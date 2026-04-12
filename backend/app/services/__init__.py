@@ -1,5 +1,6 @@
 # backend/app/services/__init__.py
 """业务服务模块"""
+from .backtest_service import BacktestService
 from .data_service import (
     DataService,
     IndustryInfo,
@@ -12,6 +13,7 @@ from .data_service import (
 from .sync_service import SyncProgress, SyncService
 
 __all__ = [
+    "BacktestService",
     "DataService",
     "PaginatedResult",
     "StockInfo",
