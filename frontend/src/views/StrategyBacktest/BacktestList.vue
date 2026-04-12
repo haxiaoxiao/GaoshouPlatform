@@ -133,6 +133,7 @@ import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/backtest'
 import BacktestReport from './BacktestReport.vue'
+import { formatDateTime, formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
 
 // 状态
 const loading = ref(false)
@@ -164,47 +165,6 @@ const createFormRules: FormRules = {
 // 报告对话框状态
 const reportDialogVisible = ref(false)
 const selectedBacktestId = ref<number | null>(null)
-
-// 获取状态标签类型
-const getStatusType = (status: string): 'info' | 'warning' | 'success' | 'danger' => {
-  const types: Record<string, 'info' | 'warning' | 'success' | 'danger'> = {
-    pending: 'info',
-    running: 'warning',
-    completed: 'success',
-    failed: 'danger',
-  }
-  return types[status] || 'info'
-}
-
-// 获取状态标签文本
-const getStatusLabel = (status: string): string => {
-  const labels: Record<string, string> = {
-    pending: '待运行',
-    running: '运行中',
-    completed: '已完成',
-    failed: '失败',
-  }
-  return labels[status] || status
-}
-
-// 格式化资金
-const formatCapital = (capital: string | null): string => {
-  if (!capital) return '-'
-  const num = parseFloat(capital)
-  return num.toLocaleString('zh-CN', { style: 'currency', currency: 'CNY' })
-}
-
-// 格式化日期时间
-const formatDateTime = (dateStr: string | null): string => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
-}
 
 // 加载回测列表
 const loadBacktests = async () => {
@@ -246,26 +206,28 @@ const handleCreate = () => {
 const handleCreateSubmit = async () => {
   if (!createFormRef.value) return
 
-  await createFormRef.value.validate(async (valid) => {
-    if (!valid) return
+  try {
+    await createFormRef.value.validate()
+  } catch {
+    return
+  }
 
-    creating.value = true
-    try {
-      await backtestApi.create({
-        strategy_id: createFormData.strategy_id!,
-        start_date: createFormData.start_date,
-        end_date: createFormData.end_date,
-        initial_capital: createFormData.initial_capital,
-      })
-      ElMessage.success('创建成功')
-      createDialogVisible.value = false
-      loadBacktests()
-    } catch {
-      ElMessage.error('创建失败')
-    } finally {
-      creating.value = false
-    }
-  })
+  creating.value = true
+  try {
+    await backtestApi.create({
+      strategy_id: createFormData.strategy_id!,
+      start_date: createFormData.start_date,
+      end_date: createFormData.end_date,
+      initial_capital: createFormData.initial_capital,
+    })
+    ElMessage.success('创建成功')
+    createDialogVisible.value = false
+    loadBacktests()
+  } catch {
+    ElMessage.error('创建失败')
+  } finally {
+    creating.value = false
+  }
 }
 
 // 运行回测

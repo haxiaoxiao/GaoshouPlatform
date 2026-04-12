@@ -92,11 +92,12 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, nextTick } from 'vue'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy } from '@/api/backtest'
 import BacktestList from './BacktestList.vue'
+import { formatDateTime } from '@/utils/format'
 
 // 状态
 const activeTab = ref('strategyList')
@@ -128,18 +129,6 @@ const formRules: FormRules = {
     { min: 2, max: 100, message: '长度在 2 到 100 个字符', trigger: 'blur' },
   ],
   code: [{ required: true, message: '请输入策略代码', trigger: 'blur' }],
-}
-
-// 格式化日期时间
-const formatDateTime = (dateStr: string | null): string => {
-  if (!dateStr) return '-'
-  return new Date(dateStr).toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
 }
 
 // 加载策略列表
@@ -180,34 +169,36 @@ const handleEdit = (row: Strategy) => {
 const handleSubmit = async () => {
   if (!formRef.value) return
 
-  await formRef.value.validate(async (valid) => {
-    if (!valid) return
+  try {
+    await formRef.value.validate()
+  } catch {
+    return
+  }
 
-    submitting.value = true
-    try {
-      if (isEdit.value && editingId.value) {
-        await strategyApi.update(editingId.value, {
-          name: formData.name,
-          description: formData.description || undefined,
-          code: formData.code,
-        })
-        ElMessage.success('更新成功')
-      } else {
-        await strategyApi.create({
-          name: formData.name,
-          description: formData.description || undefined,
-          code: formData.code,
-        })
-        ElMessage.success('创建成功')
-      }
-      dialogVisible.value = false
-      loadStrategies()
-    } catch {
-      ElMessage.error(isEdit.value ? '更新失败' : '创建失败')
-    } finally {
-      submitting.value = false
+  submitting.value = true
+  try {
+    if (isEdit.value && editingId.value) {
+      await strategyApi.update(editingId.value, {
+        name: formData.name,
+        description: formData.description || undefined,
+        code: formData.code,
+      })
+      ElMessage.success('更新成功')
+    } else {
+      await strategyApi.create({
+        name: formData.name,
+        description: formData.description || undefined,
+        code: formData.code,
+      })
+      ElMessage.success('创建成功')
     }
-  })
+    dialogVisible.value = false
+    loadStrategies()
+  } catch {
+    ElMessage.error(isEdit.value ? '更新失败' : '创建失败')
+  } finally {
+    submitting.value = false
+  }
 }
 
 // 删除策略
@@ -229,12 +220,10 @@ const handleDelete = async (row: Strategy) => {
 }
 
 // 跳转到回测
-const handleBacktest = (row: Strategy) => {
+const handleBacktest = async (row: Strategy) => {
   activeTab.value = 'backtestList'
-  // 设置策略ID并打开新建回测对话框
-  setTimeout(() => {
-    backtestListRef.value?.openCreateDialogWithStrategy(row.id, row.name)
-  }, 100)
+  await nextTick()
+  backtestListRef.value?.openCreateDialogWithStrategy(row.id, row.name)
 }
 
 // 分页变化
