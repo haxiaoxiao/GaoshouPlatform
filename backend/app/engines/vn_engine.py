@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -40,8 +43,8 @@ class BacktestResult:
     win_rate: Decimal  # 胜率
 
     # 详细数据
-    daily_values: list[dict]  # 每日净值
-    trades: list[dict]  # 交易记录
+    daily_values: list[dict[str, Any]]  # 每日净值
+    trades: list[dict[str, Any]]  # 交易记录
 
     # 元数据
     start_date: date
@@ -66,7 +69,9 @@ class VnEngine:
         Returns:
             BacktestResult: 回测结果
         """
+        # WARNING: This is a mock implementation returning simulated data.
         # TODO: 实现 VeighNa 回测逻辑
+        logger.warning("run_backtest is using mock data - implementation pending")
         # 1. 从 ClickHouse 加载 K线数据
         # 2. 动态加载策略代码
         # 3. 运行回测
@@ -90,8 +95,16 @@ class VnEngine:
             final_capital=config.initial_capital * Decimal("1.15"),
         )
 
-    async def get_backtest_progress(self, backtest_id: int) -> dict:
-        """获取回测进度"""
+    async def get_backtest_progress(self, backtest_id: int) -> dict[str, Any]:
+        """
+        获取回测进度
+
+        Args:
+            backtest_id: 回测任务ID
+
+        Returns:
+            包含回测进度的字典，包括 backtest_id、progress 和 status 字段
+        """
         return {"backtest_id": backtest_id, "progress": 0, "status": "pending"}
 
 
