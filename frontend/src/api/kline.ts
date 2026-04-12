@@ -1,11 +1,11 @@
 import request from './request'
 
 // K线数据类型
-export type KlineType = 'daily' | 'weekly' | 'monthly' | 'minute1' | 'minute5' | 'minute15' | 'minute30' | 'minute60'
+export type KlineType = 'daily' | 'minute'
 
 // K线数据接口
 export interface KlineData {
-  trade_time: string
+  datetime: string
   open: number
   high: number
   low: number
@@ -17,7 +17,7 @@ export interface KlineData {
 // K线查询参数
 export interface KlineParams {
   symbol: string
-  kline_type?: KlineType
+  period?: KlineType
   start_date?: string
   end_date?: string
 }
@@ -25,5 +25,5 @@ export interface KlineParams {
 export const klineApi = {
   // 获取K线数据
   getKlines: (params: KlineParams) =>
-    request.get<KlineData[]>('/data/klines', { params }),
+    request.get<{ items: KlineData[], total: number }>('/data/klines', { params }),
 }

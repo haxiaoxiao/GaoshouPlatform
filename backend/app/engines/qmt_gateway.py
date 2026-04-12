@@ -103,6 +103,17 @@ class QMTGateway:
         end_str = end_date.strftime("%Y%m%d")
 
         loop = asyncio.get_event_loop()
+
+        # 先下载历史数据（miniQMT需要）
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: xt.download_history_data(symbol, period="1d", start_time=start_str, end_time=end_str),
+            )
+        except Exception:
+            pass  # 下载失败不影响后续获取
+
+        # 获取数据
         data = await loop.run_in_executor(
             None,
             lambda: xt.get_market_data_ex(
@@ -119,9 +130,17 @@ class QMTGateway:
             df = data[symbol]
             for idx, row in df.iterrows():
                 try:
+                    # idx 可能是字符串格式 "20250102" 或 datetime
+                    if isinstance(idx, str):
+                        trade_date = datetime.strptime(idx, "%Y%m%d").date()
+                    elif hasattr(idx, "date"):
+                        trade_date = idx.date()
+                    else:
+                        trade_date = idx
+
                     kline = KlineData(
                         symbol=symbol,
-                        datetime=idx.date() if hasattr(idx, "date") else idx,
+                        datetime=trade_date,
                         open=float(row.get("open", 0)),
                         high=float(row.get("high", 0)),
                         low=float(row.get("low", 0)),
@@ -148,6 +167,17 @@ class QMTGateway:
         end_str = end_date.strftime("%Y%m%d")
 
         loop = asyncio.get_event_loop()
+
+        # 先下载历史数据（miniQMT需要）
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: xt.download_history_data(symbol, period="1m", start_time=start_str, end_time=end_str),
+            )
+        except Exception:
+            pass  # 下载失败不影响后续获取
+
+        # 获取数据
         data = await loop.run_in_executor(
             None,
             lambda: xt.get_market_data_ex(
@@ -164,9 +194,18 @@ class QMTGateway:
             df = data[symbol]
             for idx, row in df.iterrows():
                 try:
+                    # idx 可能是字符串格式 "20250102 093000" 或 datetime
+                    if isinstance(idx, str):
+                        # 尝试解析分钟K线格式
+                        trade_datetime = datetime.strptime(idx, "%Y%m%d %H%M%S")
+                    elif hasattr(idx, "date"):
+                        trade_datetime = idx
+                    else:
+                        trade_datetime = idx
+
                     kline = KlineData(
                         symbol=symbol,
-                        datetime=idx,
+                        datetime=trade_datetime,
                         open=float(row.get("open", 0)),
                         high=float(row.get("high", 0)),
                         low=float(row.get("low", 0)),

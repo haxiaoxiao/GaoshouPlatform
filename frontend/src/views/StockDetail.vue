@@ -21,13 +21,7 @@
         <el-form-item label="K线类型">
           <el-select v-model="klineType" style="width: 120px" @change="loadKlineData">
             <el-option label="日线" value="daily" />
-            <el-option label="周线" value="weekly" />
-            <el-option label="月线" value="monthly" />
-            <el-option label="1分钟" value="minute1" />
-            <el-option label="5分钟" value="minute5" />
-            <el-option label="15分钟" value="minute15" />
-            <el-option label="30分钟" value="minute30" />
-            <el-option label="60分钟" value="minute60" />
+            <el-option label="分钟线" value="minute" />
           </el-select>
         </el-form-item>
         <el-form-item label="开始日期">
@@ -172,12 +166,12 @@ const loadKlineData = async () => {
   try {
     const params: {
       symbol: string
-      kline_type?: KlineType
+      period?: KlineType
       start_date?: string
       end_date?: string
     } = {
       symbol: symbol.value,
-      kline_type: klineType.value,
+      period: klineType.value,
     }
 
     if (startDate.value) {
@@ -187,7 +181,8 @@ const loadKlineData = async () => {
       params.end_date = endDate.value
     }
 
-    klineData.value = await klineApi.getKlines(params)
+    const result = await klineApi.getKlines(params)
+    klineData.value = result.items || []
   } catch (error) {
     console.error('加载K线数据失败:', error)
     ElMessage.error('加载K线数据失败')

@@ -335,12 +335,11 @@ class SyncService:
                         continue
 
                     # 批量插入K线数据到 ClickHouse
+                    # ClickHouse 驱动需要 Python date 对象
                     rows = [
                         {
                             "symbol": kline.symbol,
-                            "trade_date": kline.datetime.strftime("%Y-%m-%d")
-                            if isinstance(kline.datetime, (datetime, date))
-                            else str(kline.datetime),
+                            "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
                             "open": kline.open,
                             "high": kline.high,
                             "low": kline.low,
@@ -382,9 +381,7 @@ class SyncService:
                                 rows = [
                                     {
                                         "symbol": kline.symbol,
-                                        "trade_date": kline.datetime.strftime("%Y-%m-%d")
-                                        if isinstance(kline.datetime, (datetime, date))
-                                        else str(kline.datetime),
+                                        "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
                                         "open": kline.open,
                                         "high": kline.high,
                                         "low": kline.low,
@@ -521,12 +518,11 @@ class SyncService:
                         continue
 
                     # 批量插入K线数据到 ClickHouse
+                    # ClickHouse 驱动需要 Python datetime 对象
                     rows = [
                         {
                             "symbol": kline.symbol,
-                            "datetime": kline.datetime.strftime("%Y-%m-%d %H:%M:%S")
-                            if isinstance(kline.datetime, datetime)
-                            else str(kline.datetime),
+                            "datetime": kline.datetime if isinstance(kline.datetime, datetime) else datetime.fromisoformat(str(kline.datetime)),
                             "open": kline.open,
                             "high": kline.high,
                             "low": kline.low,
@@ -568,9 +564,7 @@ class SyncService:
                                 rows = [
                                     {
                                         "symbol": kline.symbol,
-                                        "datetime": kline.datetime.strftime("%Y-%m-%d %H:%M:%S")
-                                        if isinstance(kline.datetime, datetime)
-                                        else str(kline.datetime),
+                                        "datetime": kline.datetime if isinstance(kline.datetime, datetime) else datetime.fromisoformat(str(kline.datetime)),
                                         "open": kline.open,
                                         "high": kline.high,
                                         "low": kline.low,

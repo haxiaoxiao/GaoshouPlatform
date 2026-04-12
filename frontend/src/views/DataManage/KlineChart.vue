@@ -194,7 +194,7 @@ const initChart = () => {
 const updateChart = () => {
   if (!chartInstance || !props.data.length) return
 
-  const dates = props.data.map((item) => item.trade_time)
+  const dates = props.data.map((item) => item.datetime)
   const klineData = props.data.map((item) => [
     item.open,
     item.close,
