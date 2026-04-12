@@ -29,14 +29,14 @@ class StrategyCreate(BaseModel):
 class StrategyUpdate(BaseModel):
     """更新策略请求"""
 
-    name: str | None = Field(default=None, max_length=100, description="策略名称")
+    name: str | None = Field(default=None, min_length=1, max_length=100, description="策略名称")
     code: str | None = Field(default=None, description="策略代码")
     parameters: dict[str, Any] | None = Field(default=None, description="策略参数")
     description: str | None = Field(default=None, description="策略描述")
 
 
-class StrategyResponse(BaseModel):
-    """策略响应"""
+class StrategyItem(BaseModel):
+    """策略项"""
 
     id: int = Field(description="策略ID")
     name: str = Field(description="策略名称")
@@ -47,18 +47,44 @@ class StrategyResponse(BaseModel):
     updated_at: str | None = Field(default=None, description="更新时间")
 
 
+class PaginatedStrategies(BaseModel):
+    """分页策略列表"""
+
+    items: list[StrategyItem] = Field(description="策略列表")
+    total: int = Field(description="总数")
+    page: int = Field(description="当前页码")
+    page_size: int = Field(description="每页数量")
+    total_pages: int = Field(description="总页数")
+
+
+class StrategyResponse(BaseModel):
+    """策略响应"""
+
+    code: int = Field(default=0, description="响应码")
+    message: str = Field(default="success", description="响应消息")
+    data: StrategyItem = Field(description="策略详情")
+
+
+class StrategyListResponse(BaseModel):
+    """策略列表响应"""
+
+    code: int = Field(default=0, description="响应码")
+    message: str = Field(default="success", description="响应消息")
+    data: PaginatedStrategies = Field(description="分页策略数据")
+
+
 class BacktestCreate(BaseModel):
     """创建回测请求"""
 
     strategy_id: int = Field(description="策略ID")
     start_date: date = Field(description="回测起始日期")
     end_date: date = Field(description="回测结束日期")
-    initial_capital: Decimal = Field(default=Decimal("1000000"), description="初始资金")
+    initial_capital: Decimal = Field(default=Decimal("1000000"), ge=10000, description="初始资金")
     parameters: dict[str, Any] | None = Field(default=None, description="回测参数")
 
 
-class BacktestResponse(BaseModel):
-    """回测响应"""
+class BacktestItem(BaseModel):
+    """回测项"""
 
     id: int = Field(description="回测ID")
     strategy_id: int = Field(description="策略ID")
@@ -70,10 +96,36 @@ class BacktestResponse(BaseModel):
     created_at: str | None = Field(default=None, description="创建时间")
 
 
+class PaginatedBacktests(BaseModel):
+    """分页回测列表"""
+
+    items: list[BacktestItem] = Field(description="回测列表")
+    total: int = Field(description="总数")
+    page: int = Field(description="当前页码")
+    page_size: int = Field(description="每页数量")
+    total_pages: int = Field(description="总页数")
+
+
+class BacktestResponse(BaseModel):
+    """回测响应"""
+
+    code: int = Field(default=0, description="响应码")
+    message: str = Field(default="success", description="响应消息")
+    data: BacktestItem = Field(description="回测详情")
+
+
+class BacktestListResponse(BaseModel):
+    """回测列表响应"""
+
+    code: int = Field(default=0, description="响应码")
+    message: str = Field(default="success", description="响应消息")
+    data: PaginatedBacktests = Field(description="分页回测数据")
+
+
 # ============== Strategy Endpoints ==============
 
 
-@router.get("/strategies", summary="获取策略列表")
+@router.get("/strategies", response_model=StrategyListResponse, summary="获取策略列表")
 async def get_strategies(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
@@ -145,7 +197,7 @@ async def create_strategy(
     }
 
 
-@router.get("/strategies/{strategy_id}", summary="获取策略详情")
+@router.get("/strategies/{strategy_id}", response_model=StrategyResponse, summary="获取策略详情")
 async def get_strategy(
     strategy_id: int = Path(description="策略ID"),
     session: AsyncSession = Depends(get_async_session),
@@ -238,7 +290,7 @@ async def delete_strategy(
 # ============== Backtest Endpoints ==============
 
 
-@router.get("/backtests", summary="获取回测列表")
+@router.get("/backtests", response_model=BacktestListResponse, summary="获取回测列表")
 async def get_backtests(
     strategy_id: int | None = Query(default=None, description="策略ID筛选"),
     status: str | None = Query(default=None, description="状态筛选: pending/running/completed/failed"),
@@ -365,7 +417,7 @@ async def run_backtest(
     }
 
 
-@router.get("/backtests/{backtest_id}", summary="获取回测报告")
+@router.get("/backtests/{backtest_id}", response_model=BacktestResponse, summary="获取回测报告")
 async def get_backtest_report(
     backtest_id: int = Path(description="回测ID"),
     session: AsyncSession = Depends(get_async_session),
