@@ -323,7 +323,7 @@ class BacktestService:
         return {
             "success": True,
             "report": {
-                "backtest_id": backtest.id,
+                "id": backtest.id,
                 "strategy_id": backtest.strategy_id,
                 "strategy_name": strategy.name if strategy else None,
                 "status": backtest.status,

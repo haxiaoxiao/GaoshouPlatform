@@ -247,19 +247,27 @@ async def update_strategy(
     if strategy is None:
         raise HTTPException(status_code=404, detail=f"策略 {strategy_id} 不存在")
 
+    # Get values before commit to avoid lazy loading issues
+    strategy_id_val = strategy.id
+    strategy_name = strategy.name
+    strategy_code = strategy.code
+    strategy_params = strategy.parameters
+    strategy_desc = strategy.description
+    strategy_created = strategy.created_at.isoformat() if strategy.created_at else None
+
     await session.commit()
 
     return {
         "code": 0,
         "message": "success",
         "data": {
-            "id": strategy.id,
-            "name": strategy.name,
-            "code": strategy.code,
-            "parameters": strategy.parameters,
-            "description": strategy.description,
-            "created_at": strategy.created_at.isoformat() if strategy.created_at else None,
-            "updated_at": strategy.updated_at.isoformat() if strategy.updated_at else None,
+            "id": strategy_id_val,
+            "name": strategy_name,
+            "code": strategy_code,
+            "parameters": strategy_params,
+            "description": strategy_desc,
+            "created_at": strategy_created,
+            "updated_at": None,  # Updated time will be set by DB, client can refetch
         },
     }
 
@@ -417,7 +425,7 @@ async def run_backtest(
     }
 
 
-@router.get("/backtests/{backtest_id}", response_model=BacktestResponse, summary="获取回测报告")
+@router.get("/backtests/{backtest_id}", summary="获取回测报告")
 async def get_backtest_report(
     backtest_id: int = Path(description="回测ID"),
     session: AsyncSession = Depends(get_async_session),
