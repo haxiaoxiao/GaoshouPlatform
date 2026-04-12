@@ -9,6 +9,7 @@ from .data_service import (
     WatchlistGroupInfo,
     WatchlistStockInfo,
 )
+from .sync_service import SyncProgress, SyncService
 
 __all__ = [
     "DataService",
@@ -18,4 +19,6 @@ __all__ = [
     "IndustryInfo",
     "WatchlistGroupInfo",
     "WatchlistStockInfo",
+    "SyncService",
+    "SyncProgress",
 ]
