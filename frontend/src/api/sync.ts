@@ -47,23 +47,23 @@ export interface SyncLogsParams {
   limit?: number
 }
 
-// API 响应包装
-interface ApiResponse<T> {
-  code: number
-  message: string
-  data: T
-}
+// API 响应包装 (拦截器已自动解包，此接口仅供类型参考)
+// interface ApiResponse<T> {
+//   code: number
+//   message: string
+//   data: T
+// }
 
 export const syncApi = {
   // 触发数据同步
   trigger: (params: SyncRequest) =>
-    request.post<ApiResponse<SyncStatus>>('/data/sync', params),
+    request.post<SyncStatus>('/data/sync', params),
 
   // 获取同步状态
   getStatus: () =>
-    request.get<ApiResponse<SyncStatus>>('/data/sync/status'),
+    request.get<SyncStatus>('/data/sync/status'),
 
   // 获取同步日志
   getLogs: (params?: SyncLogsParams) =>
-    request.get<ApiResponse<SyncLog[]>>('/data/sync/logs', { params }),
+    request.get<SyncLog[]>('/data/sync/logs', { params }),
 }

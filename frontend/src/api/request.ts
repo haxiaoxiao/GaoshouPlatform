@@ -9,10 +9,22 @@ const instance: AxiosInstance = axios.create({
   },
 })
 
-// 响应拦截器 - 解包 response.data
+// 响应拦截器 - 解包 response.data，并解包后端的 { code, message, data } 包装
 instance.interceptors.response.use(
   (response: AxiosResponse) => {
-    return response.data
+    // 先解包 axios 的 response.data
+    const backendData = response.data
+    // 如果后端返回的是 { code, message, data } 格式，解包 data 字段
+    if (backendData && typeof backendData === 'object' && 'code' in backendData && 'data' in backendData) {
+      if (backendData.code === 0) {
+        return backendData.data
+      } else {
+        // 业务错误
+        ElMessage.error(backendData.message || '请求失败')
+        return Promise.reject(new Error(backendData.message || '请求失败'))
+      }
+    }
+    return backendData
   },
   (error) => {
     const message = error.response?.data?.detail || error.message || '请求失败'

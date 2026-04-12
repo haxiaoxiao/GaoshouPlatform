@@ -56,8 +56,17 @@ export interface BacktestCreate {
 }
 
 export interface BacktestReport {
-  backtest: Backtest & { strategy_name: string | null }
-  summary: BacktestResult
+  backtest_id: number
+  strategy_id: number
+  strategy_name: string | null
+  status: 'pending' | 'running' | 'completed' | 'failed'
+  start_date: string
+  end_date: string
+  initial_capital: string | null
+  parameters: Record<string, unknown> | null
+  result: BacktestResult | null
+  created_at: string | null
+  updated_at: string | null
 }
 
 export const strategyApi = {
