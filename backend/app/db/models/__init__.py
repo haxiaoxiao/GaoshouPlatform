@@ -2,7 +2,7 @@
 """数据模型"""
 from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis
-from .stock import KlineDaily, KlineMinute, Stock
+from .stock import Stock
 from .strategy import Backtest, Order, Strategy, Trade
 from .sync import SyncLog, SyncTask
 from .watchlist import WatchlistGroup, WatchlistStock
@@ -11,8 +11,6 @@ __all__ = [
     "Base",
     "TimestampMixin",
     "Stock",
-    "KlineDaily",
-    "KlineMinute",
     "Strategy",
     "Backtest",
     "Order",

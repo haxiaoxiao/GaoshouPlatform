@@ -1,16 +1,15 @@
 # backend/app/services/sync_service.py
 """数据同步服务"""
-import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import KlineDaily, Stock, SyncLog, SyncTask
+from app.db.clickhouse import get_ch_client
+from app.db.models import Stock, SyncLog
 from app.engines.qmt_gateway import qmt_gateway
 
 
@@ -309,6 +308,9 @@ class SyncService:
         )
         _current_sync = progress
 
+        # 获取 ClickHouse 客户端
+        ch_client = get_ch_client()
+
         try:
             # 如果没有指定股票列表，获取所有股票
             if symbols is None:
@@ -332,41 +334,34 @@ class SyncService:
                         progress.current = i + 1
                         continue
 
-                    # 批量插入K线数据
-                    for kline in klines:
-                        try:
-                            stmt = insert(KlineDaily).values(
-                                symbol=kline.symbol,
-                                trade_date=kline.datetime,
-                                open=Decimal(str(kline.open)),
-                                high=Decimal(str(kline.high)),
-                                low=Decimal(str(kline.low)),
-                                close=Decimal(str(kline.close)),
-                                volume=kline.volume,
-                                amount=Decimal(str(kline.amount)),
-                            )
-                            stmt = stmt.on_conflict_do_update(
-                                index_elements=["symbol", "trade_date"],
-                                set_={
-                                    "open": stmt.excluded.open,
-                                    "high": stmt.excluded.high,
-                                    "low": stmt.excluded.low,
-                                    "close": stmt.excluded.close,
-                                    "volume": stmt.excluded.volume,
-                                    "amount": stmt.excluded.amount,
-                                },
-                            )
-                            await self.session.execute(stmt)
-                            total_klines += 1
-                        except Exception:
-                            continue
+                    # 批量插入K线数据到 ClickHouse
+                    rows = [
+                        {
+                            "symbol": kline.symbol,
+                            "trade_date": kline.datetime.strftime("%Y-%m-%d")
+                            if isinstance(kline.datetime, (datetime, date))
+                            else str(kline.datetime),
+                            "open": kline.open,
+                            "high": kline.high,
+                            "low": kline.low,
+                            "close": kline.close,
+                            "volume": kline.volume,
+                            "amount": kline.amount,
+                        }
+                        for kline in klines
+                    ]
+
+                    if rows:
+                        ch_client.execute(
+                            "INSERT INTO klines_daily "
+                            "(symbol, trade_date, open, high, low, close, volume, amount) "
+                            "VALUES",
+                            rows,
+                        )
+                        total_klines += len(rows)
 
                     progress.current = i + 1
                     progress.success_count += 1
-
-                    # 每 50 只股票提交一次
-                    if (i + 1) % 50 == 0:
-                        await self.session.commit()
 
                 except Exception as e:
                     progress.failed_count += 1
@@ -384,38 +379,34 @@ class SyncService:
                                 symbol, start_date, end_date
                             )
                             if klines:
-                                for kline in klines:
-                                    stmt = insert(KlineDaily).values(
-                                        symbol=kline.symbol,
-                                        trade_date=kline.datetime,
-                                        open=Decimal(str(kline.open)),
-                                        high=Decimal(str(kline.high)),
-                                        low=Decimal(str(kline.low)),
-                                        close=Decimal(str(kline.close)),
-                                        volume=kline.volume,
-                                        amount=Decimal(str(kline.amount)),
+                                rows = [
+                                    {
+                                        "symbol": kline.symbol,
+                                        "trade_date": kline.datetime.strftime("%Y-%m-%d")
+                                        if isinstance(kline.datetime, (datetime, date))
+                                        else str(kline.datetime),
+                                        "open": kline.open,
+                                        "high": kline.high,
+                                        "low": kline.low,
+                                        "close": kline.close,
+                                        "volume": kline.volume,
+                                        "amount": kline.amount,
+                                    }
+                                    for kline in klines
+                                ]
+                                if rows:
+                                    ch_client.execute(
+                                        "INSERT INTO klines_daily "
+                                        "(symbol, trade_date, open, high, low, close, volume, amount) "
+                                        "VALUES",
+                                        rows,
                                     )
-                                    stmt = stmt.on_conflict_do_update(
-                                        index_elements=["symbol", "trade_date"],
-                                        set_={
-                                            "open": stmt.excluded.open,
-                                            "high": stmt.excluded.high,
-                                            "low": stmt.excluded.low,
-                                            "close": stmt.excluded.close,
-                                            "volume": stmt.excluded.volume,
-                                            "amount": stmt.excluded.amount,
-                                        },
-                                    )
-                                    await self.session.execute(stmt)
-                                    total_klines += 1
+                                    total_klines += len(rows)
                             progress.success_count += 1
                             progress.failed_count -= 1
                             failed_symbols.pop()
                         except Exception:
                             pass
-
-            # 最终提交
-            await self.session.commit()
 
             # 更新进度
             progress.status = "completed"
@@ -503,6 +494,9 @@ class SyncService:
         )
         _current_sync = progress
 
+        # 获取 ClickHouse 客户端
+        ch_client = get_ch_client()
+
         try:
             # 如果没有指定股票列表，获取所有股票
             if symbols is None:
@@ -526,43 +520,34 @@ class SyncService:
                         progress.current = i + 1
                         continue
 
-                    # 批量插入K线数据
-                    from app.db.models import KlineMinute
+                    # 批量插入K线数据到 ClickHouse
+                    rows = [
+                        {
+                            "symbol": kline.symbol,
+                            "datetime": kline.datetime.strftime("%Y-%m-%d %H:%M:%S")
+                            if isinstance(kline.datetime, datetime)
+                            else str(kline.datetime),
+                            "open": kline.open,
+                            "high": kline.high,
+                            "low": kline.low,
+                            "close": kline.close,
+                            "volume": kline.volume,
+                            "amount": kline.amount,
+                        }
+                        for kline in klines
+                    ]
 
-                    for kline in klines:
-                        try:
-                            stmt = insert(KlineMinute).values(
-                                symbol=kline.symbol,
-                                datetime=kline.datetime,
-                                open=Decimal(str(kline.open)),
-                                high=Decimal(str(kline.high)),
-                                low=Decimal(str(kline.low)),
-                                close=Decimal(str(kline.close)),
-                                volume=kline.volume,
-                                amount=Decimal(str(kline.amount)),
-                            )
-                            stmt = stmt.on_conflict_do_update(
-                                index_elements=["symbol", "datetime"],
-                                set_={
-                                    "open": stmt.excluded.open,
-                                    "high": stmt.excluded.high,
-                                    "low": stmt.excluded.low,
-                                    "close": stmt.excluded.close,
-                                    "volume": stmt.excluded.volume,
-                                    "amount": stmt.excluded.amount,
-                                },
-                            )
-                            await self.session.execute(stmt)
-                            total_klines += 1
-                        except Exception:
-                            continue
+                    if rows:
+                        ch_client.execute(
+                            "INSERT INTO klines_minute "
+                            "(symbol, datetime, open, high, low, close, volume, amount) "
+                            "VALUES",
+                            rows,
+                        )
+                        total_klines += len(rows)
 
                     progress.current = i + 1
                     progress.success_count += 1
-
-                    # 每 20 只股票提交一次
-                    if (i + 1) % 20 == 0:
-                        await self.session.commit()
 
                 except Exception as e:
                     progress.failed_count += 1
@@ -580,38 +565,34 @@ class SyncService:
                                 symbol, start_date, end_date
                             )
                             if klines:
-                                for kline in klines:
-                                    stmt = insert(KlineMinute).values(
-                                        symbol=kline.symbol,
-                                        datetime=kline.datetime,
-                                        open=Decimal(str(kline.open)),
-                                        high=Decimal(str(kline.high)),
-                                        low=Decimal(str(kline.low)),
-                                        close=Decimal(str(kline.close)),
-                                        volume=kline.volume,
-                                        amount=Decimal(str(kline.amount)),
+                                rows = [
+                                    {
+                                        "symbol": kline.symbol,
+                                        "datetime": kline.datetime.strftime("%Y-%m-%d %H:%M:%S")
+                                        if isinstance(kline.datetime, datetime)
+                                        else str(kline.datetime),
+                                        "open": kline.open,
+                                        "high": kline.high,
+                                        "low": kline.low,
+                                        "close": kline.close,
+                                        "volume": kline.volume,
+                                        "amount": kline.amount,
+                                    }
+                                    for kline in klines
+                                ]
+                                if rows:
+                                    ch_client.execute(
+                                        "INSERT INTO klines_minute "
+                                        "(symbol, datetime, open, high, low, close, volume, amount) "
+                                        "VALUES",
+                                        rows,
                                     )
-                                    stmt = stmt.on_conflict_do_update(
-                                        index_elements=["symbol", "datetime"],
-                                        set_={
-                                            "open": stmt.excluded.open,
-                                            "high": stmt.excluded.high,
-                                            "low": stmt.excluded.low,
-                                            "close": stmt.excluded.close,
-                                            "volume": stmt.excluded.volume,
-                                            "amount": stmt.excluded.amount,
-                                        },
-                                    )
-                                    await self.session.execute(stmt)
-                                    total_klines += 1
+                                    total_klines += len(rows)
                             progress.success_count += 1
                             progress.failed_count -= 1
                             failed_symbols.pop()
                         except Exception:
                             pass
-
-            # 最终提交
-            await self.session.commit()
 
             # 更新进度
             progress.status = "completed"

@@ -9,9 +9,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
+from app.db.clickhouse import get_ch_client
 from app.db.models import (
-    KlineDaily,
-    KlineMinute,
     Stock,
     WatchlistGroup,
     WatchlistStock,
@@ -201,50 +200,58 @@ class DataService:
         Returns:
             PaginatedResult: 分页结果
         """
-        # 选择模型
-        if period == "minute":
-            model = KlineMinute
-            datetime_field = KlineMinute.datetime
-        else:
-            model = KlineDaily
-            datetime_field = KlineDaily.trade_date
+        # 选择表名
+        table_name = "klines_minute" if period == "minute" else "klines_daily"
+        datetime_field = "datetime" if period == "minute" else "trade_date"
 
-        # 基础查询
-        query = select(model).where(model.symbol == symbol)
+        # 获取 ClickHouse 客户端
+        client = get_ch_client()
 
-        # 日期筛选
+        # 构建 WHERE 条件
+        where_conditions = ["symbol = %(symbol)s"]
+        params: dict[str, Any] = {"symbol": symbol}
+
         if start_date:
-            query = query.where(datetime_field >= start_date)
+            where_conditions.append(f"{datetime_field} >= %(start_date)s")
+            params["start_date"] = start_date
         if end_date:
-            query = query.where(datetime_field <= end_date)
+            where_conditions.append(f"{datetime_field} <= %(end_date)s")
+            params["end_date"] = end_date
 
-        # 统计总数
-        count_query = select(func.count()).select_from(query.subquery())
-        total_result = await self.session.execute(count_query)
-        total = total_result.scalar() or 0
+        where_clause = " AND ".join(where_conditions)
 
-        # 分页和排序(按日期倒序)
+        # 查询总数
+        count_query = f"SELECT count() FROM {table_name} WHERE {where_clause}"
+        count_result = client.execute(count_query, params)
+        total = count_result[0][0] if count_result else 0
+
+        # 分页查询数据 (按日期倒序)
         offset = (page - 1) * page_size
-        query = query.offset(offset).limit(page_size)
-        query = query.order_by(datetime_field.desc())
+        data_query = f"""
+            SELECT symbol, {datetime_field}, open, high, low, close, volume, amount
+            FROM {table_name}
+            WHERE {where_clause}
+            ORDER BY {datetime_field} DESC
+            LIMIT %(limit)s OFFSET %(offset)s
+        """
+        params["limit"] = page_size
+        params["offset"] = offset
 
-        # 执行查询
-        result = await self.session.execute(query)
-        klines = result.scalars().all()
+        rows = client.execute(data_query, params)
 
-        # 转换为数据类
+        # 转换为 KlineData 数据类
         items = [
             KlineData(
-                symbol=kline.symbol,
-                datetime=kline.trade_date if period == "daily" else kline.datetime,
-                open=kline.open,
-                high=kline.high,
-                low=kline.low,
-                close=kline.close,
-                volume=kline.volume,
-                amount=kline.amount,
+                symbol=row[0],
+                datetime=row[1],
+                open=row[2],
+                high=row[3],
+                low=row[4],
+                close=row[5],
+                volume=row[6],
+                amount=row[7],
             )
-            for kline in klines
+            for row in rows
         ]
 
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
