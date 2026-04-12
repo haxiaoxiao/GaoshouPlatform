@@ -1,17 +1,44 @@
 # backend/app/main.py
+import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.api import api_router
+from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
+    logger.info("Starting application...")
+
+    # 初始化数据库
     await init_db()
+    logger.info("Database initialized")
+
+    # 启动调度器
+    start_scheduler()
+    logger.info("Scheduler started")
+
+    # 加载启用的定时任务
+    await load_enabled_tasks()
+    logger.info("Sync tasks loaded")
+
     yield
+
+    # 关闭调度器
+    logger.info("Stopping application...")
+    stop_scheduler()
+    logger.info("Application stopped")
 
 
 app = FastAPI(
