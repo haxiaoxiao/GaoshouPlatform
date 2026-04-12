@@ -23,6 +23,7 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+.vite/
 
 # Environment
 .env
