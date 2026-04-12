@@ -1,7 +1,6 @@
 <template>
-  <div class="page-container">
-    <h2>因子研究</h2>
-    <p>正在开发中...</p>
+  <div class="factor-research">
+    <router-view />
   </div>
 </template>
 
@@ -9,7 +8,7 @@
 </script>
 
 <style scoped>
-.page-container {
-  padding: 20px;
+.factor-research {
+  height: 100%;
 }
 </style>

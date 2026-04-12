@@ -24,6 +24,20 @@ const router = createRouter({
       name: 'FactorResearch',
       component: () => import('@/views/FactorResearch/index.vue'),
       meta: { title: '因子研究' },
+      children: [
+        {
+          path: '',
+          name: 'FactorList',
+          component: () => import('@/views/FactorResearch/FactorList.vue'),
+          meta: { title: '因子列表' },
+        },
+        {
+          path: 'analysis/:id',
+          name: 'FactorAnalysis',
+          component: () => import('@/views/FactorResearch/FactorAnalysis.vue'),
+          meta: { title: '因子分析' },
+        },
+      ],
     },
     {
       path: '/backtest',
