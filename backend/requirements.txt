@@ -17,3 +17,4 @@ ruff>=0.1.0
 apscheduler>=3.10.0
 xtquant
 clickhouse-driver>=0.2.6
+veighna>=3.9.0
