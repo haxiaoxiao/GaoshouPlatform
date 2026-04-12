@@ -14,6 +14,13 @@ class Settings(BaseSettings):
     # 数据库配置
     database_url: str = "sqlite+aiosqlite:///./data/gaoshou.db"
 
+    # ClickHouse 配置
+    clickhouse_host: str = "localhost"
+    clickhouse_port: int = 9000
+    clickhouse_database: str = "gaoshou"
+    clickhouse_user: str = "default"
+    clickhouse_password: str = ""
+
     # API 配置
     api_prefix: str = "/api"
 
