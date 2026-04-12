@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from app.api import api_router
 from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
+from app.db.clickhouse import init_clickhouse_tables
 
 # 配置日志
 logging.basicConfig(
@@ -24,6 +25,10 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     await init_db()
     logger.info("Database initialized")
+
+    # 初始化 ClickHouse 表
+    init_clickhouse_tables()
+    logger.info("ClickHouse tables initialized")
 
     # 启动调度器
     start_scheduler()

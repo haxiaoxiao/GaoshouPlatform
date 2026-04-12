@@ -35,6 +35,7 @@ def init_clickhouse_tables():
             close Decimal(10, 4),
             volume UInt64,
             amount Decimal(18, 4),
+            turnover_rate Decimal(8, 4),
             created_at DateTime DEFAULT now()
         )
         ENGINE = MergeTree()
