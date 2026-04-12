@@ -1,5 +1,4 @@
 # backend/app/db/sqlite.py
-from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -27,9 +26,8 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
 
-@asynccontextmanager
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:
-    """获取数据库会话的上下文管理器"""
+    """获取数据库会话（用于 FastAPI Depends）"""
     async with async_session_factory() as session:
         try:
             yield session
