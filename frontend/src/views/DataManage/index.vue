@@ -9,9 +9,12 @@
           <el-empty description="自选股功能开发中..." />
         </div>
       </el-tab-pane>
-      <el-tab-pane label="数据导入" name="import">
+      <el-tab-pane label="数据同步" name="sync">
+        <SyncPanel />
+      </el-tab-pane>
+      <el-tab-pane label="定时任务" name="schedule">
         <div class="placeholder-content">
-          <el-empty description="数据导入功能开发中..." />
+          <el-empty description="定时任务功能开发中..." />
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -21,6 +24,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import StockList from './StockList.vue'
+import SyncPanel from './SyncPanel.vue'
 
 const activeTab = ref('stockList')
 </script>
