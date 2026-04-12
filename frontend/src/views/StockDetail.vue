@@ -79,7 +79,7 @@
         <el-empty description="暂无K线数据" />
       </div>
 
-      <KlineChart v-else :data="klineData" ref="klineChartRef" />
+      <KlineChart v-else :data="klineData" />
     </el-card>
 
     <!-- 股票详细信息 -->
@@ -157,7 +157,6 @@ const stockDetail = ref<StockDetail | null>(null)
 const klineType = ref<KlineType>('daily')
 const startDate = ref<string>('')
 const endDate = ref<string>('')
-const klineChartRef = ref<InstanceType<typeof KlineChart> | null>(null)
 
 // 从路由获取股票代码
 const symbol = computed(() => route.params.symbol as string)

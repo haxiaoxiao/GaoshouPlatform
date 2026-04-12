@@ -364,13 +364,9 @@ const handleStartSync = async () => {
       }
 
       const response = await syncApi.trigger(params)
-      if (response.code === 0) {
-        syncStatus.value = response.data
-        startPolling()
-        ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
-      } else {
-        ElMessage.error(response.message || '启动同步失败')
-      }
+      syncStatus.value = response
+      startPolling()
+      ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
     } catch (error) {
       console.error('Sync error:', error)
       ElMessage.error('启动同步失败')
@@ -391,14 +387,12 @@ const startPolling = () => {
   pollingTimer = setInterval(async () => {
     try {
       const response = await syncApi.getStatus()
-      if (response.code === 0) {
-        syncStatus.value = response.data
+      syncStatus.value = response
 
-        // 如果同步完成或失败，停止轮询
-        if (syncStatus.value.status !== 'running') {
-          stopPolling()
-          await loadLogs()
-        }
+      // 如果同步完成或失败，停止轮询
+      if (syncStatus.value.status !== 'running') {
+        stopPolling()
+        await loadLogs()
       }
     } catch (error) {
       console.error('Poll status error:', error)
@@ -419,9 +413,7 @@ const loadLogs = async () => {
   logsLoading.value = true
   try {
     const response = await syncApi.getLogs({ limit: 20 })
-    if (response.code === 0) {
-      syncLogs.value = response.data
-    }
+    syncLogs.value = response
   } catch (error) {
     console.error('Load logs error:', error)
   } finally {
@@ -434,12 +426,10 @@ onMounted(async () => {
   // 获取初始状态
   try {
     const response = await syncApi.getStatus()
-    if (response.code === 0) {
-      syncStatus.value = response.data
-      // 如果正在同步，开始轮询
-      if (syncStatus.value.status === 'running') {
-        startPolling()
-      }
+    syncStatus.value = response
+    // 如果正在同步，开始轮询
+    if (syncStatus.value.status === 'running') {
+      startPolling()
     }
   } catch (error) {
     console.error('Get initial status error:', error)
