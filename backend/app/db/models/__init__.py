@@ -4,6 +4,8 @@ from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis
 from .stock import KlineDaily, KlineMinute, Stock
 from .strategy import Backtest, Order, Strategy, Trade
+from .sync import SyncLog, SyncTask
+from .watchlist import WatchlistGroup, WatchlistStock
 
 __all__ = [
     "Base",
@@ -17,4 +19,8 @@ __all__ = [
     "Trade",
     "Factor",
     "FactorAnalysis",
+    "WatchlistGroup",
+    "WatchlistStock",
+    "SyncTask",
+    "SyncLog",
 ]
