@@ -1,16 +1,15 @@
 <template>
   <div class="page-container">
+    <div class="page-header">
+      <h2>策略回测</h2>
+      <el-button type="primary" @click="handleCreate">
+        <el-icon><Plus /></el-icon>
+        新建策略
+      </el-button>
+    </div>
     <el-tabs v-model="activeTab" class="strategy-tabs">
       <el-tab-pane label="策略列表" name="strategyList">
         <div class="tab-content">
-          <!-- 工具栏 -->
-          <div class="toolbar">
-            <el-button type="primary" @click="handleCreate">
-              <el-icon><Plus /></el-icon>
-              新建策略
-            </el-button>
-          </div>
-
           <!-- 策略列表 -->
           <el-table v-loading="loading" :data="strategyList" stripe style="width: 100%">
             <el-table-column prop="id" label="ID" width="80" />
@@ -263,6 +262,20 @@ onMounted(() => {
   flex-direction: column;
 }
 
+.page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.page-header h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+  color: #303133;
+}
+
 .strategy-tabs {
   height: 100%;
   background: #fff;
@@ -283,11 +296,6 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 16px;
-}
-
-.toolbar {
-  display: flex;
-  justify-content: flex-end;
 }
 
 .pagination-container {
