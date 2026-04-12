@@ -128,7 +128,7 @@
               </template>
             </el-dropdown>
             <el-button type="primary" link @click.stop="handleViewDetail(row)">
-              详情
+              K线
             </el-button>
           </template>
         </el-table-column>
@@ -147,82 +147,25 @@
         />
       </div>
     </el-card>
-
-    <!-- 股票详情对话框 -->
-    <el-dialog
-      v-model="detailDialogVisible"
-      :title="detailStock ? `${detailStock.symbol} - ${detailStock.name}` : '股票详情'"
-      width="600px"
-    >
-      <div v-if="detailLoading" class="detail-loading">
-        <el-icon class="is-loading"><Loading /></el-icon>
-        加载中...
-      </div>
-      <el-descriptions v-else-if="detailStock" :column="2" border>
-        <el-descriptions-item label="股票代码">{{ detailStock.symbol }}</el-descriptions-item>
-        <el-descriptions-item label="股票名称">{{ detailStock.name }}</el-descriptions-item>
-        <el-descriptions-item label="所属行业">{{ detailStock.industry || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="所属市场">{{ detailStock.market }}</el-descriptions-item>
-        <el-descriptions-item label="上市日期">{{ detailStock.list_date || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="交易状态">
-          <el-tag :type="detailStock.is_active ? 'success' : 'danger'" size="small">
-            {{ detailStock.is_active ? '正常' : '停牌' }}
-          </el-tag>
-        </el-descriptions-item>
-        <el-descriptions-item label="市值">
-          {{ detailStock.market_cap ? formatNumber(detailStock.market_cap) + '亿' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="市盈率(PE)">
-          {{ detailStock.pe_ratio?.toFixed(2) || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="市净率(PB)">
-          {{ detailStock.pb_ratio?.toFixed(2) || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="ROE">
-          {{ detailStock.roe ? (detailStock.roe * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="营收增长">
-          {{ detailStock.revenue_growth ? (detailStock.revenue_growth * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="利润增长">
-          {{ detailStock.profit_growth ? (detailStock.profit_growth * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="资产负债率">
-          {{ detailStock.debt_ratio ? (detailStock.debt_ratio * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="流动比率">
-          {{ detailStock.current_ratio?.toFixed(2) || '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="毛利率">
-          {{ detailStock.gross_margin ? (detailStock.gross_margin * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="净利率">
-          {{ detailStock.net_margin ? (detailStock.net_margin * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-        <el-descriptions-item label="股息率">
-          {{ detailStock.dividend_yield ? (detailStock.dividend_yield * 100).toFixed(2) + '%' : '-' }}
-        </el-descriptions-item>
-      </el-descriptions>
-      <template #footer>
-        <el-button @click="detailDialogVisible = false">关闭</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Search, Refresh, Plus, Loading } from '@element-plus/icons-vue'
+import { Search, Refresh, Plus } from '@element-plus/icons-vue'
 import {
   stockApi,
   industryApi,
   watchlistApi,
   type Stock,
-  type StockDetail,
   type Industry,
   type WatchlistGroup,
 } from '@/api/data'
+
+// Router
+const router = useRouter()
 
 // 数据状态
 const loading = ref(false)
@@ -237,11 +180,6 @@ const selectedIndustry = ref<string>('')
 const selectedGroup = ref<number | undefined>(undefined)
 const industries = ref<Industry[]>([])
 const watchlistGroups = ref<WatchlistGroup[]>([])
-
-// 详情对话框
-const detailDialogVisible = ref(false)
-const detailLoading = ref(false)
-const detailStock = ref<StockDetail | null>(null)
 
 // 加载股票列表
 const loadStocks = async () => {
@@ -332,32 +270,14 @@ const handleAddToWatchlist = async (stockId: number, groupId: number) => {
   }
 }
 
-// 查看详情
-const handleViewDetail = async (stock: Stock) => {
-  detailDialogVisible.value = true
-  detailLoading.value = true
-  detailStock.value = null
-  try {
-    detailStock.value = await stockApi.getDetail(stock.id)
-  } catch {
-    ElMessage.error('加载股票详情失败')
-    detailDialogVisible.value = false
-  } finally {
-    detailLoading.value = false
-  }
+// 查看详情 - 跳转到详情页
+const handleViewDetail = (stock: Stock) => {
+  router.push(`/stock/${stock.symbol}`)
 }
 
-// 行点击
+// 行点击 - 跳转到详情页
 const handleRowClick = (row: Stock) => {
   handleViewDetail(row)
-}
-
-// 格式化数字
-const formatNumber = (num: number) => {
-  if (num >= 10000) {
-    return (num / 10000).toFixed(2) + '万'
-  }
-  return num.toFixed(2)
 }
 
 // 初始化
@@ -410,12 +330,12 @@ onMounted(() => {
   color: #909399;
 }
 
-.detail-loading {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 40px;
-  gap: 8px;
-  color: #409eff;
+/* 表格行可点击样式 */
+:deep(.el-table__row) {
+  cursor: pointer;
+}
+
+:deep(.el-table__row:hover) {
+  background-color: #f5f7fa;
 }
 </style>

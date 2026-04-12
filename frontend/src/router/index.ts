@@ -14,6 +14,12 @@ const router = createRouter({
       meta: { title: '数据管理' },
     },
     {
+      path: '/stock/:symbol',
+      name: 'StockDetail',
+      component: () => import('@/views/StockDetail.vue'),
+      meta: { title: '股票详情' },
+    },
+    {
       path: '/factor',
       name: 'FactorResearch',
       component: () => import('@/views/FactorResearch/index.vue'),
