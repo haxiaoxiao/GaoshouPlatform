@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
 from app.engines.qmt_gateway import qmt_gateway
+from app.indicators.scheduler import indicator_scheduler
 
 
 @dataclass
@@ -122,6 +123,7 @@ class SyncService:
         self,
         task_id: int | None = None,
         failure_strategy: str = "skip",
+        full_sync: bool = False,
     ) -> SyncProgress:
         """
         同步股票基础信息
@@ -129,6 +131,7 @@ class SyncService:
         Args:
             task_id: 关联任务ID
             failure_strategy: 失败策略 (skip/retry/stop)
+            full_sync: 是否全量同步(包括市值等需要实时数据的字段)
 
         Returns:
             SyncProgress: 同步进度
@@ -147,31 +150,67 @@ class SyncService:
             # 从 QMT 获取股票列表
             stocks = await qmt_gateway.get_stock_list()
             progress.total = len(stocks)
-            progress.details = {"total_stocks": len(stocks)}
+            progress.details = {"total_stocks": len(stocks), "full_sync": full_sync}
 
             failed_stocks: list[dict[str, str]] = []
 
             # 批量处理股票信息
             for i, stock in enumerate(stocks):
                 try:
+                    # 构建插入数据
+                    insert_data = {
+                        "symbol": stock.symbol,
+                        "name": stock.name,
+                        "exchange": stock.exchange,
+                        "industry": stock.industry,
+                        "industry2": stock.industry2,
+                        "industry3": stock.industry3,
+                        "sector": stock.sector,
+                        "concept": stock.concept,
+                        "list_date": stock.list_date,
+                        "delist_date": stock.delist_date,
+                        "is_st": stock.is_st,
+                        "is_delist": stock.is_delist,
+                        "is_suspend": stock.is_suspend,
+                        "product_class": stock.product_class,
+                        "security_type": stock.security_type,
+                        "updated_at": datetime.now(),
+                    }
+
+                    # 全量同步时包含更多字段
+                    if full_sync:
+                        insert_data.update({
+                            "total_shares": stock.total_shares,
+                            "float_shares": stock.float_shares,
+                            "a_float_shares": stock.a_float_shares,
+                            "limit_sell_shares": stock.limit_sell_shares,
+                            "total_mv": stock.total_mv,
+                            "circ_mv": stock.circ_mv,
+                            "company_name": stock.company_name,
+                            "province": stock.province,
+                            "city": stock.city,
+                            "office_addr": stock.office_addr,
+                            "business_scope": stock.business_scope,
+                            "main_business": stock.main_business,
+                            "website": stock.website,
+                            "employees": stock.employees,
+                            "eps": stock.eps,
+                            "bvps": stock.bvps,
+                            "roe": stock.roe,
+                            "pe_ttm": stock.pe_ttm,
+                            "pb": stock.pb,
+                            "total_assets": stock.total_assets,
+                            "total_liability": stock.total_liability,
+                            "total_equity": stock.total_equity,
+                            "net_profit": stock.net_profit,
+                            "revenue": stock.revenue,
+                        })
+
                     # 使用 upsert 插入或更新
-                    stmt = insert(Stock).values(
-                        symbol=stock.symbol,
-                        name=stock.name,
-                        exchange=stock.exchange,
-                        industry=stock.industry,
-                        list_date=stock.list_date,
-                        updated_at=datetime.now(),
-                    )
+                    stmt = insert(Stock).values(**insert_data)
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["symbol"],
-                        set_={
-                            "name": stmt.excluded.name,
-                            "exchange": stmt.excluded.exchange,
-                            "industry": stmt.excluded.industry,
-                            "list_date": stmt.excluded.list_date,
-                            "updated_at": stmt.excluded.updated_at,
-                        },
+                        set_={k: stmt.excluded[k] for k in insert_data.keys() if k != "symbol"},
                     )
                     await self.session.execute(stmt)
 
@@ -199,7 +238,9 @@ class SyncService:
                                 name=stock.name,
                                 exchange=stock.exchange,
                                 industry=stock.industry,
+                                sector=stock.sector,
                                 list_date=stock.list_date,
+                                is_st=stock.is_st,
                                 updated_at=datetime.now(),
                             )
                             stmt = stmt.on_conflict_do_update(
@@ -208,14 +249,15 @@ class SyncService:
                                     "name": stmt.excluded.name,
                                     "exchange": stmt.excluded.exchange,
                                     "industry": stmt.excluded.industry,
+                                    "sector": stmt.excluded.sector,
                                     "list_date": stmt.excluded.list_date,
+                                    "is_st": stmt.excluded.is_st,
                                     "updated_at": stmt.excluded.updated_at,
                                 },
                             )
                             await self.session.execute(stmt)
                             progress.success_count += 1
                             progress.failed_count -= 1
-                            # 移除失败记录
                             failed_stocks.pop()
                         except Exception:
                             pass
@@ -224,9 +266,10 @@ class SyncService:
             await self.session.commit()
 
             # 更新进度
+            indicator_scheduler.run_after_sync("stock_info", symbols=symbols, trade_date=date.today())
             progress.status = "completed"
             progress.end_time = datetime.now()
-            progress.details["failed_stocks"] = failed_stocks[:100]  # 只保留前100条失败记录
+            progress.details["failed_stocks"] = failed_stocks[:100]
 
             # 记录日志
             await self.create_sync_log(
@@ -274,6 +317,7 @@ class SyncService:
         end_date: date | None = None,
         task_id: int | None = None,
         failure_strategy: str = "skip",
+        full_sync: bool = False,
     ) -> SyncProgress:
         """
         同步日K线数据
@@ -284,6 +328,7 @@ class SyncService:
             end_date: 结束日期，默认为今天
             task_id: 关联任务ID
             failure_strategy: 失败策略 (skip/retry/stop)
+            full_sync: 是否全量同步(True=先删除已有数据，False=增量追加)
 
         Returns:
             SyncProgress: 同步进度
@@ -304,6 +349,7 @@ class SyncService:
             details={
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "full_sync": full_sync,
             },
         )
         _current_sync = progress
@@ -319,6 +365,21 @@ class SyncService:
                 symbols = [row[0] for row in result.all()]
 
             progress.total = len(symbols)
+
+            # 全量同步时先删除已有数据
+            if full_sync and symbols:
+                progress.details["message"] = "正在删除已有数据..."
+                for symbol in symbols:
+                    try:
+                        ch_client.execute(
+                            "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
+                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
+                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
+                        )
+                    except Exception:
+                        pass
+                progress.details["message"] = "删除完成，开始同步..."
+
             failed_symbols: list[dict[str, str]] = []
             total_klines = 0
 
@@ -406,6 +467,7 @@ class SyncService:
                             pass
 
             # 更新进度
+            indicator_scheduler.run_after_sync("kline_daily", symbols=symbols, trade_date=end_date)
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
@@ -457,6 +519,7 @@ class SyncService:
         end_date: date | None = None,
         task_id: int | None = None,
         failure_strategy: str = "skip",
+        full_sync: bool = False,
     ) -> SyncProgress:
         """
         同步分钟K线数据
@@ -467,6 +530,7 @@ class SyncService:
             end_date: 结束日期，默认为今天
             task_id: 关联任务ID
             failure_strategy: 失败策略 (skip/retry/stop)
+            full_sync: 是否全量同步(True=先删除已有数据，False=增量追加)
 
         Returns:
             SyncProgress: 同步进度
@@ -487,6 +551,7 @@ class SyncService:
             details={
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "full_sync": full_sync,
             },
         )
         _current_sync = progress
@@ -502,6 +567,21 @@ class SyncService:
                 symbols = [row[0] for row in result.all()]
 
             progress.total = len(symbols)
+
+            # 全量同步时先删除已有数据
+            if full_sync and symbols:
+                progress.details["message"] = "正在删除已有数据..."
+                for symbol in symbols:
+                    try:
+                        ch_client.execute(
+                            "DELETE FROM klines_minute WHERE symbol = %(symbol)s "
+                            "AND toDate(datetime) >= %(start_date)s AND toDate(datetime) <= %(end_date)s",
+                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
+                        )
+                    except Exception:
+                        pass
+                progress.details["message"] = "删除完成，开始同步..."
+
             failed_symbols: list[dict[str, str]] = []
             total_klines = 0
 
@@ -589,6 +669,7 @@ class SyncService:
                             pass
 
             # 更新进度
+            indicator_scheduler.run_after_sync("kline_minute", symbols=symbols, trade_date=end_date)
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
@@ -727,3 +808,132 @@ class SyncService:
             return True
 
         return False
+
+    async def sync_realtime_mv(
+        self,
+        symbols: list[str] | None = None,
+        task_id: int | None = None,
+        failure_strategy: str = "skip",
+    ) -> SyncProgress:
+        """
+        同步实时市值数据
+
+        Args:
+            symbols: 股票代码列表，为空则同步所有股票
+            task_id: 关联任务ID
+            failure_strategy: 失败策略 (skip/retry/stop)
+
+        Returns:
+            SyncProgress: 同步进度
+        """
+        global _current_sync
+
+        # 初始化进度
+        progress = SyncProgress(
+            sync_type="realtime_mv",
+            status="running",
+            start_time=datetime.now(),
+        )
+        _current_sync = progress
+
+        try:
+            # 如果没有指定股票列表，获取所有股票
+            if symbols is None:
+                query = select(Stock.symbol)
+                result = await self.session.execute(query)
+                symbols = [row[0] for row in result.all()]
+
+            progress.total = len(symbols)
+            failed_symbols: list[dict[str, str]] = []
+
+            # 批量获取实时行情
+            quotes = await qmt_gateway.get_realtime_quotes(symbols)
+
+            # 构建行情字典
+            quote_dict = {q["symbol"]: q for q in quotes}
+
+            # 更新市值数据
+            for i, symbol in enumerate(symbols):
+                try:
+                    quote = quote_dict.get(symbol)
+                    if quote:
+                        # 更新市值
+                        stmt = insert(Stock).values(
+                            symbol=symbol,
+                            total_mv=quote.get("total_value"),
+                            circ_mv=quote.get("float_value"),
+                            updated_at=datetime.now(),
+                        )
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=["symbol"],
+                            set_={
+                                "total_mv": stmt.excluded.total_mv,
+                                "circ_mv": stmt.excluded.circ_mv,
+                                "updated_at": stmt.excluded.updated_at,
+                            },
+                        )
+                        await self.session.execute(stmt)
+                        progress.success_count += 1
+
+                    progress.current = i + 1
+
+                    # 每 100 条提交一次
+                    if (i + 1) % 100 == 0:
+                        await self.session.commit()
+
+                except Exception as e:
+                    progress.failed_count += 1
+                    failed_symbols.append({
+                        "symbol": symbol,
+                        "error": str(e),
+                    })
+
+                    if failure_strategy == "stop":
+                        raise
+
+            # 最终提交
+            await self.session.commit()
+
+            # 更新进度
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["failed_symbols"] = failed_symbols[:100]
+
+            # 记录日志
+            await self.create_sync_log(
+                sync_type="realtime_mv",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+
+            # 记录失败日志
+            await self.create_sync_log(
+                sync_type="realtime_mv",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+
+        finally:
+            _current_sync = None
+
+        return progress
