@@ -62,6 +62,21 @@ def init_clickhouse_tables():
         ORDER BY (symbol, datetime)
     """)
 
+    # 创建因子缓存表
+    client.execute("""
+        CREATE TABLE IF NOT EXISTS factor_cache
+        (
+            symbol LowCardinality(String),
+            trade_date Date,
+            expr_hash FixedString(16),
+            value Float64,
+            created_at DateTime DEFAULT now()
+        )
+        ENGINE = MergeTree()
+        PARTITION BY toYYYYMM(trade_date)
+        ORDER BY (expr_hash, trade_date, symbol)
+    """)
+
 
 # 全局客户端
 _clickhouse_client: Client | None = None
