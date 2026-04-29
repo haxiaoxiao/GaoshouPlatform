@@ -1,0 +1,91 @@
+"""回测 API — /api/v2/backtest"""
+import uuid
+
+from fastapi import APIRouter
+from pydantic import BaseModel, Field
+
+from app.backtest.config import BacktestConfig
+from app.backtest.runner import get_backtest_runner
+
+router = APIRouter(prefix="/v2/backtest")
+
+_tasks: dict[str, dict] = {}
+
+
+class RunBacktestRequest(BaseModel):
+    mode: str = "vectorized"
+    factor_expression: str | None = None
+    buy_condition: str | None = None
+    sell_condition: str | None = None
+    symbols: list[str]
+    start_date: str
+    end_date: str
+    initial_capital: float = 1_000_000
+    rebalance_freq: str = "monthly"
+    n_groups: int = 5
+    bar_type: str = "daily"
+    commission_rate: float = 0.0003
+    slippage: float = 0.001
+
+
+@router.post("/run")
+async def run_backtest(req: RunBacktestRequest):
+    """提交回测任务"""
+    from datetime import date
+
+    task_id = str(uuid.uuid4())[:8]
+    config = BacktestConfig(
+        mode=req.mode,
+        factor_expression=req.factor_expression,
+        buy_condition=req.buy_condition,
+        sell_condition=req.sell_condition,
+        symbols=req.symbols,
+        start_date=date.fromisoformat(req.start_date),
+        end_date=date.fromisoformat(req.end_date),
+        initial_capital=req.initial_capital,
+        rebalance_freq=req.rebalance_freq,
+        n_groups=req.n_groups,
+        bar_type=req.bar_type,
+        commission_rate=req.commission_rate,
+        slippage=req.slippage,
+    )
+
+    _tasks[task_id] = {"status": "queued", "progress": 0, "result": None}
+
+    try:
+        _tasks[task_id]["status"] = "running"
+        runner = get_backtest_runner()
+        result = await runner.run(config)
+        _tasks[task_id] = {
+            "status": "done",
+            "progress": 1.0,
+            "result": result.to_dict(),
+        }
+    except Exception as e:
+        _tasks[task_id] = {
+            "status": "failed",
+            "progress": 1.0,
+            "result": {"error": str(e)},
+        }
+
+    return {"code": 0, "message": "success", "data": {"task_id": task_id}}
+
+
+@router.get("/status/{task_id}")
+async def get_status(task_id: str):
+    """查询回测进度"""
+    task = _tasks.get(task_id)
+    if task is None:
+        return {"code": 1, "message": "Task not found", "data": None}
+    return {"code": 0, "message": "success", "data": task}
+
+
+@router.get("/result/{task_id}")
+async def get_result(task_id: str):
+    """获取回测结果"""
+    task = _tasks.get(task_id)
+    if task is None:
+        return {"code": 1, "message": "Task not found", "data": None}
+    if task["status"] != "done":
+        return {"code": 1, "message": f"Task status: {task['status']}", "data": None}
+    return {"code": 0, "message": "success", "data": task["result"]}
