@@ -1,14 +1,25 @@
 """算子单元测试"""
+import sys
 import numpy as np
 import pandas as pd
 import pytest
 from app.compute.operators.base import RawFieldOperator
 from app.compute.operators.registry import OperatorRegistry
 
-# 注册所有算子
-OperatorRegistry.clear()
-from app.compute.operators import raw_fields  # noqa
-from app.compute.operators import math_ops    # noqa
+
+@pytest.fixture(autouse=True)
+def _setup_registry():
+    """每个测试前清空并重新注册算子，避免与 test_registry.py 交叉污染"""
+    OperatorRegistry.clear()
+    # 先 pop 已缓存的模块，再重新 import 触发注册
+    for mod_name in list(sys.modules):
+        if mod_name.startswith("app.compute.operators.") and mod_name not in (
+            "app.compute.operators.base",
+            "app.compute.operators.registry",
+        ):
+            sys.modules.pop(mod_name, None)
+    import app.compute.operators.raw_fields  # noqa
+    import app.compute.operators.math_ops   # noqa
 
 
 class TestRawFields:
