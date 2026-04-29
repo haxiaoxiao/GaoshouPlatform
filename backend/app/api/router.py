@@ -5,6 +5,7 @@ from .backtest import router as backtest_router
 from .data import router as data_router
 from .factor import router as factor_router
 from .system import router as system_router
+from app.compute.api import router as compute_router
 
 api_router = APIRouter()
 
@@ -13,3 +14,4 @@ api_router.include_router(system_router, prefix="/system", tags=["系统"])
 api_router.include_router(data_router, prefix="/data", tags=["数据"])
 api_router.include_router(backtest_router, prefix="/backtest", tags=["回测"])
 api_router.include_router(factor_router, prefix="/factor", tags=["因子"])
+api_router.include_router(compute_router, tags=["计算引擎"])
