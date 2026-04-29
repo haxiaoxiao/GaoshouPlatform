@@ -255,7 +255,7 @@ class Evaluator:
         "+": lambda a, b: a + b,
         "-": lambda a, b: a - b,
         "*": lambda a, b: a * b,
-        "/": lambda a, b: a / b.replace(0, np.nan),
+        "/": lambda a, b: a / b.replace(0, np.nan) if isinstance(b, pd.Series) else (a / b if b != 0 else (pd.Series(np.nan, index=a.index) if isinstance(a, pd.Series) else np.nan)),
         "<": lambda a, b: a < b,
         ">": lambda a, b: a > b,
         "<=": lambda a, b: a <= b,
@@ -319,35 +319,37 @@ class Evaluator:
         # 求值所有参数
         args = [self.evaluate(arg) for arg in node.args]
 
-        # 对于 std、rolling 等需要原生 Python 数据类型的参数,
-        # 第 2 个之后的位置参数通常是数值
-        kwargs = {}
-        if len(args) >= 1:
-            kwargs["series"] = args[0]
-        if len(args) >= 2:
-            kwargs["period"] = int(args[1]) if isinstance(args[1], (int, float)) else args[1]
+        kwargs: dict[str, Any] = {}
+
+        # 多参数指标需要特殊处理参数名映射
         if node.name in ("Corr", "Cov"):
             kwargs["series_a"] = args[0]
             if len(args) >= 2:
                 kwargs["series_b"] = args[1]
             if len(args) >= 3:
                 kwargs["period"] = int(args[2]) if isinstance(args[2], (int, float)) else args[2]
-        if node.name == "ATR":
+        elif node.name == "ATR":
             kwargs["high_series"] = args[0]
             kwargs["low_series"] = args[1]
             if len(args) >= 3:
                 kwargs["close_series"] = args[2]
             if len(args) >= 4:
                 kwargs["period"] = int(args[3]) if isinstance(args[3], (int, float)) else args[3]
-        if node.name in ("CCI", "WILLR"):
+        elif node.name in ("CCI", "WILLR", "KDJ_K"):
             kwargs["high"] = args[0]
             kwargs["low"] = args[1]
             kwargs["close"] = args[2]
             if len(args) >= 4:
                 kwargs["period"] = int(args[3]) if isinstance(args[3], (int, float)) else args[3]
-        if node.name == "OBV":
+        elif node.name == "OBV":
             kwargs["close"] = args[0]
             kwargs["volume"] = args[1]
+        else:
+            # 通用单序列算子: 第1个参数是序列, 第2个可选是周期
+            if len(args) >= 1:
+                kwargs["series"] = args[0]
+            if len(args) >= 2:
+                kwargs["period"] = int(args[1]) if isinstance(args[1], (int, float)) else args[1]
 
         # 生成缓存 key
         cache_key = self._make_key(node)
