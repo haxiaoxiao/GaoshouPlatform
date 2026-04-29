@@ -1,9 +1,10 @@
 """算子单元测试"""
 import sys
+
 import numpy as np
 import pandas as pd
 import pytest
-from app.compute.operators.base import RawFieldOperator
+
 from app.compute.operators.registry import OperatorRegistry
 
 

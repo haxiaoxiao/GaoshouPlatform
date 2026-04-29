@@ -1,5 +1,4 @@
 """算子注册表测试"""
-import pytest
 from app.compute.operators.base import RawFieldOperator
 from app.compute.operators.registry import OperatorRegistry
 

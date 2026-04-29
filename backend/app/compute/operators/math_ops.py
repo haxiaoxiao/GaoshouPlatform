@@ -1,5 +1,4 @@
 """L1 数学/统计算子 — 逐元素运算 + 横截面排序"""
-import numpy as np
 import pandas as pd
 
 from app.compute.operators.base import Operator

@@ -14,7 +14,8 @@ class _RollingOp(Operator):
 
     def _get_series(self, kwargs: dict) -> pd.Series:
         series = kwargs.get("series")
-        if series is None: raise ValueError(f"{self.name} requires 'series' argument")
+        if series is None:
+            raise ValueError(f"{self.name} requires 'series' argument")
         if not isinstance(series, pd.Series):
             raise TypeError(f"{self.name} 'series' must be pd.Series, got {type(series)}")
         return series

@@ -6,6 +6,7 @@ def auto_discover():
     """自动发现并注册所有算子模块"""
     import importlib
     import pkgutil
+
     from app.compute import operators as pkg
 
     for _importer, modname, _ispkg in pkgutil.iter_modules(pkg.__path__):
