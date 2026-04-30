@@ -1,7 +1,8 @@
-"""三级缓存管理器 — L1 内存 LRU → L2 ClickHouse → L3 原始数据"""
+"""三级缓存管理器 — L1 内存 LRU → L1.5 Redis → L2 ClickHouse → L3 原始数据"""
 from __future__ import annotations
 
 import hashlib
+import json
 import threading
 from collections import OrderedDict
 from datetime import date
@@ -9,6 +10,8 @@ from typing import Any
 
 import pandas as pd
 from clickhouse_driver import Client
+
+from app.cache.redis_cache import get_redis_client as _get_redis_client  # noqa: F401 — used by get/set; module-level so tests can mock
 
 
 class LRUCache:
@@ -68,14 +71,67 @@ class ComputeCache:
         return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
     def get(self, expression: str) -> dict[str, pd.Series] | None:
-        """从 L1 内存缓存获取"""
+        """从缓存获取计算结果
+
+        L1: 进程内 LRU → L1.5: Redis → 回源（调用方自行走 L2 ClickHouse）
+        """
         key = self.make_key(expression)
-        return self.l1.get(key)
+
+        # L1: 内存 LRU（最快）
+        cached = self.l1.get(key)
+        if cached is not None:
+            return cached
+
+        # L1.5: Redis（跨进程共享）
+        try:
+            redis_val = _get_redis_client().get(key)
+            if redis_val is not None:
+                deserialized = self._deserialize_result(redis_val)
+                if deserialized is not None:
+                    # 回写 L1（缓存预热）
+                    self.l1.set(key, deserialized)
+                    return deserialized
+        except Exception:
+            pass
+
+        return None
 
     def set(self, expression: str, result: dict[str, pd.Series]) -> None:
-        """写入 L1 内存缓存"""
+        """写入缓存
+
+        L1 内存 LRU + L1.5 Redis（TTL=3600s）
+        """
         key = self.make_key(expression)
+
+        # L1: 内存 LRU
         self.l1.set(key, result)
+
+        # L1.5: Redis（后台写入，失败静默降级）
+        try:
+            _get_redis_client().set(key, self._serialize_result(result), ttl=3600)
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # 序列化 / 反序列化 helper（dict[str, pd.Series] <-> JSON str）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _serialize_result(result: dict[str, pd.Series]) -> str:
+        """将 dict[str, pd.Series] 序列化为 JSON 字符串"""
+        return json.dumps(
+            {sym: ser.to_dict() for sym, ser in result.items()},
+            default=str,
+        )
+
+    @staticmethod
+    def _deserialize_result(raw: str) -> dict[str, pd.Series] | None:
+        """将 JSON 字符串反序列化为 dict[str, pd.Series]"""
+        try:
+            data = json.loads(raw)
+            return {sym: pd.Series(vals) for sym, vals in data.items()}
+        except Exception:
+            return None
 
     def get_from_ch(
         self,
