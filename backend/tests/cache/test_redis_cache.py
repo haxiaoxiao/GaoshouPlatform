@@ -1,7 +1,7 @@
 # backend/tests/cache/test_redis_cache.py
 """Redis 缓存客户端测试"""
 
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
