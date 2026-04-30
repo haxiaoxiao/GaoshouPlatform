@@ -209,8 +209,10 @@ class FactorEvaluationService:
                 return pd.concat(factor_dfs, axis=1)
 
         if isinstance(result, pd.Series):
-            # Single symbol case: wrap into DataFrame
             return result.to_frame()
+
+        if isinstance(result, pd.DataFrame):
+            return result
 
         return pd.DataFrame()
 
