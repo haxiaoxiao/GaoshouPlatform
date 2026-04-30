@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api import api_router
+from app.cache.redis_cache import get_redis_client
 from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
 from app.db.clickhouse import init_clickhouse_tables
@@ -41,11 +42,24 @@ async def lifespan(app: FastAPI):
     await load_enabled_tasks()
     logger.info("Sync tasks loaded")
 
+    # 初始化 Redis 缓存
+    redis_client = get_redis_client()
+    if redis_client.available:
+        logger.info("Redis cache initialized")
+    else:
+        logger.info("Redis cache not available, running without cache")
+
     yield
 
     # 关闭调度器
     logger.info("Stopping application...")
     stop_scheduler()
+
+    # 关闭 Redis 连接
+    if redis_client.available:
+        redis_client.close()
+        logger.info("Redis connection closed")
+
     logger.info("Application stopped")
 
 
