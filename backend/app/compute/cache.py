@@ -118,18 +118,28 @@ class ComputeCache:
 
     @staticmethod
     def _serialize_result(result: dict[str, pd.Series]) -> str:
-        """将 dict[str, pd.Series] 序列化为 JSON 字符串"""
-        return json.dumps(
-            {sym: ser.to_dict() for sym, ser in result.items()},
-            default=str,
-        )
+        """将 dict[str, pd.Series] 序列化为 JSON 字符串（NaN → None 保证跨平台兼容）"""
+        import math
+
+        serialized: dict[str, dict] = {}
+        for sym, ser in result.items():
+            d = ser.to_dict()
+            d = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in d.items()}
+            serialized[sym] = d
+        return json.dumps(serialized, default=str)
 
     @staticmethod
     def _deserialize_result(raw: str) -> dict[str, pd.Series] | None:
-        """将 JSON 字符串反序列化为 dict[str, pd.Series]"""
+        """将 JSON 字符串反序列化为 dict[str, pd.Series]（None → NaN）"""
         try:
             data = json.loads(raw)
-            return {sym: pd.Series(vals) for sym, vals in data.items()}
+            result = {}
+            for sym, vals in data.items():
+                ser = pd.Series(vals)
+                if ser.dtype == object:
+                    ser = ser.replace({None: float("nan")})
+                result[sym] = ser
+            return result
         except Exception:
             return None
 
