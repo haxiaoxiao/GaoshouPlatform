@@ -43,10 +43,14 @@ async def lifespan(app: FastAPI):
     logger.info("Sync tasks loaded")
 
     # 初始化 Redis 缓存
-    redis_client = get_redis_client()
-    if redis_client.available:
-        logger.info("Redis cache initialized")
-    else:
+    redis_client = None
+    try:
+        redis_client = get_redis_client()
+        if redis_client.available:
+            logger.info("Redis cache initialized")
+        else:
+            logger.info("Redis cache not available, running without cache")
+    except Exception:
         logger.info("Redis cache not available, running without cache")
 
     yield
@@ -56,7 +60,7 @@ async def lifespan(app: FastAPI):
     stop_scheduler()
 
     # 关闭 Redis 连接
-    if redis_client.available:
+    if redis_client is not None and redis_client.available:
         redis_client.close()
         logger.info("Redis connection closed")
 

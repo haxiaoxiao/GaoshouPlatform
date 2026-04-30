@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import threading
 from collections import OrderedDict
 from datetime import date
@@ -11,7 +12,9 @@ from typing import Any
 import pandas as pd
 from clickhouse_driver import Client
 
-from app.cache.redis_cache import get_redis_client as _get_redis_client  # noqa: F401 — used by get/set; module-level so tests can mock
+from app.cache.redis_cache import get_redis_client as _get_redis_client
+
+logger = logging.getLogger(__name__)
 
 
 class LRUCache:
@@ -92,7 +95,7 @@ class ComputeCache:
                     self.l1.set(key, deserialized)
                     return deserialized
         except Exception:
-            pass
+            logger.debug("Redis get failed for key=%s", key[:8], exc_info=True)
 
         return None
 
@@ -110,7 +113,7 @@ class ComputeCache:
         try:
             _get_redis_client().set(key, self._serialize_result(result), ttl=3600)
         except Exception:
-            pass
+            logger.debug("Redis set failed for key=%s", key[:8], exc_info=True)
 
     # ------------------------------------------------------------------
     # 序列化 / 反序列化 helper（dict[str, pd.Series] <-> JSON str）
