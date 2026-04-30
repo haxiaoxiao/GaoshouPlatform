@@ -5,6 +5,7 @@ from .backtest import router as backtest_router
 from .data import router as data_router
 from .data_explorer import router as data_explorer_router
 from .data_skill import router as data_skill_router
+from .evaluation import router as evaluation_router
 from .factor import router as factor_router
 from .indicator import router as indicator_router
 from .strategy import router as strategy_router
@@ -24,3 +25,4 @@ api_router.include_router(compute_router, tags=["计算引擎"])
 api_router.include_router(backtest_v2_router, tags=["回测引擎"])
 api_router.include_router(indicator_router, prefix="/indicators", tags=["指标"])
 api_router.include_router(strategy_router, prefix="/strategy", tags=["策略"])
+api_router.include_router(evaluation_router, tags=["因子评估"])
