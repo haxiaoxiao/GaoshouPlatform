@@ -5,6 +5,18 @@ export type KlineType = 'daily' | 'minute'
 
 // K线数据接口
 export interface KlineData {
+  symbol: string
+  trade_date: string  // API returns trade_date
+  open: number
+  high: number
+  low: number
+  close: number
+  volume: number
+  amount: number
+}
+
+// K线数据接口（前端显示用）
+export interface KlineDataDisplay {
   datetime: string
   open: number
   high: number
@@ -12,6 +24,19 @@ export interface KlineData {
   close: number
   volume: number
   amount: number
+}
+
+// 转换函数
+export function toDisplayFormat(data: KlineData[]): KlineDataDisplay[] {
+  return data.map(item => ({
+    datetime: item.trade_date,
+    open: item.open,
+    high: item.high,
+    low: item.low,
+    close: item.close,
+    volume: item.volume,
+    amount: item.amount,
+  }))
 }
 
 // K线查询参数

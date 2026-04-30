@@ -1,7 +1,8 @@
 """流动性类指标"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
+@IndicatorRegistry.register
 class TurnoverRate(IndicatorBase):
     name = "turnover_rate"
     display_name = "换手率"
@@ -11,21 +12,20 @@ class TurnoverRate(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "成交量 / 流通股本"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
         if not info:
             return None
-        turnover = info.get("turnover")
-        if turnover is not None:
-            return round(float(turnover), 4)
         volume = info.get("volume")
         float_shares = info.get("a_float_shares") or info.get("float_shares")
         if volume and float_shares and float_shares != 0:
-            return round(float(volume) / float(float_shares), 4)
+            return round(float(volume) / float(float_shares) * 100, 4)
         return None
 
 
+@IndicatorRegistry.register
 class AvgAmount20d(IndicatorBase):
     name = "avg_amount_20d"
     display_name = "20日均成交额"
@@ -35,6 +35,7 @@ class AvgAmount20d(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近20日成交额均值(万元)"
+    unit = "10k CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:20]
@@ -44,9 +45,10 @@ class AvgAmount20d(IndicatorBase):
         valid = [a for a in amounts if a > 0]
         if not valid:
             return None
-        return round(sum(valid) / len(valid), 2)
+        return round(sum(valid) / len(valid) / 10000, 2)
 
 
+@IndicatorRegistry.register
 class FreeFloatMV(IndicatorBase):
     name = "free_float_mv"
     display_name = "自由流通市值"
@@ -56,12 +58,13 @@ class FreeFloatMV(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "流通市值(万元)"
+    unit = "10k CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
         if not info:
             return None
-        circ_mv = info.get("circ_mv") or info.get("floatValue")
+        circ_mv = info.get("circ_mv")
         if circ_mv is not None:
             return round(float(circ_mv), 2)
         return None

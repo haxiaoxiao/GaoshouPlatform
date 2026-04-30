@@ -2,6 +2,11 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
+_BASE_DIR = Path(__file__).resolve().parent.parent.parent
+_DATA_DIR = _BASE_DIR / "data"
+_DATA_DIR.mkdir(exist_ok=True)
+_DB_PATH = _DATA_DIR / "gaoshou.db"
+
 
 class Settings(BaseSettings):
     """应用配置"""
@@ -12,11 +17,11 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # 数据库配置
-    database_url: str = "sqlite+aiosqlite:///./data/gaoshou.db"
+    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH}"
 
     # ClickHouse 配置
     clickhouse_host: str = "localhost"
-    clickhouse_port: int = 9000
+    clickhouse_port: int = 19000
     clickhouse_database: str = "gaoshou"
     clickhouse_user: str = "default"
     clickhouse_password: str = ""
@@ -26,13 +31,11 @@ class Settings(BaseSettings):
 
     @property
     def base_dir(self) -> Path:
-        return Path(__file__).parent.parent.parent
+        return _BASE_DIR
 
     @property
     def data_dir(self) -> Path:
-        data_dir = self.base_dir / "data"
-        data_dir.mkdir(exist_ok=True)
-        return data_dir
+        return _DATA_DIR
 
     class Config:
         env_file = ".env"

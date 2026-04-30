@@ -1,9 +1,10 @@
 """波动类指标"""
 import math
 
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
+@IndicatorRegistry.register
 class Volatility20d(IndicatorBase):
     name = "volatility_20d"
     display_name = "20日波动率"
@@ -13,6 +14,7 @@ class Volatility20d(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近20日日收益率标准差(年化)"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:20]
@@ -22,7 +24,7 @@ class Volatility20d(IndicatorBase):
         if any(c == 0 for c in closes):
             return None
         returns = [
-            (closes[i] - closes[i - 1]) / closes[i - 1]
+            (closes[i] - closes[i - 1]) / closes[i - 1] * 100
             for i in range(1, len(closes))
         ]
         if not returns:
@@ -32,6 +34,7 @@ class Volatility20d(IndicatorBase):
         return round(math.sqrt(variance) * math.sqrt(252), 4)
 
 
+@IndicatorRegistry.register
 class AvgAmplitude(IndicatorBase):
     name = "avg_amplitude"
     display_name = "平均振幅"
@@ -41,6 +44,7 @@ class AvgAmplitude(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近20日振幅均值"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:20]
@@ -52,7 +56,7 @@ class AvgAmplitude(IndicatorBase):
             low = d.get("low", 0)
             prev_close = d.get("prev_close", 0) or d.get("open", 0)
             if prev_close > 0:
-                amplitudes.append((high - low) / prev_close)
+                amplitudes.append((high - low) / prev_close * 100)
         if not amplitudes:
             return None
         return round(sum(amplitudes) / len(amplitudes), 4)

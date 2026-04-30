@@ -14,6 +14,18 @@ const router = createRouter({
       meta: { title: '数据管理' },
     },
     {
+      path: '/explorer',
+      name: 'DataExplorer',
+      component: () => import('@/views/DataExplorer.vue'),
+      meta: { title: '数据浏览器' },
+    },
+    {
+      path: '/watchlist',
+      name: 'Watchlist',
+      component: () => import('@/views/Watchlist.vue'),
+      meta: { title: '自选股' },
+    },
+    {
       path: '/stock/:symbol',
       name: 'StockDetail',
       component: () => import('@/views/StockDetail.vue'),
@@ -25,12 +37,6 @@ const router = createRouter({
       component: () => import('@/views/FactorResearch/index.vue'),
       meta: { title: '因子研究' },
       children: [
-        {
-          path: '',
-          name: 'FactorList',
-          component: () => import('@/views/FactorResearch/FactorList.vue'),
-          meta: { title: '因子列表' },
-        },
         {
           path: 'analysis/:id',
           name: 'FactorAnalysis',
@@ -50,6 +56,12 @@ const router = createRouter({
       name: 'LiveTrading',
       component: () => import('@/views/LiveTrading/index.vue'),
       meta: { title: '实盘交易' },
+    },
+    {
+      path: '/trend-capital',
+      name: 'TrendCapital',
+      component: () => import('@/views/TrendCapital/index.vue'),
+      meta: { title: '趋势资金策略' },
     },
     {
       path: '/monitor',

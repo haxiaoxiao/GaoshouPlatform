@@ -1,7 +1,8 @@
 """成长类指标"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
+@IndicatorRegistry.register
 class RevenueGrowth(IndicatorBase):
     name = "revenue_growth"
     display_name = "营收增速"
@@ -11,17 +12,19 @@ class RevenueGrowth(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "营业收入同比增长率"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
         if not info:
             return None
-        revenue_growth = info.get("revenue_growth")
-        if revenue_growth is not None:
-            return round(float(revenue_growth), 4)
+        revenue_yoy = info.get("revenue_yoy")
+        if revenue_yoy is not None:
+            return round(float(revenue_yoy), 4)
         return None
 
 
+@IndicatorRegistry.register
 class ProfitGrowth(IndicatorBase):
     name = "profit_growth"
     display_name = "净利润增速"
@@ -31,12 +34,13 @@ class ProfitGrowth(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "净利润同比增长率"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
         if not info:
             return None
-        profit_growth = info.get("profit_growth")
-        if profit_growth is not None:
-            return round(float(profit_growth), 4)
+        profit_yoy = info.get("profit_yoy")
+        if profit_yoy is not None:
+            return round(float(profit_yoy), 4)
         return None

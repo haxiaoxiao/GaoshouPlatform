@@ -1,9 +1,9 @@
 # backend/app/api/data.py
 """数据相关 API 接口"""
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -93,11 +93,12 @@ class WatchlistStockResponse(BaseModel):
 class SyncRequest(BaseModel):
     """同步请求"""
 
-    sync_type: str = Field(description="同步类型: stock_info/kline_daily/kline_minute")
+    sync_type: str = Field(description="同步类型: stock_info/stock_full/kline_daily/kline_minute/realtime_mv")
     symbols: list[str] | None = Field(default=None, description="股票代码列表")
     start_date: date | None = Field(default=None, description="开始日期")
     end_date: date | None = Field(default=None, description="结束日期")
     failure_strategy: str = Field(default="skip", description="失败策略: skip/retry/stop")
+    full_sync: bool = Field(default=False, description="全量同步标记")
 
 
 class SyncProgressResponse(BaseModel):
@@ -139,16 +140,18 @@ class SyncLogResponse(BaseModel):
 @router.get("/stocks", summary="获取股票列表")
 async def get_stocks(
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    page_size: int = Query(default=20, ge=1, le=500, description="每页数量"),
     search: str | None = Query(default=None, description="搜索关键词(代码或名称)"),
     industry: str | None = Query(default=None, description="行业筛选"),
+    exchange: str | None = Query(default=None, description="交易所筛选"),
+    is_st: int | None = Query(default=None, description="ST状态: 0-正常, 1-ST"),
     group_id: int | None = Query(default=None, description="自选股分组ID"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
     获取股票列表(分页)
 
-    支持按代码/名称搜索、行业筛选、自选股分组筛选
+    支持按代码/名称搜索、行业筛选、交易所筛选、ST状态筛选、自选股分组筛选
     """
     service = DataService(session)
     result = await service.get_stocks(
@@ -156,6 +159,8 @@ async def get_stocks(
         page_size=page_size,
         search=search,
         industry=industry,
+        exchange=exchange,
+        is_st=is_st,
         group_id=group_id,
     )
 
@@ -167,6 +172,9 @@ async def get_stocks(
             "exchange": item.exchange,
             "industry": item.industry,
             "list_date": item.list_date.isoformat() if item.list_date else None,
+            "is_st": item.is_st if hasattr(item, 'is_st') else 0,
+            "total_mv": item.total_mv if hasattr(item, 'total_mv') else None,
+            "circ_mv": item.circ_mv if hasattr(item, 'circ_mv') else None,
         }
         for item in result.items
     ]
@@ -264,6 +272,24 @@ async def get_stock_detail(
     }
 
 
+@router.get("/industries", summary="获取行业列表")
+async def get_industries(
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """
+    获取所有行业及其股票数量
+    """
+    service = DataService(session)
+    industries = await service.get_industries()
+
+    return {
+        "industries": [
+            {"name": item.name, "count": item.stock_count}
+            for item in industries
+        ],
+    }
+
+
 # ============== Kline Endpoints ==============
 
 
@@ -274,7 +300,7 @@ async def get_klines(
     start_date: date | None = Query(default=None, description="开始日期"),
     end_date: date | None = Query(default=None, description="结束日期"),
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=100, ge=1, le=500, description="每页数量"),
+    page_size: int = Query(default=100, ge=1, le=1000, description="每页数量"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
@@ -295,11 +321,11 @@ async def get_klines(
         page_size=page_size,
     )
 
-    # 转换为响应格式
+    # 转换为响应格式 - 使用 trade_date 作为字段名
     items = [
         {
             "symbol": item.symbol,
-            "datetime": (
+            "trade_date": (
                 item.datetime.isoformat()
                 if isinstance(item.datetime, date)
                 else item.datetime.isoformat()
@@ -315,17 +341,8 @@ async def get_klines(
     ]
 
     return {
-        "code": 0,
-        "message": "success",
-        "data": {
-            "symbol": symbol,
-            "period": period,
-            "items": items,
-            "total": result.total,
-            "page": result.page,
-            "page_size": result.page_size,
-            "total_pages": result.total_pages,
-        },
+        "items": items,
+        "total": result.total,
     }
 
 
@@ -510,8 +527,74 @@ async def remove_from_watchlist(
 # ============== Sync Endpoints ==============
 
 
+async def _run_sync_task(
+    sync_type: str,
+    symbols: list[str] | None,
+    start_date: date | None,
+    end_date: date | None,
+    failure_strategy: str,
+    full_sync: bool,
+) -> None:
+    """在后台运行同步任务（使用独立的数据库会话）"""
+    from datetime import datetime
+    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+
+    from app.core.config import settings
+    from app.services.sync_service import SyncProgress, SyncService
+
+    engine = create_async_engine(settings.database_url)
+    async_session = async_sessionmaker(engine, expire_on_commit=False)
+
+    async with async_session() as session:
+        service = SyncService(session)
+        try:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.info(f"Starting sync task: {sync_type}")
+            if sync_type == "stock_info":
+                await service.sync_stock_info(
+                    failure_strategy=failure_strategy,
+                    full_sync=full_sync,
+                )
+            elif sync_type == "stock_full":
+                await service.sync_stock_full(
+                    failure_strategy=failure_strategy,
+                )
+            elif sync_type == "financial_data":
+                await service.sync_financial_data(
+                    failure_strategy=failure_strategy,
+                )
+            elif sync_type == "realtime_mv":
+                await service.sync_realtime_mv(
+                    symbols=symbols,
+                    failure_strategy=failure_strategy,
+                )
+            elif sync_type == "kline_daily":
+                await service.sync_kline_daily(
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    failure_strategy=failure_strategy,
+                    full_sync=full_sync,
+                )
+            else:  # kline_minute
+                await service.sync_kline_minute(
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    failure_strategy=failure_strategy,
+                    full_sync=full_sync,
+                )
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).exception(f"Sync task {sync_type} failed: {e}")
+        finally:
+            await engine.dispose()
+
+
 @router.post("/sync", summary="触发数据同步")
 async def trigger_sync(
+    background_tasks: BackgroundTasks,
     request: SyncRequest = Body(description="同步参数"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
@@ -519,14 +602,18 @@ async def trigger_sync(
     触发数据同步任务
 
     同步类型:
-    - stock_info: 股票基础信息
+    - stock_info: 股票基础信息(快速同步)
+    - stock_full: 股票完整信息(含市值、财务等扩展字段)
+    - financial_data: 下载并同步财务数据(需QMT在线，耗时长)
     - kline_daily: 日K线数据
     - kline_minute: 分钟K线数据
+    - realtime_mv: 实时市值更新
     """
-    if request.sync_type not in ("stock_info", "kline_daily", "kline_minute"):
+    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "realtime_mv")
+    if request.sync_type not in valid_types:
         raise HTTPException(
             status_code=400,
-            detail="sync_type 必须是 stock_info、kline_daily 或 kline_minute",
+            detail=f"sync_type 必须是: {', '.join(valid_types)}",
         )
 
     if request.failure_strategy not in ("skip", "retry", "stop"):
@@ -541,37 +628,31 @@ async def trigger_sync(
     if current_status and current_status.status == "running":
         raise HTTPException(status_code=409, detail="已有同步任务正在进行中")
 
-    try:
-        if request.sync_type == "stock_info":
-            progress = await service.sync_stock_info(
-                failure_strategy=request.failure_strategy
-            )
-        elif request.sync_type == "kline_daily":
-            progress = await service.sync_kline_daily(
-                symbols=request.symbols,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                failure_strategy=request.failure_strategy,
-            )
-        else:  # kline_minute
-            progress = await service.sync_kline_minute(
-                symbols=request.symbols,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                failure_strategy=request.failure_strategy,
-            )
+    # 启动后台同步任务
+    background_tasks.add_task(
+        _run_sync_task,
+        request.sync_type,
+        request.symbols,
+        request.start_date,
+        request.end_date,
+        request.failure_strategy,
+        request.full_sync,
+    )
 
-        return {
-            "code": 0,
-            "message": "success",
-            "data": progress.to_dict(),
-        }
-    except Exception as e:
-        return {
-            "code": 1,
-            "message": str(e),
-            "data": None,
-        }
+    # 构造并返回初始运行状态
+    from app.services.sync_service import SyncProgress
+
+    initial_progress = SyncProgress(
+        sync_type=request.sync_type,
+        status="running",
+        start_time=datetime.now(),
+    )
+
+    return {
+        "code": 0,
+        "message": "success",
+        "data": initial_progress.to_dict(),
+    }
 
 
 @router.get("/sync/status", summary="获取同步状态")

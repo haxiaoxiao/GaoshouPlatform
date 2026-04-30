@@ -77,6 +77,36 @@ def init_clickhouse_tables():
         ORDER BY (expr_hash, trade_date, symbol)
     """)
 
+    # 创建截面指标表
+    client.execute("""
+        CREATE TABLE IF NOT EXISTS stock_indicators
+        (
+            symbol LowCardinality(String),
+            indicator_name LowCardinality(String),
+            trade_date Date,
+            value Nullable(Float64),
+            updated_at DateTime DEFAULT now()
+        )
+        ENGINE = MergeTree()
+        PARTITION BY toYYYYMM(trade_date)
+        ORDER BY (symbol, indicator_name, trade_date)
+    """)
+
+    # 创建时序指标表
+    client.execute("""
+        CREATE TABLE IF NOT EXISTS indicator_timeseries
+        (
+            symbol LowCardinality(String),
+            indicator_name LowCardinality(String),
+            datetime DateTime,
+            value Nullable(Float64),
+            updated_at DateTime DEFAULT now()
+        )
+        ENGINE = MergeTree()
+        PARTITION BY toYYYYMM(datetime)
+        ORDER BY (symbol, indicator_name, datetime)
+    """)
+
 
 # 全局客户端
 _clickhouse_client: Client | None = None

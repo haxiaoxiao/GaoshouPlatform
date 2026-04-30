@@ -2,6 +2,7 @@
 """数据模型"""
 from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis
+from .financial import FinancialData
 from .stock import Stock
 from .strategy import Backtest, Order, Strategy, Trade
 from .sync import SyncLog, SyncTask
@@ -17,6 +18,7 @@ __all__ = [
     "Trade",
     "Factor",
     "FactorAnalysis",
+    "FinancialData",
     "WatchlistGroup",
     "WatchlistStock",
     "SyncTask",

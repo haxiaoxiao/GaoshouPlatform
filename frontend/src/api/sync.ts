@@ -33,11 +33,12 @@ export interface SyncLog {
 
 // 同步请求参数
 export interface SyncRequest {
-  sync_type: 'stock_info' | 'kline_daily' | 'kline_minute'
+  sync_type: 'stock_info' | 'stock_full' | 'kline_daily' | 'kline_minute' | 'realtime_mv'
   symbols?: string[]
   start_date?: string
   end_date?: string
   failure_strategy?: 'skip' | 'retry' | 'stop'
+  full_sync?: boolean  // 全量同步标记(适用于K线数据)
 }
 
 // 同步日志查询参数
@@ -55,9 +56,9 @@ export interface SyncLogsParams {
 // }
 
 export const syncApi = {
-  // 触发数据同步
+  // 触发数据同步（同步任务可能耗时较长，超时设为 10 分钟）
   trigger: (params: SyncRequest) =>
-    request.post<SyncStatus>('/data/sync', params),
+    request.post<SyncStatus>('/data/sync', params, { timeout: 600000 }),
 
   // 获取同步状态
   getStatus: () =>

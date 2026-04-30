@@ -27,8 +27,11 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
 
     # 初始化 ClickHouse 表
-    init_clickhouse_tables()
-    logger.info("ClickHouse tables initialized")
+    try:
+        init_clickhouse_tables()
+        logger.info("ClickHouse tables initialized")
+    except Exception as e:
+        logger.warning(f"ClickHouse not available, skipping: {e}")
 
     # 启动调度器
     start_scheduler()

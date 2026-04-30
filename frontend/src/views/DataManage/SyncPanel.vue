@@ -13,10 +13,16 @@
         <el-form :model="syncConfig" label-width="100px" class="config-form">
           <el-form-item label="同步类型">
             <el-checkbox-group v-model="syncConfig.syncTypes">
-              <el-checkbox label="stock_info">股票信息</el-checkbox>
-              <el-checkbox label="kline_daily">日K线</el-checkbox>
-              <el-checkbox label="kline_minute">分钟K线</el-checkbox>
+              <el-checkbox value="stock_info">股票信息</el-checkbox>
+              <el-checkbox value="stock_full">股票完整信息</el-checkbox>
+              <el-checkbox value="financial_data">财务数据(按季度)</el-checkbox>
+              <el-checkbox value="kline_daily">日K线</el-checkbox>
+              <el-checkbox value="kline_minute">分钟K线</el-checkbox>
+              <el-checkbox value="realtime_mv">实时市值</el-checkbox>
             </el-checkbox-group>
+            <div class="form-tip">
+              股票信息=基础字段+市值；股票完整信息=含市值等；财务数据=从QMT下载季度财报(耗时较长)；实时市值=仅更新市值
+            </div>
           </el-form-item>
 
           <el-form-item label="日期范围">
@@ -28,11 +34,12 @@
               end-placeholder="结束日期"
               format="YYYY-MM-DD"
               value-format="YYYY-MM-DD"
-              :disabled="syncConfig.syncTypes.includes('stock_info')"
+              :disabled="isDateRangeDisabled"
+              :shortcuts="dateShortcuts"
               style="width: 100%"
             />
-            <div v-if="syncConfig.syncTypes.includes('stock_info')" class="form-tip">
-              股票信息同步不需要选择日期范围
+            <div class="form-tip">
+              {{ isDateRangeDisabled ? '股票信息和市值同步不需要选择日期范围' : 'K线数据同步需要选择日期范围' }}
             </div>
           </el-form-item>
 
@@ -40,7 +47,16 @@
             <el-radio-group v-model="syncConfig.stockScope">
               <el-radio label="all">全部股票</el-radio>
               <el-radio label="watchlist">自选股</el-radio>
+              <el-radio label="custom">自定义</el-radio>
             </el-radio-group>
+            <el-input
+              v-if="syncConfig.stockScope === 'custom'"
+              v-model="syncConfig.customSymbols"
+              type="textarea"
+              :rows="3"
+              placeholder="输入股票代码，逗号分隔，如: 000001.SZ, 600000.SH"
+              style="margin-top: 8px"
+            />
           </el-form-item>
 
           <el-form-item label="失败策略">
@@ -51,14 +67,23 @@
             </el-select>
           </el-form-item>
 
+          <el-form-item label="更新模式">
+            <el-checkbox v-model="syncConfig.fullSync">
+              全量更新（覆盖已有数据）
+            </el-checkbox>
+            <div class="form-tip">
+              默认为增量更新，仅追加新数据；勾选后先删除已有数据再重新同步
+            </div>
+          </el-form-item>
+
           <el-form-item>
             <el-button
               type="primary"
-              :loading="isSyncing"
-              :disabled="syncConfig.syncTypes.length === 0"
+              :loading="isSyncing || isSubmitting"
+              :disabled="syncConfig.syncTypes.length === 0 || isSubmitting"
               @click="handleStartSync"
             >
-              {{ isSyncing ? '同步中...' : '开始同步' }}
+              {{ isSubmitting ? '提交中...' : isSyncing ? '同步中...' : '开始同步' }}
             </el-button>
             <el-button
               v-if="isSyncing"
@@ -221,10 +246,52 @@ import { syncApi, type SyncStatus, type SyncLog } from '@/api/sync'
 // 同步配置
 const syncConfig = ref({
   syncTypes: [] as string[],
-  dateRange: [] as string[],
+  dateRange: null as [string, string] | null,
   stockScope: 'all',
   failureStrategy: 'skip',
+  customSymbols: '',
+  fullSync: false,  // 全量更新标记
 })
+
+// 日期快捷选项
+const dateShortcuts = [
+  {
+    text: '最近一周',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24 * 7)
+      return [start, end]
+    },
+  },
+  {
+    text: '最近一个月',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24 * 30)
+      return [start, end]
+    },
+  },
+  {
+    text: '最近三个月',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24 * 90)
+      return [start, end]
+    },
+  },
+  {
+    text: '最近一年',
+    value: () => {
+      const end = new Date()
+      const start = new Date()
+      start.setTime(start.getTime() - 3600 * 1000 * 24 * 365)
+      return [start, end]
+    },
+  },
+]
 
 // 同步状态
 const syncStatus = ref<SyncStatus>({
@@ -255,6 +322,16 @@ const logsLoading = ref(false)
 
 // 是否正在同步
 const isSyncing = computed(() => syncStatus.value.status === 'running')
+
+// 是否禁用日期范围选择
+// 只有当选中的同步类型都不需要日期范围时才禁用
+const isDateRangeDisabled = computed(() => {
+  const needsDateTypes = ['kline_daily', 'kline_minute']
+  // 如果选中的类型中有需要日期的，则不禁用
+  const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
+  // 如果没有选中任何需要日期的类型，则禁用
+  return !hasNeedDate
+})
 
 // 状态轮询定时器
 let pollingTimer: ReturnType<typeof setInterval> | null = null
@@ -298,8 +375,11 @@ const progressStatus = computed(() => {
 const syncTypeLabel = (type: string): string => {
   const labels: Record<string, string> = {
     stock_info: '股票信息',
+    stock_full: '股票完整信息',
+    financial_data: '财务数据',
     kline_daily: '日K线',
     kline_minute: '分钟K线',
+    realtime_mv: '实时市值',
   }
   return labels[type] || type
 }
@@ -340,38 +420,72 @@ const formatTime = (time: string | null): string => {
   })
 }
 
-// 开始同步
+const isSubmitting = ref(false)
+
 const handleStartSync = async () => {
   if (syncConfig.value.syncTypes.length === 0) {
     ElMessage.warning('请至少选择一个同步类型')
     return
   }
 
+  // 提前校验：K线类型需要日期范围
+  const needsDateTypes = ['kline_daily', 'kline_minute']
+  const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
+  if (hasNeedDate) {
+    if (!syncConfig.value.dateRange || !syncConfig.value.dateRange[0] || !syncConfig.value.dateRange[1]) {
+      ElMessage.warning('K线数据同步需要选择日期范围')
+      return
+    }
+  }
+
+  // 校验自定义股票范围
+  if (syncConfig.value.stockScope === 'custom' && !syncConfig.value.customSymbols.trim()) {
+    ElMessage.warning('请输入自定义股票代码')
+    return
+  }
+
+  isSubmitting.value = true
+
   // 按顺序同步选中的类型
   for (const syncType of syncConfig.value.syncTypes) {
     try {
       const params: Parameters<typeof syncApi.trigger>[0] = {
-        sync_type: syncType as 'stock_info' | 'kline_daily' | 'kline_minute',
+        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv',
         failure_strategy: syncConfig.value.failureStrategy as 'skip' | 'retry' | 'stop',
+        full_sync: syncConfig.value.fullSync,  // 传递全量更新标记
       }
 
       // 只有 K 线数据才需要日期范围
-      if (syncType !== 'stock_info') {
-        if (syncConfig.value.dateRange && syncConfig.value.dateRange.length === 2) {
-          params.start_date = syncConfig.value.dateRange[0]
-          params.end_date = syncConfig.value.dateRange[1]
-        }
+      if (['kline_daily', 'kline_minute'].includes(syncType)) {
+        params.start_date = syncConfig.value.dateRange![0]
+        params.end_date = syncConfig.value.dateRange![1]
+      }
+
+      // 全量同步标记
+      if (syncType === 'stock_full' || syncType === 'financial_data') {
+        params.full_sync = true
+      }
+
+      // 股票范围
+      if (syncConfig.value.stockScope === 'custom') {
+        params.symbols = syncConfig.value.customSymbols
+          .split(',')
+          .map(s => s.trim())
+          .filter(Boolean)
       }
 
       const response = await syncApi.trigger(params)
       syncStatus.value = response
-      startPolling()
       ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
     } catch (error) {
       console.error('Sync error:', error)
       ElMessage.error('启动同步失败')
+      break
     }
   }
+
+  startPolling()
+  isSubmitting.value = false
 }
 
 // 停止同步（目前后端不支持取消，仅作为 UI 提示）
@@ -475,10 +589,24 @@ onUnmounted(() => {
   padding-right: 16px;
 }
 
+/* 确保checkbox文字正常显示 */
+.config-form :deep(.el-checkbox__label) {
+  font-family: var(--font-ui, "PingFang SC", "Microsoft YaHei", sans-serif);
+  font-size: 14px;
+  color: var(--text-primary, #303133);
+}
+
+.config-form :deep(.el-checkbox-group) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+}
+
 .form-tip {
   font-size: 12px;
   color: #909399;
   margin-top: 4px;
+  line-height: 1.5;
 }
 
 .status-content {

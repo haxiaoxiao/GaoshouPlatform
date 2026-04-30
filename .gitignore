@@ -32,3 +32,4 @@ build/
 # Database
 *.db
 data/*.db
+.worktrees

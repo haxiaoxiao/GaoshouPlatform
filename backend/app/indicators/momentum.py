@@ -1,5 +1,6 @@
 """动量类指标"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+import math
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
 def _calc_return(kline_data: list[dict], n: int) -> float | None:
@@ -14,9 +15,10 @@ def _calc_return(kline_data: list[dict], n: int) -> float | None:
         oldest = kline_data[n].get("close", 0)
     if oldest == 0:
         return None
-    return round((latest - oldest) / oldest, 4)
+    return round((latest - oldest) / oldest * 100, 4)
 
 
+@IndicatorRegistry.register
 class Return5d(IndicatorBase):
     name = "return_5d"
     display_name = "5日涨幅"
@@ -26,11 +28,13 @@ class Return5d(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近5个交易日涨幅"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         return _calc_return(context.kline_data, 5)
 
 
+@IndicatorRegistry.register
 class Return20d(IndicatorBase):
     name = "return_20d"
     display_name = "20日涨幅"
@@ -40,11 +44,13 @@ class Return20d(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近20个交易日涨幅"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         return _calc_return(context.kline_data, 20)
 
 
+@IndicatorRegistry.register
 class Return60d(IndicatorBase):
     name = "return_60d"
     display_name = "60日涨幅"
@@ -54,11 +60,13 @@ class Return60d(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "近60个交易日涨幅"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         return _calc_return(context.kline_data, 60)
 
 
+@IndicatorRegistry.register
 class MA5Slope(IndicatorBase):
     name = "ma5_slope"
     display_name = "5日均线斜率"
@@ -67,7 +75,8 @@ class MA5Slope(IndicatorBase):
     data_type = "时序"
     is_precomputed = True
     dependencies = []
-    description = "MA5线性回归斜率"
+    description = "MA5线性回��斜率"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:5] if len(context.kline_data) >= 5 else context.kline_data

@@ -1,10 +1,36 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <meta name="theme-color" content="#0a0a0c" />
+    <meta name="description" content="Gaoshou Platform - 量化投研平台" />
+
+    <!-- Preconnect to font servers -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+
+    <!-- Load custom fonts: JetBrains Mono + Sora -->
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Sora:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <title>Gaoshou Platform | 量化投研平台</title>
+
+    <style>
+      /* Critical CSS - Prevent FOUC */
+      html {
+        background: #0a0a0c;
+      }
+
+      body {
+        opacity: 0;
+        animation: fadeIn 0.3s ease-out forwards;
+      }
+
+      @keyframes fadeIn {
+        to { opacity: 1; }
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>

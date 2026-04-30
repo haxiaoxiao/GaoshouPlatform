@@ -45,6 +45,9 @@ class StockInfo:
     exchange: str | None
     industry: str | None
     list_date: date | None
+    is_st: int = 0
+    total_mv: float | None = None
+    circ_mv: float | None = None
 
 
 @dataclass
@@ -104,6 +107,8 @@ class DataService:
         page_size: int = 20,
         search: str | None = None,
         industry: str | None = None,
+        exchange: str | None = None,
+        is_st: int | None = None,
         group_id: int | None = None,
     ) -> PaginatedResult:
         """
@@ -114,6 +119,8 @@ class DataService:
             page_size: 每页数量
             search: 搜索关键词(代码或名称)
             industry: 行业筛选
+            exchange: 交易所筛选
+            is_st: ST状态筛选
             group_id: 自选股分组筛选
 
         Returns:
@@ -133,6 +140,14 @@ class DataService:
         # 行业筛选
         if industry:
             query = query.where(Stock.industry == industry)
+
+        # 交易所筛选
+        if exchange:
+            query = query.where(Stock.exchange == exchange)
+
+        # ST状态筛选
+        if is_st is not None:
+            query = query.where(Stock.is_st == is_st)
 
         # 自选股分组筛选
         if group_id:
@@ -163,6 +178,9 @@ class DataService:
                 exchange=stock.exchange,
                 industry=stock.industry,
                 list_date=stock.list_date,
+                is_st=getattr(stock, 'is_st', 0) or 0,
+                total_mv=getattr(stock, 'total_mv', None),
+                circ_mv=getattr(stock, 'circ_mv', None),
             )
             for stock in stocks
         ]
@@ -220,18 +238,31 @@ class DataService:
 
         where_clause = " AND ".join(where_conditions)
 
-        # 查询总数
-        count_query = f"SELECT count() FROM {table_name} WHERE {where_clause}"
+        # 查询总数 (基于去重后的日期数)
+        count_query = f"""
+            SELECT count() FROM (
+                SELECT {datetime_field} FROM {table_name}
+                WHERE {where_clause}
+                GROUP BY symbol, {datetime_field}
+            )
+        """
         count_result = client.execute(count_query, params)
         total = count_result[0][0] if count_result else 0
 
-        # 分页查询数据 (按日期倒序)
+        # 分页查询数据 (LIMIT 1 BY 去重 + round 精度 + 按日期倒序)
         offset = (page - 1) * page_size
         data_query = f"""
-            SELECT symbol, {datetime_field}, open, high, low, close, volume, amount
+            SELECT symbol, {datetime_field},
+                   round(open, 4) as open,
+                   round(high, 4) as high,
+                   round(low, 4) as low,
+                   round(close, 4) as close,
+                   volume,
+                   round(amount, 2) as amount
             FROM {table_name}
             WHERE {where_clause}
             ORDER BY {datetime_field} DESC
+            LIMIT 1 BY symbol, {datetime_field}
             LIMIT %(limit)s OFFSET %(offset)s
         """
         params["limit"] = page_size
@@ -239,7 +270,6 @@ class DataService:
 
         rows = client.execute(data_query, params)
 
-        # 转换为 KlineData 数据类
         items = [
             KlineData(
                 symbol=row[0],

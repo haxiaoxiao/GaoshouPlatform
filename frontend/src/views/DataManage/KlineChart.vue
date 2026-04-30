@@ -5,194 +5,234 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import * as echarts from 'echarts'
-import type { KlineData } from '@/api/kline'
+import type { KlineDataDisplay } from '@/api/kline'
 
 // Props
 const props = defineProps<{
-  data: KlineData[]
+  data: KlineDataDisplay[]
 }>()
 
 // Refs
 const chartRef = ref<HTMLDivElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
+let isInitialized = false
+
+// 颜色配置 - 使用更鲜明的颜色
+const COLORS = {
+  up: '#ef5350',      // 涨 - 红色
+  down: '#26a69a',    // 跌 - 绿色
+  grid: '#e0e0e0',    // 网格线
+  axis: '#616161',    // 坐标轴
+  text: '#424242',    // 文字
+  background: '#ffffff',
+}
+
+// 获取默认配置
+const getDefaultOption = (): echarts.EChartsOption => ({
+  animation: false,
+  backgroundColor: COLORS.background,
+  legend: {
+    bottom: 10,
+    left: 'center',
+    data: ['K线', '成交量'],
+    textStyle: { color: COLORS.text },
+  },
+  tooltip: {
+    trigger: 'axis',
+    axisPointer: {
+      type: 'cross',
+      lineStyle: { color: '#999' },
+    },
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    borderColor: '#ddd',
+    borderWidth: 1,
+    textStyle: { color: '#333', fontSize: 13 },
+    formatter: (params: unknown) => {
+      const items = params as Array<{ seriesName: string; axisValue: string; dataIndex: number }>
+      if (!items || items.length === 0) return ''
+
+      const date = items[0].axisValue
+      const idx = items[0].dataIndex
+      if (idx < 0 || idx >= props.data.length) return ''
+      const d = props.data[idx]
+
+      const open = d.open
+      const close = d.close
+      const high = d.high
+      const low = d.low
+      const vol = d.volume
+      const change = close - open
+      const changePercent = open !== 0 ? ((change / open) * 100).toFixed(2) : '0.00'
+      const changeColor = change >= 0 ? COLORS.up : COLORS.down
+
+      return `
+        <div style="padding: 12px; min-width: 180px;">
+          <div style="font-weight: 600; margin-bottom: 10px; font-size: 14px;">${date}</div>
+          <div style="display: grid; grid-template-columns: 70px 90px; gap: 6px; font-size: 13px;">
+            <span style="color: #666;">开盘:</span><span style="text-align: right; font-weight: 500;">${open.toFixed(2)}</span>
+            <span style="color: #666;">收盘:</span><span style="text-align: right; font-weight: 600; color: ${changeColor};">${close.toFixed(2)}</span>
+            <span style="color: #666;">最高:</span><span style="text-align: right; font-weight: 500;">${high.toFixed(2)}</span>
+            <span style="color: #666;">最低:</span><span style="text-align: right; font-weight: 500;">${low.toFixed(2)}</span>
+            <span style="color: #666;">涨跌:</span><span style="text-align: right; font-weight: 600; color: ${changeColor};">${change >= 0 ? '+' : ''}${changePercent}%</span>
+            <span style="color: #666;">成交量:</span><span style="text-align: right;">${formatVolume(vol)}</span>
+          </div>
+        </div>
+      `
+    },
+  },
+  axisPointer: {
+    link: [{ xAxisIndex: 'all' }],
+  },
+  grid: [
+    {
+      left: '8%',
+      right: '4%',
+      top: '8%',
+      height: '52%',
+    },
+    {
+      left: '8%',
+      right: '4%',
+      top: '68%',
+      height: '18%',
+    },
+  ],
+  xAxis: [
+    {
+      type: 'category',
+      data: [],
+      boundaryGap: true,
+      axisLine: { lineStyle: { color: COLORS.axis } },
+      axisTick: { lineStyle: { color: COLORS.axis } },
+      axisLabel: {
+        color: COLORS.text,
+        formatter: (value: string) => {
+          if (value.length >= 10) return value.substring(5)
+          return value
+        },
+      },
+      splitLine: { show: false },
+    },
+    {
+      type: 'category',
+      gridIndex: 1,
+      data: [],
+      boundaryGap: true,
+      axisLine: { lineStyle: { color: COLORS.axis } },
+      axisTick: { show: false },
+      splitLine: { show: false },
+      axisLabel: { show: false },
+    },
+  ],
+  yAxis: [
+    {
+      type: 'value',
+      scale: true,
+      axisLine: { show: true, lineStyle: { color: COLORS.axis } },
+      axisTick: { show: true, lineStyle: { color: COLORS.axis } },
+      axisLabel: {
+        color: COLORS.text,
+        formatter: (value: number) => value.toFixed(2),
+      },
+      splitLine: { lineStyle: { color: COLORS.grid, type: 'dashed' } },
+      splitArea: { show: false },
+    },
+    {
+      type: 'value',
+      gridIndex: 1,
+      scale: true,
+      axisLine: { show: true, lineStyle: { color: COLORS.axis } },
+      axisTick: { show: false },
+      axisLabel: {
+        color: COLORS.text,
+        formatter: (value: number) => formatVolume(value),
+      },
+      splitLine: { lineStyle: { color: COLORS.grid, type: 'dashed' } },
+    },
+  ],
+  dataZoom: [
+    {
+      type: 'inside',
+      xAxisIndex: [0, 1],
+      start: 0,
+      end: 100,
+    },
+    {
+      show: true,
+      xAxisIndex: [0, 1],
+      type: 'slider',
+      bottom: 0,
+      start: 0,
+      end: 100,
+      height: 24,
+      borderColor: '#ccc',
+      fillerColor: 'rgba(64, 158, 255, 0.2)',
+      handleStyle: { color: '#409eff' },
+      textStyle: { color: COLORS.text },
+    },
+  ],
+  series: [
+    {
+      name: 'K线',
+      type: 'candlestick',
+      data: [],
+      itemStyle: {
+        color: COLORS.up,
+        color0: COLORS.down,
+        borderColor: COLORS.up,
+        borderColor0: COLORS.down,
+      },
+      barWidth: '60%',
+    },
+    {
+      name: '成交量',
+      type: 'bar',
+      xAxisIndex: 1,
+      yAxisIndex: 1,
+      data: [],
+      barWidth: '60%',
+      itemStyle: {
+        color: (params: { dataIndex: number }) => {
+          if (!props.data[params.dataIndex]) return '#bdbdbd'
+          const item = props.data[params.dataIndex]
+          return item.close >= item.open ? COLORS.up : COLORS.down
+        },
+      },
+    },
+  ],
+})
 
 // 初始化图表
 const initChart = () => {
   if (!chartRef.value) return
 
-  chartInstance = echarts.init(chartRef.value)
-
-  const option: echarts.EChartsOption = {
-    animation: false,
-    legend: {
-      bottom: 10,
-      left: 'center',
-      data: ['K线', '成交量'],
-    },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: {
-        type: 'cross',
-      },
-      backgroundColor: 'rgba(255, 255, 255, 0.9)',
-      borderColor: '#ccc',
-      borderWidth: 1,
-      textStyle: {
-        color: '#333',
-      },
-      formatter: (params: unknown) => {
-        const items = params as Array<{ seriesName: string; data: unknown; axisValue: string }>
-        if (!items || items.length === 0) return ''
-
-        const date = items[0].axisValue
-        const klineItem = items.find((item) => item.seriesName === 'K线')
-        const volumeItem = items.find((item) => item.seriesName === '成交量')
-
-        const klineData = klineItem?.data as [number, number, number, number] | undefined
-        const volumeData = volumeItem?.data as number | undefined
-
-        if (!klineData) return ''
-
-        const [open, close, low, high] = klineData
-        const change = close - open
-        const changePercent = ((change / open) * 100).toFixed(2)
-        const changeColor = change >= 0 ? '#f56c6c' : '#67c23a'
-
-        return `
-          <div style="padding: 8px;">
-            <div style="font-weight: bold; margin-bottom: 8px;">${date}</div>
-            <div style="display: grid; grid-template-columns: 60px 80px; gap: 4px;">
-              <span>开盘:</span><span style="text-align: right;">${open.toFixed(2)}</span>
-              <span>收盘:</span><span style="text-align: right; color: ${changeColor};">${close.toFixed(2)}</span>
-              <span>最高:</span><span style="text-align: right;">${high.toFixed(2)}</span>
-              <span>最低:</span><span style="text-align: right;">${low.toFixed(2)}</span>
-              <span>涨跌:</span><span style="text-align: right; color: ${changeColor};">${change >= 0 ? '+' : ''}${changePercent}%</span>
-              <span>成交量:</span><span style="text-align: right;">${formatVolume(volumeData || 0)}</span>
-            </div>
-          </div>
-        `
-      },
-    },
-    axisPointer: {
-      link: [{ xAxisIndex: 'all' }],
-    },
-    grid: [
-      {
-        left: '10%',
-        right: '8%',
-        top: '5%',
-        height: '55%',
-      },
-      {
-        left: '10%',
-        right: '8%',
-        top: '68%',
-        height: '20%',
-      },
-    ],
-    xAxis: [
-      {
-        type: 'category',
-        data: [],
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        splitLine: { show: false },
-        min: 'dataMin',
-        max: 'dataMax',
-        axisLabel: {
-          formatter: (value: string) => {
-            // 格式化日期显示
-            if (value.length >= 10) {
-              return value.substring(5) // 只显示月-日
-            }
-            return value
-          },
-        },
-      },
-      {
-        type: 'category',
-        gridIndex: 1,
-        data: [],
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        axisLabel: { show: false },
-        min: 'dataMin',
-        max: 'dataMax',
-      },
-    ],
-    yAxis: [
-      {
-        scale: true,
-        splitArea: {
-          show: true,
-        },
-        axisLabel: {
-          formatter: (value: number) => value.toFixed(2),
-        },
-      },
-      {
-        scale: true,
-        gridIndex: 1,
-        splitNumber: 2,
-        axisLabel: {
-          formatter: (value: number) => formatVolume(value),
-        },
-      },
-    ],
-    dataZoom: [
-      {
-        type: 'inside',
-        xAxisIndex: [0, 1],
-        start: 50,
-        end: 100,
-      },
-      {
-        show: true,
-        xAxisIndex: [0, 1],
-        type: 'slider',
-        bottom: 0,
-        start: 50,
-        end: 100,
-        height: 20,
-      },
-    ],
-    series: [
-      {
-        name: 'K线',
-        type: 'candlestick',
-        data: [],
-        itemStyle: {
-          color: '#f56c6c', // 阳线颜色
-          color0: '#67c23a', // 阴线颜色
-          borderColor: '#f56c6c',
-          borderColor0: '#67c23a',
-        },
-      },
-      {
-        name: '成交量',
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        data: [],
-        itemStyle: {
-          color: (params: { dataIndex: number }) => {
-            if (!props.data[params.dataIndex]) return '#909399'
-            const item = props.data[params.dataIndex]
-            return item.close >= item.open ? '#f56c6c' : '#67c23a'
-          },
-        },
-      },
-    ],
+  // 销毁旧实例
+  if (chartInstance) {
+    chartInstance.dispose()
+    chartInstance = null
   }
 
-  chartInstance.setOption(option)
+  chartInstance = echarts.init(chartRef.value, undefined, { renderer: 'canvas' })
+  chartInstance.setOption(getDefaultOption())
+  isInitialized = true
 }
 
-// 更新图表数据
+// 更新图表数据 - 关键修复：始终重置dataZoom
 const updateChart = () => {
-  if (!chartInstance || !props.data.length) return
+  if (!chartInstance || !chartRef.value) {
+    initChart()
+  }
+
+  if (!chartInstance) return
+
+  // 如果没有数据，清空图表
+  if (!props.data || props.data.length === 0) {
+    chartInstance.setOption({
+      xAxis: [{ data: [] }, { data: [] }],
+      series: [{ data: [] }, { data: [] }],
+    })
+    return
+  }
 
   const dates = props.data.map((item) => item.datetime)
   const klineData = props.data.map((item) => [
@@ -203,6 +243,8 @@ const updateChart = () => {
   ])
   const volumeData = props.data.map((item) => item.volume)
 
+  // 关键：使用 notMerge: true 完全重置图表状态
+  // 这样可以确保 dataZoom 和其他状态被正确重置
   chartInstance.setOption({
     xAxis: [
       { data: dates },
@@ -212,7 +254,27 @@ const updateChart = () => {
       { data: klineData },
       { data: volumeData },
     ],
-  })
+    dataZoom: [
+      {
+        type: 'inside',
+        xAxisIndex: [0, 1],
+        start: 0,
+        end: 100,
+      },
+      {
+        show: true,
+        xAxisIndex: [0, 1],
+        type: 'slider',
+        bottom: 0,
+        start: 0,
+        end: 100,
+        height: 24,
+      },
+    ],
+  }, { notMerge: false, lazyUpdate: true })
+
+  // 强制重新渲染
+  chartInstance.resize()
 }
 
 // 格式化成交量
@@ -234,25 +296,34 @@ const handleResize = () => {
 // 监听数据变化
 watch(
   () => props.data,
-  () => {
+  (newData) => {
+    // 使用 nextTick 确保 DOM 已更新
     nextTick(() => {
+      if (!isInitialized) {
+        initChart()
+      }
       updateChart()
     })
   },
-  { deep: true }
+  { deep: true, immediate: false }
 )
 
 // 生命周期
 onMounted(() => {
   initChart()
-  updateChart()
+  if (props.data && props.data.length > 0) {
+    updateChart()
+  }
   window.addEventListener('resize', handleResize)
 })
 
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize)
-  chartInstance?.dispose()
-  chartInstance = null
+  if (chartInstance) {
+    chartInstance.dispose()
+    chartInstance = null
+  }
+  isInitialized = false
 })
 
 // 暴露方法供父组件调用
@@ -264,7 +335,10 @@ defineExpose({
 <style scoped>
 .kline-chart {
   width: 100%;
-  height: 500px;
+  height: 520px;
   min-height: 400px;
+  background: #ffffff;
+  border-radius: 8px;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.1);
 }
 </style>

@@ -1,33 +1,35 @@
 """主题类指标 - 从SQLite theme_annotations表读取人工标注"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
-def _get_theme_annotation(symbol: str, theme_name: str | None = None) -> dict | None:
+def _get_theme_annotation(symbol: str) -> dict | None:
     """从SQLite读取主题标注"""
-    from sqlalchemy import create_engine, select
-    from app.db.models.stock import ThemeAnnotation
-    from app.core.config import settings
-
-    sync_url = settings.database_url.replace("+aiosqlite", "")
-    engine = create_engine(sync_url)
     try:
-        with engine.connect() as conn:
-            query = select(ThemeAnnotation).where(ThemeAnnotation.symbol == symbol)
-            if theme_name:
-                query = query.where(ThemeAnnotation.theme_name == theme_name)
-            result = conn.execute(query)
-            row = result.first()
-            if row:
-                return {
-                    "business_purity": row.business_purity,
-                    "chain_position": row.chain_position,
-                    "revenue_ratio": row.revenue_ratio,
-                }
-    finally:
-        engine.dispose()
+        from sqlalchemy import create_engine, select
+        from app.db.models.stock import ThemeAnnotation
+        from app.core.config import settings
+
+        sync_url = settings.database_url.replace("+aiosqlite", "")
+        engine = create_engine(sync_url)
+        try:
+            with engine.connect() as conn:
+                query = select(ThemeAnnotation).where(ThemeAnnotation.symbol == symbol)
+                result = conn.execute(query)
+                row = result.first()
+                if row:
+                    return {
+                        "business_purity": row.business_purity,
+                        "chain_position": row.chain_position,
+                        "revenue_ratio": row.revenue_ratio,
+                    }
+        finally:
+            engine.dispose()
+    except (ImportError, Exception):
+        pass
     return None
 
 
+@IndicatorRegistry.register
 class BusinessPurity(IndicatorBase):
     name = "business_purity"
     display_name = "业务纯度"
@@ -37,14 +39,16 @@ class BusinessPurity(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "股票与主题的相关程度(0~1)，人工标注"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         annotation = _get_theme_annotation(context.symbol)
         if annotation and annotation["business_purity"] is not None:
-            return round(annotation["business_purity"], 4)
+            return round(annotation["business_purity"] * 100, 4)
         return None
 
 
+@IndicatorRegistry.register
 class ChainPosition(IndicatorBase):
     name = "chain_position"
     display_name = "产业链定位"
@@ -63,6 +67,7 @@ class ChainPosition(IndicatorBase):
         return None
 
 
+@IndicatorRegistry.register
 class RevenueRatio(IndicatorBase):
     name = "revenue_ratio"
     display_name = "主题营收占比"
@@ -72,9 +77,10 @@ class RevenueRatio(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "主题相关业务营收占总营收比重(0~1)，人工标注"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         annotation = _get_theme_annotation(context.symbol)
         if annotation and annotation["revenue_ratio"] is not None:
-            return round(annotation["revenue_ratio"], 4)
+            return round(annotation["revenue_ratio"] * 100, 4)
         return None

@@ -63,43 +63,44 @@ export const industryApi = {
     request.get<Industry[]>('/data/industries'),
 }
 
-// 自选股分组相关接口
 export interface WatchlistGroup {
   id: number
   name: string
   description: string | null
-  created_at: string
-  updated_at: string
   stock_count?: number
+  created_at: string | null
+  updated_at: string | null
 }
 
-export interface CreateWatchlistGroupParams {
+export interface WatchlistStock {
+  id: number
+  group_id: number
+  symbol: string
+  stock_name: string | null
+  added_at: string
+}
+
+export interface CreateGroupParams {
   name: string
   description?: string
 }
 
-export interface AddStockToGroupParams {
-  stock_id: number
-}
-
 export const watchlistApi = {
-  // 获取自选股分组列表
   getGroups: () =>
     request.get<WatchlistGroup[]>('/data/watchlist/groups'),
 
-  // 创建自选股分组
-  createGroup: (data: CreateWatchlistGroupParams) =>
+  createGroup: (data: CreateGroupParams) =>
     request.post<WatchlistGroup>('/data/watchlist/groups', data),
 
-  // 添加股票到分组
-  addStockToGroup: (groupId: number, data: AddStockToGroupParams) =>
-    request.post(`/data/watchlist/groups/${groupId}/stocks`, data),
-
-  // 从分组移除股票
-  removeStockFromGroup: (groupId: number, stockId: number) =>
-    request.delete(`/data/watchlist/groups/${groupId}/stocks/${stockId}`),
-
-  // 删除分组
   deleteGroup: (groupId: number) =>
     request.delete(`/data/watchlist/groups/${groupId}`),
+
+  getGroupStocks: (groupId: number) =>
+    request.get<WatchlistStock[]>(`/data/watchlist/groups/${groupId}/stocks`),
+
+  addStock: (groupId: number, symbol: string) =>
+    request.post<WatchlistStock>(`/data/watchlist/groups/${groupId}/stocks`, { symbol }),
+
+  removeStock: (groupId: number, symbol: string) =>
+    request.delete(`/data/watchlist/groups/${groupId}/stocks/${symbol}`),
 }

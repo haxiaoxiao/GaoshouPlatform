@@ -226,7 +226,7 @@ const handleEdit = (factor: Factor) => {
 
 // 查看详情
 const handleDetail = (factor: Factor) => {
-  router.push(`/factor/${factor.id}`)
+  handleEdit(factor)
 }
 
 // 提交表单

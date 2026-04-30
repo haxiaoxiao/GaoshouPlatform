@@ -1,5 +1,6 @@
 # backend/app/services/sync_service.py
 """数据同步服务"""
+import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
+from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
 
@@ -157,7 +159,6 @@ class SyncService:
             # 批量处理股票信息
             for i, stock in enumerate(stocks):
                 try:
-                    # 构建插入数据
                     insert_data = {
                         "symbol": stock.symbol,
                         "name": stock.name,
@@ -174,6 +175,10 @@ class SyncService:
                         "is_suspend": stock.is_suspend,
                         "product_class": stock.product_class,
                         "security_type": stock.security_type,
+                        "total_shares": stock.total_shares,
+                        "float_shares": stock.float_shares,
+                        "total_mv": stock.total_mv,
+                        "circ_mv": stock.circ_mv,
                         "updated_at": datetime.now(),
                     }
 
@@ -265,8 +270,11 @@ class SyncService:
             # 最终提交
             await self.session.commit()
 
+            # 触发指标计算
+            synced_symbols = [s.symbol for s in stocks]
+            indicator_scheduler.run_after_sync("stock_info", symbols=synced_symbols, trade_date=date.today())
+
             # 更新进度
-            indicator_scheduler.run_after_sync("stock_info", symbols=symbols, trade_date=date.today())
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["failed_stocks"] = failed_stocks[:100]
@@ -305,6 +313,461 @@ class SyncService:
             await self.session.commit()
             raise
 
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_stock_full(
+        self,
+        task_id: int | None = None,
+        failure_strategy: str = "skip",
+    ) -> SyncProgress:
+        """全量同步: 基础信息(已有) + 批量财务数据 + 批量市值"""
+        global _current_sync
+
+        progress = SyncProgress(
+            sync_type="stock_full",
+            status="running",
+            start_time=datetime.now(),
+        )
+        _current_sync = progress
+
+        try:
+            # 阶段1: 用已有 stock_list 做基础 upsert (复用 sync_stock_info)
+            stocks = await qmt_gateway.get_stock_list()
+            progress.total = len(stocks)
+            progress.details = {"total_stocks": len(stocks), "phase": "basic_info"}
+            failed_stocks: list[dict[str, str]] = []
+
+            for i, stock in enumerate(stocks):
+                try:
+                    insert_data = {
+                        "symbol": stock.symbol,
+                        "name": stock.name,
+                        "exchange": stock.exchange,
+                        "industry": stock.industry,
+                        "industry2": stock.industry2,
+                        "industry3": stock.industry3,
+                        "sector": stock.sector,
+                        "concept": stock.concept,
+                        "list_date": stock.list_date,
+                        "delist_date": stock.delist_date,
+                        "is_st": stock.is_st,
+                        "is_delist": stock.is_delist,
+                        "is_suspend": stock.is_suspend,
+                        "product_class": stock.product_class,
+                        "security_type": stock.security_type,
+                        "updated_at": datetime.now(),
+                    }
+                    stmt = insert(Stock).values(**insert_data)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=["symbol"],
+                        set_={k: stmt.excluded[k] for k in insert_data.keys() if k != "symbol"},
+                    )
+                    await self.session.execute(stmt)
+                    progress.current = i + 1
+                    progress.success_count += 1
+                    if (i + 1) % 100 == 0:
+                        await self.session.commit()
+                except Exception as e:
+                    progress.failed_count += 1
+                    failed_stocks.append({"symbol": stock.symbol, "error": str(e)})
+
+            await self.session.commit()
+
+            # 阶段2: 批量获取市值
+            progress.details["phase"] = "market_value"
+            progress.current = 0
+            progress.success_count = 0
+            progress.failed_count = 0
+
+            symbols = [s.symbol for s in stocks]
+            quote_dict: dict[str, dict] = {}
+
+            for batch_start in range(0, len(symbols), 200):
+                batch = symbols[batch_start:batch_start + 200]
+                try:
+                    quotes = await qmt_gateway.get_realtime_quotes(batch)
+                    for q in quotes:
+                        quote_dict[q["symbol"]] = q
+                except Exception:
+                    pass
+
+                for symbol in batch:
+                    try:
+                        q = quote_dict.get(symbol, {})
+                        if q:
+                            stmt = insert(Stock).values(
+                                symbol=symbol,
+                                total_mv=q.get("total_value"),
+                                circ_mv=q.get("float_value"),
+                                updated_at=datetime.now(),
+                            )
+                            stmt = stmt.on_conflict_do_update(
+                                index_elements=["symbol"],
+                                set_={
+                                    "total_mv": stmt.excluded.total_mv,
+                                    "circ_mv": stmt.excluded.circ_mv,
+                                    "updated_at": stmt.excluded.updated_at,
+                                },
+                            )
+                            await self.session.execute(stmt)
+                            progress.success_count += 1
+                        progress.current += 1
+                        if progress.current % 100 == 0:
+                            await self.session.commit()
+                    except Exception:
+                        progress.failed_count += 1
+
+            await self.session.commit()
+
+            # 阶段3: 读取本地已缓存的财务数据(不触发download，用户需在QMT客户端手动下载)
+            progress.details["phase"] = "financial_query"
+            progress.current = 0
+            progress.success_count = 0
+            progress.failed_count = 0
+            fin_success = 0
+
+            for symbol in symbols:
+                try:
+                    quarters = await qmt_gateway.get_financial_quarters(symbol, report_count=8)
+                    if not quarters:
+                        progress.current += 1
+                        continue
+
+                    latest = quarters[0]
+                    stock_update = {}
+                    if latest.total_mv is not None:
+                        stock_update["total_mv"] = latest.total_mv
+                    if latest.circ_mv is not None:
+                        stock_update["circ_mv"] = latest.circ_mv
+
+                    mv = quote_dict.get(symbol, {}).get("total_value") or latest.total_mv
+                    if mv and latest.net_profit and latest.net_profit != 0:
+                        latest.pe_ttm = round(mv / latest.net_profit, 4)
+                        stock_update["pe_ttm"] = latest.pe_ttm
+                    if mv and latest.total_equity and latest.total_equity != 0:
+                        latest.pb = round(mv / latest.total_equity, 4)
+                        stock_update["pb"] = latest.pb
+
+                    for fq in quarters:
+                        fin_data = {
+                            "symbol": fq.symbol,
+                            "report_date": fq.report_date,
+                            "report_type": fq.report_type,
+                            "eps": fq.eps,
+                            "bvps": fq.bvps,
+                            "roe": fq.roe,
+                            "revenue": fq.revenue,
+                            "net_profit": fq.net_profit,
+                            "revenue_yoy": fq.revenue_yoy,
+                            "profit_yoy": fq.profit_yoy,
+                            "gross_margin": fq.gross_margin,
+                            "total_assets": fq.total_assets,
+                            "total_liability": fq.total_liability,
+                            "total_equity": fq.total_equity,
+                            "total_shares": fq.total_shares,
+                            "float_shares": fq.float_shares,
+                            "a_float_shares": fq.a_float_shares,
+                            "limit_sell_shares": fq.limit_sell_shares,
+                            "total_mv": fq.total_mv,
+                            "circ_mv": fq.circ_mv,
+                            "pe_ttm": fq.pe_ttm,
+                            "pb": fq.pb,
+                            "raw_data": fq.raw_data,
+                            "updated_at": datetime.now(),
+                        }
+                        fin_stmt = insert(FinancialData).values(**fin_data)
+                        fin_stmt = fin_stmt.on_conflict_do_update(
+                            index_elements=["symbol", "report_date"],
+                            set_={k: fin_stmt.excluded[k] for k in fin_data.keys() if k not in ("symbol", "report_date")},
+                        )
+                        await self.session.execute(fin_stmt)
+
+                    if stock_update:
+                        stock_update["updated_at"] = datetime.now()
+                        stmt = insert(Stock).values(symbol=symbol, **stock_update)
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=["symbol"],
+                            set_={k: stmt.excluded[k] for k in stock_update.keys()},
+                        )
+                        await self.session.execute(stmt)
+
+                    fin_success += 1
+                    progress.success_count += 1
+                except Exception as e:
+                    progress.failed_count += 1
+                    failed_stocks.append({"symbol": symbol, "error": str(e)})
+
+                progress.current += 1
+                if progress.current % 50 == 0:
+                    await self.session.commit()
+
+            await self.session.commit()
+
+            try:
+                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="all")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
+            indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["failed_stocks"] = failed_stocks[:100]
+            progress.details["fin_success"] = fin_success
+
+            await self.create_sync_log(
+                sync_type="stock_full",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            await self.create_sync_log(
+                sync_type="stock_full",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_financial_data(
+        self,
+        task_id: int | None = None,
+        failure_strategy: str = "skip",
+    ) -> SyncProgress:
+        global _current_sync
+
+        progress = SyncProgress(
+            sync_type="financial_data",
+            status="running",
+            start_time=datetime.now(),
+        )
+        _current_sync = progress
+
+        try:
+            from app.engines.qmt_gateway import qmt_gateway as gw
+            xt = gw._get_xt()
+            loop = asyncio.get_running_loop()
+
+            stocks = await qmt_gateway.get_stock_list()
+            if not stocks:
+                raise RuntimeError("QMT返回股票列表为空，请确认QMT客户端是否在线")
+            symbols = [s.symbol for s in stocks]
+            progress.total = len(symbols)
+            progress.details = {"total_stocks": len(symbols), "phase": "download"}
+            failed_stocks: list[dict[str, str]] = []
+
+            tables = ["PershareIndex", "Balance", "Income", "Capital"]
+            download_results: dict[str, dict] = {}
+
+            batch_size = 200
+            total_batches = (len(symbols) + batch_size - 1) // batch_size
+
+            for batch_idx in range(total_batches):
+                batch = symbols[batch_idx * batch_size: (batch_idx + 1) * batch_size]
+                progress.details["download_batch"] = f"{batch_idx + 1}/{total_batches}"
+
+                try:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info(f"Downloading financial data batch {batch_idx+1}/{total_batches} ({len(batch)} stocks)")
+                    await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,
+                            lambda b=batch: xt.download_financial_data2(
+                                b, tables
+                            ),
+                        ),
+                        timeout=300,
+                    )
+                except asyncio.TimeoutError:
+                    progress.details["download_timeout"] = progress.details.get("download_timeout", 0) + 1
+                except Exception as e:
+                    progress.details["download_error"] = str(e)[:200]
+
+                try:
+                    fin_data = await loop.run_in_executor(
+                        None,
+                        lambda b=batch: xt.get_financial_data(
+                            b, tables, start_time="20200101"
+                        ),
+                    )
+                    download_results.update(fin_data)
+                except Exception as e:
+                    progress.details["get_data_error"] = str(e)[:200]
+
+                progress.current = min((batch_idx + 1) * batch_size, len(symbols))
+                if (batch_idx + 1) % 3 == 0:
+                    await asyncio.sleep(0)
+
+            progress.details["phase"] = "parse"
+            progress.current = 0
+            progress.success_count = 0
+            progress.failed_count = 0
+            fin_success = 0
+
+            quote_dict: dict[str, dict] = {}
+            try:
+                for batch_start in range(0, len(symbols), 200):
+                    batch = symbols[batch_start:batch_start + 200]
+                    quotes = await qmt_gateway.get_realtime_quotes(batch)
+                    for q in quotes:
+                        quote_dict[q["symbol"]] = q
+            except Exception:
+                pass
+
+            for symbol in symbols:
+                try:
+                    if symbol not in download_results:
+                        progress.current += 1
+                        continue
+
+                    tables_raw = download_results[symbol]
+                    quarters = qmt_gateway._parse_financial_dataframes(
+                        symbol, tables_raw, report_count=8,
+                    )
+                    if not quarters:
+                        progress.current += 1
+                        continue
+
+                    latest = quarters[0]
+                    stock_update = {}
+                    mv = quote_dict.get(symbol, {}).get("total_value") or latest.total_mv
+                    if mv and latest.net_profit and latest.net_profit != 0:
+                        stock_update["pe_ttm"] = round(mv / latest.net_profit, 4)
+                    if mv and latest.total_equity and latest.total_equity != 0:
+                        stock_update["pb"] = round(mv / latest.total_equity, 4)
+                    stock_update["roe"] = latest.roe
+                    stock_update["eps"] = latest.eps
+                    stock_update["bvps"] = latest.bvps
+                    stock_update["revenue"] = latest.revenue
+                    stock_update["net_profit"] = latest.net_profit
+                    stock_update["total_assets"] = latest.total_assets
+                    stock_update["total_liability"] = latest.total_liability
+                    stock_update["total_equity"] = latest.total_equity
+                    if latest.total_shares is not None:
+                        stock_update["total_shares"] = latest.total_shares
+                    if latest.float_shares is not None:
+                        stock_update["float_shares"] = latest.float_shares
+                    stock_update = {k: v for k, v in stock_update.items() if v is not None}
+
+                    for fq in quarters:
+                        fin_data = {
+                            "symbol": fq.symbol, "report_date": fq.report_date,
+                            "report_type": fq.report_type,
+                            "eps": fq.eps, "bvps": fq.bvps, "roe": fq.roe,
+                            "revenue": fq.revenue, "net_profit": fq.net_profit,
+                            "revenue_yoy": fq.revenue_yoy, "profit_yoy": fq.profit_yoy,
+                            "gross_margin": fq.gross_margin,
+                            "total_assets": fq.total_assets, "total_liability": fq.total_liability,
+                            "total_equity": fq.total_equity,
+                            "total_shares": fq.total_shares, "float_shares": fq.float_shares,
+                            "a_float_shares": fq.a_float_shares,
+                            "limit_sell_shares": fq.limit_sell_shares,
+                            "total_mv": fq.total_mv, "circ_mv": fq.circ_mv,
+                            "pe_ttm": fq.pe_ttm, "pb": fq.pb,
+                            "raw_data": fq.raw_data, "updated_at": datetime.now(),
+                        }
+                        fin_stmt = insert(FinancialData).values(**fin_data)
+                        fin_stmt = fin_stmt.on_conflict_do_update(
+                            index_elements=["symbol", "report_date"],
+                            set_={k: fin_stmt.excluded[k] for k in fin_data.keys() if k not in ("symbol", "report_date")},
+                        )
+                        await self.session.execute(fin_stmt)
+
+                    if stock_update:
+                        stock_update["updated_at"] = datetime.now()
+                        stmt = insert(Stock).values(symbol=symbol, **stock_update)
+                        stmt = stmt.on_conflict_do_update(
+                            index_elements=["symbol"],
+                            set_={k: stmt.excluded[k] for k in stock_update.keys()},
+                        )
+                        await self.session.execute(stmt)
+
+                    fin_success += 1
+                    progress.success_count += 1
+                except Exception as e:
+                    progress.failed_count += 1
+                    failed_stocks.append({"symbol": symbol, "error": str(e)})
+                    if failure_strategy == "stop":
+                        raise
+
+                progress.current += 1
+                if progress.current % 50 == 0:
+                    await self.session.commit()
+
+            await self.session.commit()
+
+            try:
+                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="financial")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
+            indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["fin_success"] = fin_success
+            progress.details["failed_stocks"] = failed_stocks[:100]
+
+            await self.create_sync_log(
+                sync_type="financial_data",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            import logging
+            logging.getLogger(__name__).exception(f"sync_financial_data failed: {e}")
+            await self.create_sync_log(
+                sync_type="financial_data",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                task_id=task_id,
+            )
+            await self.session.commit()
         finally:
             _current_sync = None
 
@@ -467,6 +930,12 @@ class SyncService:
                             pass
 
             # 更新进度
+            try:
+                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
             indicator_scheduler.run_after_sync("kline_daily", symbols=symbols, trade_date=end_date)
             progress.status = "completed"
             progress.end_time = datetime.now()
@@ -491,8 +960,10 @@ class SyncService:
             progress.status = "failed"
             progress.end_time = datetime.now()
             progress.error_message = str(e)
-
-            # 记录失败日志
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            import logging
+            logging.getLogger(__name__).exception(f"sync_kline_daily failed: {e}")
             await self.create_sync_log(
                 sync_type="kline_daily",
                 status="failed",
@@ -506,7 +977,6 @@ class SyncService:
             )
             await self.session.commit()
             raise
-
         finally:
             _current_sync = None
 
@@ -669,6 +1139,12 @@ class SyncService:
                             pass
 
             # 更新进度
+            try:
+                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
             indicator_scheduler.run_after_sync("kline_minute", symbols=symbols, trade_date=end_date)
             progress.status = "completed"
             progress.end_time = datetime.now()

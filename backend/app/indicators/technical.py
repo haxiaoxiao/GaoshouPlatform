@@ -1,7 +1,8 @@
 """技术类指标"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
+@IndicatorRegistry.register
 class MA5(IndicatorBase):
     name = "ma5"
     display_name = "5日均线"
@@ -11,6 +12,7 @@ class MA5(IndicatorBase):
     is_precomputed = False
     dependencies = []
     description = "5日移动平均线"
+    unit = "CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:5]
@@ -22,6 +24,7 @@ class MA5(IndicatorBase):
         return round(sum(closes) / len(closes), 4)
 
 
+@IndicatorRegistry.register
 class MA10(IndicatorBase):
     name = "ma10"
     display_name = "10日均线"
@@ -31,6 +34,7 @@ class MA10(IndicatorBase):
     is_precomputed = False
     dependencies = []
     description = "10日移动平均线"
+    unit = "CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:10]
@@ -42,6 +46,7 @@ class MA10(IndicatorBase):
         return round(sum(closes) / len(closes), 4)
 
 
+@IndicatorRegistry.register
 class MA20(IndicatorBase):
     name = "ma20"
     display_name = "20日均线"
@@ -51,6 +56,7 @@ class MA20(IndicatorBase):
     is_precomputed = False
     dependencies = []
     description = "20日移动平均线"
+    unit = "CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:20]
@@ -62,6 +68,7 @@ class MA20(IndicatorBase):
         return round(sum(closes) / len(closes), 4)
 
 
+@IndicatorRegistry.register
 class RSI14(IndicatorBase):
     name = "rsi_14"
     display_name = "14日RSI"
@@ -71,6 +78,7 @@ class RSI14(IndicatorBase):
     is_precomputed = False
     dependencies = []
     description = "14日相对强弱指标"
+    unit = ""
 
     def compute(self, context: IndicatorContext) -> float | None:
         data = context.kline_data[:15]

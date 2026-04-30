@@ -1,7 +1,8 @@
 """质量类指标"""
-from app.indicators.base import IndicatorBase, IndicatorContext
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
+@IndicatorRegistry.register
 class ROE(IndicatorBase):
     name = "roe"
     display_name = "净资产收益率"
@@ -11,6 +12,7 @@ class ROE(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "净利润 / 净资产"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
@@ -19,9 +21,15 @@ class ROE(IndicatorBase):
         roe = info.get("roe")
         if roe is not None:
             return round(float(roe), 4)
+        # 计算: net_profit / total_equity * 100
+        net_profit = info.get("net_profit")
+        total_equity = info.get("total_equity")
+        if net_profit and total_equity and total_equity != 0:
+            return round(net_profit / total_equity * 100, 4)
         return None
 
 
+@IndicatorRegistry.register
 class DebtRatio(IndicatorBase):
     name = "debt_ratio"
     display_name = "资产负债率"
@@ -31,6 +39,7 @@ class DebtRatio(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "总负债 / 总资产"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info
@@ -39,10 +48,11 @@ class DebtRatio(IndicatorBase):
         total_liability = info.get("total_liability")
         total_assets = info.get("total_assets")
         if total_liability is not None and total_assets and total_assets != 0:
-            return round(float(total_liability) / float(total_assets), 4)
+            return round(float(total_liability) / float(total_assets) * 100, 4)
         return None
 
 
+@IndicatorRegistry.register
 class GrossMargin(IndicatorBase):
     name = "gross_margin"
     display_name = "毛利率"
@@ -52,6 +62,7 @@ class GrossMargin(IndicatorBase):
     is_precomputed = True
     dependencies = []
     description = "(营业收入-营业成本) / 营业收入"
+    unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
         info = context.stock_info

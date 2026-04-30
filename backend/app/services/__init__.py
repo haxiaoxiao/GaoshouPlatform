@@ -10,6 +10,14 @@ from .data_service import (
     WatchlistGroupInfo,
     WatchlistStockInfo,
 )
+from .data_skill import (
+    DataSkill,
+    FinancialReport,
+    IndustryInfo as SkillIndustryInfo,
+    KlineBar,
+    ScreenResult,
+    StockSnapshot,
+)
 from .sync_service import SyncProgress, SyncService
 
 __all__ = [
@@ -23,4 +31,10 @@ __all__ = [
     "WatchlistStockInfo",
     "SyncService",
     "SyncProgress",
+    "DataSkill",
+    "StockSnapshot",
+    "KlineBar",
+    "FinancialReport",
+    "ScreenResult",
+    "SkillIndustryInfo",
 ]
