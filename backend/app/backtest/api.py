@@ -6,6 +6,8 @@ from pydantic import BaseModel, Field
 
 from app.backtest.config import BacktestConfig
 from app.backtest.runner import get_backtest_runner
+from app.models.factor import FactorConfig, BtConfig
+from app.services.factor_backtest import factor_backtest_service
 
 router = APIRouter(prefix="/v2/backtest")
 
@@ -89,3 +91,10 @@ async def get_result(task_id: str):
     if task["status"] != "done":
         return {"code": 1, "message": f"Task status: {task['status']}", "data": None}
     return {"code": 0, "message": "success", "data": task["result"]}
+
+
+@router.post("/factor")
+async def run_factor_backtest(config: FactorConfig, bt_config: BtConfig | None = None):
+    """Run factor quantile-based layered backtest."""
+    report = await factor_backtest_service.run(config, bt_config)
+    return {"code": 0, "data": report.model_dump()}
