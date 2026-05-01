@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 import threading
 from collections import OrderedDict
 from datetime import date
@@ -11,10 +10,9 @@ from typing import Any
 
 import pandas as pd
 from clickhouse_driver import Client
+from loguru import logger
 
 from app.cache.redis_cache import get_redis_client as _get_redis_client
-
-logger = logging.getLogger(__name__)
 
 
 class LRUCache:

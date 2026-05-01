@@ -1,18 +1,16 @@
 """单因子评估服务 — 串联计算层和回测层"""
-import logging
 from datetime import date
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from app.backtest.analyzers import compute_ic_series
 from app.backtest.config import BacktestConfig
 from app.backtest.runner import get_backtest_runner
 from app.compute.expression import evaluate_expression
 from app.db.clickhouse import get_ch_client
-
-logger = logging.getLogger(__name__)
 
 _IC_DECAY_LAGS = [1, 3, 5, 10, 20]
 

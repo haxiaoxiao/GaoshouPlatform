@@ -3,18 +3,16 @@
 
 使用 APScheduler 实现定时任务调度，支持 cron 表达式。
 """
-import logging
 from datetime import datetime
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from loguru import logger
 from sqlalchemy import select, update
 
 from app.db.models import SyncTask
 from app.db.sqlite import async_session_factory
-
-logger = logging.getLogger(__name__)
 
 # 单例调度器实例
 _scheduler: AsyncIOScheduler | None = None

@@ -102,13 +102,16 @@
 
           <!-- Quick actions -->
           <div class="quick-actions">
-            <button class="action-btn" title="通知">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-              </svg>
-              <span class="action-badge">3</span>
-            </button>
+            <div class="notification-wrapper">
+              <button class="action-btn" title="通知" @click="toggleNotificationPanel">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                  <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+                </svg>
+                <span v-if="notificationStore.unreadCount > 0" class="action-badge">{{ notificationStore.unreadCount }}</span>
+              </button>
+              <NotificationPanel v-if="showNotifications" />
+            </div>
             <button class="action-btn" title="设置">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <circle cx="12" cy="12" r="3"/>
@@ -134,18 +137,46 @@
           </transition>
         </router-view>
       </div>
+
+      <!-- Status bar -->
+      <StatusBar />
     </main>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
+import { useNotificationStore } from '@/stores/notification'
+import NotificationPanel from '@/components/NotificationPanel.vue'
+import StatusBar from '@/components/StatusBar.vue'
+
+const notificationStore = useNotificationStore()
 
 const route = useRoute()
 const isCollapsed = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
+const showNotifications = ref(false)
+
+function toggleNotificationPanel() {
+  showNotifications.value = !showNotifications.value
+}
+
+function closeNotificationPanel(e: MouseEvent) {
+  const target = e.target as HTMLElement
+  if (!target.closest('.notification-wrapper') && !target.closest('.notification-panel')) {
+    showNotifications.value = false
+  }
+}
+
+onMounted(() => {
+  document.addEventListener('click', closeNotificationPanel)
+})
+
+onUnmounted(() => {
+  document.removeEventListener('click', closeNotificationPanel)
+})
 
 // SVG icons as strings
 const icons = {
@@ -647,6 +678,10 @@ const toggleSidebar = () => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.notification-wrapper {
+  position: relative;
 }
 
 /* User Menu */

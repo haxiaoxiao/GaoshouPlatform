@@ -32,16 +32,29 @@
     <section class="content-section">
       <!-- Tabs -->
       <div class="tab-navigation">
-        <button
-          v-for="tab in tabs"
-          :key="tab.key"
-          class="tab-btn"
-          :class="{ 'tab-btn--active': activeTab === tab.key }"
-          @click="activeTab = tab.key"
-        >
-          <span class="tab-btn__icon" v-html="tab.icon"></span>
-          <span>{{ tab.label }}</span>
-        </button>
+        <div class="tab-navigation__tabs">
+          <button
+            v-for="tab in tabs"
+            :key="tab.key"
+            class="tab-btn"
+            :class="{ 'tab-btn--active': activeTab === tab.key }"
+            @click="activeTab = tab.key"
+          >
+            <span class="tab-btn__icon" v-html="tab.icon"></span>
+            <span>{{ tab.label }}</span>
+          </button>
+        </div>
+        <div class="tab-navigation__actions">
+          <el-button
+            type="primary"
+            size="small"
+            :icon="Refresh"
+            :loading="oneClickSyncing"
+            @click="handleOneClickSync"
+          >
+            一键同步
+          </el-button>
+        </div>
       </div>
 
       <!-- Tab Content -->
@@ -67,10 +80,13 @@
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
+import { ElMessage } from 'element-plus'
+import { Refresh } from '@element-plus/icons-vue'
 import StockList from './StockList.vue'
 import SyncPanel from './SyncPanel.vue'
 import KlineQuery from './KlineQuery.vue'
 import request from '@/api/request'
+import { syncApi } from '@/api/sync'
 
 // SVG icons as strings
 const icons = {
@@ -84,6 +100,7 @@ const icons = {
 
 // State
 const activeTab = ref('stockList')
+const oneClickSyncing = ref(false)
 
 // Hero metrics
 const heroMetrics = ref([
@@ -131,6 +148,51 @@ const tabs = [
   { key: 'klineQuery', label: 'K线查询', icon: icons.barChart },
   { key: 'sync', label: '数据同步', icon: icons.refresh }
 ]
+
+// 一键同步
+const ONE_CLICK_TYPES: { type: SyncType; label: string; daysBack?: number }[] = [
+  { type: 'stock_info', label: '股票信息' },
+  { type: 'stock_full', label: '股票完整信息' },
+  { type: 'kline_daily', label: '日K线', daysBack: 30 },
+  { type: 'kline_minute', label: '分钟K线', daysBack: 7 },
+  { type: 'realtime_mv', label: '实时市值' },
+]
+
+type SyncType = 'stock_info' | 'stock_full' | 'kline_daily' | 'kline_minute' | 'realtime_mv'
+
+const handleOneClickSync = async () => {
+  oneClickSyncing.value = true
+  activeTab.value = 'sync'  // 切换到同步面板查看进度
+
+  for (const item of ONE_CLICK_TYPES) {
+    ElMessage.info(`正在同步 ${item.label}...`)
+
+    try {
+      const params: Parameters<typeof syncApi.trigger>[0] = {
+        sync_type: item.type,
+        failure_strategy: 'skip',
+        full_sync: false,
+      }
+
+      // K线数据加默认日期范围
+      if (item.daysBack) {
+        const end = new Date()
+        const start = new Date()
+        start.setDate(start.getDate() - item.daysBack)
+        params.start_date = start.toISOString().slice(0, 10)
+        params.end_date = end.toISOString().slice(0, 10)
+      }
+
+      await syncApi.trigger(params)
+    } catch (error) {
+      console.error(`One-click sync failed for ${item.type}:`, error)
+      ElMessage.warning(`${item.label} 同步失败，已跳过`)
+    }
+  }
+
+  oneClickSyncing.value = false
+  ElMessage.success('一键同步完成')
+}
 
 // Methods
 const formatNumber = (num: number): string => {
@@ -310,10 +372,23 @@ onMounted(() => {
 /* Tab Navigation */
 .tab-navigation {
   display: flex;
-  gap: var(--space-1);
+  align-items: center;
+  justify-content: space-between;
   padding: var(--space-3) var(--space-4);
   border-bottom: 1px solid var(--border-subtle);
   background: rgba(0, 0, 0, 0.2);
+}
+
+.tab-navigation__tabs {
+  display: flex;
+  gap: var(--space-1);
+}
+
+.tab-navigation__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
 }
 
 .tab-btn {

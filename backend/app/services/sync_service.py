@@ -5,10 +5,13 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from typing import Any
 
+from loguru import logger
+
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.retry import async_retry
 from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
@@ -236,8 +239,7 @@ class SyncService:
                     if failure_strategy == "stop":
                         raise
                     elif failure_strategy == "retry":
-                        # 简单重试一次
-                        try:
+                        async def _retry_stock_insert():
                             stmt = insert(Stock).values(
                                 symbol=stock.symbol,
                                 name=stock.name,
@@ -261,6 +263,9 @@ class SyncService:
                                 },
                             )
                             await self.session.execute(stmt)
+
+                        try:
+                            await async_retry(_retry_stock_insert, max_retries=3, base_delay=1.0)
                             progress.success_count += 1
                             progress.failed_count -= 1
                             failed_stocks.pop()
@@ -373,6 +378,43 @@ class SyncService:
                 except Exception as e:
                     progress.failed_count += 1
                     failed_stocks.append({"symbol": stock.symbol, "error": str(e)})
+
+                    if failure_strategy == "stop":
+                        raise
+                    elif failure_strategy == "retry":
+                        async def _retry_stock_full_insert():
+                            insert_data = {
+                                "symbol": stock.symbol,
+                                "name": stock.name,
+                                "exchange": stock.exchange,
+                                "industry": stock.industry,
+                                "industry2": stock.industry2,
+                                "industry3": stock.industry3,
+                                "sector": stock.sector,
+                                "concept": stock.concept,
+                                "list_date": stock.list_date,
+                                "delist_date": stock.delist_date,
+                                "is_st": stock.is_st,
+                                "is_delist": stock.is_delist,
+                                "is_suspend": stock.is_suspend,
+                                "product_class": stock.product_class,
+                                "security_type": stock.security_type,
+                                "updated_at": datetime.now(),
+                            }
+                            stmt = insert(Stock).values(**insert_data)
+                            stmt = stmt.on_conflict_do_update(
+                                index_elements=["symbol"],
+                                set_={k: stmt.excluded[k] for k in insert_data.keys() if k != "symbol"},
+                            )
+                            await self.session.execute(stmt)
+
+                        try:
+                            await async_retry(_retry_stock_full_insert, max_retries=3, base_delay=1.0)
+                            progress.success_count += 1
+                            progress.failed_count -= 1
+                            failed_stocks.pop()
+                        except Exception:
+                            pass
 
             await self.session.commit()
 
@@ -592,8 +634,6 @@ class SyncService:
                 progress.details["download_batch"] = f"{batch_idx + 1}/{total_batches}"
 
                 try:
-                    import logging
-                    logger = logging.getLogger(__name__)
                     logger.info(f"Downloading financial data batch {batch_idx+1}/{total_batches} ({len(batch)} stocks)")
                     await asyncio.wait_for(
                         loop.run_in_executor(
@@ -715,6 +755,75 @@ class SyncService:
                     failed_stocks.append({"symbol": symbol, "error": str(e)})
                     if failure_strategy == "stop":
                         raise
+                    elif failure_strategy == "retry":
+                        async def _retry_financial_insert():
+                            k_tables_raw = download_results[symbol]
+                            k_quarters = qmt_gateway._parse_financial_dataframes(
+                                symbol, k_tables_raw, report_count=8,
+                            )
+                            if not k_quarters:
+                                return
+                            k_latest = k_quarters[0]
+                            k_stock_update = {}
+                            k_mv = quote_dict.get(symbol, {}).get("total_value") or k_latest.total_mv
+                            if k_mv and k_latest.net_profit and k_latest.net_profit != 0:
+                                k_stock_update["pe_ttm"] = round(k_mv / k_latest.net_profit, 4)
+                            if k_mv and k_latest.total_equity and k_latest.total_equity != 0:
+                                k_stock_update["pb"] = round(k_mv / k_latest.total_equity, 4)
+                            k_stock_update["roe"] = k_latest.roe
+                            k_stock_update["eps"] = k_latest.eps
+                            k_stock_update["bvps"] = k_latest.bvps
+                            k_stock_update["revenue"] = k_latest.revenue
+                            k_stock_update["net_profit"] = k_latest.net_profit
+                            k_stock_update["total_assets"] = k_latest.total_assets
+                            k_stock_update["total_liability"] = k_latest.total_liability
+                            k_stock_update["total_equity"] = k_latest.total_equity
+                            if k_latest.total_shares is not None:
+                                k_stock_update["total_shares"] = k_latest.total_shares
+                            if k_latest.float_shares is not None:
+                                k_stock_update["float_shares"] = k_latest.float_shares
+                            k_stock_update = {k: v for k, v in k_stock_update.items() if v is not None}
+                            for fq in k_quarters:
+                                fin_data = {
+                                    "symbol": fq.symbol, "report_date": fq.report_date,
+                                    "report_type": fq.report_type,
+                                    "eps": fq.eps, "bvps": fq.bvps, "roe": fq.roe,
+                                    "revenue": fq.revenue, "net_profit": fq.net_profit,
+                                    "revenue_yoy": fq.revenue_yoy, "profit_yoy": fq.profit_yoy,
+                                    "gross_margin": fq.gross_margin,
+                                    "total_assets": fq.total_assets, "total_liability": fq.total_liability,
+                                    "total_equity": fq.total_equity,
+                                    "total_shares": fq.total_shares, "float_shares": fq.float_shares,
+                                    "a_float_shares": fq.a_float_shares,
+                                    "limit_sell_shares": fq.limit_sell_shares,
+                                    "total_mv": fq.total_mv, "circ_mv": fq.circ_mv,
+                                    "pe_ttm": fq.pe_ttm, "pb": fq.pb,
+                                    "raw_data": fq.raw_data, "updated_at": datetime.now(),
+                                }
+                                fin_stmt = insert(FinancialData).values(**fin_data)
+                                fin_stmt = fin_stmt.on_conflict_do_update(
+                                    index_elements=["symbol", "report_date"],
+                                    set_={k: fin_stmt.excluded[k] for k in fin_data.keys() if k not in ("symbol", "report_date")},
+                                )
+                                await self.session.execute(fin_stmt)
+                            if k_stock_update:
+                                k_stock_update["updated_at"] = datetime.now()
+                                stmt = insert(Stock).values(symbol=symbol, **k_stock_update)
+                                stmt = stmt.on_conflict_do_update(
+                                    index_elements=["symbol"],
+                                    set_={k: stmt.excluded[k] for k in k_stock_update.keys()},
+                                )
+                                await self.session.execute(stmt)
+                            nonlocal fin_success
+                            fin_success += 1
+
+                        try:
+                            await async_retry(_retry_financial_insert, max_retries=3, base_delay=1.0)
+                            progress.success_count += 1
+                            progress.failed_count -= 1
+                            failed_stocks.pop()
+                        except Exception:
+                            pass
 
                 progress.current += 1
                 if progress.current % 50 == 0:
@@ -754,8 +863,7 @@ class SyncService:
             progress.error_message = str(e)
             progress.details["error"] = str(e)[:500]
             progress.details["error_type"] = type(e).__name__
-            import logging
-            logging.getLogger(__name__).exception(f"sync_financial_data failed: {e}")
+            logger.opt(exception=True).error(f"sync_financial_data failed: {e}")
             await self.create_sync_log(
                 sync_type="financial_data",
                 status="failed",
@@ -896,8 +1004,7 @@ class SyncService:
                     if failure_strategy == "stop":
                         raise
                     elif failure_strategy == "retry":
-                        # 简单重试一次
-                        try:
+                        async def _retry_kline_insert():
                             klines = await qmt_gateway.get_kline_daily(
                                 symbol, start_date, end_date
                             )
@@ -916,13 +1023,17 @@ class SyncService:
                                     for kline in klines
                                 ]
                                 if rows:
-                                    ch_client.execute(
+                                    get_ch_client().execute(
                                         "INSERT INTO klines_daily "
                                         "(symbol, trade_date, open, high, low, close, volume, amount) "
                                         "VALUES",
                                         rows,
                                     )
+                                    nonlocal total_klines
                                     total_klines += len(rows)
+
+                        try:
+                            await async_retry(_retry_kline_insert, max_retries=3, base_delay=1.0)
                             progress.success_count += 1
                             progress.failed_count -= 1
                             failed_symbols.pop()
@@ -962,8 +1073,7 @@ class SyncService:
             progress.error_message = str(e)
             progress.details["error"] = str(e)[:500]
             progress.details["error_type"] = type(e).__name__
-            import logging
-            logging.getLogger(__name__).exception(f"sync_kline_daily failed: {e}")
+            logger.opt(exception=True).error(f"sync_kline_daily failed: {e}")
             await self.create_sync_log(
                 sync_type="kline_daily",
                 status="failed",
@@ -1105,8 +1215,7 @@ class SyncService:
                     if failure_strategy == "stop":
                         raise
                     elif failure_strategy == "retry":
-                        # 简单重试一次
-                        try:
+                        async def _retry_minute_insert():
                             klines = await qmt_gateway.get_kline_minute(
                                 symbol, start_date, end_date
                             )
@@ -1125,13 +1234,17 @@ class SyncService:
                                     for kline in klines
                                 ]
                                 if rows:
-                                    ch_client.execute(
+                                    get_ch_client().execute(
                                         "INSERT INTO klines_minute "
                                         "(symbol, datetime, open, high, low, close, volume, amount) "
                                         "VALUES",
                                         rows,
                                     )
+                                    nonlocal total_klines
                                     total_klines += len(rows)
+
+                        try:
+                            await async_retry(_retry_minute_insert, max_retries=3, base_delay=1.0)
                             progress.success_count += 1
                             progress.failed_count -= 1
                             failed_symbols.pop()

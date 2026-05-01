@@ -4,6 +4,7 @@ from datetime import date, datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
+from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -548,8 +549,6 @@ async def _run_sync_task(
     async with async_session() as session:
         service = SyncService(session)
         try:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info(f"Starting sync task: {sync_type}")
             if sync_type == "stock_info":
                 await service.sync_stock_info(
@@ -586,8 +585,7 @@ async def _run_sync_task(
                     full_sync=full_sync,
                 )
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).exception(f"Sync task {sync_type} failed: {e}")
+            logger.opt(exception=True).error(f"Sync task {sync_type} failed: {e}")
         finally:
             await engine.dispose()
 
@@ -728,4 +726,18 @@ async def get_sync_logs(
         "code": 0,
         "message": "success",
         "data": items,
+    }
+
+
+@router.post("/sync/cancel", summary="取消正在运行的同步")
+async def cancel_sync(
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    """取消当前正在运行的同步任务"""
+    service = SyncService(session)
+    cancelled = await service.cancel_sync()
+    return {
+        "code": 0,
+        "message": "同步已取消" if cancelled else "当前没有正在运行的同步任务",
+        "data": {"cancelled": cancelled},
     }

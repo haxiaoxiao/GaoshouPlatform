@@ -1,13 +1,11 @@
 """因子评估 API — /v2/evaluation"""
-import logging
 from datetime import date
 
 from fastapi import APIRouter
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.services.factor_evaluation import FactorEvaluationService
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v2/evaluation")
 

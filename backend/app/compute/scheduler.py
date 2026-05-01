@@ -1,12 +1,10 @@
 """每日盘后预计算调度器"""
-import logging
 from datetime import date
 
 import pandas as pd
+from loguru import logger
 
 from app.compute.cache import ComputeCache, get_compute_cache
-
-logger = logging.getLogger(__name__)
 
 
 class ComputeScheduler:

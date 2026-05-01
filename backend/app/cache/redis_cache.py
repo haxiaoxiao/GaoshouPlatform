@@ -2,14 +2,12 @@
 """Redis cache client wrapper"""
 
 import json
-import logging
 from typing import Any, Optional
 
 import redis
+from loguru import logger
 
 from app.core.config import settings
-
-logger = logging.getLogger(__name__)
 
 
 class RedisClient:

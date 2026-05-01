@@ -1,14 +1,12 @@
 """回测统一入口"""
-import logging
 from datetime import date
 from typing import Any
 
 import pandas as pd
+from loguru import logger
 
 from app.backtest.config import BacktestConfig, BacktestResult
 from app.backtest.vectorized import get_vectorized_engine
-
-logger = logging.getLogger(__name__)
 
 
 class BacktestRunner:

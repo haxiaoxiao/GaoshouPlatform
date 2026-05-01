@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
+from loguru import logger
+
 
 @dataclass
 class StockInfo:
@@ -242,8 +244,6 @@ class QMTGateway:
         )
 
         if not stock_codes:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info("Sector data empty, trying download...")
             try:
                 await asyncio.wait_for(
@@ -258,8 +258,6 @@ class QMTGateway:
             )
 
         if not stock_codes:
-            import logging
-            logger = logging.getLogger(__name__)
             logger.info("Sector still empty, falling back to SW-sector scan")
             stock_codes = await loop.run_in_executor(None, self._scan_all_stocks)
 

@@ -1,8 +1,9 @@
 # backend/app/main.py
-import logging
+from app.core.logging import setup_logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from loguru import logger
 
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
@@ -11,11 +12,7 @@ from app.db import init_db
 from app.db.clickhouse import init_clickhouse_tables
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
-logger = logging.getLogger(__name__)
+setup_logging(debug=True)
 
 
 @asynccontextmanager
