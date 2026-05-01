@@ -277,13 +277,6 @@ const handleDelete = async (row: Strategy) => {
   }
 }
 
-// 跳转到回测
-const handleBacktest = async (row: Strategy) => {
-  activeTab.value = 'backtestList'
-  await nextTick()
-  backtestListRef.value?.openCreateDialogWithStrategy(row.id, row.name)
-}
-
 // 分页变化
 const handlePageChange = (page: number) => {
   currentPage.value = page
