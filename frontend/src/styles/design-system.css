@@ -27,8 +27,8 @@
   --text-bright: #f0f0f5;
   --text-primary: #e2e2ea;
   --text-secondary: #8888a0;
-  --text-muted: #55556a;
-  --text-ghost: #3a3a4d;
+  --text-muted: #6e6e85;
+  --text-ghost: #4e4e63;
 
   /* Accent colors - Electric palette */
   --accent-primary: #38bdf8;        /* Electric cyan */
@@ -288,6 +288,70 @@ h4 { font-size: var(--text-lg); }
 /* ═══════════════════════════════════════════════════════════════
    ELEMENT PLUS OVERRIDES
    ═══════════════════════════════════════════════════════════════ */
+
+/* Global Element Plus dark theme variables */
+:root {
+  --el-text-color-primary: var(--text-primary);
+  --el-text-color-regular: var(--text-primary);
+  --el-text-color-secondary: var(--text-secondary);
+  --el-text-color-placeholder: var(--text-muted);
+  --el-border-color: var(--border-default);
+  --el-border-color-light: var(--border-subtle);
+  --el-border-color-lighter: var(--border-subtle);
+  --el-fill-color-blank: var(--bg-elevated);
+  --el-fill-color: var(--bg-surface);
+  --el-fill-color-light: var(--bg-hover);
+  --el-bg-color: var(--bg-void);
+  --el-bg-color-overlay: var(--bg-elevated);
+  --el-bg-color-page: var(--bg-primary);
+  --el-color-info: var(--text-secondary);
+  --el-color-info-light-3: var(--text-muted);
+  --el-color-info-light-5: var(--bg-hover);
+  --el-color-info-light-7: var(--bg-surface);
+  --el-color-info-light-9: var(--bg-elevated);
+}
+
+/* Checkbox label visibility */
+.el-checkbox__label {
+  color: var(--text-primary) !important;
+  font-weight: 400;
+}
+
+.el-checkbox.is-checked .el-checkbox__label {
+  color: var(--text-primary) !important;
+}
+
+/* Radio label visibility */
+.el-radio__label {
+  color: var(--text-primary) !important;
+}
+
+/* Radio button */
+.el-radio-button__inner {
+  background: var(--bg-surface) !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-secondary) !important;
+}
+
+.el-radio-button__inner:hover {
+  color: var(--accent-primary) !important;
+}
+
+.el-radio-button.is-active .el-radio-button__inner {
+  background: var(--accent-primary) !important;
+  border-color: var(--accent-primary) !important;
+  color: var(--bg-void) !important;
+  box-shadow: none !important;
+}
+
+.el-radio-button:first-child .el-radio-button__inner {
+  border-left-color: var(--border-default) !important;
+}
+
+/* Switch */
+.el-switch__label * {
+  color: var(--text-secondary) !important;
+}
 
 /* Buttons */
 .el-button {

@@ -10,7 +10,6 @@
     <el-tabs v-model="activeTab" class="strategy-tabs">
       <el-tab-pane label="策略列表" name="strategyList">
         <div class="tab-content">
-          <!-- 策略列表 -->
           <el-table v-loading="loading" :data="strategyList" stripe style="width: 100%">
             <el-table-column prop="id" label="ID" width="80" />
             <el-table-column prop="name" label="策略名称" width="200" />
@@ -26,14 +25,12 @@
             </el-table-column>
             <el-table-column label="操作" width="200" fixed="right">
               <template #default="{ row }">
-                <el-button type="primary" link @click="handleEdit(row)">编辑</el-button>
-                <el-button type="success" link @click="handleBacktest(row)">回测</el-button>
+                <el-button type="primary" link @click="handleBacktest(row)">回测</el-button>
                 <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
 
-          <!-- 分页 -->
           <div class="pagination-container">
             <el-pagination
               v-model:current-page="currentPage"
@@ -56,15 +53,18 @@
         <div class="split-layout">
           <div class="editor-panel">
             <div class="editor-toolbar">
-              <span>{{ activeStrategy.name }}</span>
-              <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
+              <el-input v-model="activeStrategy.name" size="small" class="strategy-name-input" placeholder="策略名称" />
+              <div class="toolbar-actions">
+                <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
+                <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
+              </div>
             </div>
             <div class="code-editor">
               <textarea
                 v-model="btCode"
                 class="editor-textarea"
                 spellcheck="false"
-                placeholder="# 输入策略代码..."
+                placeholder="# 输入因子表达式作为策略信号&#10;# 例如: Mean($close, 5) / Mean($close, 20) - 1&#10;# 正值表示做多，负值表示做空"
               />
             </div>
           </div>
@@ -110,86 +110,34 @@
         </div>
       </el-tab-pane>
     </el-tabs>
-
-    <!-- 新建/编辑策略对话框 -->
-    <el-dialog
-      v-model="dialogVisible"
-      :title="isEdit ? '编辑策略' : '新建策略'"
-      width="600px"
-      :close-on-click-modal="false"
-    >
-      <el-form ref="formRef" :model="formData" :rules="formRules" label-width="80px">
-        <el-form-item label="策略名称" prop="name">
-          <el-input v-model="formData.name" placeholder="请输入策略名称" maxlength="100" />
-        </el-form-item>
-        <el-form-item label="描述" prop="description">
-          <el-input
-            v-model="formData.description"
-            type="textarea"
-            :rows="3"
-            placeholder="请输入策略描述"
-            maxlength="500"
-          />
-        </el-form-item>
-        <el-form-item label="策略代码" prop="code">
-          <el-input
-            v-model="formData.code"
-            type="textarea"
-            :rows="10"
-            placeholder="请输入策略代码"
-            class="code-input"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="dialogVisible = false">取消</el-button>
-        <el-button type="primary" :loading="submitting" @click="handleSubmit">确定</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, nextTick } from 'vue'
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { ref, reactive, onMounted } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy } from '@/api/backtest'
 import BacktestList from './BacktestList.vue'
 import { formatDateTime } from '@/utils/format'
 
-// 状态
+const SAMPLE_CODE = `// 买入条件: RSI < 30 (超卖)
+// 卖出条件: RSI > 70 (超买)
+// 注: 当前使用因子表达式作为策略信号
+Mean($close, 5) / Mean($close, 20) - 1`
+
+// ── State ──
 const activeTab = ref('strategyList')
 const loading = ref(false)
 const strategyList = ref<Strategy[]>([])
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(20)
+const saving = ref(false)
 
-// 对话框状态
-const dialogVisible = ref(false)
-const isEdit = ref(false)
-const submitting = ref(false)
-const formRef = ref<FormInstance>()
-const editingId = ref<number | null>(null)
 const backtestListRef = ref<InstanceType<typeof BacktestList> | null>(null)
 
-// 表单数据
-const formData = reactive({
-  name: '',
-  description: '',
-  code: '',
-})
-
-// 表单验证规则
-const formRules: FormRules = {
-  name: [
-    { required: true, message: '请输入策略名称', trigger: 'blur' },
-    { min: 2, max: 100, message: '长度在 2 到 100 个字符', trigger: 'blur' },
-  ],
-  code: [{ required: true, message: '请输入策略代码', trigger: 'blur' }],
-}
-
-// 加载策略列表
+// ── Strategy list ──
 const loadStrategies = async () => {
   loading.value = true
   try {
@@ -203,63 +151,35 @@ const loadStrategies = async () => {
   }
 }
 
-// 新建策略
-const handleCreate = () => {
-  isEdit.value = false
-  editingId.value = null
-  formData.name = ''
-  formData.description = ''
-  formData.code = ''
-  dialogVisible.value = true
-}
-
-// 编辑策略
-const handleEdit = (row: Strategy) => {
-  isEdit.value = true
-  editingId.value = row.id
-  formData.name = row.name
-  formData.description = row.description || ''
-  formData.code = row.code
-  dialogVisible.value = true
-}
-
-// 提交表单
-const handleSubmit = async () => {
-  if (!formRef.value) return
-
+const handleCreate = async () => {
   try {
-    await formRef.value.validate()
-  } catch {
-    return
-  }
-
-  submitting.value = true
-  try {
-    if (isEdit.value && editingId.value) {
-      await strategyApi.update(editingId.value, {
-        name: formData.name,
-        description: formData.description || undefined,
-        code: formData.code,
-      })
-      ElMessage.success('更新成功')
-    } else {
-      await strategyApi.create({
-        name: formData.name,
-        description: formData.description || undefined,
-        code: formData.code,
-      })
-      ElMessage.success('创建成功')
+    const result = await strategyApi.create({
+      name: '新建策略',
+      code: SAMPLE_CODE,
+      description: '双均线交叉策略示例',
+    })
+    ElMessage.success('示例策略已创建')
+    await loadStrategies()
+    // Load the new strategy into the editor
+    activeStrategy.value = {
+      id: result.id,
+      name: result.name,
+      code: result.code,
+      description: result.description,
+      parameters: result.parameters,
+      created_at: result.created_at,
+      updated_at: result.updated_at,
     }
-    dialogVisible.value = false
-    loadStrategies()
+    btCode.value = result.code || SAMPLE_CODE
+    btMetrics.value = []
+    btLogs.value = []
+    btErrors.value = []
+    activeTab.value = 'backtestRunner'
   } catch {
-    ElMessage.error(isEdit.value ? '更新失败' : '创建失败')
-  } finally {
-    submitting.value = false
+    ElMessage.error('创建失败')
   }
 }
 
-// 删除策略
 const handleDelete = async (row: Strategy) => {
   try {
     await ElMessageBox.confirm(`确定要删除策略"${row.name}"吗？`, '确认删除', {
@@ -269,6 +189,10 @@ const handleDelete = async (row: Strategy) => {
     })
     await strategyApi.delete(row.id)
     ElMessage.success('删除成功')
+    if (activeStrategy.value?.id === row.id) {
+      activeStrategy.value = null
+      activeTab.value = 'strategyList'
+    }
     loadStrategies()
   } catch (error) {
     if (error !== 'cancel') {
@@ -277,7 +201,6 @@ const handleDelete = async (row: Strategy) => {
   }
 }
 
-// 分页变化
 const handlePageChange = (page: number) => {
   currentPage.value = page
   loadStrategies()
@@ -289,7 +212,7 @@ const handleSizeChange = (size: number) => {
   loadStrategies()
 }
 
-// Backtest runner state
+// ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
 const btCode = ref('')
 const btStartDate = ref('2020-01-01')
@@ -301,8 +224,25 @@ const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
 const btErrors = ref<string[]>([])
 
-const handleBacktest = async (row: Strategy) => {
-  activeStrategy.value = row
+const handleSaveStrategy = async () => {
+  if (!activeStrategy.value) return
+  saving.value = true
+  try {
+    await strategyApi.update(activeStrategy.value.id, {
+      name: activeStrategy.value.name,
+      code: btCode.value,
+      description: activeStrategy.value.description || undefined,
+    })
+    ElMessage.success('保存成功')
+  } catch {
+    ElMessage.error('保存失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+const handleBacktest = (row: Strategy) => {
+  activeStrategy.value = { ...row }
   btCode.value = row.code || ''
   btMetrics.value = []
   btLogs.value = []
@@ -318,35 +258,76 @@ const handleRunBacktest = async () => {
   btErrors.value = []
   try {
     const { default: request } = await import('@/api/request')
-    const res = await request.post<any>('/v2/backtest/strategy', {
-      code: btCode.value,
+    const res = await request.post<any>('/v2/backtest/run', {
+      mode: 'vectorized',
+      factor_expression: btCode.value,
+      symbols: ['000300.SH'],
       start_date: btStartDate.value,
       end_date: btEndDate.value,
       initial_capital: btCapital.value,
-      frequency: btFrequency.value,
+      rebalance_freq: btFrequency.value,
+      n_groups: 5,
+      bar_type: 'daily',
     })
-    const data = res.metrics || res.data?.metrics || res
-    const logs = res.logs || res.data?.logs || []
-    btLogs.value = Array.isArray(logs) ? logs : [String(logs)]
-    if (data) {
-      btMetrics.value = [
-        { label: '总收益率', value: data.total_return != null ? (data.total_return * 100).toFixed(2) + '%' : '-', color: data.total_return >= 0 ? 'positive' : 'negative' },
-        { label: '年化收益', value: data.annual_return != null ? (data.annual_return * 100).toFixed(2) + '%' : '-', color: data.annual_return >= 0 ? 'positive' : 'negative' },
-        { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
-        { label: '最大回撤', value: data.max_drawdown != null ? (data.max_drawdown * 100).toFixed(2) + '%' : '-', color: 'negative' },
-        { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
-        { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
-      ]
+
+    // The v2/backtest/run returns { task_id }, need to poll for result
+    const taskId = res?.task_id
+    if (taskId) {
+      btLogs.value = [`任务已提交 (${taskId})，等待完成...`]
+      // Poll for result
+      let attempts = 0
+      while (attempts < 30) {
+        await new Promise(r => setTimeout(r, 2000))
+        const statusRes = await request.get<any>(`/v2/backtest/status/${taskId}`)
+        if (statusRes?.status === 'done') {
+          const resultRes = await request.get<any>(`/v2/backtest/result/${taskId}`)
+          const data = resultRes
+          if (data) {
+            btMetrics.value = [
+              { label: '总收益率', value: data.total_return != null ? (Number(data.total_return) * 100).toFixed(2) + '%' : '-', color: Number(data.total_return) >= 0 ? 'positive' : 'negative' },
+              { label: '年化收益', value: data.annual_return != null ? (Number(data.annual_return) * 100).toFixed(2) + '%' : '-', color: Number(data.annual_return) >= 0 ? 'positive' : 'negative' },
+              { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
+              { label: '最大回撤', value: data.max_drawdown != null ? (Number(data.max_drawdown) * 100).toFixed(2) + '%' : '-', color: 'negative' },
+              { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
+              { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
+            ]
+            btLogs.value = ['回测完成']
+          }
+          break
+        } else if (statusRes?.status === 'failed') {
+          btErrors.value = ['回测失败']
+          btLogs.value = ['回测执行失败']
+          break
+        }
+        attempts++
+      }
+      if (attempts >= 30) {
+        btErrors.value = ['回测超时']
+        btLogs.value = ['回测超时（60秒）']
+      }
+    } else {
+      // Direct result
+      const data = res
+      if (data) {
+        btMetrics.value = [
+          { label: '总收益率', value: data.total_return != null ? (Number(data.total_return) * 100).toFixed(2) + '%' : '-', color: Number(data.total_return) >= 0 ? 'positive' : 'negative' },
+          { label: '年化收益', value: data.annual_return != null ? (Number(data.annual_return) * 100).toFixed(2) + '%' : '-', color: Number(data.annual_return) >= 0 ? 'positive' : 'negative' },
+          { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
+          { label: '最大回撤', value: data.max_drawdown != null ? (Number(data.max_drawdown) * 100).toFixed(2) + '%' : '-', color: 'negative' },
+          { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
+          { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
+        ]
+        btLogs.value = ['回测完成']
+      }
     }
   } catch (e: any) {
-    btErrors.value = [e?.message || 'Backtest failed']
+    btErrors.value = [e?.message || '回测失败']
     btLogs.value = ['回测执行失败']
   } finally {
     btRunning.value = false
   }
 }
 
-// 初始化
 onMounted(() => {
   loadStrategies()
 })
@@ -400,11 +381,6 @@ onMounted(() => {
   justify-content: flex-end;
 }
 
-.code-input :deep(.el-textarea__inner) {
-  font-family: 'Courier New', Courier, monospace;
-  font-size: 13px;
-}
-
 .split-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; height: calc(100vh - 200px); }
 .editor-panel {
   display: flex;
@@ -421,6 +397,20 @@ onMounted(() => {
   background: #1e1e1e;
   color: #d4d4d4;
   font-size: 12px;
+  gap: 8px;
+}
+.strategy-name-input {
+  width: 200px;
+}
+.strategy-name-input :deep(.el-input__inner) {
+  background: #2d2d2d;
+  border-color: #404040;
+  color: #d4d4d4;
+}
+.toolbar-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
 }
 .code-editor { flex: 1; background: #1e1e1e; }
 .editor-textarea {

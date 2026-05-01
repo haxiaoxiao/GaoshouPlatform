@@ -86,11 +86,21 @@
       <el-form :model="params" label-width="80px" size="small">
         <el-form-item label="股票池">
           <el-select v-model="params.stock_pool">
-            <el-option label="沪深300" value="hs300" />
-            <el-option label="中证500" value="zz500" />
-            <el-option label="中证800" value="zz800" />
-            <el-option label="中证1000" value="zz1000" />
-            <el-option label="中证全指" value="zz_quanzhi" />
+            <el-option-group label="指数股票池">
+              <el-option label="沪深300" value="hs300" />
+              <el-option label="中证500" value="zz500" />
+              <el-option label="中证800" value="zz800" />
+              <el-option label="中证1000" value="zz1000" />
+              <el-option label="中证全指" value="zz_quanzhi" />
+            </el-option-group>
+            <el-option-group v-if="props.watchlistGroups?.length" label="自选股分组">
+              <el-option
+                v-for="g in props.watchlistGroups"
+                :key="'wl_'+g.id"
+                :label="g.name"
+                :value="'watchlist_'+g.id"
+              />
+            </el-option-group>
           </el-select>
         </el-form-item>
         <el-form-item label="日期范围">
@@ -127,7 +137,9 @@ import { factorApi, computeApi } from '@/api/v2'
 import request from '@/api/request'
 import type { FactorTemplate } from '@/types/factor'
 
-const props = defineProps<{ visible: boolean }>()
+interface WatchlistGroup { id: number; name: string }
+
+const props = defineProps<{ visible: boolean; watchlistGroups?: WatchlistGroup[] }>()
 const emit = defineEmits<{ (e: 'update:visible', v: boolean): void; (e: 'created'): void }>()
 
 const visible = computed({

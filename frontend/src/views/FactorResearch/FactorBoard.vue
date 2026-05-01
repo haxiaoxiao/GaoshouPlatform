@@ -10,13 +10,23 @@
 
       <div class="filter-row">
         <span class="filter-label">股票池:</span>
-        <el-radio-group v-model="filters.stock_pool" size="small">
-          <el-radio-button value="hs300">沪深300</el-radio-button>
-          <el-radio-button value="zz500">中证500</el-radio-button>
-          <el-radio-button value="zz800">中证800</el-radio-button>
-          <el-radio-button value="zz1000">中证1000</el-radio-button>
-          <el-radio-button value="zz_quanzhi">中证全指</el-radio-button>
-        </el-radio-group>
+        <el-select v-model="filters.stock_pool" size="small" style="width:160px">
+          <el-option-group label="指数股票池">
+            <el-option label="沪深300" value="hs300" />
+            <el-option label="中证500" value="zz500" />
+            <el-option label="中证800" value="zz800" />
+            <el-option label="中证1000" value="zz1000" />
+            <el-option label="中证全指" value="zz_quanzhi" />
+          </el-option-group>
+          <el-option-group v-if="watchlistGroups.length" label="自选股分组">
+            <el-option
+              v-for="g in watchlistGroups"
+              :key="'wl_'+g.id"
+              :label="g.name"
+              :value="'watchlist_'+g.id"
+            />
+          </el-option-group>
+        </el-select>
 
         <span class="filter-label" style="margin-left:24px">回测周期:</span>
         <el-radio-group v-model="filters.period" size="small">
@@ -98,7 +108,7 @@
       style="margin-top:16px;justify-content:flex-end"
     />
 
-    <FactorCreateDialog v-model:visible="showCreateDialog" @created="fetchBoard" />
+    <FactorCreateDialog v-model:visible="showCreateDialog" :watchlist-groups="watchlistGroups" @created="fetchBoard" />
   </div>
 </template>
 
@@ -106,7 +116,9 @@
 import { ref, reactive, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { evaluationApi } from '@/api/v2'
+import { watchlistApi } from '@/api/data'
 import type { BoardRow, BoardQuery } from '@/types/factor'
+import type { WatchlistGroup } from '@/api/data'
 import FactorCreateDialog from './FactorCreateDialog.vue'
 
 const router = useRouter()
@@ -134,6 +146,15 @@ const rows = ref<BoardRow[]>([])
 const total = ref(0)
 const loading = ref(false)
 const showCreateDialog = ref(false)
+const watchlistGroups = ref<WatchlistGroup[]>([])
+
+async function loadWatchlistGroups() {
+  try {
+    watchlistGroups.value = await watchlistApi.getGroups()
+  } catch {
+    watchlistGroups.value = []
+  }
+}
 
 async function fetchBoard() {
   loading.value = true
@@ -170,14 +191,17 @@ watch(
   () => { filters.page = 1; fetchBoard() }
 )
 
-onMounted(fetchBoard)
+onMounted(() => {
+  loadWatchlistGroups()
+  fetchBoard()
+})
 </script>
 
 <style scoped>
 .factor-board { padding: 16px; }
 .filter-bar {
   background: var(--bg-surface);
-  border: 1px solid var(--border-ghost);
+  border: 1px solid var(--border-subtle);
   border-radius: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
@@ -191,7 +215,7 @@ onMounted(fetchBoard)
 .filter-row:last-child { margin-bottom: 0; }
 .filter-label {
   font-size: 12px;
-  color: var(--text-ghost);
+  color: var(--text-secondary);
   white-space: nowrap;
 }
 .toolbar { margin-bottom: 12px; }
