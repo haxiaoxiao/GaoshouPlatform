@@ -1,5 +1,5 @@
 <template>
-  <el-dialog v-model="visible" title="新建因子" width="820px" @close="resetForm">
+  <el-dialog v-model="visible" title="新建因子" width="900px" @close="resetForm">
     <!-- 因子名称 -->
     <div class="step-section">
       <h4>因子名称</h4>
@@ -27,15 +27,21 @@
       </div>
     </div>
 
-    <!-- 表达式编辑 + 参考面板 -->
+    <!-- 表达式编辑 -->
     <div class="step-section" v-if="selectedTemplate">
-      <div class="expression-layout">
+      <div class="expr-header">
+        <h4>因子表达式</h4>
+        <el-button size="small" text @click="showRef = !showRef">
+          {{ showRef ? '收起参考' : '展开参考' }}
+          <el-icon class="toggle-icon" :class="{ rotated: showRef }"><ArrowRight /></el-icon>
+        </el-button>
+      </div>
+      <div class="expression-layout" :class="{ 'has-ref': showRef }">
         <div class="expression-main">
-          <h4>因子表达式</h4>
           <el-input
             v-model="expression"
             type="textarea"
-            :rows="3"
+            :rows="4"
             placeholder="输入因子表达式，例如 Mean($close, 20) / Std($close, 20)"
             class="expression-input"
           />
@@ -46,8 +52,8 @@
             <span v-if="validationDone && !valid" class="error-msg">{{ errorMsg }}</span>
           </div>
         </div>
-        <div class="reference-panel">
-          <h4>可用指标参考</h4>
+
+        <div v-if="showRef" class="reference-panel">
           <div class="ref-section">
             <div class="ref-title">基础字段 <code>$</code> 前缀</div>
             <div class="ref-tags">
@@ -116,6 +122,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
+import { ArrowRight } from '@element-plus/icons-vue'
 import { factorApi, computeApi } from '@/api/v2'
 import request from '@/api/request'
 import type { FactorTemplate } from '@/types/factor'
@@ -138,6 +145,7 @@ const validating = ref(false)
 const validationDone = ref(false)
 const valid = ref(false)
 const errorMsg = ref('')
+const showRef = ref(false)
 
 const operators = ref<{ name: string; signature: string; description: string; level: number; category: string }[]>([])
 const loadingRef = ref(false)
@@ -229,6 +237,7 @@ function resetForm() {
   expression.value = ''
   validationDone.value = false
   valid.value = false
+  showRef.value = false
 }
 
 onMounted(async () => {
@@ -241,13 +250,14 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.step-section { margin-bottom: 20px; }
+.step-section { margin-bottom: 24px; }
 .step-section h4 { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text-bright); }
-.template-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+.template-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .template-card {
   border: 1px solid var(--border-ghost);
   border-radius: 8px;
-  padding: 12px;
+  padding: 14px;
   cursor: pointer;
   transition: border-color 0.2s;
 }
@@ -257,37 +267,52 @@ onMounted(async () => {
 .template-desc { font-size: 11px; color: var(--text-ghost); margin-bottom: 4px; }
 .template-cat { font-size: 10px; color: var(--text-muted); }
 
-.expression-layout { display: grid; grid-template-columns: 1fr 260px; gap: 16px; }
+.expr-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.expr-header h4 { margin-bottom: 0; }
+
+.toggle-icon {
+  font-size: 14px;
+  transition: transform 0.2s;
+}
+.toggle-icon.rotated { transform: rotate(90deg); }
+
+.expression-layout { display: block; }
+.expression-layout.has-ref { display: grid; grid-template-columns: 1fr 280px; gap: 20px; }
+
 .expression-main { min-width: 0; }
 .expression-input { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
-.validate-row { margin-top: 8px; display: flex; align-items: center; gap: 12px; }
+.validate-row { margin-top: 10px; display: flex; align-items: center; gap: 12px; }
 .error-msg { font-size: 12px; color: var(--color-red); }
 
 .reference-panel {
   border: 1px solid var(--border-ghost);
   border-radius: 8px;
-  padding: 12px;
+  padding: 14px;
   background: var(--bg-surface);
-  max-height: 360px;
+  max-height: 240px;
   overflow-y: auto;
   font-size: 12px;
 }
-.reference-panel h4 { font-size: 13px; margin-bottom: 8px; }
-.ref-section { margin-bottom: 10px; }
-.ref-title { font-weight: 600; margin-bottom: 4px; color: var(--text-bright); }
-.ref-sub { margin-top: 6px; }
-.ref-subtitle { font-size: 11px; color: var(--text-ghost); margin-bottom: 2px; }
-.ref-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+.ref-section { margin-bottom: 12px; }
+.ref-title { font-weight: 600; margin-bottom: 6px; color: var(--text-bright); }
+.ref-sub { margin-top: 8px; }
+.ref-subtitle { font-size: 11px; color: var(--text-ghost); margin-bottom: 4px; }
+.ref-tags { display: flex; flex-wrap: wrap; gap: 5px; }
 .ref-tag {
   display: inline-block;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: 4px;
   font-size: 11px;
   font-family: 'JetBrains Mono', monospace;
   cursor: pointer;
   transition: background 0.15s;
 }
-.ref-tag:hover { opacity: 0.8; }
+.ref-tag:hover { opacity: 0.75; }
 .ref-raw { background: #e6f7ff; color: #1890ff; border: 1px solid #91d5ff; }
 .ref-op { background: #f6ffed; color: #52c41a; border: 1px solid #b7eb8f; }
 </style>
