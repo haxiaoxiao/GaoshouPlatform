@@ -43,6 +43,12 @@ const router = createRouter({
           component: () => import('@/views/FactorResearch/FactorAnalysis.vue'),
           meta: { title: '因子分析' },
         },
+        {
+          path: 'analysis-new/:id',
+          name: 'FactorAnalysisNew',
+          component: () => import('@/views/FactorResearch/FactorAnalysisNew.vue'),
+          meta: { title: '因子分析(新版)' },
+        },
       ],
     },
     {
@@ -50,6 +56,12 @@ const router = createRouter({
       name: 'StrategyBacktest',
       component: () => import('@/views/StrategyBacktest/index.vue'),
       meta: { title: '策略回测' },
+    },
+    {
+      path: '/backtest/factor/:id',
+      name: 'FactorBacktest',
+      component: () => import('@/views/FactorBacktest/index.vue'),
+      meta: { title: '因子回测' },
     },
     {
       path: '/trade',

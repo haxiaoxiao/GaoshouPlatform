@@ -1,5 +1,6 @@
 """单因子评估服务 — 串联计算层和回测层"""
 from datetime import date
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,12 @@ from app.backtest.config import BacktestConfig
 from app.backtest.runner import get_backtest_runner
 from app.compute.expression import evaluate_expression
 from app.db.clickhouse import get_ch_client
+from app.models.factor import (
+    FactorConfig, EvalConfig, BtConfig, FactorReport,
+    ICPoint, IndustryIC, TurnoverPoint, DecayPoint, StockFactorValue,
+    BoardQuery, BoardRow, BoardResponse, StockPool,
+)
+from app.services.compute_service import compute_service
 
 _IC_DECAY_LAGS = [1, 3, 5, 10, 20]
 
@@ -151,6 +158,164 @@ class FactorEvaluationService:
         }
 
     # ------------------------------------------------------------------
+    # New report + board (Tasks A5-A6)
+    # ------------------------------------------------------------------
+
+    async def report(self, config: FactorConfig, eval_config: EvalConfig | None = None) -> FactorReport:
+        """Generate 6-module factor analysis report."""
+        eval_config = eval_config or EvalConfig()
+        pool_symbols = await self._resolve_pool(config.stock_pool)
+        factor_df = self._load_factor_matrix(
+            config.expression, pool_symbols,
+            config.start_date, config.end_date,
+        )
+        return_df = self._load_return_matrix(
+            pool_symbols, config.start_date, config.end_date,
+        )
+
+        # Module 1: IC time series
+        ic_points = self._compute_ic_series(factor_df, return_df, eval_config)
+
+        # Module 2: Industry IC
+        industry_ic = self._compute_industry_ic(factor_df, return_df)
+
+        # Module 3: Turnover
+        turnover = self._compute_turnover(factor_df)
+
+        # Module 4: Signal decay
+        signal_decay = self._compute_signal_decay(factor_df, return_df)
+
+        # Module 5 & 6: Top/Bottom 20
+        top20: list[StockFactorValue] = []
+        bottom20: list[StockFactorValue] = []
+        if isinstance(factor_df, pd.DataFrame) and not factor_df.empty:
+            if factor_df.index.nlevels > 1:
+                latest_date = factor_df.index.get_level_values("date").max()
+                latest_factor = factor_df.xs(latest_date, level="date")
+            else:
+                latest_date = factor_df.index.max()
+                latest_factor = factor_df.loc[latest_date]
+
+            if isinstance(latest_factor, pd.Series):
+                sorted_factor = latest_factor.sort_values()
+                top20 = self._top_n_stocks(sorted_factor, 20, ascending=False)
+                bottom20 = self._top_n_stocks(sorted_factor, 20, ascending=True)
+            elif isinstance(latest_factor, pd.DataFrame) and "value" in latest_factor.columns:
+                sorted_factor = latest_factor.sort_values("value")
+                top20 = self._top_n_stocks(sorted_factor["value"], 20, ascending=False)
+                bottom20 = self._top_n_stocks(sorted_factor["value"], 20, ascending=True)
+
+        return FactorReport(
+            ic_series=[ICPoint(date=d, value=v) for d, v in ic_points],
+            industry_ic=[IndustryIC(industry=i, value=v) for i, v in industry_ic],
+            turnover=[TurnoverPoint(date=d, min_quantile=mn, max_quantile=mx)
+                      for d, mn, mx in turnover],
+            signal_decay=[DecayPoint(lag=l, min_quantile=mn, max_quantile=mx)
+                          for l, mn, mx in signal_decay],
+            top20=top20,
+            bottom20=bottom20,
+            update_date=date.today(),
+        )
+
+    async def board_query(self, query: BoardQuery) -> BoardResponse:
+        """Query factor board with filters, sorting, and pagination."""
+        from app.services.factor_templates import FactorTemplatesService
+        templates_svc = FactorTemplatesService()
+        all_templates = templates_svc.list_templates()
+        if query.categories:
+            all_templates = [t for t in all_templates if t.category in query.categories]
+
+        rows: list[BoardRow] = []
+        for tmpl in all_templates:
+            cfg = FactorConfig(
+                expression=tmpl.preset_expression,
+                stock_pool=query.stock_pool,
+                start_date=self._period_start_date(query.period),
+                end_date=date.today(),
+            )
+            try:
+                report_obj = await self.report(cfg)
+                ic_values = [p.value for p in report_obj.ic_series]
+                if ic_values:
+                    ic_mean = sum(ic_values) / len(ic_values)
+                    variance = sum((v - ic_mean) ** 2 for v in ic_values) / len(ic_values)
+                    ic_std = variance ** 0.5
+                    ir = ic_mean / ic_std if ic_std != 0 else 0.0
+                else:
+                    ic_mean = 0.0
+                    ir = 0.0
+
+                rows.append(BoardRow(
+                    factor_name=tmpl.name,
+                    category=tmpl.category,
+                    min_quantile_excess_return=0.0,
+                    max_quantile_excess_return=0.0,
+                    min_quantile_turnover=0.0,
+                    max_quantile_turnover=0.0,
+                    ic_mean=round(ic_mean, 4),
+                    ir=round(ir, 4),
+                ))
+            except Exception:
+                logger.exception("board_query failed for template: %s", tmpl.name)
+                continue
+
+        # Sort
+        reverse = query.sort_order == "desc"
+        rows.sort(key=lambda r: getattr(r, query.sort_by, 0), reverse=reverse)
+
+        # Paginate
+        total = len(rows)
+        start = (query.page - 1) * query.page_size
+        end = start + query.page_size
+        page_rows = rows[start:end]
+
+        return BoardResponse(
+            rows=page_rows, total=total,
+            page=query.page, page_size=query.page_size,
+        )
+
+    # ------------------------------------------------------------------
+    # Report helpers
+    # ------------------------------------------------------------------
+
+    def _compute_ic_series(self, factor_df, return_df, eval_config) -> list[tuple]:
+        series = compute_ic_series(factor_df, return_df)
+        result: list[tuple] = []
+        for d_str, v in series.items():
+            try:
+                d = date.fromisoformat(str(d_str)[:10])
+            except (ValueError, TypeError):
+                continue
+            result.append((d, float(v)))
+        return result
+
+    def _compute_industry_ic(self, factor_df, return_df) -> list[tuple]:
+        return []  # Requires industry classification data
+
+    def _compute_turnover(self, factor_df) -> list[tuple]:
+        return []  # Requires quantile group tracking
+
+    def _compute_signal_decay(self, factor_df, return_df) -> list[tuple]:
+        return []  # Requires lagged IC computation
+
+    def _top_n_stocks(self, sorted_series, n, ascending) -> list[StockFactorValue]:
+        items = sorted_series.nlargest(n) if not ascending else sorted_series.nsmallest(n)
+        result: list[StockFactorValue] = []
+        for idx, val in items.items():
+            result.append(StockFactorValue(symbol=str(idx), name=str(idx), value=float(val)))
+        return result
+
+    def _period_start_date(self, period: str) -> date:
+        today = date.today()
+        mapping = {"3m": 90, "1y": 365, "3y": 3 * 365, "10y": 10 * 365}
+        days = mapping.get(period, 365)
+        return today - timedelta(days=days)
+
+    async def _resolve_pool(self, stock_pool) -> list[str]:
+        sp = stock_pool if isinstance(stock_pool, StockPool) else StockPool(stock_pool)
+        return await compute_service._resolve_stock_pool(sp)
+
+    # ------------------------------------------------------------------
     # Internal helpers (mirror BacktestRunner data-loading logic)
     # ------------------------------------------------------------------
 
@@ -250,3 +415,17 @@ class FactorEvaluationService:
         if return_matrix:
             return pd.DataFrame(return_matrix)
         return pd.DataFrame()
+
+
+# ------------------------------------------------------------------
+# Singleton factory
+# ------------------------------------------------------------------
+
+_evaluation_service: FactorEvaluationService | None = None
+
+
+def get_evaluation_service() -> FactorEvaluationService:
+    global _evaluation_service
+    if _evaluation_service is None:
+        _evaluation_service = FactorEvaluationService()
+    return _evaluation_service

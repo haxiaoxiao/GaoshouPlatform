@@ -10,6 +10,8 @@ from app.compute.cache import ComputeCache, get_compute_cache
 from app.compute.expression import evaluate_expression, validate_expression
 from app.compute.operators import auto_discover
 from app.compute.operators.registry import OperatorRegistry
+from app.models.factor import FactorConfig
+from app.services.compute_service import compute_service
 
 router = APIRouter(prefix="/v2/compute")
 
@@ -197,3 +199,14 @@ async def validate_expr(expression: str = Body(..., description="要校验的表
         "message": "success",
         "data": {"valid": valid, "error": err},
     }
+
+
+@router.post("/batch")
+async def batch_evaluate(configs: list[FactorConfig]):
+    """Batch compute multiple factors (for factor board use).
+
+    Accepts a list of FactorConfig objects and returns computed results
+    for each, with per-config error isolation.
+    """
+    results = await compute_service.batch_compute(configs)
+    return {"code": 0, "message": "success", "data": results}
