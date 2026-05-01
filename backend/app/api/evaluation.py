@@ -5,7 +5,8 @@ from datetime import date
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
-from app.services.factor_evaluation import FactorEvaluationService
+from app.models.factor import FactorConfig, EvalConfig, BoardQuery
+from app.services.factor_evaluation import FactorEvaluationService, get_evaluation_service
 
 logger = logging.getLogger(__name__)
 
@@ -101,4 +102,28 @@ async def full_report(req: FullReportRequest):
         return {"code": 0, "message": "success", "data": data}
     except Exception as e:
         logger.exception("Full report failed")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.post("/report")
+async def factor_report(config: FactorConfig, eval_config: EvalConfig | None = None):
+    """Generate 6-module factor analysis report."""
+    try:
+        svc = get_evaluation_service()
+        report = await svc.report(config, eval_config)
+        return {"code": 0, "message": "success", "data": report.model_dump()}
+    except Exception as e:
+        logger.exception("Factor report failed")
+        return {"code": 1, "message": str(e), "data": None}
+
+
+@router.post("/board")
+async def factor_board(query: BoardQuery):
+    """Query factor board with filters, sorting, and pagination."""
+    try:
+        svc = get_evaluation_service()
+        result = await svc.board_query(query)
+        return {"code": 0, "message": "success", "data": result.model_dump()}
+    except Exception as e:
+        logger.exception("Factor board query failed")
         return {"code": 1, "message": str(e), "data": None}
