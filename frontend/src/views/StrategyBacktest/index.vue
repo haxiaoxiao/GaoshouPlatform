@@ -51,6 +51,64 @@
       <el-tab-pane label="回测记录" name="backtestList">
         <BacktestList ref="backtestListRef" />
       </el-tab-pane>
+
+      <el-tab-pane label="回测运行" name="backtestRunner" v-if="activeStrategy">
+        <div class="split-layout">
+          <div class="editor-panel">
+            <div class="editor-toolbar">
+              <span>{{ activeStrategy.name }}</span>
+              <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
+            </div>
+            <div class="code-editor">
+              <textarea
+                v-model="btCode"
+                class="editor-textarea"
+                spellcheck="false"
+                placeholder="# 输入策略代码..."
+              />
+            </div>
+          </div>
+          <div class="right-panel">
+            <div class="bt-config-bar">
+              <el-date-picker v-model="btStartDate" value-format="YYYY-MM-DD" size="small" style="width:130px" placeholder="开始日期" />
+              <span>至</span>
+              <el-date-picker v-model="btEndDate" value-format="YYYY-MM-DD" size="small" style="width:130px" placeholder="结束日期" />
+              <span>资金</span>
+              <el-input-number v-model="btCapital" :min="10000" :step="100000" size="small" style="width:130px" />
+              <el-select v-model="btFrequency" size="small" style="width:80px">
+                <el-option label="每天" value="daily" />
+                <el-option label="每周" value="weekly" />
+                <el-option label="每月" value="monthly" />
+              </el-select>
+              <el-button type="primary" size="small" @click="handleRunBacktest" :loading="btRunning">运行回测</el-button>
+            </div>
+
+            <div v-if="btMetrics.length" class="bt-metrics-grid">
+              <div class="bt-metric-card" v-for="m in btMetrics" :key="m.label">
+                <div class="bt-metric-label">{{ m.label }}</div>
+                <div class="bt-metric-value" :class="m.color || ''">{{ m.value }}</div>
+              </div>
+            </div>
+
+            <div v-if="btLogs.length || btErrors.length" class="bt-log-panel">
+              <el-tabs model-value="logs" size="small">
+                <el-tab-pane label="日志" name="logs">
+                  <div class="bt-log-content">
+                    <div v-for="(log, i) in btLogs" :key="i" class="bt-log-line">{{ log }}</div>
+                    <div v-if="!btLogs.length" class="bt-log-empty">暂无日志</div>
+                  </div>
+                </el-tab-pane>
+                <el-tab-pane label="错误" name="errors">
+                  <div class="bt-log-content">
+                    <div v-for="(err, i) in btErrors" :key="i" class="bt-log-line bt-error">{{ err }}</div>
+                    <div v-if="!btErrors.length" class="bt-log-empty">暂无错误</div>
+                  </div>
+                </el-tab-pane>
+              </el-tabs>
+            </div>
+          </div>
+        </div>
+      </el-tab-pane>
     </el-tabs>
 
     <!-- 新建/编辑策略对话框 -->
@@ -238,6 +296,63 @@ const handleSizeChange = (size: number) => {
   loadStrategies()
 }
 
+// Backtest runner state
+const activeStrategy = ref<Strategy | null>(null)
+const btCode = ref('')
+const btStartDate = ref('2020-01-01')
+const btEndDate = ref('2025-12-31')
+const btCapital = ref(1_000_000)
+const btFrequency = ref('monthly')
+const btRunning = ref(false)
+const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
+const btLogs = ref<string[]>([])
+const btErrors = ref<string[]>([])
+
+const handleBacktest = async (row: Strategy) => {
+  activeStrategy.value = row
+  btCode.value = row.code || ''
+  btMetrics.value = []
+  btLogs.value = []
+  btErrors.value = []
+  activeTab.value = 'backtestRunner'
+}
+
+const handleRunBacktest = async () => {
+  if (!activeStrategy.value) return
+  btRunning.value = true
+  btMetrics.value = []
+  btLogs.value = ['正在运行回测...']
+  btErrors.value = []
+  try {
+    const { default: request } = await import('@/api/request')
+    const res = await request.post<any>('/v2/backtest/strategy', {
+      code: btCode.value,
+      start_date: btStartDate.value,
+      end_date: btEndDate.value,
+      initial_capital: btCapital.value,
+      frequency: btFrequency.value,
+    })
+    const data = res.metrics || res.data?.metrics || res
+    const logs = res.logs || res.data?.logs || []
+    btLogs.value = Array.isArray(logs) ? logs : [String(logs)]
+    if (data) {
+      btMetrics.value = [
+        { label: '总收益率', value: data.total_return != null ? (data.total_return * 100).toFixed(2) + '%' : '-', color: data.total_return >= 0 ? 'positive' : 'negative' },
+        { label: '年化收益', value: data.annual_return != null ? (data.annual_return * 100).toFixed(2) + '%' : '-', color: data.annual_return >= 0 ? 'positive' : 'negative' },
+        { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
+        { label: '最大回撤', value: data.max_drawdown != null ? (data.max_drawdown * 100).toFixed(2) + '%' : '-', color: 'negative' },
+        { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
+        { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
+      ]
+    }
+  } catch (e: any) {
+    btErrors.value = [e?.message || 'Backtest failed']
+    btLogs.value = ['回测执行失败']
+  } finally {
+    btRunning.value = false
+  }
+}
+
 // 初始化
 onMounted(() => {
   loadStrategies()
@@ -296,4 +411,73 @@ onMounted(() => {
   font-family: 'Courier New', Courier, monospace;
   font-size: 13px;
 }
+
+.split-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; height: calc(100vh - 200px); }
+.editor-panel {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-ghost);
+  border-radius: 8px;
+  overflow: hidden;
+}
+.editor-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-size: 12px;
+}
+.code-editor { flex: 1; background: #1e1e1e; }
+.editor-textarea {
+  width: 100%;
+  height: 100%;
+  border: none;
+  padding: 12px;
+  font-family: 'JetBrains Mono', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #d4d4d4;
+  background: #1e1e1e;
+  resize: none;
+  outline: none;
+  tab-size: 4;
+}
+.editor-textarea::placeholder { color: #6e6e6e; }
+.right-panel { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+.bt-config-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-ghost);
+  border-radius: 8px;
+  font-size: 12px;
+}
+.bt-metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.bt-metric-card {
+  border: 1px solid var(--border-ghost);
+  border-radius: 6px;
+  padding: 10px;
+  text-align: center;
+  background: var(--bg-surface);
+}
+.bt-metric-label { font-size: 10px; color: var(--text-ghost); }
+.bt-metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; }
+.positive { color: #d93026; }
+.negative { color: #137333; }
+.bt-log-panel {
+  border: 1px solid var(--border-ghost);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  overflow: hidden;
+  flex: 1;
+  min-height: 120px;
+}
+.bt-log-content { padding: 8px 12px; font-size: 11px; font-family: monospace; max-height: 200px; overflow: auto; }
+.bt-log-line { color: var(--text-ghost); padding: 1px 0; }
+.bt-error { color: #e5484d; }
+.bt-log-empty { color: var(--text-muted); font-style: italic; }
 </style>
