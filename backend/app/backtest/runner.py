@@ -1,7 +1,9 @@
 """回测统一入口"""
+import uuid
 from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -39,10 +41,213 @@ class BacktestRunner:
         return result
 
     async def _run_event_driven(self, config: BacktestConfig) -> BacktestResult:
-        logger.warning("Event-driven backtest not yet implemented")
+        """事件驱动回测 — 使用 EventBus + Portfolio + Risk + Analysis 完整管线"""
+        from app.backtest.event import (
+            Event, EventBus, EventType, BarEventSource,
+            TradingCalendar, EventDrivenExecutor,
+        )
+        from app.backtest.portfolio import (
+            Account, PositionManager, Portfolio,
+            CashValidator, PriceValidator, PositionLimitValidator,
+        )
+        from app.backtest.analysis import TradeCollector, OrderCollector
+        from app.backtest.analysis.metrics import compute_metrics
+        from app.backtest.strategy_loader import ExpressionSignalStrategy, StrategyContext
+
+        symbols = config.symbols
+        start = config.start_date or date(2020, 1, 1)
+        end = config.end_date or date(2025, 12, 31)
+
+        # ── 1. 建立事件总线 ──
+        event_bus = EventBus()
+        logger.info("EventBus initialized")
+
+        # ── 2. 加载交易日历 ──
+        calendar = await TradingCalendar.from_clickhouse(symbols, start, end)
+        if len(calendar) == 0:
+            logger.warning("No trading dates found, returning empty result")
+            return BacktestResult(initial_capital=config.initial_capital)
+
+        # ── 3. 加载 Bar 数据 ──
+        try:
+            event_source = await BarEventSource.from_clickhouse(symbols, start, end, calendar)
+        except ValueError as e:
+            logger.error("BarEventSource load failed: {}", e)
+            return BacktestResult(initial_capital=config.initial_capital)
+
+        # ── 4. 构建投资组合组件 ──
+        account = Account(cash=config.initial_capital)
+        position_manager = PositionManager()
+        portfolio = Portfolio(account=account, position_manager=position_manager)
+
+        # ── 5. 注册系统监听器 ──
+        # Portfolio 快照录制
+        portfolio.register_listeners(event_bus)
+
+        # 风控校验链
+        CashValidator(account).register(event_bus)
+        PriceValidator(0.1).register(event_bus)
+        if config.max_positions:
+            PositionLimitValidator(position_manager, config.max_positions).register(event_bus)
+
+        # 数据收集器
+        trade_collector = TradeCollector()
+        trade_collector.register(event_bus)
+        order_collector = OrderCollector()
+        order_collector.register(event_bus)
+
+        # ── 6. 策略上下文 + 信号策略 ──
+        ctx = StrategyContext(
+            account=account,
+            position_manager=position_manager,
+            event_source=event_source,
+        )
+
+        # 使用 factor_expression 作为信号表达式（事件驱动模式下）
+        expression = config.factor_expression or config.buy_condition
+        if expression:
+            strategy = ExpressionSignalStrategy(
+                expression=expression,
+                symbols=symbols,
+                buy_threshold=0.0,
+                sell_threshold=0.0,
+                position_pct=0.2,
+            )
+            strategy.register(event_bus, ctx)
+
+        # ── 7. BAR → 订单 → 成交管线 ──
+        def on_order_creation_pass(event: Event) -> None:
+            """订单风控通过 → 撮合成交"""
+            order = event.data.get("order", {})
+            bar = event.data.get("bar")
+            date_val = event.data.get("date")
+
+            if bar is None:
+                return
+
+            order_id = order.get("order_id", "")
+            symbol = order.get("symbol", "")
+            direction = order.get("direction", "buy")
+            price = order.get("price", bar.close)
+            quantity = order.get("quantity", 0)
+
+            # 模拟撮合 — 按当日收盘价成交
+            trade_price = bar.close
+            commission = trade_price * quantity * config.commission_rate
+            slippage_cost = trade_price * quantity * config.slippage
+
+            if direction == "buy":
+                cost = trade_price * quantity + commission + slippage_cost
+                if cost > account.available_cash:
+                    event.stop_propagation()
+                    return
+                account.commit_buy(cost)
+                try:
+                    position_manager.get_or_create(symbol).buy(quantity, trade_price, date_val)
+                except Exception:
+                    return
+            else:
+                proceeds = trade_price * quantity - commission - slippage_cost
+                try:
+                    _, realized_pnl = position_manager.get_or_create(symbol).sell(
+                        quantity, trade_price, date_val
+                    )
+                except ValueError:
+                    event.stop_propagation()
+                    return
+                account.commit_sell(proceeds)
+
+            trade_id = str(uuid.uuid4())[:12]
+            event_bus.publish_event(Event(
+                EventType.TRADE,
+                data={
+                    "trade_id": trade_id,
+                    "order_id": order_id,
+                    "symbol": symbol,
+                    "direction": direction,
+                    "price": trade_price,
+                    "quantity": quantity,
+                    "commission": commission,
+                    "date": date_val,
+                    "pnl": None,
+                },
+            ))
+
+        event_bus.add_listener(EventType.ORDER_CREATION_PASS, on_order_creation_pass, system=True)
+
+        # ── 8. 策略上下文中转订单到事件总线 ──
+        def on_bar_dispatch_orders(event: Event) -> None:
+            """BAR 处理后，将策略上下文的待发订单推送到 EventBus 做风控"""
+            ctx.current_date = event.data.get("date")
+            ctx.current_bar = event.data.get("bar")
+            if ctx.current_bar:
+                bar = ctx.current_bar
+                orders = ctx.pending_orders.copy()
+                ctx.clear_orders()
+
+                for order in orders:
+                    # 补充 ref_price 用于价格校验
+                    order["ref_price"] = bar.close
+                    # 风控校验 → 通过则撮合
+                    order_event = Event(
+                        EventType.ORDER_PENDING_NEW,
+                        data={"order": order, "bar": bar, "date": ctx.current_date},
+                    )
+                    if event_bus.publish_event(order_event):
+                        event_bus.publish_event(Event(
+                            EventType.ORDER_CREATION_PASS,
+                            data=order_event.data,
+                        ))
+
+        event_bus.add_listener(EventType.POST_BAR, on_bar_dispatch_orders, system=True)
+
+        # ── 9. 执行主循环 ──
+        executor = EventDrivenExecutor(event_bus, calendar)
+        executor.run(event_source)
+
+        # ── 10. 计算绩效 ──
+        navs = portfolio.nav_series
+        d_returns = portfolio.daily_returns
+
+        if not navs:
+            return BacktestResult(initial_capital=config.initial_capital,
+                                  final_capital=config.initial_capital)
+
+        metrics = compute_metrics(
+            nav_series=navs,
+            daily_returns=d_returns,
+            trades=trade_collector.to_dicts(),
+            risk_free=0.02,
+            freq=config.bar_type,
+        )
+
+        final_nav = navs[-1]["nav"] if navs else 1.0
+        n_days = len(navs)
+
         return BacktestResult(
+            total_return=metrics.total_return,
+            annual_return=metrics.annual_return,
+            annual_volatility=metrics.annual_volatility,
+            sharpe_ratio=metrics.sharpe_ratio,
+            sortino_ratio=metrics.sortino_ratio,
+            max_drawdown=metrics.max_drawdown,
+            calmar_ratio=metrics.calmar_ratio,
+            alpha=metrics.alpha,
+            beta=metrics.beta,
+            information_ratio=metrics.information_ratio,
+            total_trades=metrics.total_trades,
+            win_trades=metrics.win_trades,
+            loss_trades=metrics.loss_trades,
+            win_rate=metrics.win_rate,
+            avg_return=metrics.avg_return,
+            nav_series=navs,
+            daily_returns=d_returns,
+            trades=trade_collector.to_dicts(),
+            start_date=start,
+            end_date=end,
             initial_capital=config.initial_capital,
-            final_capital=config.initial_capital,
+            final_capital=config.initial_capital * final_nav,
+            n_trading_days=n_days,
         )
 
     async def _load_factor_matrix(

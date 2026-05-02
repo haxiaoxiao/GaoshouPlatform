@@ -43,8 +43,12 @@ class BacktestResult:
     annual_return: float = 0.0
     annual_volatility: float = 0.0
     sharpe_ratio: float = 0.0
+    sortino_ratio: float = 0.0
     max_drawdown: float = 0.0
     calmar_ratio: float = 0.0
+    alpha: float = 0.0
+    beta: float = 0.0
+    information_ratio: float = 0.0
 
     total_trades: int = 0
     win_trades: int = 0
@@ -71,9 +75,14 @@ class BacktestResult:
             "total_return": self.total_return,
             "annual_return": self.annual_return,
             "annual_volatility": self.annual_volatility,
+            "sharpe": self.sharpe_ratio,  # frontend compat
             "sharpe_ratio": self.sharpe_ratio,
+            "sortino": self.sortino_ratio,
             "max_drawdown": self.max_drawdown,
-            "calmar_ratio": self.calmar_ratio,
+            "calmar": self.calmar_ratio,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "information_ratio": self.information_ratio,
             "total_trades": self.total_trades,
             "win_trades": self.win_trades,
             "loss_trades": self.loss_trades,
