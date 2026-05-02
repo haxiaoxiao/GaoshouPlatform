@@ -81,6 +81,12 @@ const router = createRouter({
       component: () => import('@/views/SystemMonitor/index.vue'),
       meta: { title: '系统监控' },
     },
+    {
+      path: '/docs',
+      name: 'Docs',
+      component: () => import('@/views/Docs/index.vue'),
+      meta: { title: '文档中心' },
+    },
   ],
 })
 

@@ -2,10 +2,16 @@
   <div class="page-container">
     <div class="page-header">
       <h2>策略回测</h2>
-      <el-button type="primary" @click="handleCreate">
-        <el-icon><Plus /></el-icon>
-        新建策略
-      </el-button>
+      <div class="page-header-actions">
+        <el-button link type="primary" @click="$router.push('/docs')">
+          <el-icon><Document /></el-icon>
+          使用手册
+        </el-button>
+        <el-button type="primary" @click="handleCreate">
+          <el-icon><Plus /></el-icon>
+          新建策略
+        </el-button>
+      </div>
     </div>
     <el-tabs v-model="activeTab" class="strategy-tabs">
       <el-tab-pane label="策略列表" name="strategyList">
@@ -144,7 +150,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { Plus, Document } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import BacktestList from './BacktestList.vue'
@@ -464,6 +470,12 @@ onMounted(() => {
   font-size: 20px;
   font-weight: 600;
   color: #303133;
+}
+
+.page-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .strategy-tabs {
