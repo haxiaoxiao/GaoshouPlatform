@@ -1,4 +1,6 @@
 """Bar 数据源 — 从 ClickHouse 加载日线数据"""
+from __future__ import annotations
+
 from datetime import date, datetime
 from typing import Iterator, TYPE_CHECKING
 
@@ -29,7 +31,7 @@ class Bar:
 
     __slots__ = ("_data", "_source", "_symbol", "_trade_date")
 
-    def __init__(self, symbol: str, trade_date: date, data: dict, source: "BarEventSource | None" = None):
+    def __init__(self, symbol: str, trade_date: "date | datetime", data: dict, source: "BarEventSource | None" = None):
         self._symbol = symbol
         self._trade_date = trade_date
         self._data = data
@@ -48,13 +50,24 @@ class Bar:
 
     @property
     def datetime(self) -> datetime:
-        """时间戳"""
+        """时间戳 — 日线返回日期零点，分钟线返回实际时间"""
+        if isinstance(self._trade_date, datetime):
+            return self._trade_date
         return datetime.combine(self._trade_date, datetime.min.time())
 
     @property
     def trade_date(self) -> date:
         """交易日期"""
+        if isinstance(self._trade_date, datetime):
+            return self._trade_date.date()
         return self._trade_date
+
+    @property
+    def minute_time(self) -> datetime | None:
+        """分钟时间戳 — 仅分钟 Bar 有效，日线 Bar 返回 None"""
+        if isinstance(self._trade_date, datetime):
+            return self._trade_date
+        return None
 
     # ── OHLCV ──
     @property
@@ -163,12 +176,48 @@ class Bar:
             raise KeyError(key)
 
     @classmethod
-    def from_row(cls, symbol: str, trade_date: date, row: dict, source: "BarEventSource | None" = None) -> "Bar":
+    def from_row(cls, symbol: str, trade_date: "date | datetime", row: dict, source: "BarEventSource | None" = None) -> "Bar":
         return cls(symbol=symbol, trade_date=trade_date, data=dict(row), source=source)
 
 
+class BarDict:
+    """bar_dict — 兼容 RQAlpha BarMap，提供 dict-like 访问所有标的当前 Bar"""
+
+    def __init__(self, bars: dict[str, Bar], trade_date: date):
+        self._bars = bars
+        self.dt = trade_date
+
+    def __getitem__(self, key: str) -> Bar:
+        if key not in self._bars:
+            raise KeyError(f"{key} not in bar_dict (available: {list(self._bars.keys())})")
+        return self._bars[key]
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._bars
+
+    def __len__(self) -> int:
+        return len(self._bars)
+
+    def __iter__(self):
+        return iter(self._bars)
+
+    def items(self):
+        return self._bars.items()
+
+    def keys(self):
+        return self._bars.keys()
+
+    def values(self):
+        return self._bars.values()
+
+    def __repr__(self) -> str:
+        syms = list(self._bars.keys())[:5]
+        more = f" +{len(self._bars) - 5}" if len(self._bars) > 5 else ""
+        return f"BarDict(dt={self.dt}, symbols={syms}{more})"
+
+
 class BarEventSource:
-    """日线 Bar 数据源 — 一次性加载，按交易日产出 Bar 序列"""
+    """Bar 数据源 — 一次性加载日线/分钟数据，按交易日产出 Bar 序列"""
 
     def __init__(
         self,
@@ -176,13 +225,17 @@ class BarEventSource:
         start_date: date,
         end_date: date,
         calendar: TradingCalendar,
+        bar_type: str = "daily",
     ):
         self.symbols = symbols
         self.start_date = start_date
         self.end_date = end_date
         self.calendar = calendar
+        self.bar_type = bar_type
         # {symbol: DataFrame(index=trade_date)}
         self._data: dict[str, pd.DataFrame] = {}
+        # {symbol: DataFrame(index=datetime)} — minute data
+        self._minute_data: dict[str, pd.DataFrame] = {}
         self._loaded = False
 
     @classmethod
@@ -192,11 +245,12 @@ class BarEventSource:
         start_date: date,
         end_date: date,
         calendar: TradingCalendar,
+        bar_type: str = "daily",
     ) -> "BarEventSource":
-        """从 ClickHouse 加载日线数据"""
+        """从 ClickHouse 加载日线/分钟数据"""
         from app.db.clickhouse import get_ch_client
 
-        source = cls(symbols, start_date, end_date, calendar)
+        source = cls(symbols, start_date, end_date, calendar, bar_type=bar_type)
         ch = get_ch_client()
 
         rows = ch.execute(
@@ -230,6 +284,38 @@ class BarEventSource:
         for sym, grp in df.groupby("symbol"):
             source._data[sym] = grp.set_index("trade_date")
 
+        # Load minute data when bar_type is minute
+        if bar_type in ("1m", "minute"):
+            try:
+                minute_rows = ch.execute(
+                    """
+                    SELECT symbol, datetime, open, high, low, close, volume, amount
+                    FROM klines_minute
+                    WHERE symbol IN %(syms)s
+                      AND toDate(datetime) >= %(start)s
+                      AND toDate(datetime) <= %(end)s
+                    ORDER BY symbol, datetime
+                    """,
+                    {"syms": symbols, "start": start_date, "end": end_date},
+                )
+            except Exception as e:
+                logger.warning("BarEventSource: failed to load minute data (table may not exist): {}", e)
+                minute_rows = []
+            if minute_rows:
+                mdf = pd.DataFrame(
+                    minute_rows,
+                    columns=["symbol", "datetime", "open", "high", "low",
+                             "close", "volume", "amount"],
+                )
+                for col in ["open", "high", "low", "close", "amount"]:
+                    mdf[col] = mdf[col].astype(float)
+                mdf["datetime"] = pd.to_datetime(mdf["datetime"])
+                mdf = mdf.drop_duplicates(subset=["symbol", "datetime"], keep="first")
+                for sym, grp in mdf.groupby("symbol"):
+                    source._minute_data[sym] = grp.set_index("datetime")
+                logger.info("BarEventSource: loaded {} symbols minute data, {} rows",
+                            len(source._minute_data), len(mdf))
+
         source._loaded = True
         logger.info("BarEventSource: loaded {} symbols, {} rows", len(source._data), len(df))
         return source
@@ -239,11 +325,14 @@ class BarEventSource:
         cls,
         data: dict[str, pd.DataFrame],
         calendar: TradingCalendar,
+        minute_data: dict[str, pd.DataFrame] | None = None,
     ) -> "BarEventSource":
         """从已有 DataFrame 创建（测试用）"""
         source = cls(symbols=list(data.keys()), start_date=date(2000, 1, 1),
                      end_date=date(2099, 12, 31), calendar=calendar)
         source._data = data
+        if minute_data:
+            source._minute_data = minute_data
         source._loaded = True
         return source
 
@@ -281,6 +370,28 @@ class BarEventSource:
         ts = pd.Timestamp(end_date)
         mask = df.index <= ts
         return df.loc[mask].tail(n_days)
+
+    def get_intraday(self, symbol: str, trade_date: date) -> list[Bar]:
+        """获取某标的某日的所有分钟 Bar"""
+        df = self._minute_data.get(symbol)
+        if df is None:
+            return []
+        day_start = pd.Timestamp(datetime.combine(trade_date, datetime.min.time()))
+        day_end = day_start + pd.Timedelta(days=1)
+        mask = (df.index >= day_start) & (df.index < day_end)
+        rows = df.loc[mask]
+        return [Bar(symbol, idx.to_pydatetime(), row.to_dict(), source=self)
+                for idx, row in rows.iterrows()]
+
+    def get_intraday_history(self, symbol: str, end_date: date, n_days: int = 5) -> pd.DataFrame:
+        """获取某标的截止某日的 N 日分钟 OHLCV 数据"""
+        df = self._minute_data.get(symbol)
+        if df is None:
+            return pd.DataFrame()
+        end_ts = pd.Timestamp(datetime.combine(end_date, datetime.max.time()))
+        start_ts = end_ts - pd.Timedelta(days=n_days * 2)
+        mask = (df.index <= end_ts) & (df.index >= start_ts)
+        return df.loc[mask].copy()
 
     def iter_trading_dates(self) -> Iterator[date]:
         """按交易日历迭代日期"""

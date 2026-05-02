@@ -133,8 +133,8 @@ class TestPositionManager:
 
         from app.backtest.event.event_source import Bar
         bars = {
-            "A": Bar("A", date(2024, 1, 3), 15, 16, 9, 14, 10000, 140000, 0.1),
-            "B": Bar("B", date(2024, 1, 3), 25, 26, 19, 24, 20000, 480000, 0.2),
+            "A": Bar("A", date(2024, 1, 3), {"open": 15, "high": 16, "low": 9, "close": 14, "volume": 10000, "amount": 140000}),
+            "B": Bar("B", date(2024, 1, 3), {"open": 25, "high": 26, "low": 19, "close": 24, "volume": 20000, "amount": 480000}),
         }
         pm.update_prices(bars)
 

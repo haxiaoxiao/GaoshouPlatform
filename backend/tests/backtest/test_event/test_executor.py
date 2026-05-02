@@ -70,18 +70,20 @@ class TestExecutor:
 
     def test_bar_data_contains_symbol_and_prices(self, event_source):
         bus = EventBus()
-        bars = []
+        bar_dicts = []
 
-        bus.add_listener(EventType.BAR, lambda e: bars.append(e.data["bar"]))
+        bus.add_listener(EventType.BAR, lambda e: bar_dicts.append(e.data["bar_dict"]))
 
         executor = EventDrivenExecutor(bus)
         executor.run(event_source)
 
-        assert len(bars) >= 5  # 5 dates * 2 symbols
-        first_bar = bars[0]
-        assert first_bar.symbol in ("000300.SH", "600000.SH")
-        assert first_bar.close > 0
-        assert first_bar.volume > 0
+        assert len(bar_dicts) == 5  # 5 dates, 1 bar_dict per day
+        bd = bar_dicts[0]
+        assert len(bd) == 2  # 000300.SH, 600000.SH
+        bar = bd["000300.SH"]
+        assert bar.symbol == "000300.SH"
+        assert bar.close > 0
+        assert bar.volume > 0
 
     def test_execution_context_counts(self, event_source):
         bus = EventBus()
@@ -107,8 +109,8 @@ class TestExecutor:
         executor = EventDrivenExecutor(bus)
         executor.run(event_source)
 
-        # All bars after the first block should pass, but the first one is blocked
-        assert len(bars) >= 8  # 9 instead of 10 (one blocked)
+        # First BAR is blocked, so 4 daily bars pass (instead of 5)
+        assert len(bars) >= 4
 
     def test_engine_start_blocked_aborts(self, event_source):
         bus = EventBus()

@@ -238,6 +238,25 @@ class BacktestService:
         result = await self.session.execute(query)
         return result.scalar_one_or_none()
 
+    async def delete_backtest(self, backtest_id: int) -> bool:
+        """删除单个回测记录"""
+        backtest = await self.get_backtest(backtest_id)
+        if backtest is None:
+            return False
+        await self.session.delete(backtest)
+        await self.session.flush()
+        return True
+
+    async def delete_backtests_batch(self, ids: list[int]) -> int:
+        """批量删除回测记录，返回删除数量"""
+        query = select(Backtest).where(Backtest.id.in_(ids))
+        result = await self.session.execute(query)
+        backtests = list(result.scalars().all())
+        for b in backtests:
+            await self.session.delete(b)
+        await self.session.flush()
+        return len(backtests)
+
     async def run_backtest(self, backtest_id: int) -> dict[str, Any]:
         """
         运行回测

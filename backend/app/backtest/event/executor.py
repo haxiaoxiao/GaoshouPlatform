@@ -5,11 +5,11 @@ from loguru import logger
 
 from app.backtest.event.events import Event, EventType
 from app.backtest.event.event_bus import EventBus
-from app.backtest.event.event_source import Bar, BarEventSource
+from app.backtest.event.event_source import Bar, BarDict, BarEventSource
 
 
 class EventDrivenExecutor:
-    """事件驱动执行器 — 按交易日历遍历 Bar，拆分为生命周期事件分发"""
+    """事件驱动执行器 — 按交易日历遍历，每个交易日触发一次 bar_dict 生命周期"""
 
     def __init__(self, event_bus: EventBus, calendar=None):
         self.event_bus = event_bus
@@ -43,44 +43,43 @@ class EventDrivenExecutor:
             if not bars:
                 continue
 
+            bar_dict = BarDict(bars, trade_date)
+            ctx["n_bars"] += len(bars)
+
             # Phase 1: BEFORE_TRADING
             self.event_bus.publish_event(Event(
                 EventType.BEFORE_TRADING,
-                data={"date": trade_date, "bars": bars, "ctx": ctx},
+                data={"date": trade_date, "bars": bars, "bar_dict": bar_dict, "ctx": ctx},
                 timestamp=datetime.now(),
             ))
 
-            # Phase 2: Per-instrument BAR lifecycle
-            for symbol, bar in bars.items():
-                ctx["n_bars"] += 1
+            # Phase 2: BAR (一次，传入 bar_dict)
+            # PRE_BAR
+            pre_ok = self.event_bus.publish_event(Event(
+                EventType.PRE_BAR,
+                data={"bar_dict": bar_dict, "bars": bars, "date": trade_date, "ctx": ctx},
+                timestamp=datetime.now(),
+            ))
 
-                # PRE_BAR
-                if not self.event_bus.publish_event(Event(
-                    EventType.PRE_BAR,
-                    data={"bar": bar, "date": trade_date, "ctx": ctx},
-                    timestamp=datetime.now(),
-                )):
-                    continue
-
-                # BAR (主事件 — 策略信号在此)
-                if not self.event_bus.publish_event(Event(
-                    EventType.BAR,
-                    data={"bar": bar, "date": trade_date, "ctx": ctx},
-                    timestamp=datetime.now(),
-                )):
-                    continue
-
-                # POST_BAR
+            if pre_ok:
+                # BAR (策略 handle_bar 在此)
                 self.event_bus.publish_event(Event(
-                    EventType.POST_BAR,
-                    data={"bar": bar, "date": trade_date, "ctx": ctx},
+                    EventType.BAR,
+                    data={"bar_dict": bar_dict, "bars": bars, "date": trade_date, "ctx": ctx},
                     timestamp=datetime.now(),
                 ))
+
+            # POST_BAR
+            self.event_bus.publish_event(Event(
+                EventType.POST_BAR,
+                data={"bar_dict": bar_dict, "bars": bars, "date": trade_date, "ctx": ctx},
+                timestamp=datetime.now(),
+            ))
 
             # Phase 3: AFTER_TRADING + SETTLEMENT
             self.event_bus.publish_event(Event(
                 EventType.AFTER_TRADING,
-                data={"date": trade_date, "bars": bars, "ctx": ctx},
+                data={"date": trade_date, "bars": bars, "bar_dict": bar_dict, "ctx": ctx},
                 timestamp=datetime.now(),
             ))
 

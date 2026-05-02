@@ -58,6 +58,7 @@ class BacktestRunner:
         symbols = config.symbols
         start = config.start_date or date(2020, 1, 1)
         end = config.end_date or date(2025, 12, 31)
+        bar_type = config.bar_type or "daily"
 
         # ── 1. 建立事件总线 ──
         event_bus = EventBus()
@@ -71,7 +72,7 @@ class BacktestRunner:
 
         # ── 3. 加载 Bar 数据 ──
         try:
-            event_source = await BarEventSource.from_clickhouse(symbols, start, end, calendar)
+            event_source = await BarEventSource.from_clickhouse(symbols, start, end, calendar, bar_type=bar_type)
         except ValueError as e:
             logger.error("BarEventSource load failed: {}", e)
             return BacktestResult(initial_capital=config.initial_capital)
@@ -157,6 +158,7 @@ class BacktestRunner:
                 start_date=start,
                 end_date=end,
                 capital=config.initial_capital,
+                bar_type=bar_type,
             )
             strategy = UserScriptStrategy(
                 code=script,
@@ -210,6 +212,8 @@ class BacktestRunner:
             commission = trade_price * quantity * config.commission_rate
             slippage_cost = trade_price * quantity * config.slippage
 
+            trade_pnl = 0.0
+
             if direction == "buy":
                 cost = trade_price * quantity + commission + slippage_cost
                 if cost > account.available_cash:
@@ -229,7 +233,7 @@ class BacktestRunner:
             else:
                 proceeds = trade_price * quantity - commission - slippage_cost
                 try:
-                    _, realized_pnl = position_manager.get_or_create(symbol).sell(
+                    _, trade_pnl = position_manager.get_or_create(symbol).sell(
                         quantity, trade_price, date_val
                     )
                 except ValueError:
@@ -254,7 +258,7 @@ class BacktestRunner:
                 "quantity": quantity,
                 "commission": commission,
                 "date": date_val,
-                "pnl": None,
+                "pnl": round(trade_pnl, 2),
             }
             event_bus.publish_event(Event(
                 EventType.TRADE,
@@ -273,43 +277,54 @@ class BacktestRunner:
             """BAR 处理后，将策略上下文的待发订单推送到 EventBus 做风控"""
             if ctx is None:
                 return
+            bar_dict = event.data.get("bar_dict")
             ctx.current_date = event.data.get("date")
-            ctx.current_bar = event.data.get("bar")
-            if ctx.current_bar:
-                bar = ctx.current_bar
-                record_event("BAR", {
-                    "symbol": bar.symbol,
-                    "close": round(bar.close, 4),
-                })
-                orders = ctx.pending_orders.copy()
-                ctx.clear_orders()
+            ctx._bar_dict = bar_dict
 
-                for order in orders:
-                    # 补充 ref_price 用于价格校验
-                    order["ref_price"] = bar.close
-                    # 风控校验 → 通过则撮合
-                    order_event = Event(
-                        EventType.ORDER_PENDING_NEW,
-                        data={"order": order, "bar": bar, "date": ctx.current_date},
-                    )
-                    if event_bus.publish_event(order_event):
-                        event_bus.publish_event(Event(
-                            EventType.ORDER_CREATION_PASS,
-                            data=order_event.data,
-                        ))
-                        record_event("ORDER_PASS", {
-                            "order_id": order.get("order_id", ""),
-                            "symbol": order.get("symbol", ""),
-                            "direction": order.get("direction", "buy"),
-                            "quantity": order.get("quantity", 0),
-                            "price": order.get("price", 0),
-                        })
-                    else:
-                        record_event("ORDER_REJECT", {
-                            "order_id": order.get("order_id", ""),
-                            "symbol": order.get("symbol", ""),
-                            "reason": "风控拒绝",
-                        })
+            if bar_dict is None:
+                return
+
+            orders = ctx.pending_orders.copy()
+            ctx.clear_orders()
+
+            for order in orders:
+                symbol = order.get("symbol", "")
+                # 从 bar_dict 查找对应 Bar 设置 ref_price
+                bar = bar_dict[symbol] if symbol in bar_dict else None
+                if bar is None:
+                    continue
+                order["ref_price"] = bar.close
+                # 风控校验 → 通过则撮合
+                order_event = Event(
+                    EventType.ORDER_PENDING_NEW,
+                    data={"order": order, "bar": bar, "date": ctx.current_date},
+                )
+                if event_bus.publish_event(order_event):
+                    event_bus.publish_event(Event(
+                        EventType.ORDER_CREATION_PASS,
+                        data=order_event.data,
+                    ))
+                    record_event("ORDER_PASS", {
+                        "order_id": order.get("order_id", ""),
+                        "symbol": symbol,
+                        "direction": order.get("direction", "buy"),
+                        "quantity": order.get("quantity", 0),
+                        "price": order.get("price", 0),
+                    })
+                else:
+                    record_event("ORDER_REJECT", {
+                        "order_id": order.get("order_id", ""),
+                        "symbol": symbol,
+                        "reason": "风控拒绝",
+                    })
+
+            # 记录每日 BAR 摘要
+            for sym in bar_dict:
+                b = bar_dict[sym]
+                record_event("BAR", {
+                    "symbol": sym,
+                    "close": round(b.close, 4),
+                })
 
         event_bus.add_listener(EventType.POST_BAR, on_bar_dispatch_orders, system=True)
 

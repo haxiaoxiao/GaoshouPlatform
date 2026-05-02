@@ -14,7 +14,7 @@ class TradingCalendar:
         """
         self._dates: list[date] | None = None
         self._dates_set: set[date] | None = None
-        if trading_dates:
+        if trading_dates is not None:
             self._dates = sorted(trading_dates)
             self._dates_set = set(self._dates)
 

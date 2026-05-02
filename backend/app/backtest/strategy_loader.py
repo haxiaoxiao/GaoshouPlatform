@@ -122,39 +122,42 @@ class ExpressionSignalStrategy:
         event_bus.add_listener(EventType.BAR, self._on_bar)
 
     def _on_bar(self, event: Event) -> None:
-        bar: Bar = event.data["bar"]
+        bar_dict = event.data.get("bar_dict")
         date_val = event.data.get("date")
         source = self._ctx.event_source
 
-        if source is None:
+        if source is None or bar_dict is None:
             return
 
-        # 计算信号值
-        hist = source.get_history(bar.symbol, bar.trade_date, n_days=252)
-        if hist.empty:
-            return
+        for symbol, bar in bar_dict.items():
+            # 计算信号值
+            hist = source.get_history(symbol, bar.trade_date, n_days=252)
+            if hist.empty:
+                continue
 
-        try:
-            sig = self._compute_signal(bar.symbol, {bar.symbol: hist})
-            if sig is None:
-                return
-        except Exception as exc:
-            logger.debug("Signal compute failed for {}: {}", bar.symbol, exc)
-            return
+            try:
+                sig = self._compute_signal(symbol, {symbol: hist})
+                if sig is None:
+                    continue
+            except Exception as exc:
+                logger.debug("Signal compute failed for {}: {}", symbol, exc)
+                continue
 
-        # 信号 → 订单
-        if sig > self.buy_threshold:
-            pos = self._ctx.position_manager.get_or_create(bar.symbol)
-            if pos.total_shares == 0:
-                available = self._ctx.account.available_cash * self.position_pct
-                self._ctx.order_value(bar.symbol, available, bar.close, "buy")
-        elif sig < self.sell_threshold:
-            pos = self._ctx.position_manager.get(bar.symbol)
-            if pos and pos.total_shares > 0:
-                try:
-                    self._ctx.order_shares(bar.symbol, -pos.total_shares, bar.close)
-                except ValueError:
-                    pass  # T+1 locked
+            # 信号 → 订单
+            if sig > self.buy_threshold:
+                pos = self._ctx.position_manager.get_or_create(symbol)
+                if pos.total_shares == 0:
+                    available = self._ctx.account.available_cash * self.position_pct
+                    self._ctx.current_bar = bar
+                    self._ctx.order_value(symbol, available, bar.close, "buy")
+            elif sig < self.sell_threshold:
+                pos = self._ctx.position_manager.get(symbol)
+                if pos and pos.total_shares > 0:
+                    try:
+                        self._ctx.current_bar = bar
+                        self._ctx.order_shares(symbol, -pos.total_shares, bar.close)
+                    except ValueError:
+                        pass  # T+1 locked
 
     def _compute_signal(self, symbol: str, data: dict[str, pd.DataFrame]) -> float | None:
         from app.compute.expression import evaluate_expression

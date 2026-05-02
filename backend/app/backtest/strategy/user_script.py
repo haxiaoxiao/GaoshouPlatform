@@ -201,6 +201,7 @@ class UserContext:
         start_date: date | None = None,
         end_date: date | None = None,
         capital: float = 1_000_000,
+        bar_type: str = "daily",
     ):
         self.symbols = symbols
         self._account = account
@@ -208,9 +209,11 @@ class UserContext:
         self._event_source = event_source
         self._params = params or {}
         self._orders: dict[str, Order] = {}
+        self.bar_type = bar_type
 
         self.current_bar: Bar | None = None
         self.current_date: date | None = None
+        self._bar_dict = None  # BarDict — 当日所有标的 Bar
         self._pending_orders: list[dict] = []
         self._order_counter: int = 0
         self._history_cache: dict[str, pd.DataFrame] = {}
@@ -286,6 +289,14 @@ class UserContext:
     def update_universe(self, symbols: list[str]) -> None:
         self._universe = set(symbols)
 
+    def _get_bar_price(self, symbol: str) -> float:
+        """从 bar_dict 获取当前标的价格"""
+        if self._bar_dict and symbol in self._bar_dict:
+            return self._bar_dict[symbol].close
+        if self.current_bar and self.current_bar.symbol == symbol:
+            return self.current_bar.close
+        return 0.0
+
     # ── 下单 API ──
     def _create_order(self, symbol: str, direction: str, quantity: int, price: float) -> Order | None:
         if quantity <= 0 or price <= 0:
@@ -310,8 +321,8 @@ class UserContext:
         """按股数下单。正=买入，负=卖出。兼容 RQAlpha"""
         if shares == 0:
             return None
-        if price is None and self.current_bar:
-            price = self.current_bar.close
+        if price is None:
+            price = self._get_bar_price(symbol)
         if price is None or price <= 0:
             return None
         direction = "buy" if shares > 0 else "sell"
@@ -321,8 +332,8 @@ class UserContext:
         """按金额下单。value > 0 买入，value < 0 卖出。兼容 RQAlpha"""
         if value == 0:
             return None
-        if price is None and self.current_bar:
-            price = self.current_bar.close
+        if price is None:
+            price = self._get_bar_price(symbol)
         if price is None or price <= 0:
             return None
         direction = "buy" if value > 0 else "sell"
@@ -333,9 +344,9 @@ class UserContext:
         return self._create_order(symbol, direction, shares, price)
 
     def order_target_pct(self, symbol: str, pct: float, price: float | None = None) -> Order | None:
-        """目标仓位百分比下单。兼容 RQAlpha"""
-        if price is None and self.current_bar:
-            price = self.current_bar.close
+        """目标仓位百分比下单。兼容 RQAlpha order_target_percent"""
+        if price is None:
+            price = self._get_bar_price(symbol)
         if price is None or price <= 0:
             return None
         target_value = self.total_value * pct
@@ -386,6 +397,21 @@ class UserContext:
         df = self._event_source.get_history(symbol, self.current_date, n_days)
         self._history_cache[cache_key] = df
         return df
+
+    def get_intraday(self, symbol: str, trade_date: date | None = None) -> list[Bar]:
+        """获取某标的某日的所有分钟 Bar。未指定日期则用 current_date"""
+        td = trade_date or self.current_date
+        if td is None:
+            return []
+        return self._event_source.get_intraday(symbol, td)
+
+    def get_intraday_history(self, symbol: str, n_days: int = 5,
+                              end_date: date | None = None) -> pd.DataFrame:
+        """获取某标的截止某日的 N 日分钟 OHLCV 数据"""
+        ed = end_date or self.current_date
+        if ed is None:
+            return pd.DataFrame()
+        return self._event_source.get_intraday_history(symbol, ed, n_days)
 
     def history_bars(self, symbol: str, bar_count: int, frequency: str = "1d",
                      fields: str | list[str] | None = None) -> np.ndarray:
@@ -592,11 +618,14 @@ def _every(condition: pd.Series | np.ndarray, n: int) -> pd.Series:
 # ── UserScriptStrategy ──
 
 class UserScriptStrategy:
-    """用户脚本策略 — exec() 执行 init + handle_bar
+    """用户脚本策略 — exec() 执行 init + handle_bar(context, bar_dict)
+
+    RQAlpha 兼容: handle_bar 每天触发一次，bar_dict 提供 dict-like 访问所有标的 Bar。
+    同时支持 before_trading(context) / after_trading(context) 生命周期回调。
 
     沙箱提供:
       - 全局函数: MA, EMA, RSI, MACD, HHV, LLV, CROSS, REF, SMA, ATR, STD, COUNT, EVERY
-      - 顶层 API: order_shares, order_value, order_target_pct, order,
+      - 顶层 API: order_shares, order_value, order_target_pct, order_target_percent, order,
                   history_bars, current_snapshot, get_open_orders, cancel_order, get_positions
       - 类型: Order, OrderStatus
       - 数学库: np, pd
@@ -608,6 +637,8 @@ class UserScriptStrategy:
         self._params = params or {}
         self._init_fn = None
         self._handle_bar_fn = None
+        self._before_trading_fn = None
+        self._after_trading_fn = None
         self._ctx: UserContext | None = None
 
     def register(self, event_bus, ctx: UserContext) -> None:
@@ -621,13 +652,16 @@ class UserScriptStrategy:
         namespace["order_shares"] = ctx.order_shares
         namespace["order_value"] = ctx.order_value
         namespace["order_target_pct"] = ctx.order_target_pct
-        namespace["order"] = ctx.order_shares  # RQAlpha 兼容别名
+        namespace["order_target_percent"] = ctx.order_target_pct  # RQAlpha 全名别名
+        namespace["order"] = ctx.order_shares
         namespace["history_bars"] = ctx.history_bars
         namespace["current_snapshot"] = ctx.current_snapshot
         namespace["get_open_orders"] = ctx.get_open_orders
         namespace["cancel_order"] = ctx.cancel_order
         namespace["get_positions"] = ctx.portfolio.get_positions
         namespace["get_history"] = ctx.get_history
+        namespace["get_intraday"] = ctx.get_intraday
+        namespace["get_intraday_history"] = ctx.get_intraday_history
         namespace["log"] = ctx.log
 
         try:
@@ -638,9 +672,11 @@ class UserScriptStrategy:
 
         self._init_fn = namespace.get("init")
         self._handle_bar_fn = namespace.get("handle_bar")
+        self._before_trading_fn = namespace.get("before_trading")
+        self._after_trading_fn = namespace.get("after_trading")
 
-        if self._handle_bar_fn is None:
-            raise ValueError("策略脚本必须定义 handle_bar(context, bar) 函数")
+        if self._handle_bar_fn is None and self._before_trading_fn is None:
+            raise ValueError("策略脚本必须定义 handle_bar(context, bar_dict) 或 before_trading(context) 函数")
 
         # 调用 init
         if self._init_fn:
@@ -650,19 +686,46 @@ class UserScriptStrategy:
                 logger.error("init() failed: {}", exc)
                 raise ValueError(f"init() 执行失败: {exc}") from exc
 
-        # 注册 BAR 监听
+        # 注册事件监听
         event_bus.add_listener(EventType.BAR, self._on_bar)
+        if self._before_trading_fn:
+            event_bus.add_listener(EventType.BEFORE_TRADING, self._on_before_trading)
+        if self._after_trading_fn:
+            event_bus.add_listener(EventType.AFTER_TRADING, self._on_after_trading)
+
+    def _on_before_trading(self, event: Event) -> None:
+        ctx = self._ctx
+        if ctx is None or self._before_trading_fn is None:
+            return
+        ctx.current_date = event.data.get("date")
+        ctx._bar_dict = event.data.get("bar_dict")
+        try:
+            self._before_trading_fn(ctx)
+        except Exception as exc:
+            logger.error("before_trading failed on {}: {}", ctx.current_date, exc)
 
     def _on_bar(self, event: Event) -> None:
         ctx = self._ctx
-        if ctx is None:
+        if ctx is None or self._handle_bar_fn is None:
             return
 
-        bar: Bar = event.data["bar"]
+        bar_dict = event.data.get("bar_dict")
         ctx.current_date = event.data.get("date")
-        ctx.current_bar = bar
+        ctx._bar_dict = bar_dict
 
+        # bar_dict 是 BarDict，handle_bar(context, bar_dict)
         try:
-            self._handle_bar_fn(ctx, bar)
+            self._handle_bar_fn(ctx, bar_dict)
         except Exception as exc:
-            logger.error("handle_bar failed for {} on {}: {}", bar.symbol, ctx.current_date, exc)
+            logger.error("handle_bar failed on {}: {}", ctx.current_date, exc)
+
+    def _on_after_trading(self, event: Event) -> None:
+        ctx = self._ctx
+        if ctx is None or self._after_trading_fn is None:
+            return
+        ctx.current_date = event.data.get("date")
+        ctx._bar_dict = event.data.get("bar_dict")
+        try:
+            self._after_trading_fn(ctx)
+        except Exception as exc:
+            logger.error("after_trading failed on {}: {}", ctx.current_date, exc)
