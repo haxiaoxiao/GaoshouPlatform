@@ -125,6 +125,7 @@ export interface BacktestResultData {
   loss_trades?: number
   win_rate?: number
   avg_return?: number
+  turnover_rate?: number
   trades?: Array<{
     trade_date?: string
     symbol?: string
@@ -132,7 +133,7 @@ export interface BacktestResultData {
     price?: number
     quantity?: number
     commission?: number
-    pnl?: number
+    pnl?: number | null
   }>
   nav_series?: Array<{ date: string; nav: number }>
   daily_returns?: Array<{ date: string; return: number }>
@@ -164,4 +165,6 @@ export const backtestApi = {
   get: (id: number) => request.get<BacktestReport>(`/backtest/backtests/${id}`),
   create: (data: BacktestCreate) => request.post<Backtest>('/backtest/backtests', data),
   run: (id: number) => request.post<BacktestResult>(`/backtest/backtests/${id}/run`),
+  delete: (id: number) => request.delete<{ deleted: boolean }>(`/backtest/backtests/${id}`),
+  deleteBatch: (ids: number[]) => request.delete<{ deleted_count: number }>('/backtest/backtests/batch', { data: { ids } }),
 }

@@ -70,12 +70,6 @@ const router = createRouter({
       meta: { title: '实盘交易' },
     },
     {
-      path: '/trend-capital',
-      name: 'TrendCapital',
-      component: () => import('@/views/TrendCapital/index.vue'),
-      meta: { title: '趋势资金策略' },
-    },
-    {
       path: '/monitor',
       name: 'SystemMonitor',
       component: () => import('@/views/SystemMonitor/index.vue'),

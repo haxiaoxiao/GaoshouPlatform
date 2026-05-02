@@ -2,6 +2,12 @@
   <div class="backtest-list-container">
     <!-- 工具栏 -->
     <div class="toolbar">
+      <div class="toolbar-left">
+        <el-button type="danger" plain size="small" :disabled="selectedIds.length === 0" @click="handleBatchDelete">
+          <el-icon><Delete /></el-icon>
+          批量删除 ({{ selectedIds.length }})
+        </el-button>
+      </div>
       <el-button type="primary" @click="handleCreate">
         <el-icon><Plus /></el-icon>
         新建回测
@@ -9,46 +15,55 @@
     </div>
 
     <!-- 回测列表 -->
-    <el-table v-loading="loading" :data="backtestList" stripe style="width: 100%">
-      <el-table-column prop="id" label="ID" width="80" />
-      <el-table-column prop="strategy_id" label="策略ID" width="100" />
-      <el-table-column prop="status" label="状态" width="100">
+    <el-table v-loading="loading" :data="backtestList" stripe style="width: 100%" @selection-change="handleSelectionChange">
+      <el-table-column type="selection" width="40" />
+      <el-table-column prop="id" label="ID" width="70" />
+      <el-table-column prop="status" label="状态" width="90">
         <template #default="{ row }">
           <el-tag :type="getStatusType(row.status)" size="small">
             {{ getStatusLabel(row.status) }}
           </el-tag>
         </template>
       </el-table-column>
-      <el-table-column prop="start_date" label="开始日期" width="120" />
-      <el-table-column prop="end_date" label="结束日期" width="120" />
-      <el-table-column prop="initial_capital" label="初始资金" width="140">
+      <el-table-column label="收益率" width="100">
         <template #default="{ row }">
-          {{ formatCapital(row.initial_capital) }}
+          <span v-if="row.result?.total_return != null" :style="{ color: row.result.total_return >= 0 ? '#d93026' : '#137333', fontWeight: 600 }">
+            {{ (row.result.total_return * 100).toFixed(1) }}%
+          </span>
+          <span v-else style="color:#666">—</span>
         </template>
       </el-table-column>
-      <el-table-column prop="created_at" label="创建时间" width="180">
+      <el-table-column label="Sharpe" width="80">
+        <template #default="{ row }">
+          {{ row.result?.sharpe_ratio?.toFixed(2) || '—' }}
+        </template>
+      </el-table-column>
+      <el-table-column label="胜率" width="80">
+        <template #default="{ row }">
+          {{ row.result?.win_rate != null ? (row.result.win_rate * 100).toFixed(0) + '%' : '—' }}
+        </template>
+      </el-table-column>
+      <el-table-column label="成交" width="70">
+        <template #default="{ row }">
+          {{ row.result?.total_trades ?? '—' }}
+        </template>
+      </el-table-column>
+      <el-table-column prop="start_date" label="区间" width="200">
+        <template #default="{ row }">
+          {{ row.start_date }} ~ {{ row.end_date }}
+        </template>
+      </el-table-column>
+      <el-table-column prop="created_at" label="创建时间" width="160">
         <template #default="{ row }">
           {{ formatDateTime(row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180" fixed="right">
+      <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }">
-          <el-button
-            type="primary"
-            link
-            :disabled="row.status !== 'pending'"
-            @click="handleRun(row)"
-          >
-            运行
+          <el-button type="success" link :disabled="row.status !== 'completed'" @click="handleViewReport(row)">
+            报告
           </el-button>
-          <el-button
-            type="success"
-            link
-            :disabled="row.status !== 'completed'"
-            @click="handleViewReport(row)"
-          >
-            查看报告
-          </el-button>
+          <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -129,8 +144,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
-import { ElMessage, type FormInstance, type FormRules } from 'element-plus'
-import { Plus } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
+import { Plus, Delete } from '@element-plus/icons-vue'
 import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/backtest'
 import BacktestReport from './BacktestReport.vue'
 import { formatDateTime, formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
@@ -160,6 +175,39 @@ const createFormRules: FormRules = {
   start_date: [{ required: true, message: '请选择开始日期', trigger: 'change' }],
   end_date: [{ required: true, message: '请选择结束日期', trigger: 'change' }],
   initial_capital: [{ required: true, message: '请输入初始资金', trigger: 'blur' }],
+}
+
+// 多选 & 删除
+const selectedIds = ref<number[]>([])
+const handleSelectionChange = (rows: Backtest[]) => {
+  selectedIds.value = rows.map(r => r.id)
+}
+
+const handleDelete = async (row: Backtest) => {
+  try {
+    await ElMessageBox.confirm(`确定删除回测记录 #${row.id}？`, '确认删除', { type: 'warning' })
+    await backtestApi.delete(row.id)
+    ElMessage.success('已删除')
+    loadBacktests()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('删除失败')
+  }
+}
+
+const handleBatchDelete = async () => {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除选中的 ${selectedIds.value.length} 条回测记录？此操作不可恢复。`,
+      '批量删除',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+    const res = await backtestApi.deleteBatch(selectedIds.value)
+    ElMessage.success(`已删除 ${res.deleted_count} 条`)
+    selectedIds.value = []
+    loadBacktests()
+  } catch (e) {
+    if (e !== 'cancel') ElMessage.error('批量删除失败')
+  }
 }
 
 // 报告对话框状态

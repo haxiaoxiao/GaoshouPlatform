@@ -186,7 +186,6 @@ const icons = {
   factor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg>',
   backtest: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>',
   trade: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>',
-  trend: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>',
   monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>'
 }
 
@@ -198,7 +197,6 @@ const mainNavItems = [
   { path: '/factor', label: '因子研究', icon: icons.factor, badge: '' },
   { path: '/backtest', label: '策略回测', icon: icons.backtest, badge: '' },
   { path: '/trade', label: '实盘交易', icon: icons.trade, badge: '' },
-  { path: '/trend-capital', label: '趋势资金策略', icon: icons.trend, badge: '' },
 ]
 
 const systemNavItems = [
@@ -213,7 +211,6 @@ const pageTitles: Record<string, { title: string; subtitle?: string }> = {
   '/factor': { title: '因子研究', subtitle: '因子分析与筛选' },
   '/backtest': { title: '策略回测', subtitle: '策略开发与验证' },
   '/trade': { title: '实盘交易', subtitle: '模拟盘与实盘' },
-  '/trend-capital': { title: '趋势资金策略', subtitle: '研报十一 · 事件驱动' },
   '/monitor': { title: '系统监控', subtitle: '运行状态与日志' }
 }
 
