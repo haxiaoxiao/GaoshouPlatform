@@ -110,7 +110,6 @@
               </div>
             </div>
           </div>
-          </div>
           <div class="right-panel">
             <div class="bt-config-bar">
               <el-date-picker v-model="btStartDate" value-format="YYYY-MM-DD" size="small" style="width:130px" placeholder="开始日期" />
