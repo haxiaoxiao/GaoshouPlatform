@@ -52,22 +52,25 @@ async def run_backtest(req: RunBacktestRequest):
         slippage=req.slippage,
     )
 
-    _tasks[task_id] = {"status": "queued", "progress": 0, "result": None}
+    task_store = {"status": "queued", "progress": 0, "result": None, "live": None}
+    _tasks[task_id] = task_store
 
     try:
         _tasks[task_id]["status"] = "running"
         runner = get_backtest_runner()
-        result = await runner.run(config)
+        result = await runner.run(config, task_store=task_store)
         _tasks[task_id] = {
             "status": "done",
             "progress": 1.0,
             "result": result.to_dict(),
+            "live": task_store.get("live"),
         }
     except Exception as e:
         _tasks[task_id] = {
             "status": "failed",
             "progress": 1.0,
             "result": {"error": str(e)},
+            "live": task_store.get("live"),
         }
 
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
@@ -79,7 +82,15 @@ async def get_status(task_id: str):
     task = _tasks.get(task_id)
     if task is None:
         return {"code": 1, "message": "Task not found", "data": None}
-    return {"code": 0, "message": "success", "data": task}
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "status": task["status"],
+            "progress": task.get("progress", 0),
+            "live": task.get("live"),
+        },
+    }
 
 
 @router.get("/result/{task_id}")

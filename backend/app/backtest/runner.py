@@ -1,6 +1,6 @@
 """回测统一入口"""
 import uuid
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
@@ -14,12 +14,12 @@ from app.backtest.vectorized import get_vectorized_engine
 class BacktestRunner:
     """回测运行器 — 统一入口"""
 
-    async def run(self, config: BacktestConfig) -> BacktestResult:
+    async def run(self, config: BacktestConfig, task_store: dict | None = None) -> BacktestResult:
         """运行回测"""
         if config.mode == "vectorized":
             return await self._run_vectorized(config)
         elif config.mode == "event_driven":
-            return await self._run_event_driven(config)
+            return await self._run_event_driven(config, task_store=task_store)
         else:
             raise ValueError(f"Unknown backtest mode: {config.mode}")
 
@@ -40,7 +40,7 @@ class BacktestRunner:
         result = engine.run(factor_matrix, return_matrix, config)
         return result
 
-    async def _run_event_driven(self, config: BacktestConfig) -> BacktestResult:
+    async def _run_event_driven(self, config: BacktestConfig, task_store: dict | None = None) -> BacktestResult:
         """事件驱动回测 — 使用 EventBus + Portfolio + Risk + Analysis 完整管线"""
         from app.backtest.event import (
             Event, EventBus, EventType, BarEventSource,
@@ -93,6 +93,47 @@ class BacktestRunner:
         # 数据收集器
         trade_collector = TradeCollector()
         trade_collector.register(event_bus)
+
+        # ── Live data recording for polling API ──
+        events_buffer: list[dict] = []
+
+        def record_event(event_type: str, data: dict):
+            if task_store is not None:
+                data_copy = {k: v for k, v in data.items() if k != "ctx"}
+                events_buffer.append({
+                    "type": event_type,
+                    "timestamp": datetime.now().isoformat(),
+                    **data_copy,
+                })
+
+        def on_after_trading_snapshot(event: Event):
+            if task_store is None:
+                return
+            dt = event.data.get("date")
+            task_store["progress"] = (i + 1) / len(calendar) if len(calendar) > 0 else 0
+            task_store["live"] = {
+                "current_date": dt.isoformat() if hasattr(dt, 'isoformat') else str(dt) if dt else None,
+                "events": events_buffer[-200:],
+                "positions": {
+                    sym: {
+                        "shares": pos.total_shares,
+                        "avg_cost": round(pos.avg_cost, 4),
+                        "market_value": round(pos.market_value, 2),
+                        "unrealized_pnl": round(pos.unrealized_pnl, 2),
+                    }
+                    for sym, pos in position_manager.positions.items()
+                    if pos.total_shares > 0
+                },
+                "metrics_snapshot": {
+                    "total_return": round(portfolio.total_value / config.initial_capital - 1, 4),
+                    "cash": round(account.cash, 2),
+                    "total_value": round(portfolio.total_value, 2),
+                    "n_trades": len(trade_collector.trades),
+                },
+            }
+
+        event_bus.add_listener(EventType.AFTER_TRADING, on_after_trading_snapshot, system=True)
+
         order_collector = OrderCollector()
         order_collector.register(event_bus)
 
@@ -172,6 +213,11 @@ class BacktestRunner:
                     "pnl": None,
                 },
             ))
+            record_event("TRADE", {
+                "symbol": symbol, "direction": direction,
+                "quantity": quantity, "price": round(trade_price, 4),
+                "commission": round(commission, 4),
+            })
 
         event_bus.add_listener(EventType.ORDER_CREATION_PASS, on_order_creation_pass, system=True)
 
@@ -182,6 +228,10 @@ class BacktestRunner:
             ctx.current_bar = event.data.get("bar")
             if ctx.current_bar:
                 bar = ctx.current_bar
+                record_event("BAR", {
+                    "symbol": bar.symbol,
+                    "close": round(bar.close, 4),
+                })
                 orders = ctx.pending_orders.copy()
                 ctx.clear_orders()
 
@@ -198,6 +248,19 @@ class BacktestRunner:
                             EventType.ORDER_CREATION_PASS,
                             data=order_event.data,
                         ))
+                        record_event("ORDER_PASS", {
+                            "order_id": order.get("order_id", ""),
+                            "symbol": order.get("symbol", ""),
+                            "direction": order.get("direction", "buy"),
+                            "quantity": order.get("quantity", 0),
+                            "price": order.get("price", 0),
+                        })
+                    else:
+                        record_event("ORDER_REJECT", {
+                            "order_id": order.get("order_id", ""),
+                            "symbol": order.get("symbol", ""),
+                            "reason": "风控拒绝",
+                        })
 
         event_bus.add_listener(EventType.POST_BAR, on_bar_dispatch_orders, system=True)
 
