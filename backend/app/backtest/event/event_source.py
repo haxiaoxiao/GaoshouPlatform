@@ -72,7 +72,7 @@ class BarEventSource:
 
         rows = ch.execute(
             """
-            SELECT symbol, trade_date, open, high, low, close, volume, amount, turnover_rate
+            SELECT symbol, trade_date, open, high, low, close, volume, amount
             FROM klines_daily
             WHERE symbol IN %(syms)s
               AND trade_date >= %(start)s
@@ -85,14 +85,18 @@ class BarEventSource:
         df = pd.DataFrame(
             rows,
             columns=["symbol", "trade_date", "open", "high", "low",
-                     "close", "volume", "amount", "turnover_rate"],
+                     "close", "volume", "amount"],
         )
         if df.empty:
             raise ValueError(f"No kline data for symbols {symbols} in [{start_date}, {end_date}]")
 
-        for col in ["open", "high", "low", "close", "amount", "turnover_rate"]:
+        for col in ["open", "high", "low", "close", "amount"]:
             df[col] = df[col].astype(float)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+        # ClickHouse klines_daily may have multiple rows per (symbol, date).
+        # Drop duplicates keeping the first row.
+        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
 
         for sym, grp in df.groupby("symbol"):
             source._data[sym] = grp.set_index("trade_date")

@@ -2,6 +2,7 @@
 import uuid
 
 from fastapi import APIRouter
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.backtest.config import BacktestConfig
@@ -66,10 +67,11 @@ async def run_backtest(req: RunBacktestRequest):
             "live": task_store.get("live"),
         }
     except Exception as e:
+        logger.error("Backtest task {} failed: {} ({})", task_id, e, type(e).__name__)
         _tasks[task_id] = {
             "status": "failed",
             "progress": 1.0,
-            "result": {"error": str(e)},
+            "result": {"error": f"{type(e).__name__}: {e}"},
             "live": task_store.get("live"),
         }
 
@@ -99,7 +101,7 @@ async def get_result(task_id: str):
     task = _tasks.get(task_id)
     if task is None:
         return {"code": 1, "message": "Task not found", "data": None}
-    if task["status"] != "done":
+    if task["status"] not in ("done", "failed"):
         return {"code": 1, "message": f"Task status: {task['status']}", "data": None}
     return {"code": 0, "message": "success", "data": task["result"]}
 

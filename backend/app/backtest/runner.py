@@ -202,19 +202,20 @@ class BacktestRunner:
                 account.commit_sell(proceeds)
 
             trade_id = str(uuid.uuid4())[:12]
+            trade_data = {
+                "trade_id": trade_id,
+                "order_id": order_id,
+                "symbol": symbol,
+                "direction": direction,
+                "price": trade_price,
+                "quantity": quantity,
+                "commission": commission,
+                "date": date_val,
+                "pnl": None,
+            }
             event_bus.publish_event(Event(
                 EventType.TRADE,
-                data={
-                    "trade_id": trade_id,
-                    "order_id": order_id,
-                    "symbol": symbol,
-                    "direction": direction,
-                    "price": trade_price,
-                    "quantity": quantity,
-                    "commission": commission,
-                    "date": date_val,
-                    "pnl": None,
-                },
+                data={"trade": trade_data, "date": date_val},
             ))
             record_event("TRADE", {
                 "symbol": symbol, "direction": direction,
@@ -330,7 +331,7 @@ class BacktestRunner:
         ch = get_ch_client()
 
         query = """
-            SELECT symbol, trade_date, open, high, low, close, volume, amount, turnover_rate
+            SELECT symbol, trade_date, open, high, low, close, volume, amount
             FROM klines_daily
             WHERE symbol IN %(syms)s
         """
@@ -350,11 +351,14 @@ class BacktestRunner:
         df = pd.DataFrame(
             rows,
             columns=["symbol", "trade_date", "open", "high", "low", "close",
-                     "volume", "amount", "turnover_rate"],
+                     "volume", "amount"],
         )
-        for col in ["open", "high", "low", "close", "amount", "turnover_rate"]:
+        for col in ["open", "high", "low", "close", "amount"]:
             df[col] = df[col].astype(float)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+        # ClickHouse klines_daily may have multiple rows per (symbol, date)
+        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
 
         data = {}
         for sym, grp in df.groupby("symbol"):
@@ -396,6 +400,7 @@ class BacktestRunner:
         df = pd.DataFrame(rows, columns=["symbol", "trade_date", "close"])
         df["close"] = df["close"].astype(float)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
 
         return_matrix = {}
         for sym, grp in df.groupby("symbol"):
