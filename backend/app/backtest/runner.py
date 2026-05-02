@@ -140,24 +140,46 @@ class BacktestRunner:
         order_collector = OrderCollector()
         order_collector.register(event_bus)
 
-        # ── 6. 策略上下文 + 信号策略 ──
-        ctx = StrategyContext(
-            account=account,
-            position_manager=position_manager,
-            event_source=event_source,
-        )
+        # ── 6. 策略上下文 + 策略注册 ──
+        script = config.factor_expression or config.buy_condition or ""
 
-        # 使用 factor_expression 作为信号表达式（事件驱动模式下）
-        expression = config.factor_expression or config.buy_condition
-        if expression:
+        # 判断是用户脚本 (含 def handle_bar) 还是因子表达式
+        if "def handle_bar" in script:
+            from app.backtest.strategy.user_script import UserContext, UserScriptStrategy
+
+            ctx = UserContext(
+                symbols=symbols,
+                account=account,
+                position_manager=position_manager,
+                event_source=event_source,
+                params=getattr(config, "strategy_params", None) or {},
+            )
+            strategy = UserScriptStrategy(
+                code=script,
+                symbols=symbols,
+                params=getattr(config, "strategy_params", None) or {},
+            )
+            strategy.register(event_bus, ctx)
+            logger.info("Strategy: user script with handle_bar")
+        elif script:
+            ctx = StrategyContext(
+                account=account,
+                position_manager=position_manager,
+                event_source=event_source,
+            )
             strategy = ExpressionSignalStrategy(
-                expression=expression,
+                expression=script,
                 symbols=symbols,
                 buy_threshold=0.0,
                 sell_threshold=0.0,
                 position_pct=0.2,
             )
             strategy.register(event_bus, ctx)
+            logger.info("Strategy: expression signal mode")
+        else:
+            ctx = None
+            strategy = None
+            logger.warning("No strategy script or expression provided")
 
         # ── 7. BAR → 订单 → 成交管线 ──
         def on_order_creation_pass(event: Event) -> None:
@@ -228,6 +250,8 @@ class BacktestRunner:
         # ── 8. 策略上下文中转订单到事件总线 ──
         def on_bar_dispatch_orders(event: Event) -> None:
             """BAR 处理后，将策略上下文的待发订单推送到 EventBus 做风控"""
+            if ctx is None:
+                return
             ctx.current_date = event.data.get("date")
             ctx.current_bar = event.data.get("bar")
             if ctx.current_bar:

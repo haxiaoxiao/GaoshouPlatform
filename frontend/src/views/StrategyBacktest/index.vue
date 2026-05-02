@@ -64,7 +64,7 @@
                 v-model="btCode"
                 class="editor-textarea"
                 spellcheck="false"
-                placeholder="# 输入因子表达式作为策略信号&#10;# 例如: Mean($close, 5) / Mean($close, 20) - 1&#10;# 正值表示做多，负值表示做空"
+                placeholder="def init(context):&#10;    context.ma_fast = 5&#10;&#10;def handle_bar(context, bar):&#10;    # 在这里写你的策略逻辑&#10;    pass"
               />
             </div>
           </div>
@@ -109,10 +109,32 @@ import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
 import { formatDateTime } from '@/utils/format'
 
-const SAMPLE_CODE = `// 买入条件: RSI < 30 (超卖)
-// 卖出条件: RSI > 70 (超买)
-// 注: 当前使用因子表达式作为策略信号
-Mean($close, 5) / Mean($close, 20) - 1`
+const SAMPLE_CODE = `def init(context):
+    # 策略参数
+    context.ma_fast = 5
+    context.ma_slow = 20
+
+def handle_bar(context, bar):
+    # 获取历史收盘价
+    hist = context.get_history(bar.symbol, 252)
+    if hist.empty or len(hist) < context.ma_slow:
+        return
+    close = hist['close']
+
+    # 计算快慢均线
+    ma_fast = MA(close, context.ma_fast)
+    ma_slow = MA(close, context.ma_slow)
+
+    # 上穿买入
+    if ma_fast.iloc[-1] > ma_slow.iloc[-1] and ma_fast.iloc[-2] <= ma_slow.iloc[-2]:
+        if not context.has_position(bar.symbol):
+            context.order_value(bar.symbol, context.cash * 0.2)
+
+    # 下穿卖出
+    elif ma_fast.iloc[-1] < ma_slow.iloc[-1] and ma_fast.iloc[-2] >= ma_slow.iloc[-2]:
+        pos = context.get_position(bar.symbol)
+        if pos and pos.total_shares > 0:
+            context.order_shares(bar.symbol, -pos.total_shares)`
 
 // ── State ──
 const activeTab = ref('strategyList')
@@ -207,6 +229,7 @@ const btStartDate = ref('2020-01-01')
 const btEndDate = ref('2025-12-31')
 const btCapital = ref(1_000_000)
 const btFrequency = ref('monthly')
+const btSymbols = ref<string[]>(['600178.SH'])
 const btRunning = ref(false)
 const btLiveData = ref<LiveData | null>(null)
 const btFullResult = ref<BacktestResultData | null>(null)
@@ -262,7 +285,7 @@ const handleRunBacktest = async () => {
     const res = await request.post<any>('/v2/backtest/run', {
       mode: 'event_driven',
       factor_expression: btCode.value,
-      symbols: ['000300.SH'],
+      symbols: btSymbols.value,
       start_date: btStartDate.value,
       end_date: btEndDate.value,
       initial_capital: btCapital.value,
@@ -271,28 +294,28 @@ const handleRunBacktest = async () => {
       bar_type: 'daily',
     })
 
-    const taskId = res?.data?.task_id
+    // 拦截器已解包 {code, data} → data 字段直接返回
+    const taskId = (res as any)?.task_id
     if (taskId) {
       btLogs.value = [`任务已提交 (${taskId})，等待完成...`]
       let attempts = 0
       while (attempts < 300) {
         await new Promise(r => setTimeout(r, 2000))
-        const statusRes = await request.get<any>(`/v2/backtest/status/${taskId}`)
-        const statusData = statusRes?.data as TaskStatus
+        const statusData = await request.get<any>(`/v2/backtest/status/${taskId}`)
         if (statusData?.live) {
           btLiveData.value = statusData.live
         }
         if (statusData?.status === 'done') {
           btLiveData.value = statusData.live
-          const resultRes = await request.get<any>(`/v2/backtest/result/${taskId}`)
-          const data = resultRes?.data as BacktestResultData
+          const data = await request.get<any>(`/v2/backtest/result/${taskId}`)
           if (data) {
-            btFullResult.value = data
+            btFullResult.value = data as BacktestResultData
             btLogs.value = ['回测完成']
           }
           break
         } else if (statusData?.status === 'failed') {
-          btErrors.value = ['回测失败']
+          const errData = await request.get<any>(`/v2/backtest/result/${taskId}`)
+          btErrors.value = [errData?.error || '回测失败']
           btLogs.value = ['回测执行失败']
           break
         }
@@ -303,9 +326,9 @@ const handleRunBacktest = async () => {
         btLogs.value = ['回测超时（10分钟）']
       }
     } else {
-      const data = res?.data as BacktestResultData
-      if (data) {
-        btFullResult.value = data
+      // 同步返回结果（vectorized 模式直接返回）
+      if (res) {
+        btFullResult.value = res as BacktestResultData
         btLogs.value = ['回测完成']
       }
     }

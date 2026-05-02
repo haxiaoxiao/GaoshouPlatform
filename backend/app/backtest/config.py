@@ -24,6 +24,7 @@ class BacktestConfig:
     buy_condition: str | None = None
     sell_condition: str | None = None
     bar_type: str = "daily"
+    strategy_params: dict | None = None  # 用户策略参数
 
     # 风控
     stop_loss: float | None = None

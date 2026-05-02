@@ -29,6 +29,7 @@ class RunBacktestRequest(BaseModel):
     bar_type: str = "daily"
     commission_rate: float = 0.0003
     slippage: float = 0.001
+    strategy_params: dict | None = None
 
 
 @router.post("/run")
@@ -51,6 +52,7 @@ async def run_backtest(req: RunBacktestRequest):
         bar_type=req.bar_type,
         commission_rate=req.commission_rate,
         slippage=req.slippage,
+        strategy_params=req.strategy_params,
     )
 
     task_store = {"status": "queued", "progress": 0, "result": None, "live": None}
