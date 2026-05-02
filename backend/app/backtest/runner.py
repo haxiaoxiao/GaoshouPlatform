@@ -96,6 +96,7 @@ class BacktestRunner:
 
         # ── Live data recording for polling API ──
         events_buffer: list[dict] = []
+        _day_count = 0
 
         def record_event(event_type: str, data: dict):
             if task_store is not None:
@@ -107,10 +108,12 @@ class BacktestRunner:
                 })
 
         def on_after_trading_snapshot(event: Event):
+            nonlocal _day_count
             if task_store is None:
                 return
+            _day_count += 1
             dt = event.data.get("date")
-            task_store["progress"] = (i + 1) / len(calendar) if len(calendar) > 0 else 0
+            task_store["progress"] = _day_count / len(calendar) if len(calendar) > 0 else 0
             task_store["live"] = {
                 "current_date": dt.isoformat() if hasattr(dt, 'isoformat') else str(dt) if dt else None,
                 "events": events_buffer[-200:],
