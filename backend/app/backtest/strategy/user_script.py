@@ -1,7 +1,20 @@
-"""用户策略引擎 — exec() 沙箱执行 init(context) + handle_bar(context, bar)"""
+"""用户策略引擎 — exec() 沙箱执行 init(context) + handle_bar(context, bar)
+
+兼容 RQAlpha API:
+  - context.now, context.run_info, context.portfolio, context.stock_account
+  - context.universe, context.get_open_orders(), context.cancel_order()
+  - bar.symbol, bar.order_book_id, bar.datetime, bar.open/high/low/close/volume
+  - bar.limit_up, bar.limit_down, bar.prev_close, bar.suspended, bar.is_trading
+  - bar.mavg(intervals), bar.vwap(intervals)
+  - order_shares / order_value / order_target_pct / order
+  - get_open_orders / cancel_order
+  - history_bars / current_snapshot / get_history
+"""
+import uuid
 import numpy as np
 import pandas as pd
-from datetime import date
+from dataclasses import dataclass, field
+from datetime import date, datetime
 from typing import Any
 
 from loguru import logger
@@ -12,8 +25,171 @@ from app.backtest.portfolio.account import Account
 from app.backtest.portfolio.position import PositionManager, Position
 
 
+# ── Order ──
+
+class OrderStatus:
+    PENDING_NEW = "pending_new"
+    ACTIVE = "active"
+    FILLED = "filled"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+@dataclass
+class Order:
+    """订单对象 — 兼容 RQAlpha Order"""
+    order_id: str
+    symbol: str
+    direction: str  # "buy" | "sell"
+    quantity: int
+    price: float
+    amount: float
+    order_date: date | None = None
+    status: str = OrderStatus.PENDING_NEW
+    filled_quantity: int = 0
+    avg_price: float = 0.0
+    transaction_cost: float = 0.0
+    message: str = ""
+
+    @property
+    def order_book_id(self) -> str:
+        return self.symbol
+
+    @property
+    def side(self) -> str:
+        return self.direction
+
+    @property
+    def unfilled_quantity(self) -> int:
+        return self.quantity - self.filled_quantity
+
+    @property
+    def is_final(self) -> bool:
+        return self.status in (OrderStatus.FILLED, OrderStatus.REJECTED, OrderStatus.CANCELLED)
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == OrderStatus.ACTIVE
+
+    def fill(self, quantity: int, price: float, cost: float = 0) -> None:
+        new_filled = self.filled_quantity + quantity
+        self.avg_price = (
+            (self.avg_price * self.filled_quantity + price * quantity) / new_filled
+            if new_filled > 0 else price
+        )
+        self.filled_quantity = new_filled
+        self.transaction_cost += cost
+        if self.unfilled_quantity == 0:
+            self.status = OrderStatus.FILLED
+
+    def mark_rejected(self, reason: str) -> None:
+        self.message = reason
+        self.status = OrderStatus.REJECTED
+
+    def mark_cancelled(self, reason: str) -> None:
+        self.message = reason
+        self.status = OrderStatus.CANCELLED
+
+
+# ── RunInfo ──
+
+@dataclass
+class RunInfo:
+    """策略运行信息 — 兼容 RQAlpha context.run_info"""
+    start_date: date
+    end_date: date
+    frequency: str = "1d"
+    capital: float = 1_000_000
+    symbols: list[str] = field(default_factory=list)
+
+
+# ── Portfolio / Account Proxy ──
+
+class AccountProxy:
+    """账户信息代理 — 兼容 RQAlpha context.stock_account"""
+    def __init__(self, account: Account, position_manager: PositionManager):
+        self._account = account
+        self._pm = position_manager
+
+    @property
+    def cash(self) -> float:
+        return self._account.cash
+
+    @property
+    def available_cash(self) -> float:
+        return self._account.available_cash
+
+    @property
+    def frozen_cash(self) -> float:
+        return self._account.frozen_cash
+
+    @property
+    def total_value(self) -> float:
+        return self._account.total_value(self._pm.total_market_value)
+
+    @property
+    def market_value(self) -> float:
+        """持仓总市值"""
+        return self._pm.total_market_value
+
+    @property
+    def positions(self) -> dict[str, Position]:
+        return self._pm.positions
+
+    def __repr__(self) -> str:
+        return f"StockAccount(cash={self.available_cash:.2f}, total_value={self.total_value:.2f})"
+
+
+class PortfolioProxy:
+    """投资组合代理 — 兼容 RQAlpha context.portfolio"""
+    def __init__(self, account: Account, position_manager: PositionManager):
+        self._account = account
+        self._pm = position_manager
+        self.accounts = {"STOCK": AccountProxy(account, position_manager)}
+
+    @property
+    def stock_account(self) -> AccountProxy:
+        return self.accounts["STOCK"]
+
+    @property
+    def total_value(self) -> float:
+        return self._account.total_value(self._pm.total_market_value)
+
+    @property
+    def unit_net_value(self) -> float:
+        cap = self._account.initial_cash
+        return self.total_value / cap if cap > 0 else 1.0
+
+    @property
+    def positions(self) -> dict[str, Position]:
+        return self._pm.positions
+
+    def get_position(self, symbol: str) -> Position | None:
+        return self._pm.get(symbol)
+
+    def get_positions(self) -> list[Position]:
+        return [p for p in self._pm.positions.values() if p.total_shares > 0]
+
+    def __repr__(self) -> str:
+        return f"Portfolio(total_value={self.total_value:.2f}, positions={len(self.positions)})"
+
+
+# ── UserContext ──
+
 class UserContext:
-    """用户策略上下文 — 封装 StrategyContext，提供 RQAlpha 风格 API"""
+    """用户策略上下文 — 兼容 RQAlpha ExecutionContext + Environment API
+
+    策略可通过 context 访问:
+      - context.now / context.now_dt            当前时间
+      - context.run_info                        运行参数
+      - context.portfolio                       投资组合
+      - context.stock_account                   股票账户
+      - context.universe                        当前股票池
+      - context.cash / context.total_value      快捷资金查询
+      - context.order_shares / order_value / order_target_pct  下单
+      - context.get_open_orders() / cancel_order()  订单管理
+      - context.get_history(symbol, n_days)     历史数据 (DataFrame)
+    """
 
     def __init__(
         self,
@@ -22,12 +198,16 @@ class UserContext:
         position_manager: PositionManager,
         event_source: BarEventSource,
         params: dict | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        capital: float = 1_000_000,
     ):
         self.symbols = symbols
         self._account = account
         self._position_manager = position_manager
         self._event_source = event_source
         self._params = params or {}
+        self._orders: dict[str, Order] = {}
 
         self.current_bar: Bar | None = None
         self.current_date: date | None = None
@@ -36,11 +216,56 @@ class UserContext:
         self._history_cache: dict[str, pd.DataFrame] = {}
         self._log_messages: list[str] = []
 
-    # ── 账户信息 ──
-    @property
-    def account(self):
-        return self._account
+        # 预构建代理对象
+        self._portfolio = PortfolioProxy(account, position_manager)
+        self._stock_account = self._portfolio.stock_account
+        self._run_info = RunInfo(
+            start_date=start_date or date(2000, 1, 1),
+            end_date=end_date or date(2099, 12, 31),
+            frequency="1d",
+            capital=capital,
+            symbols=symbols,
+        )
+        self._universe: set[str] = set(symbols)
 
+    # ── 时间 ──
+    @property
+    def now(self) -> datetime:
+        """当前时间 — 兼容 RQAlpha context.now"""
+        if self.current_date:
+            return datetime.combine(self.current_date, datetime.min.time())
+        return datetime.now()
+
+    @property
+    def now_dt(self) -> datetime:
+        return self.now
+
+    # ── 运行信息 ──
+    @property
+    def run_info(self) -> RunInfo:
+        return self._run_info
+
+    # ── 组合 & 账户 ──
+    @property
+    def portfolio(self) -> PortfolioProxy:
+        return self._portfolio
+
+    @property
+    def stock_account(self) -> AccountProxy:
+        return self._stock_account
+
+    # ── 快捷持仓查询（向后兼容） ──
+    def get_position(self, symbol: str) -> Position | None:
+        return self._position_manager.get(symbol)
+
+    def get_or_create_position(self, symbol: str) -> Position:
+        return self._position_manager.get_or_create(symbol)
+
+    def has_position(self, symbol: str) -> bool:
+        pos = self._position_manager.get(symbol)
+        return pos is not None and pos.total_shares > 0
+
+    # ── 快捷资金 ──
     @property
     def cash(self) -> float:
         return self._account.available_cash
@@ -53,97 +278,156 @@ class UserContext:
     def params(self) -> dict:
         return self._params
 
-    # ── 持仓 ──
-    def get_position(self, symbol: str) -> Position | None:
-        return self._position_manager.get(symbol)
-
-    def get_or_create_position(self, symbol: str) -> Position:
-        return self._position_manager.get_or_create(symbol)
-
+    # ── 股票池 ──
     @property
-    def positions(self) -> dict[str, Position]:
-        return self._position_manager.positions
+    def universe(self) -> set[str]:
+        return self._universe
 
-    def has_position(self, symbol: str) -> bool:
-        pos = self._position_manager.get(symbol)
-        return pos is not None and pos.total_shares > 0
+    def update_universe(self, symbols: list[str]) -> None:
+        self._universe = set(symbols)
 
     # ── 下单 API ──
-    def order_shares(self, symbol: str, shares: int, price: float | None = None) -> str | None:
-        """按股数下单。正=买入，负=卖出。返回 order_id"""
+    def _create_order(self, symbol: str, direction: str, quantity: int, price: float) -> Order | None:
+        if quantity <= 0 or price <= 0:
+            return None
+        self._order_counter += 1
+        oid = f"ord_{self._order_counter:06d}"
+        order = Order(
+            order_id=oid, symbol=symbol, direction=direction,
+            quantity=quantity, price=price,
+            amount=quantity * price, order_date=self.current_date,
+        )
+        self._orders[oid] = order
+
+        self._pending_orders.append({
+            "order_id": oid, "symbol": symbol, "direction": direction,
+            "price": price, "quantity": quantity, "amount": quantity * price,
+            "date": self.current_date,
+        })
+        return order
+
+    def order_shares(self, symbol: str, shares: int, price: float | None = None) -> Order | None:
+        """按股数下单。正=买入，负=卖出。兼容 RQAlpha"""
         if shares == 0:
             return None
         if price is None and self.current_bar:
             price = self.current_bar.close
         if price is None or price <= 0:
             return None
-
         direction = "buy" if shares > 0 else "sell"
-        quantity = abs(shares)
-        amount = quantity * price
+        return self._create_order(symbol, direction, abs(shares), price)
 
-        self._order_counter += 1
-        oid = f"ord_{self._order_counter:06d}"
-
-        self._pending_orders.append({
-            "order_id": oid, "symbol": symbol, "direction": direction,
-            "price": price, "quantity": quantity, "amount": amount,
-            "date": self.current_date,
-        })
-        return oid
-
-    def order_value(self, symbol: str, value: float = 0, price: float | None = None) -> str | None:
-        """按金额下单。value > 0 买入，value < 0 卖出"""
+    def order_value(self, symbol: str, value: float, price: float | None = None) -> Order | None:
+        """按金额下单。value > 0 买入，value < 0 卖出。兼容 RQAlpha"""
         if value == 0:
             return None
         if price is None and self.current_bar:
             price = self.current_bar.close
         if price is None or price <= 0:
             return None
-
         direction = "buy" if value > 0 else "sell"
         abs_value = abs(value)
         shares = int(abs_value / price / 100) * 100
         if shares == 0:
             return None
+        return self._create_order(symbol, direction, shares, price)
 
-        return self.order_shares(symbol, shares if direction == "buy" else -shares, price)
-
-    def order_target_pct(self, symbol: str, pct: float, price: float | None = None) -> str | None:
-        """目标仓位百分比下单"""
+    def order_target_pct(self, symbol: str, pct: float, price: float | None = None) -> Order | None:
+        """目标仓位百分比下单。兼容 RQAlpha"""
         if price is None and self.current_bar:
             price = self.current_bar.close
         if price is None or price <= 0:
             return None
-
         target_value = self.total_value * pct
         current = self._position_manager.get(symbol)
         current_value = current.market_value if current else 0
         diff = target_value - current_value
-
-        if abs(diff) < price * 100:  # 不足1手
+        if abs(diff) < price * 100:
             return None
+        return self.order_value(symbol, diff, price)
 
-        if diff > 0:
-            return self.order_value(symbol, diff, price)
-        else:
-            shares = int(-diff / price / 100) * 100
-            if shares > 0:
-                return self.order_shares(symbol, -shares, price)
-        return None
+    # ── 订单管理 ──
+    def get_open_orders(self, symbol: str | None = None) -> list[Order]:
+        """获取未成交订单。兼容 RQAlpha get_open_orders()"""
+        orders = [o for o in self._orders.values() if o.is_active]
+        if symbol:
+            orders = [o for o in orders if o.symbol == symbol]
+        return orders
+
+    def cancel_order(self, order: Order) -> Order | None:
+        """撤单。兼容 RQAlpha cancel_order()"""
+        if order.is_final:
+            return None
+        order.mark_cancelled("用户撤单")
+        return order
+
+    def get_order(self, order_id: str) -> Order | None:
+        return self._orders.get(order_id)
+
+    def _activate_order(self, order_id: str) -> None:
+        if order_id in self._orders:
+            self._orders[order_id].status = OrderStatus.ACTIVE
+
+    def _fill_order(self, order_id: str, quantity: int = 0, price: float = 0, cost: float = 0) -> None:
+        if order_id in self._orders:
+            order = self._orders[order_id]
+            fill_qty = quantity or order.quantity
+            fill_price = price or order.price
+            order.fill(fill_qty, fill_price, cost)
 
     # ── 数据获取 ──
     def get_history(self, symbol: str, n_days: int = 252) -> pd.DataFrame:
-        """获取截止当前的 N 日历史数据"""
+        """获取截止当前的 N 日历史数据（DataFrame）。兼容原有 API"""
         if self.current_date is None:
             return pd.DataFrame()
         cache_key = f"{symbol}:{self.current_date}:{n_days}"
         if cache_key in self._history_cache:
             return self._history_cache[cache_key]
-
         df = self._event_source.get_history(symbol, self.current_date, n_days)
         self._history_cache[cache_key] = df
         return df
+
+    def history_bars(self, symbol: str, bar_count: int, frequency: str = "1d",
+                     fields: str | list[str] | None = None) -> np.ndarray:
+        """获取历史 Bar 数据返回 numpy 数组。兼容 RQAlpha history_bars()"""
+        df = self.get_history(symbol, bar_count)
+        if df.empty:
+            return np.array([])
+        if fields is None:
+            fields = ["close"]
+        elif isinstance(fields, str):
+            fields = [fields]
+        result = df.tail(bar_count)
+        if len(fields) == 1:
+            return result[fields[0]].to_numpy()
+        return result[fields].to_numpy()
+
+    def current_snapshot(self, symbol: str) -> dict | None:
+        """当前市场快照。兼容 RQAlpha current_snapshot()"""
+        bar = self.current_bar
+        if bar is None:
+            return None
+        return {
+            "symbol": symbol,
+            "datetime": bar.datetime,
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "last": bar.last,
+            "close": bar.close,
+            "volume": bar.volume,
+            "total_turnover": bar.total_turnover,
+            "prev_close": bar.prev_close,
+            "limit_up": bar.limit_up,
+            "limit_down": bar.limit_down,
+        }
+
+    def get_trading_dates(self, start_date: str, end_date: str) -> list[date]:
+        """获取交易日列表"""
+        from datetime import datetime as dt
+        s = dt.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+        e = dt.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
+        return list(self._event_source.iter_trading_dates())
 
     # ── 日志 ──
     def log(self, msg: str) -> None:
@@ -158,15 +442,22 @@ class UserContext:
     def clear_orders(self) -> None:
         self._pending_orders.clear()
 
+    # ── 扩展 ──
+    def __repr__(self) -> str:
+        return (
+            f"UserContext(date={self.current_date}, cash={self.cash:.0f}, "
+            f"total_value={self.total_value:.0f}, positions={len(self._position_manager.positions)})"
+        )
 
-# ── 脚本沙箱提供的辅助函数 ──
+
+# ── 沙箱辅助函数 ──
+
 def _make_sandbox_globals() -> dict:
-    """构建用户脚本可用的全局函数"""
+    """构建用户脚本可用的全局函数（兼容 RQAlpha 内置指标）"""
     return {
-        # Basic Python
         "np": np,
         "pd": pd,
-        # Math helpers
+        # 技术指标
         "MA": _ma,
         "EMA": _ema,
         "RSI": _rsi,
@@ -176,8 +467,26 @@ def _make_sandbox_globals() -> dict:
         "CROSS": _cross,
         "REF": _ref,
         "ROUND": lambda x, n=2: round(float(x), n) if x is not None else 0,
+        "SMA": _sma,
+        "ATR": _atr,
+        "STD": _std,
+        "COUNT": _count,
+        "EVERY": _every,
+        # 订单 & 状态常亮
+        "Order": Order,
+        "OrderStatus": OrderStatus,
+        "MARKETORDER_SIGNAL": "market",
+        # 供策略内直接调用的顶层函数
+        "history_bars": None,  # 在 register 时注入
+        "current_snapshot": None,
+        "get_open_orders": None,
+        "cancel_order": None,
+        "order": None,
+        "get_positions": None,
     }
 
+
+# ── 内置指标 ──
 
 def _ma(series: pd.Series | np.ndarray, period: int) -> pd.Series:
     s = pd.Series(series) if not isinstance(series, pd.Series) else series
@@ -187,6 +496,22 @@ def _ma(series: pd.Series | np.ndarray, period: int) -> pd.Series:
 def _ema(series: pd.Series | np.ndarray, period: int) -> pd.Series:
     s = pd.Series(series) if not isinstance(series, pd.Series) else series
     return s.ewm(span=period, adjust=False).mean()
+
+
+def _sma(series: pd.Series | np.ndarray, period: int, weight: float = 1.0) -> pd.Series:
+    """扩展移动平均 SMA(X, N, M) = (M*X + (N-M)*SMA')/N"""
+    s = pd.Series(series) if not isinstance(series, pd.Series) else series
+    result = pd.Series(np.nan, index=s.index, dtype=float)
+    if len(s) == 0:
+        return result
+    result.iloc[0] = s.iloc[0]
+    alpha = weight / period
+    for i in range(1, len(s)):
+        if pd.notna(s.iloc[i]):
+            result.iloc[i] = alpha * s.iloc[i] + (1 - alpha) * result.iloc[i - 1]
+        else:
+            result.iloc[i] = result.iloc[i - 1]
+    return result
 
 
 def _rsi(series: pd.Series | np.ndarray, period: int = 14) -> pd.Series:
@@ -220,6 +545,22 @@ def _llv(series: pd.Series | np.ndarray, period: int) -> pd.Series:
     return s.rolling(window=period, min_periods=1).min()
 
 
+def _std(series: pd.Series | np.ndarray, period: int) -> pd.Series:
+    s = pd.Series(series) if not isinstance(series, pd.Series) else series
+    return s.rolling(window=period, min_periods=max(1, period // 2)).std()
+
+
+def _atr(close: pd.Series, high: pd.Series, low: pd.Series, period: int = 14) -> pd.Series:
+    """平均真实波幅 ATR"""
+    c, h, l = pd.Series(close), pd.Series(high), pd.Series(low)
+    tr = pd.concat([
+        (h - l).abs(),
+        (h - c.shift(1)).abs(),
+        (l - c.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / period, adjust=False).mean()
+
+
 def _cross(a: pd.Series, b: pd.Series) -> pd.Series:
     """上穿/下穿检测: +1=上穿, -1=下穿, 0=无"""
     a, b = pd.Series(a), pd.Series(b)
@@ -237,8 +578,29 @@ def _ref(series: pd.Series | np.ndarray, n: int) -> pd.Series:
     return s.shift(n)
 
 
+def _count(condition: pd.Series | np.ndarray, n: int) -> pd.Series:
+    """统计 N 周期内满足条件的次数"""
+    c = pd.Series(condition) if not isinstance(condition, pd.Series) else condition
+    return c.rolling(window=n, min_periods=1).sum()
+
+
+def _every(condition: pd.Series | np.ndarray, n: int) -> pd.Series:
+    """N 周期内是否全部满足条件"""
+    return _count(condition, n) >= n
+
+
+# ── UserScriptStrategy ──
+
 class UserScriptStrategy:
-    """用户脚本策略 — exec() 执行 init + handle_bar"""
+    """用户脚本策略 — exec() 执行 init + handle_bar
+
+    沙箱提供:
+      - 全局函数: MA, EMA, RSI, MACD, HHV, LLV, CROSS, REF, SMA, ATR, STD, COUNT, EVERY
+      - 顶层 API: order_shares, order_value, order_target_pct, order,
+                  history_bars, current_snapshot, get_open_orders, cancel_order, get_positions
+      - 类型: Order, OrderStatus
+      - 数学库: np, pd
+    """
 
     def __init__(self, code: str, symbols: list[str], params: dict | None = None):
         self.code = code
@@ -251,7 +613,22 @@ class UserScriptStrategy:
     def register(self, event_bus, ctx: UserContext) -> None:
         self._ctx = ctx
         namespace = _make_sandbox_globals()
+
+        # 注入上下文引用
         namespace["context"] = ctx
+
+        # 注入顶层 API 函数（绑定到 ctx）
+        namespace["order_shares"] = ctx.order_shares
+        namespace["order_value"] = ctx.order_value
+        namespace["order_target_pct"] = ctx.order_target_pct
+        namespace["order"] = ctx.order_shares  # RQAlpha 兼容别名
+        namespace["history_bars"] = ctx.history_bars
+        namespace["current_snapshot"] = ctx.current_snapshot
+        namespace["get_open_orders"] = ctx.get_open_orders
+        namespace["cancel_order"] = ctx.cancel_order
+        namespace["get_positions"] = ctx.portfolio.get_positions
+        namespace["get_history"] = ctx.get_history
+        namespace["log"] = ctx.log
 
         try:
             exec(self.code, namespace)

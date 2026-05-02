@@ -54,12 +54,18 @@
           <div class="editor-panel">
             <div class="editor-toolbar">
               <el-input v-model="activeStrategy.name" size="small" class="strategy-name-input" placeholder="策略名称" />
+              <el-radio-group v-model="btMode" size="small" class="mode-switch">
+                <el-radio-button value="script">脚本</el-radio-button>
+                <el-radio-button value="expression">表达式</el-radio-button>
+              </el-radio-group>
               <div class="toolbar-actions">
                 <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
                 <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
               </div>
             </div>
-            <div class="code-editor">
+
+            <!-- 脚本模式 — 代码编辑器 -->
+            <div class="code-editor" v-if="btMode === 'script'">
               <textarea
                 v-model="btCode"
                 class="editor-textarea"
@@ -67,6 +73,43 @@
                 placeholder="def init(context):&#10;    context.ma_fast = 5&#10;&#10;def handle_bar(context, bar):&#10;    # 在这里写你的策略逻辑&#10;    pass"
               />
             </div>
+
+            <!-- 表达式模式 — 因子表达式输入 -->
+            <div class="expression-panel" v-else>
+              <div class="expression-input-row">
+                <el-input
+                  v-model="btExpression"
+                  size="default"
+                  class="expression-input"
+                  placeholder="输入因子表达式，如: close/MA(close, 20) - 1"
+                  clearable
+                />
+                <el-select
+                  v-model="selectedFactorId"
+                  size="default"
+                  placeholder="从因子研究选择"
+                  clearable
+                  class="factor-select"
+                  @change="handleFactorSelect"
+                >
+                  <el-option
+                    v-for="f in savedFactors"
+                    :key="f.id"
+                    :label="f.name"
+                    :value="f.id"
+                  />
+                </el-select>
+              </div>
+              <div class="expression-hint">
+                <span>向量化回测：表达式按日计算因子值 → 分层买入 → 计算分组收益</span>
+                <span class="hint-examples">示例: close/MA(close,20)-1 | RSI(close,14) | MACD(close)[0]</span>
+              </div>
+              <div class="expression-params">
+                <span class="param-label">分组数</span>
+                <el-input-number v-model="btNGroups" :min="2" :max="10" size="small" style="width:80px" />
+              </div>
+            </div>
+          </div>
           </div>
           <div class="right-panel">
             <div class="bt-config-bar">
@@ -100,10 +143,11 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted } from 'vue'
+import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
+import { factorApi, type Factor } from '@/api/factor'
 import BacktestList from './BacktestList.vue'
 import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
@@ -111,30 +155,47 @@ import { formatDateTime } from '@/utils/format'
 
 const SAMPLE_CODE = `def init(context):
     # 策略参数
-    context.ma_fast = 5
-    context.ma_slow = 20
+    context.fast = 5
+    context.slow = 20
+
+    # 运行信息
+    log(f"回测区间: {context.run_info.start_date} ~ {context.run_info.end_date}")
+    log(f"初始资金: {context.run_info.capital:,.0f}")
+    log(f"标的: {context.run_info.symbols}")
 
 def handle_bar(context, bar):
-    # 获取历史收盘价
+    # 跳过停牌
+    if bar.suspended or bar.isnan:
+        return
+
+    # 获取历史收盘价序列
     hist = context.get_history(bar.symbol, 252)
-    if hist.empty or len(hist) < context.ma_slow:
+    if hist.empty or len(hist) < context.slow:
         return
     close = hist['close']
 
-    # 计算快慢均线
-    ma_fast = MA(close, context.ma_fast)
-    ma_slow = MA(close, context.ma_slow)
+    # 计算快慢均线（也可用 bar.mavg(n) 获取当前 Bar 的 N 日均值）
+    mf = MA(close, context.fast)
+    ms = MA(close, context.slow)
 
-    # 上穿买入
-    if ma_fast.iloc[-1] > ma_slow.iloc[-1] and ma_fast.iloc[-2] <= ma_slow.iloc[-2]:
-        if not context.has_position(bar.symbol):
-            context.order_value(bar.symbol, context.cash * 0.2)
+    # 金叉买入
+    if CROSS(mf, ms).iloc[-1] == 1:
+        if not context.portfolio.get_position(bar.symbol):
+            context.order_value(bar.symbol, context.portfolio.total_value * 0.2)
 
-    # 下穿卖出
-    elif ma_fast.iloc[-1] < ma_slow.iloc[-1] and ma_fast.iloc[-2] >= ma_slow.iloc[-2]:
-        pos = context.get_position(bar.symbol)
+    # 死叉卖出
+    elif CROSS(mf, ms).iloc[-1] == -1:
+        pos = context.portfolio.get_position(bar.symbol)
         if pos and pos.total_shares > 0:
-            context.order_shares(bar.symbol, -pos.total_shares)`
+            context.order_shares(bar.symbol, -pos.total_shares)
+
+    # 定期输出状态
+    if bar.trade_date.day % 30 == 0:
+        nav = context.portfolio.unit_net_value
+        log(f"[{bar.trade_date}] {bar.symbol} close={bar.close:.2f} "
+            f"nav={nav:.3f} cash={context.stock_account.available_cash:,.0f}")`
+
+const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
 // ── State ──
 const activeTab = ref('strategyList')
@@ -170,7 +231,6 @@ const handleCreate = async () => {
     })
     ElMessage.success('示例策略已创建')
     await loadStrategies()
-    // Load the new strategy into the editor
     activeStrategy.value = {
       id: result.id,
       name: result.name,
@@ -180,7 +240,9 @@ const handleCreate = async () => {
       created_at: result.created_at,
       updated_at: result.updated_at,
     }
+    btMode.value = 'script'
     btCode.value = result.code || SAMPLE_CODE
+    btExpression.value = SAMPLE_EXPRESSION
     btMetrics.value = []
     btLogs.value = []
     btErrors.value = []
@@ -224,7 +286,12 @@ const handleSizeChange = (size: number) => {
 
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
+const btMode = ref<'script' | 'expression'>('script')
 const btCode = ref('')
+const btExpression = ref(SAMPLE_EXPRESSION)
+const btNGroups = ref(5)
+const selectedFactorId = ref<number | null>(null)
+const savedFactors = ref<Factor[]>([])
 const btStartDate = ref('2020-01-01')
 const btEndDate = ref('2025-12-31')
 const btCapital = ref(1_000_000)
@@ -244,13 +311,32 @@ const freqLabelMap: Record<string, string> = {
   monthly: '每月',
 }
 
+// ── Factor selection ──
+const loadSavedFactors = async () => {
+  try {
+    const data = await factorApi.getList()
+    savedFactors.value = data || []
+  } catch {
+    // non-critical
+  }
+}
+
+const handleFactorSelect = (factorId: number | null) => {
+  if (!factorId) return
+  const factor = savedFactors.value.find(f => f.id === factorId)
+  if (factor && factor.code) {
+    btExpression.value = factor.code
+  }
+}
+
 const handleSaveStrategy = async () => {
   if (!activeStrategy.value) return
   saving.value = true
   try {
+    const code = btMode.value === 'expression' ? btExpression.value : btCode.value
     await strategyApi.update(activeStrategy.value.id, {
       name: activeStrategy.value.name,
-      code: btCode.value,
+      code,
       description: activeStrategy.value.description || undefined,
     })
     ElMessage.success('保存成功')
@@ -263,7 +349,16 @@ const handleSaveStrategy = async () => {
 
 const handleBacktest = (row: Strategy) => {
   activeStrategy.value = { ...row }
-  btCode.value = row.code || ''
+  const code = row.code || ''
+  // Auto-detect mode from code content
+  if (code.includes('def handle_bar') || code.includes('def init')) {
+    btMode.value = 'script'
+    btCode.value = code
+  } else {
+    btMode.value = 'expression'
+    btExpression.value = code || SAMPLE_EXPRESSION
+    btCode.value = code
+  }
   btLiveData.value = null
   btFullResult.value = null
   btMetrics.value = []
@@ -280,17 +375,22 @@ const handleRunBacktest = async () => {
   btMetrics.value = []
   btLogs.value = ['正在运行回测...']
   btErrors.value = []
+
+  const isExpression = btMode.value === 'expression'
+  const code = isExpression ? btExpression.value : btCode.value
+  const mode = isExpression ? 'vectorized' : 'event_driven'
+
   try {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>('/v2/backtest/run', {
-      mode: 'event_driven',
-      factor_expression: btCode.value,
+      mode,
+      factor_expression: code,
       symbols: btSymbols.value,
       start_date: btStartDate.value,
       end_date: btEndDate.value,
       initial_capital: btCapital.value,
       rebalance_freq: btFrequency.value,
-      n_groups: 5,
+      n_groups: isExpression ? btNGroups.value : 5,
       bar_type: 'daily',
     })
 
@@ -342,6 +442,7 @@ const handleRunBacktest = async () => {
 
 onMounted(() => {
   loadStrategies()
+  loadSavedFactors()
 })
 </script>
 
@@ -475,4 +576,73 @@ onMounted(() => {
 .bt-log-line { color: var(--text-ghost); padding: 1px 0; }
 .bt-error { color: #e5484d; }
 .bt-log-empty { color: var(--text-muted); font-style: italic; }
+
+/* ── Mode switch ── */
+.mode-switch { flex-shrink: 0; }
+.mode-switch :deep(.el-radio-button__inner) {
+  background: #2d2d2d;
+  border-color: #404040;
+  color: #999;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+.mode-switch :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: var(--el-color-primary);
+  border-color: var(--el-color-primary);
+  color: #fff;
+}
+
+/* ── Expression panel ── */
+.expression-panel {
+  flex: 1;
+  background: #1e1e1e;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.expression-input-row {
+  display: flex;
+  gap: 10px;
+}
+.expression-input {
+  flex: 1;
+}
+.expression-input :deep(.el-input__inner) {
+  background: #2d2d2d;
+  border-color: #404040;
+  color: #d4d4d4;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  height: 40px;
+}
+.factor-select {
+  width: 200px;
+}
+.factor-select :deep(.el-input__inner) {
+  background: #2d2d2d;
+  border-color: #404040;
+  color: #d4d4d4;
+}
+.expression-hint {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: #888;
+  line-height: 1.5;
+}
+.hint-examples {
+  color: #666;
+  font-family: 'JetBrains Mono', monospace;
+}
+.expression-params {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.param-label {
+  font-size: 12px;
+  color: #999;
+}
 </style>

@@ -53,6 +53,7 @@ class BacktestRunner:
         from app.backtest.analysis import TradeCollector, OrderCollector
         from app.backtest.analysis.metrics import compute_metrics
         from app.backtest.strategy_loader import ExpressionSignalStrategy, StrategyContext
+        from app.backtest.strategy.user_script import UserContext
 
         symbols = config.symbols
         start = config.start_date or date(2020, 1, 1)
@@ -145,7 +146,7 @@ class BacktestRunner:
 
         # 判断是用户脚本 (含 def handle_bar) 还是因子表达式
         if "def handle_bar" in script:
-            from app.backtest.strategy.user_script import UserContext, UserScriptStrategy
+            from app.backtest.strategy.user_script import UserScriptStrategy
 
             ctx = UserContext(
                 symbols=symbols,
@@ -153,6 +154,9 @@ class BacktestRunner:
                 position_manager=position_manager,
                 event_source=event_source,
                 params=getattr(config, "strategy_params", None) or {},
+                start_date=start,
+                end_date=end,
+                capital=config.initial_capital,
             )
             strategy = UserScriptStrategy(
                 code=script,
@@ -197,6 +201,10 @@ class BacktestRunner:
             price = order.get("price", bar.close)
             quantity = order.get("quantity", 0)
 
+            # 标记订单为 ACTIVE
+            if isinstance(ctx, UserContext):
+                ctx._activate_order(order_id)
+
             # 模拟撮合 — 按当日收盘价成交
             trade_price = bar.close
             commission = trade_price * quantity * config.commission_rate
@@ -205,12 +213,18 @@ class BacktestRunner:
             if direction == "buy":
                 cost = trade_price * quantity + commission + slippage_cost
                 if cost > account.available_cash:
+                    if isinstance(ctx, UserContext):
+                        o = ctx.get_order(order_id)
+                        if o: o.mark_rejected("可用资金不足")
                     event.stop_propagation()
                     return
                 account.commit_buy(cost)
                 try:
                     position_manager.get_or_create(symbol).buy(quantity, trade_price, date_val)
                 except Exception:
+                    if isinstance(ctx, UserContext):
+                        o = ctx.get_order(order_id)
+                        if o: o.mark_rejected("开仓失败")
                     return
             else:
                 proceeds = trade_price * quantity - commission - slippage_cost
@@ -219,9 +233,16 @@ class BacktestRunner:
                         quantity, trade_price, date_val
                     )
                 except ValueError:
+                    if isinstance(ctx, UserContext):
+                        o = ctx.get_order(order_id)
+                        if o: o.mark_rejected("平仓失败（T+1 锁仓或持仓不足）")
                     event.stop_propagation()
                     return
                 account.commit_sell(proceeds)
+
+            # 标记订单成交
+            if isinstance(ctx, UserContext):
+                ctx._fill_order(order_id, quantity, trade_price, commission)
 
             trade_id = str(uuid.uuid4())[:12]
             trade_data = {
