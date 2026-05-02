@@ -83,30 +83,16 @@
               <el-button type="primary" size="small" @click="handleRunBacktest" :loading="btRunning">运行回测</el-button>
             </div>
 
-            <div v-if="btMetrics.length" class="bt-metrics-grid">
-              <div class="bt-metric-card" v-for="m in btMetrics" :key="m.label">
-                <div class="bt-metric-label">{{ m.label }}</div>
-                <div class="bt-metric-value" :class="m.color || ''">{{ m.value }}</div>
-              </div>
-            </div>
-
-            <div v-if="btLogs.length || btErrors.length" class="bt-log-panel">
-              <el-tabs model-value="logs" size="small">
-                <el-tab-pane label="日志" name="logs">
-                  <div class="bt-log-content">
-                    <div v-for="(log, i) in btLogs" :key="i" class="bt-log-line">{{ log }}</div>
-                    <div v-if="!btLogs.length" class="bt-log-empty">暂无日志</div>
-                  </div>
-                </el-tab-pane>
-                <el-tab-pane label="错误" name="errors">
-                  <div class="bt-log-content">
-                    <div v-for="(err, i) in btErrors" :key="i" class="bt-log-line bt-error">{{ err }}</div>
-                    <div v-if="!btErrors.length" class="bt-log-empty">暂无错误</div>
-                  </div>
-                </el-tab-pane>
-              </el-tabs>
-            </div>
+            <RunningPanel
+              :running="btRunning"
+              :completed="!btRunning && btFullResult != null"
+              :liveData="btLiveData"
+              :logs="[...btLogs, ...btErrors.map(e => '[错误] ' + e)]"
+              @viewReport="showReport = true"
+            />
           </div>
+
+          <ReportOverlay v-model:visible="showReport" :result="btFullResult" />
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -117,8 +103,10 @@
 import { ref, reactive, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
-import { strategyApi, type Strategy } from '@/api/backtest'
+import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
 import BacktestList from './BacktestList.vue'
+import RunningPanel from './RunningPanel.vue'
+import ReportOverlay from './ReportOverlay.vue'
 import { formatDateTime } from '@/utils/format'
 
 const SAMPLE_CODE = `// 买入条件: RSI < 30 (超卖)
@@ -220,9 +208,18 @@ const btEndDate = ref('2025-12-31')
 const btCapital = ref(1_000_000)
 const btFrequency = ref('monthly')
 const btRunning = ref(false)
+const btLiveData = ref<LiveData | null>(null)
+const btFullResult = ref<BacktestResultData | null>(null)
+const showReport = ref(false)
 const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
 const btErrors = ref<string[]>([])
+
+const freqLabelMap: Record<string, string> = {
+  daily: '每天',
+  weekly: '每周',
+  monthly: '每月',
+}
 
 const handleSaveStrategy = async () => {
   if (!activeStrategy.value) return
@@ -244,6 +241,8 @@ const handleSaveStrategy = async () => {
 const handleBacktest = (row: Strategy) => {
   activeStrategy.value = { ...row }
   btCode.value = row.code || ''
+  btLiveData.value = null
+  btFullResult.value = null
   btMetrics.value = []
   btLogs.value = []
   btErrors.value = []
@@ -253,13 +252,15 @@ const handleBacktest = (row: Strategy) => {
 const handleRunBacktest = async () => {
   if (!activeStrategy.value) return
   btRunning.value = true
+  btLiveData.value = null
+  btFullResult.value = null
   btMetrics.value = []
   btLogs.value = ['正在运行回测...']
   btErrors.value = []
   try {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>('/v2/backtest/run', {
-      mode: 'vectorized',
+      mode: 'event_driven',
       factor_expression: btCode.value,
       symbols: ['000300.SH'],
       start_date: btStartDate.value,
@@ -270,53 +271,41 @@ const handleRunBacktest = async () => {
       bar_type: 'daily',
     })
 
-    // The v2/backtest/run returns { task_id }, need to poll for result
-    const taskId = res?.task_id
+    const taskId = res?.data?.task_id
     if (taskId) {
       btLogs.value = [`任务已提交 (${taskId})，等待完成...`]
-      // Poll for result
       let attempts = 0
-      while (attempts < 30) {
+      while (attempts < 300) {
         await new Promise(r => setTimeout(r, 2000))
         const statusRes = await request.get<any>(`/v2/backtest/status/${taskId}`)
-        if (statusRes?.status === 'done') {
+        const statusData = statusRes?.data as TaskStatus
+        if (statusData?.live) {
+          btLiveData.value = statusData.live
+        }
+        if (statusData?.status === 'done') {
+          btLiveData.value = statusData.live
           const resultRes = await request.get<any>(`/v2/backtest/result/${taskId}`)
-          const data = resultRes
+          const data = resultRes?.data as BacktestResultData
           if (data) {
-            btMetrics.value = [
-              { label: '总收益率', value: data.total_return != null ? (Number(data.total_return) * 100).toFixed(2) + '%' : '-', color: Number(data.total_return) >= 0 ? 'positive' : 'negative' },
-              { label: '年化收益', value: data.annual_return != null ? (Number(data.annual_return) * 100).toFixed(2) + '%' : '-', color: Number(data.annual_return) >= 0 ? 'positive' : 'negative' },
-              { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
-              { label: '最大回撤', value: data.max_drawdown != null ? (Number(data.max_drawdown) * 100).toFixed(2) + '%' : '-', color: 'negative' },
-              { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
-              { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
-            ]
+            btFullResult.value = data
             btLogs.value = ['回测完成']
           }
           break
-        } else if (statusRes?.status === 'failed') {
+        } else if (statusData?.status === 'failed') {
           btErrors.value = ['回测失败']
           btLogs.value = ['回测执行失败']
           break
         }
         attempts++
       }
-      if (attempts >= 30) {
+      if (attempts >= 300) {
         btErrors.value = ['回测超时']
-        btLogs.value = ['回测超时（60秒）']
+        btLogs.value = ['回测超时（10分钟）']
       }
     } else {
-      // Direct result
-      const data = res
+      const data = res?.data as BacktestResultData
       if (data) {
-        btMetrics.value = [
-          { label: '总收益率', value: data.total_return != null ? (Number(data.total_return) * 100).toFixed(2) + '%' : '-', color: Number(data.total_return) >= 0 ? 'positive' : 'negative' },
-          { label: '年化收益', value: data.annual_return != null ? (Number(data.annual_return) * 100).toFixed(2) + '%' : '-', color: Number(data.annual_return) >= 0 ? 'positive' : 'negative' },
-          { label: 'Sharpe', value: data.sharpe != null ? Number(data.sharpe).toFixed(2) : '-' },
-          { label: '最大回撤', value: data.max_drawdown != null ? (Number(data.max_drawdown) * 100).toFixed(2) + '%' : '-', color: 'negative' },
-          { label: 'Alpha', value: data.alpha != null ? Number(data.alpha).toFixed(4) : '-' },
-          { label: 'Beta', value: data.beta != null ? Number(data.beta).toFixed(4) : '-' },
-        ]
+        btFullResult.value = data
         btLogs.value = ['回测完成']
       }
     }
