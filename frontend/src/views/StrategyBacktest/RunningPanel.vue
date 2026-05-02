@@ -200,14 +200,14 @@ function formatEvent(ev: LiveEvent): string {
   gap: 5px;
 }
 .mini-card {
-  background: var(--bg-surface);
+  background: #1a1a22;
   border-radius: 5px;
   padding: 6px 8px;
   text-align: center;
 }
 .mini-label {
   font-size: 9px;
-  color: var(--text-label);
+  color: #8888a0;
   font-weight: 500;
 }
 .mini-value {
@@ -218,18 +218,18 @@ function formatEvent(ev: LiveEvent): string {
 
 .panel-tabs {
   display: flex;
-  border-bottom: 1px solid var(--border-subtle);
+  border-bottom: 1px solid #2a2a35;
   gap: 0;
 }
 .panel-tab {
   padding: 5px 12px;
   font-size: 11px;
-  color: var(--text-secondary);
+  color: #8888a0;
   cursor: pointer;
   transition: color 0.15s;
 }
-.panel-tab:hover { color: var(--text-primary); }
-.panel-tab.active { color: var(--accent-primary); border-bottom: 2px solid var(--accent-primary); }
+.panel-tab:hover { color: #d4d4d4; }
+.panel-tab.active { color: #38bdf8; border-bottom: 2px solid #38bdf8; }
 
 .tab-body {
   flex: 1;
@@ -244,10 +244,10 @@ function formatEvent(ev: LiveEvent): string {
   padding: 6px 0;
 }
 .event-line { padding: 1px 4px; }
-.event-time { color: var(--text-muted); margin-right: 6px; }
+.event-time { color: #6e6e85; margin-right: 6px; }
 
 .empty-hint {
-  color: var(--text-muted);
+  color: #8888a0;
   font-style: italic;
   padding: 20px;
   text-align: center;
@@ -262,7 +262,7 @@ function formatEvent(ev: LiveEvent): string {
   border-bottom: 1px solid var(--border-subtle);
   font-size: 13px;
 }
-.metric-label { color: var(--text-label); font-weight: 500; }
+.metric-label { color: #b0b0c0; font-weight: 500; }
 .metric-value { font-weight: 700; font-family: var(--font-data); font-size: 15px; }
 
 .log-stream {
@@ -270,7 +270,7 @@ function formatEvent(ev: LiveEvent): string {
   font-size: 10px;
   line-height: 1.6;
   padding: 6px 4px;
-  color: var(--text-muted);
+  color: #8888a0;
 }
 .log-line { padding: 1px 0; }
 

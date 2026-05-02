@@ -3,7 +3,7 @@
     <div class="page-header">
       <h2>策略回测</h2>
       <div class="page-header-actions">
-        <el-button link type="primary" @click="$router.push('/docs')">
+        <el-button link type="primary" @click="openDocs">
           <el-icon><Document /></el-icon>
           使用手册
         </el-button>
@@ -168,37 +168,41 @@ const SAMPLE_CODE = `def init(context):
     log(f"初始资金: {context.run_info.capital:,.0f}")
     log(f"标的: {context.run_info.symbols}")
 
-def handle_bar(context, bar):
-    # 跳过停牌
-    if bar.suspended or bar.isnan:
-        return
+def handle_bar(context, bar_dict):
+    # bar_dict 包含当日所有标的的 Bar，每天触发一次
+    for symbol in bar_dict:
+        bar = bar_dict[symbol]
 
-    # 获取历史收盘价序列
-    hist = context.get_history(bar.symbol, 252)
-    if hist.empty or len(hist) < context.slow:
-        return
-    close = hist['close']
+        # 跳过停牌
+        if bar.suspended or bar.isnan:
+            continue
 
-    # 计算快慢均线（也可用 bar.mavg(n) 获取当前 Bar 的 N 日均值）
-    mf = MA(close, context.fast)
-    ms = MA(close, context.slow)
+        # 获取历史收盘价序列
+        hist = context.get_history(symbol, 252)
+        if hist.empty or len(hist) < context.slow:
+            continue
+        close = hist['close']
 
-    # 金叉买入
-    if CROSS(mf, ms).iloc[-1] == 1:
-        if not context.portfolio.get_position(bar.symbol):
-            context.order_value(bar.symbol, context.portfolio.total_value * 0.2)
+        # 计算快慢均线
+        mf = MA(close, context.fast)
+        ms = MA(close, context.slow)
 
-    # 死叉卖出
-    elif CROSS(mf, ms).iloc[-1] == -1:
-        pos = context.portfolio.get_position(bar.symbol)
-        if pos and pos.total_shares > 0:
-            context.order_shares(bar.symbol, -pos.total_shares)
+        # 金叉买入
+        if CROSS(mf, ms).iloc[-1] == 1:
+            if not context.portfolio.get_position(symbol):
+                context.order_value(symbol, context.portfolio.total_value * 0.2)
+
+        # 死叉卖出
+        elif CROSS(mf, ms).iloc[-1] == -1:
+            pos = context.portfolio.get_position(symbol)
+            if pos and pos.total_shares > 0:
+                context.order_shares(symbol, -pos.total_shares)
 
     # 定期输出状态
-    if bar.trade_date.day % 30 == 0:
+    now = context.now
+    if now.day % 30 == 0:
         nav = context.portfolio.unit_net_value
-        log(f"[{bar.trade_date}] {bar.symbol} close={bar.close:.2f} "
-            f"nav={nav:.3f} cash={context.stock_account.available_cash:,.0f}")`
+        log(f"[{now.date()}] nav={nav:.3f} cash={context.stock_account.available_cash:,.0f}")`
 
 const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
@@ -314,6 +318,10 @@ const freqLabelMap: Record<string, string> = {
   daily: '每天',
   weekly: '每周',
   monthly: '每月',
+}
+
+const openDocs = () => {
+  window.open('/docs', '_blank')
 }
 
 // ── Factor selection ──
@@ -469,7 +477,7 @@ onMounted(() => {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
-  color: #303133;
+  color: #e2e2ea;
 }
 
 .page-header-actions {
@@ -480,7 +488,7 @@ onMounted(() => {
 
 .strategy-tabs {
   height: 100%;
-  background: #fff;
+  background: #131318;
   border-radius: 4px;
   padding: 16px;
 }
@@ -558,21 +566,34 @@ onMounted(() => {
   align-items: center;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-ghost);
+  background: #1a1a22;
+  border: 1px solid #2a2a35;
   border-radius: 8px;
   font-size: 12px;
+  color: #c0c0cc;
+}
+.bt-config-bar span {
+  color: #999;
+}
+.bt-config-bar :deep(.el-input__inner) {
+  background: #141418;
+  border-color: #2a2a35;
+  color: #d4d4d4;
+}
+.bt-config-bar :deep(.el-input__wrapper) {
+  background: #141418;
+  box-shadow: none;
 }
 .bt-metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .bt-metric-card {
-  border: 1px solid var(--border-ghost);
+  border: 1px solid #2a2a35;
   border-radius: 6px;
   padding: 10px;
   text-align: center;
-  background: var(--bg-surface);
+  background: #1a1a22;
 }
-.bt-metric-label { font-size: 10px; color: var(--text-ghost); }
-.bt-metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; }
+.bt-metric-label { font-size: 10px; color: #8888a0; }
+.bt-metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; color: #e2e2ea; }
 .positive { color: #d93026; }
 .negative { color: #137333; }
 .bt-log-panel {
@@ -583,10 +604,10 @@ onMounted(() => {
   flex: 1;
   min-height: 120px;
 }
-.bt-log-content { padding: 8px 12px; font-size: 11px; font-family: monospace; max-height: 200px; overflow: auto; }
-.bt-log-line { color: var(--text-ghost); padding: 1px 0; }
+.bt-log-content { padding: 8px 12px; font-size: 11px; font-family: monospace; max-height: 200px; overflow: auto; background: #141418; border-radius: 4px; }
+.bt-log-line { color: #8888a0; padding: 1px 0; }
 .bt-error { color: #e5484d; }
-.bt-log-empty { color: var(--text-muted); font-style: italic; }
+.bt-log-empty { color: #8888a0; font-style: italic; }
 
 /* ── Mode switch ── */
 .mode-switch { flex-shrink: 0; }
@@ -640,11 +661,11 @@ onMounted(() => {
   flex-direction: column;
   gap: 4px;
   font-size: 11px;
-  color: #888;
+  color: #999;
   line-height: 1.5;
 }
 .hint-examples {
-  color: #666;
+  color: #777;
   font-family: 'JetBrains Mono', monospace;
 }
 .expression-params {
@@ -654,6 +675,6 @@ onMounted(() => {
 }
 .param-label {
   font-size: 12px;
-  color: #999;
+  color: #aaa;
 }
 </style>
