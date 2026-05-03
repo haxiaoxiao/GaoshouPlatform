@@ -82,6 +82,52 @@ class PSTTM(IndicatorBase):
 
 
 @IndicatorRegistry.register
+class PriceToMA250W(IndicatorBase):
+    name = "price_to_ma250w"
+    display_name = "价格/250周线"
+    category = "valuation"
+    tags = ["估值", "行情"]
+    data_type = "截面"
+    is_precomputed = False
+    dependencies = ["ma250_weekly"]
+    description = "最新收盘价 / 250周均线，< 1 表示低于周线"
+    unit = "x"
+
+    def compute(self, context: IndicatorContext) -> float | None:
+        from app.db.clickhouse import get_ch_client
+        ch = get_ch_client()
+        try:
+            close_result = ch.execute(
+                """SELECT close FROM klines_daily
+                WHERE symbol = %(symbol)s
+                ORDER BY trade_date DESC LIMIT 1""",
+                {"symbol": context.symbol}
+            )
+            if not close_result or not close_result[0][0]:
+                return None
+            close = float(close_result[0][0])
+
+            ma_result = ch.execute(
+                """SELECT avg(close) FROM (
+                    SELECT close FROM klines_weekly
+                    WHERE symbol = %(symbol)s
+                    ORDER BY trade_date DESC
+                    LIMIT 250
+                )""",
+                {"symbol": context.symbol}
+            )
+            if not ma_result or not ma_result[0] or not ma_result[0][0]:
+                return None
+            ma250 = float(ma_result[0][0])
+            if ma250 <= 0:
+                return None
+            return round(close / ma250, 4)
+        except Exception:
+            pass
+        return None
+
+
+@IndicatorRegistry.register
 class DividendYield(IndicatorBase):
     name = "dividend_yield"
     display_name = "股息率"
