@@ -353,7 +353,7 @@ def handle_bar(context, bar_dict):
 
             # 评分: 折价越多+股息越高=分数越高
             score = (1 - ratio) * 50 + div_yield
-            candidates.append((sym, close, score))
+            candidates.append((sym, close, score, ma250w, pe, div_yield))
         except Exception:
             continue
 
@@ -370,7 +370,7 @@ def handle_bar(context, bar_dict):
     per_stock_cash = available_cash * context.single_position_pct
 
     bought = 0
-    for sym, price, score in candidates:
+    for sym, price, score, ma_val, pe_val, div_val in candidates:
         if sym in context.positions:
             continue
         if bought >= context.max_positions - len(context.positions):
@@ -380,7 +380,7 @@ def handle_bar(context, bar_dict):
         order_value(sym, per_stock_cash)
         context.positions[sym] = {"entry_price": price, "entry_week": context.week_count}
         bought += 1
-        log(f"买入 {sym} @ {price:.2f} 折价{1-close/ma250w:.1%} PE={pe:.1f} 股息率={div_yield:.1f}% score={score:.1f}")
+        log(f"买入 {sym} @ {price:.2f} 折价{(1-price/ma_val)*100:.1f}% PE={pe_val:.1f} 股息率={div_val:.1f}% score={score:.1f}")
 `
 
 const TREND_CAPITAL_CODE = `def init(context):
