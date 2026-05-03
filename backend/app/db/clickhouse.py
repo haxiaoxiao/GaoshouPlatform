@@ -62,6 +62,26 @@ def init_clickhouse_tables():
         ORDER BY (symbol, datetime)
     """)
 
+    # 创建周K线表
+    client.execute("""
+        CREATE TABLE IF NOT EXISTS klines_weekly
+        (
+            symbol LowCardinality(String),
+            trade_date Date,
+            open Decimal(10, 4),
+            high Decimal(10, 4),
+            low Decimal(10, 4),
+            close Decimal(10, 4),
+            volume UInt64,
+            amount Decimal(18, 4),
+            turnover_rate Decimal(8, 4),
+            created_at DateTime DEFAULT now()
+        )
+        ENGINE = MergeTree()
+        PARTITION BY toYYYYMM(trade_date)
+        ORDER BY (symbol, trade_date)
+    """)
+
     # 创建因子缓存表
     client.execute("""
         CREATE TABLE IF NOT EXISTS factor_cache
