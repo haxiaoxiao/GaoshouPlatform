@@ -1,161 +1,90 @@
-# AGENTS.md — Coding Agent 指南
+# AGENTS.md — AI Coding Agent 指南
 
-> 本文件为 AI coding agent 提供项目关键信息，确保快速上手。
+> 为 AI agent 提供项目全貌，快速理解数据能力、因子系统和策略开发流程。
 
 ---
 
 ## 项目概述
 
-**GaoshouPlatform** 是一个 A 股量化投研平台，核心功能：
-1. 从华泰 miniQMT (xtquant) 获取行情和财务数据
-2. 存储到 SQLite (元数据) + ClickHouse (时序数据)
-3. 提供 Vue 3 前端进行数据浏览、因子研究、选股筛选
-4. 支持策略回测（VeighNa）和实盘交易
+**GaoshouPlatform** 是一个 A 股量化投研平台，核心能力链：
 
-## 用户偏好
+```
+华泰 miniQMT (xtquant) → SQLite + ClickHouse → FastAPI → Vue 3 前端
+                                    ↓
+                           DataSkill 统一数据接口
+                                    ↓
+                     因子计算 / 策略回测 / 实盘交易
+```
 
-- **界面和交互使用中文**
-- **不要用 AKShare 替代 xtquant** — 用户明确说"先不要用akshare替代"
-- 代码风格简洁，不加多余注释
+## 技术栈
 
----
-
-## 技术栈速览
-
-| 层 | 技术 | 版本/说明 |
+| 层 | 技术 | 说明 |
 |---|---|---|
-| 后端 | FastAPI + SQLAlchemy (async) | Python 3.12+ |
+| 后端框架 | FastAPI + SQLAlchemy (async) | Python 3.12+ |
 | 元数据库 | SQLite via aiosqlite | `backend/data/gaoshou.db` |
-| 时序数据库 | ClickHouse | 端口 19000 |
-| 数据源 | xtquant (华泰 miniQMT) | 必须在线 |
-| 前端 | Vue 3 + TypeScript + Element Plus | Vite 构建 |
+| 时序数据库 | ClickHouse | 端口 19000，列式存储高性能查询 |
+| 数据源 | xtquant (华泰 miniQMT) | 同步阻塞，必须用 `run_in_executor` 包装 |
+| 前端 | Vue 3 + TypeScript + Element Plus | Vite 构建，深色主题 |
+| 缓存 | Redis (可选) | 无 Redis 也可运行 |
 
-## 项目路径
+---
+
+## 数据能力全景
+
+### 数据存储分布
+
+| 数据 | 存储位置 | 表名 |
+|------|----------|------|
+| 股票基础信息 | SQLite | `stocks` — 代码、名称、行业、市值、股本、财务指标 |
+| 财务数据 | SQLite | `financial_data` — 按季度，EPS/ROE/毛利率/营收增速等 |
+| 日 K 线 | ClickHouse | `klines_daily` — OHLCV + 换手率 |
+| 分钟 K 线 | ClickHouse | `klines_minute` — OHLCV + 成交额 |
+| 截面指标 | ClickHouse | `stock_indicators` — (symbol, indicator_name, trade_date, value) |
+| 时序指标 | ClickHouse | `indicator_timeseries` — (symbol, indicator_name, datetime, value) |
+| 因子缓存 | ClickHouse | `factor_cache` — (symbol, trade_date, expr_hash, value) |
+| 自选股 | SQLite | `watchlist_groups` + `watchlist_stocks` |
+| 策略/回测 | SQLite | `strategies` / `backtests` / `orders` / `trades` |
+| 主题标注 | SQLite | `theme_annotations` — 人工标注的业务纯度/产业链定位 |
+
+### SQLite stocks 表核心字段
 
 ```
-E:\projects\gaoshouplatform\
-├── backend\              # FastAPI 后端 (工作目录)
-│   ├── app\
-│   │   ├── engines\qmt_gateway.py     # ⭐ QMT 数据网关
-│   │   ├── services\sync_service.py    # ⭐ 数据同步服务
-│   │   ├── api\data_explorer.py       # ClickHouse 浏览器 API
-│   │   ├── api\data.py                # 股票/同步/自选股 API
-│   │   ├── core\config.py             # 配置（DB路径等）
-│   │   └── db\                         # 数据库连接和模型
-│   ├── data\                           # SQLite 数据文件
-│   ├── .opencode\skills\xtquant-data-api.md  # ⭐ xtquant 完整 API 参考
-│   └── requirements.txt
-└── frontend\             # Vue 3 前端
-    └── src\
-        ├── api\explorer.ts             # 数据浏览器 API 客户端
-        ├── views\DataExplorer.vue      # 数据浏览器页面
-        └── views\DataManage\          # 数据管理页面
+symbol, name, exchange, industry(申万一级), industry2, industry3, sector, concept
+list_date, delist_date, is_st, is_delist, is_suspend
+total_shares, float_shares, a_float_shares (万股)
+total_mv, circ_mv (万元)
+eps, bvps, roe, pe_ttm, pb
+total_assets, total_liability, total_equity
+net_profit, revenue (万元)
+revenue_yoy, profit_yoy, gross_margin
+```
+
+### SQLite financial_data 表核心字段
+
+```
+symbol, report_date, report_type(Q1/H1/Q3/Annual)
+eps, bvps, roe, revenue, net_profit
+revenue_yoy, profit_yoy, gross_margin
+total_assets, total_liability, total_equity
+total_shares, float_shares
+total_mv, circ_mv, pe_ttm, pb
+raw_data (原始 JSON)
+```
+
+### ClickHouse K 线表结构
+
+```sql
+-- klines_daily: (symbol, trade_date, open, high, low, close, volume, amount, turnover_rate)
+-- klines_minute: (symbol, datetime, open, high, low, close, volume, amount)
+-- 分区: toYYYYMM(trade_date/datetime)
+-- 排序键: (symbol, trade_date/datetime)
 ```
 
 ---
 
-## 启动命令
+## DataSkill — 统一数据访问接口
 
-```powershell
-# 后端（从 backend 目录）
-cd E:\projects\GaoshouPlatform\backend
-.venv\Scripts\activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# 前端（从 frontend 目录）
-cd E:\projects\Gaoshouplatform\frontend
-npm run dev
-```
-
----
-
-## ⚠️ 关键踩坑记录（必读）
-
-### 1. `download_financial_data` 永远不要用
-
-```python
-# ❌ 会在 miniQMT 上无限阻塞
-xt.download_financial_data(stock_list, table_list)
-
-# ✅ 用带回调的版本，0.1-0.5s 完成
-xt.download_financial_data2(stock_list, table_list, callback=None)
-```
-
-### 2. `get_financial_data` 返回 DataFrame（不是 dict）
-
-```python
-fnd = xt.get_financial_data(['600051.SH'], ['PershareIndex','Balance'], start_time='20240101')
-# fnd['600051.SH']['PershareIndex'] 是 DataFrame，不是 dict
-# m_timetag 列是 STRING 类型（如 '20240331'），必须用字符串比较！
-# 正确: df[df['m_timetag'] == '20240331']
-# 错误: df[df['m_timetag'] == 20240331]  ← 比较失败！
-```
-
-### 3. `download_sector_data` 可能挂死
-
-如果本地 Sector 缓存已被清理。代码有兜底：`_scan_all_stocks()` 通过 SW1 行业板块扫描获取 A 股列表。
-
-### 4. 异步调用 xtquant
-
-所有 xtquant 函数都是同步阻塞的，必须用 `asyncio.get_running_loop().run_in_executor()` 调用。
-**绝对不要用 `asyncio.get_event_loop()`**（Python 3.10+ 已废弃）。
-
-### 5. SQLite 路径
-
-`config.py` 中 SQLite 路径已改为绝对路径（基于 `_BASE_DIR`），可以从任何工作目录启动 uvicorn。
-
-### 6. clean_local_cache 清理范围
-
-只清理 K 线和财务 .DAT 文件。**不要清理 `Sector/`、`TradeDateAndETFStockListCache`**——清理后板块扫描会失败。
-
----
-
-## 数据同步流程
-
-| API 调用 | sync_type | 数据源 | 写入目标 | 说明 |
-|----------|-----------|--------|----------|------|
-| `POST /api/data/sync` | `stock_info` | `get_stock_list_in_sector` | SQLite | 快速，无需下载 |
-| `POST /api/data/sync` | `stock_full` | `get_stock_list` + `get_full_tick` + `get_financial_data` | SQLite | 含市值+财务 |
-| `POST /api/data/sync` | `financial_data` | `download_financial_data2` + `get_financial_data` | SQLite | ⭐ 核心，需 QMT 在线 |
-| `POST /api/data/sync` | `kline_daily` | `download_history_data` + `get_market_data_ex` | ClickHouse | 日 K 线 |
-| `POST /api/data/sync` | `kline_minute` | `download_history_data` + `get_market_data_ex` | ClickHouse | 分钟 K 线 |
-| `POST /api/data/sync` | `realtime_mv` | `get_full_tick` | SQLite | 实时市值 |
-
-同步流程：下载 → 读取 → 写入数据库 → 清理本地缓存
-
----
-
-## 数据浏览器
-
-- 前端路由：`/explorer`
-- 后端 API：`/api/explorer/tables`、`/api/explorer/tables/{name}/schema`、`/api/explorer/tables/{name}/preview`
-- 支持 WHERE 过滤、排序、分页、自定义 SQL
-
----
-
-## 现有功能完成度
-
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| 股票列表同步 | ✅ 完成 | 含 SW1 板块兜底 |
-| 股票完整信息同步 | ✅ 完成 | 含财务+市值 |
-| 财务数据同步 | ✅ 完成 | 使用 download_financial_data2 |
-| 日 K 线同步 | ✅ 完成 | 写入 ClickHouse |
-| 分钟 K 线同步 | ✅ 完成 | 写入 ClickHouse |
-| 实时市值同步 | ✅ 完成 | get_full_tick |
-| 本地缓存清理 | ✅ 完成 | 清理 .DAT 释放磁盘 |
-| 数据浏览器 | ✅ 完成 | 动态列、WHERE过滤、排序、分页 |
-| 自选股 | ✅ 完成 | 分组管理、CSV批量导入 |
-| 数据技能 (DataSkill) | ✅ 完成 | 策略模块统一数据访问接口，`/api/skill/*` |
-| 因子研究 | 🔧 框架完成 | 指标库已搭建，IC/IR分析待完善 |
-| 策略回测 | 🔧 框架完成 | VeighNa 引擎待集成 |
-| 实盘交易 | 📋 规划中 | 尚未开始 |
-
----
-
-## 数据技能 (DataSkill) — 策略模块数据接口
-
-策略模块通过 `DataSkill` 获取所有数据，无需关心数据来自 QMT/SQLite/ClickHouse。
+策略和因子开发通过 `DataSkill` 获取所有数据，**无需关心数据来源**（SQLite/ClickHouse/QMT）。
 
 ### 服务层 (`backend/app/services/data_skill.py`)
 
@@ -163,36 +92,35 @@ fnd = xt.get_financial_data(['600051.SH'], ['PershareIndex','Balance'], start_ti
 from app.services.data_skill import DataSkill, StockSnapshot, KlineBar, FinancialReport, ScreenResult
 from app.db.sqlite import get_async_session
 
-# 在 API 中使用
-skill = DataSkill(session)  # session = AsyncSession
+skill = DataSkill(session)
 
-# 股票快照（本地优先，QMT 兜底）
+# ── 股票快照 ──
 snapshot = await skill.get_stock("600051.SH")
 snapshots = await skill.get_stocks(["600051.SH", "000001.SZ"])
 
-# 条件选股
+# ── 条件选股 ──
 result = await skill.screen_stocks(
-    min_mv=1_000_000, max_mv=100_000_000,
+    min_mv=10_000_000, max_mv=100_000_000,
     min_pe=5, max_pe=30, min_roe=10, limit=100
 )
 
-# K线数据（ClickHouse 优先，QMT 兜底）
+# ── K 线数据 ──
 bars = await skill.get_kline_daily("600051.SH", start_date=date(2024,1,1))
 bars = await skill.get_kline_minute("600051.SH")
 
-# 财务数据（SQLite 优先，QMT 兜底）
-reports = await skill.get_financial("600051.SH", report_count=8)
+# ── 财务数据 ──
+reports = await skill.get_financial("600051.SH", report_count=8)  # 最近8期
 batch = await skill.get_financial_batch(["600051.SH", "000001.SZ"])
 
-# 实时行情
+# ── 实时行情 ──
 quote = await skill.get_realtime_quote("600051.SH")
 quotes = await skill.get_realtime_quotes(["600051.SH", "000001.SZ"])
 
-# 行业统计 & 股票列表
+# ── 行业与股票列表 ──
 industries = await skill.get_industries()
 all_symbols = await skill.get_all_symbols()
 
-# 指标查询（ClickHouse）
+# ── 指标查询 ──
 value = skill.get_indicator("600051.SH", "pe_ttm", date(2025,4,1))
 indicators = skill.get_indicators_batch(["600051.SH"], date(2025,4,1))
 ```
@@ -201,8 +129,8 @@ indicators = skill.get_indicators_batch(["600051.SH"], date(2025,4,1))
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/skill/stock/{symbol}` | 获取股票快照 |
-| POST | `/skill/stocks/batch` | 批量获取股票快照 |
+| GET | `/skill/stock/{symbol}` | 股票快照 |
+| POST | `/skill/stocks/batch` | 批量股票快照 |
 | GET | `/skill/screen` | 条件选股（industry/exchange/is_st/min_mv/max_mv/min_pe/max_pe/min_roe） |
 | GET | `/skill/kline/daily/{symbol}` | 日K线（start_date/end_date/limit） |
 | GET | `/skill/kline/minute/{symbol}` | 分钟K线 |
@@ -219,18 +147,274 @@ indicators = skill.get_indicators_batch(["600051.SH"], date(2025,4,1))
 | 数据类型 | 优先来源 | 兜底来源 |
 |----------|----------|----------|
 | 股票快照 | SQLite `stocks` 表 | QMT `get_stock_full_info` |
-| K线 | ClickHouse | QMT `get_kline_daily/minute` |
-| 财务数据 | SQLite `financial_data` 表 | QMT `_fetch_financial_data` |
+| K 线 | ClickHouse | QMT `get_kline_daily/minute` |
+| 财务数据 | SQLite `financial_data` 表 | QMT `download_financial_data2` |
 | 实时行情 | QMT `get_realtime_quotes` | 无兜底 |
 | 指标 | ClickHouse `stock_indicators` | 无兜底 |
 
 ---
 
-## 修改代码时的注意事项
+## 因子开发
 
-1. **修改 sync_service.py 后要验证语法** — 该文件较长（1400+ 行），修改后用 `python -c "import ast; ast.parse(...)"` 检查
-2. **修改 qmt_gateway.py 后要验证语法** — `_scan_all_stocks` 等方法确保缩进正确（class 方法，4 空格缩进）
-3. **新增 API 路由** — 需在 `api/router.py` 中注册
-4. **新增前端页面** — 需在 `router/index.ts` 添加路由，在 `layouts/MainLayout.vue` 添加导航
-5. **ClickHouse 查询** — 使用 `get_ch_client()` 获取单例客户端，不要手动创建连接
-6. **SQLite 操作** — 使用 `get_async_session()` 依赖注入，用 `insert().on_conflict_do_update()` 做 upsert
+项目有 **两套因子系统**，用途不同：
+
+### 系统一：Indicator 体系（`backend/app/indicators/`）
+
+适用于**简单截面/时序指标**，有明确的注册表和自动发现机制。
+
+**已有指标（20+ 个）：**
+
+| 类别 | 指标 | 数据来源 |
+|------|------|----------|
+| 估值 | pe_ttm, pb, ps_ttm, dividend_yield | stock_info / ClickHouse |
+| 动量 | return_5d, return_20d, return_60d, ma5_slope | kline_data |
+| 波动 | volatility_20d, avg_amplitude | kline_data |
+| 流动性 | turnover_rate, avg_amount_20d, free_float_mv | stock_info / kline_data |
+| 质量 | roe, debt_ratio, gross_margin | stock_info |
+| 成长 | revenue_growth, profit_growth | stock_info |
+| 技术 | ma5, ma10, ma20, rsi_14 | kline_data |
+| 主题 | business_purity, chain_position, revenue_ratio | SQLite theme_annotations |
+
+**添加新指标的步骤：**
+
+1. 在对应类别文件（如 `valuation.py`）创建子类：
+
+```python
+from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
+
+@IndicatorRegistry.register
+class MyNewFactor(IndicatorBase):
+    name = "my_new_factor"
+    display_name = "我的新因子"
+    category = "valuation"       # valuation/growth/quality/momentum/volatility/liquidity/technical/theme
+    tags = ["估值", "自定义"]
+    data_type = "截面"            # "截面" 用 stock_info，"时序" 用 kline_data
+    is_precomputed = True        # True=同步后自动计算
+    dependencies = []            # 依赖的其他指标名
+    description = "因子描述"
+    unit = "%"                   # % / x / CNY / 10k CNY / ""
+
+    def compute(self, context: IndicatorContext) -> float | None:
+        # context.symbol    → 股票代码
+        # context.trade_date → 交易日期
+        # context.stock_info → dict (截面: 从 stocks + financial_data 合并)
+        # context.kline_data → list[dict] (时序: 按日期倒序)
+        ...
+        return value
+```
+
+2. 确保 `is_precomputed = True` 则同步后自动计算；`False` 则只在前端查询时计算。
+3. 自动发现机制：`IndicatorRegistry.auto_discover()` 会扫描 `indicators/` 包下所有模块（除 `base.py`、`scheduler.py`、`__init__.py`）。
+
+### 系统二：Compute Engine（`backend/app/compute/`）
+
+适用于**基于表达式的自定义因子**，支持复杂公式组合。
+
+**算子体系（4 级）：**
+
+| 级别 | 说明 | 示例 |
+|------|------|------|
+| L0 | 原始字段 | `$close`, `$open`, `$high`, `$low`, `$volume`, `$amount`, `$turnover` |
+| L1 | 指标算子 | `indicator(name, series)`, `pe_ttm(series)`, `dividend_yield(series)` |
+| L2 | 滚动/数学 | `Mean`, `Std`, `Sum`, `Min`, `Max`, `Corr`, `Cov`, `Lag`, `Delta`, `Rank` |
+| L3 | 技术分析 | `SMA`, `EMA`, `RSI`, `MACD`, `ATR`, `BB`, `CCI`, `WILLR`, `OBV`, `KDJ_K` |
+
+**表达式语法：**
+
+```
+Mean($close, 5) / Std($close, 20)           -- 均值/标准差
+($close - Mean($close, 20)) / Std($close, 20) -- Z-Score
+RSI($close, 14)                              -- RSI 指标
+$close > Mean($close, 20)                    -- 布尔条件
+```
+
+**添加新算子的步骤：**
+
+1. 在对应算子文件中创建子类：
+
+```python
+from app.compute.operators.base import Operator
+from app.compute.operators.registry import OperatorRegistry
+
+@OperatorRegistry.register
+class MyRollingOp(Operator):
+    name = "my_op"
+    level = 2
+    category = "rolling"
+    signature = "my_op(series, period)"
+
+    def evaluate(self, df, **kwargs):
+        series = kwargs["series"]
+        period = kwargs.get("period", 10)
+        # 计算逻辑...
+        return result
+```
+
+2. 算子文件在 `backend/app/compute/operators/`：
+   - `raw_fields.py` — L0 原始字段
+   - `indicator_ops.py` — L1 指标
+   - `math_ops.py` — L2 数学/比较
+   - `rolling_ops.py` — L2 滚动/窗口
+   - `ta_ops.py` — L3 技术分析
+
+---
+
+## 策略开发
+
+### 已有策略
+
+**趋势资金策略** (`backend/app/strategies/trend_capital.py`)：
+- 基于研报十一的日内交易行为事件驱动策略
+- 三路信号融合：Signal A（小单净流出）+ Signal B（VWAP ratio）+ Signal C（净支撑量）
+- 3 交易日窗口，每个信号至少 2 日触发
+- 仓位管理：5 通道，持有 20 天
+- 从 ClickHouse `klines_minute` 直接查询计算
+
+**UserScript 策略** (`backend/app/backtest/strategies/trend_capital_script.py`)：
+- RQAlpha 兼容的策略脚本格式
+- 通过 `strategy_loader.py` 动态加载
+
+### 编写新策略的方式
+
+**方式一：独立策略类**（推荐用于复杂策略）
+
+```python
+class MyStrategy:
+    def __init__(self):
+        self.ch_client = get_ch_client()
+
+    def generate_signals(self, start_date, end_date, symbols):
+        # 从 ClickHouse 查询数据，生成交易信号
+        ...
+
+    def run_backtest(self, ...):
+        # 模拟交易
+        ...
+```
+
+**方式二：UserScript**（RQAlpha 兼容）
+
+```python
+def init(context):
+    context.stocks = []
+
+def handle_bar(context, bar):
+    # 每个 bar 调用一次
+    ...
+```
+
+### 回测引擎 (`backend/app/backtest/`)
+
+| 模块 | 文件 | 说明 |
+|------|------|------|
+| 向量化回测 | `vectorized.py` | 基于 quantile 分组收益 |
+| 事件驱动回测 | `event_driven.py` | 完整的事件驱动引擎 |
+| 事件定义 | `event/events.py` | MarketEvent, SignalEvent, OrderEvent, FillEvent |
+| 事件总线 | `event/event_bus.py` | 事件注册与分发 |
+| 日历 | `event/calendar.py` | 交易日历 |
+| 组合管理 | `portfolio/` | Position, Account, Portfolio, RiskValidators |
+| 分析 | `analysis/` | Collectors, Metrics (夏普/最大回撤/年化收益等) |
+| 配置 | `config.py` | BacktestConfig |
+| 运行器 | `runner.py` | BacktestRunner |
+| 策略加载 | `strategy_loader.py` | 动态加载 UserScript |
+
+---
+
+## API 路由全景
+
+| 前缀 | 来源 | 功能 |
+|------|------|------|
+| `/api/system/*` | `api/system.py` | 系统状态、健康检查 |
+| `/api/data/*` | `api/data.py` | 股票列表、同步、自选股 |
+| `/api/explorer/*` | `api/data_explorer.py` | 数据浏览器（ClickHouse 表查询） |
+| `/api/skill/*` | `api/data_skill.py` | DataSkill 统一数据接口 |
+| `/api/backtest/*` | `api/backtest.py` | 回测管理 |
+| `/api/factor/*` | `api/factor.py` | 因子管理 |
+| `/api/v2/factors/*` | `api/factors.py` | 因子模板、表达式验证 |
+| `/api/indicators/*` | `api/indicator.py` | 指标元数据、计算触发 |
+| `/api/strategy/*` | `api/strategy.py` | 策略 CRUD |
+| `/compute/*` | `compute/api.py` | 计算引擎（因子表达式求值） |
+| `/backtest/*` | `backtest/api.py` | 回测引擎 V2 |
+
+---
+
+## 前端页面
+
+| 路由 | 组件 | 功能 |
+|------|------|------|
+| `/data` | `DataManage/index.vue` | 数据管理主页 |
+| `/data/sync` | `DataManage/SyncPanel.vue` | 数据同步面板 |
+| `/data/stock-list` | `DataManage/StockList.vue` | 股票列表 |
+| `/data/kline` | `DataManage/KlineQuery.vue` | K线查询 |
+| `/explorer` | `DataExplorer.vue` | 数据浏览器（动态 SQL 查询） |
+| `/factors` | `FactorResearch/index.vue` | 因子研究主页 |
+| `/factors/overview` | `FactorResearch/IndicatorOverview.vue` | 指标概览 |
+| `/factors/list` | `FactorResearch/FactorList.vue` | 因子列表 |
+| `/factors/board` | `FactorResearch/FactorBoard.vue` | 因子看板 |
+| `/factors/screen` | `FactorResearch/StockScreen.vue` | 选股筛选 |
+| `/factors/analysis` | `FactorResearch/FactorAnalysis.vue` | 因子分析 |
+| `/backtest` | `StrategyBacktest/index.vue` | 策略回测主页 |
+| `/backtest/list` | `StrategyBacktest/BacktestList.vue` | 回测记录列表 |
+| `/backtest/report/:id` | `StrategyBacktest/BacktestReport.vue` | 回测报告 |
+| `/factor-backtest` | `FactorBacktest/index.vue` | 因子回测 |
+| `/watchlist` | `Watchlist.vue` | 自选股管理 |
+| `/stock/:symbol` | `StockDetail.vue` | 个股详情 |
+| `/live` | `LiveTrading/index.vue` | 实盘交易（规划中） |
+| `/system` | `SystemMonitor/index.vue` | 系统监控 |
+| `/docs` | `Docs/index.vue` | 使用文档 |
+
+---
+
+## ⚠️ 关键注意事项
+
+### xtquant 使用
+
+1. **永远不要用 `download_financial_data`** — 会在 miniQMT 上无限阻塞。用 `download_financial_data2(callback=None)`。
+2. **所有 xtquant 调用都是同步阻塞的**，必须用 `asyncio.get_running_loop().run_in_executor()` 包装。不要用 `asyncio.get_event_loop()`（Python 3.10+ 已废弃）。
+3. **`get_financial_data` 返回 DataFrame**，不是 dict。`m_timetag` 列是 **STRING 类型**，必须用字符串比较（`'20240331'` 而非 `20240331`）。
+4. **`download_sector_data` 可能挂死** — 代码有兜底：`_scan_all_stocks()` 通过 SW1 板块扫描获取 A 股列表。
+5. **clean_local_cache 不要清理 `Sector/` 和 `TradeDateAndETFStockListCache`** — 清理后板块扫描会失败。
+
+### 数据库操作
+
+- **ClickHouse 查询** — 使用 `get_ch_client()` 获取全局单例客户端。
+- **SQLite 操作** — 使用 `get_async_session()` 依赖注入，`insert().on_conflict_do_update()` 做 upsert。
+- **SQLite 同步引擎** — 指标调度器中需创建同步引擎：`create_engine(settings.database_url.replace("+aiosqlite", ""))`。
+
+### 代码修改注意事项
+
+- 修改 `sync_service.py`（1400+ 行）后验证语法：`python -c "import ast; ast.parse(...)"`
+- 修改 `qmt_gateway.py` 后验证语法（class 方法缩进为 4 空格）
+- 新增 API 路由需在 `api/router.py` 注册
+- 新增前端页面需在 `frontend/src/router/index.ts` 添加路由，在 `layouts/MainLayout.vue` 添加导航
+- **不要用 AKShare 替代 xtquant** — 用户明确拒绝
+
+---
+
+## 启动命令
+
+```powershell
+# 后端
+cd E:\Projects\GaoshouPlatform\backend
+.venv\Scripts\activate
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 前端
+cd E:\Projects\GaoshouPlatform\frontend
+npm run dev
+```
+
+---
+
+## 数据同步流程
+
+| API | sync_type | 数据源 | 写入目标 | 说明 |
+|-----|-----------|--------|----------|------|
+| `POST /api/data/sync` | `stock_info` | `get_stock_list_in_sector` | SQLite stocks | 快速，无需下载 |
+| `POST /api/data/sync` | `stock_full` | `get_stock_list` + `get_full_tick` + `get_financial_data` | SQLite stocks | 含市值+财务 |
+| `POST /api/data/sync` | `financial_data` | `download_financial_data2` + `get_financial_data` | SQLite financial_data | 需 QMT 在线 |
+| `POST /api/data/sync` | `kline_daily` | `download_history_data` + `get_market_data_ex` | ClickHouse klines_daily | 日 K 线 |
+| `POST /api/data/sync` | `kline_minute` | `download_history_data` + `get_market_data_ex` | ClickHouse klines_minute | 分钟 K 线 |
+| `POST /api/data/sync` | `realtime_mv` | `get_full_tick` | SQLite stocks | 实时市值 |
+
+同步流程：下载 → 读取 → 写入数据库 → 清理本地缓存 → 触发指标自动计算
