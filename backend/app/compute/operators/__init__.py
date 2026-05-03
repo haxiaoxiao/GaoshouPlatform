@@ -10,7 +10,7 @@ def auto_discover():
     from app.compute import operators as pkg
 
     for _importer, modname, _ispkg in pkgutil.iter_modules(pkg.__path__):
-        if modname in ("base", "registry", "__init__"):
+        if modname in ("base", "registry", "__init__", "indicator_ops"):
             continue
         importlib.import_module(f"app.compute.operators.{modname}")
 

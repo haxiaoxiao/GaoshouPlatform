@@ -1728,6 +1728,8 @@ class SyncService:
     async def sync_dividends(
         self,
         symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
         task_id: int | None = None,
         failure_strategy: str = "skip",
     ) -> SyncProgress:

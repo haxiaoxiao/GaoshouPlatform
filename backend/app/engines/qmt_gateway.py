@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
+import pandas as pd
 from loguru import logger
 
 
@@ -889,6 +890,83 @@ class QMTGateway:
                         "total_value": total_value,
                         "float_value": float_value,
                     })
+            return results
+        except Exception:
+            return []
+
+    async def get_dividends(self, symbol: str, start_date: str = '', end_date: str = '') -> list[dict]:
+        """获取分红送股数据 (除权除息信息)
+
+        Args:
+            symbol: 股票代码，如 '600000.SH'
+            start_date: 开始日期，格式 YYYYMMDD
+            end_date: 结束日期，格式 YYYYMMDD
+
+        Returns:
+            list[dict]: 分红数据列表，每条包含:
+                - symbol: 股票代码
+                - dividend_date: 分红送股日期
+                - dividend_type: 分红类型 (cash/stock/both)
+                - cash_dividend: 现金分红(元/股)
+                - stock_dividend: 送股(股/股)
+                - rights_issue: 配股(股/股)
+                - ex_date: 除权除息日
+                - announcement_date: 公告日期
+        """
+        xt = self._get_xt()
+        loop = asyncio.get_running_loop()
+
+        try:
+            df = await loop.run_in_executor(
+                None, lambda: xt.get_divid_factors(symbol, start_date, end_date)
+            )
+
+            if df is None or df.empty:
+                return []
+
+            results = []
+            for _, row in df.iterrows():
+                try:
+                    # 解析日期 - time 字段是毫秒时间戳
+                    ex_date = None
+                    if "time" in df.columns and pd.notna(row.get("time")):
+                        try:
+                            # 时间戳是毫秒
+                            ts = int(row["time"]) / 1000
+                            ex_date = datetime.fromtimestamp(ts).strftime("%Y%m%d")
+                        except Exception:
+                            pass
+
+                    # QMT 字段: interest=现金分红, stockBonus=送股, stockGift=赠股, allotNum=配股
+                    cash_div = float(row.get("interest", 0) or 0)
+                    stock_div = float(row.get("stockBonus", 0) or 0)
+                    stock_gift = float(row.get("stockGift", 0) or 0)
+                    rights_issue = float(row.get("allotNum", 0) or 0)
+
+                    # 合并送股和赠股
+                    total_stock = stock_div + stock_gift
+
+                    if cash_div <= 0 and total_stock <= 0 and rights_issue <= 0:
+                        continue
+
+                    div_type = "cash"
+                    if total_stock > 0 and cash_div > 0:
+                        div_type = "both"
+                    elif total_stock > 0:
+                        div_type = "stock"
+
+                    results.append({
+                        "symbol": symbol,
+                        "dividend_date": ex_date,
+                        "dividend_type": div_type,
+                        "cash_dividend": cash_div if cash_div > 0 else None,
+                        "stock_dividend": total_stock if total_stock > 0 else None,
+                        "rights_issue": rights_issue if rights_issue > 0 else None,
+                        "ex_date": ex_date,
+                    })
+                except Exception:
+                    continue
+
             return results
         except Exception:
             return []

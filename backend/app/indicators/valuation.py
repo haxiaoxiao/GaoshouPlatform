@@ -140,4 +140,22 @@ class DividendYield(IndicatorBase):
     unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
+        from app.db.clickhouse import get_ch_client
+
+        ch = get_ch_client()
+        try:
+            result = ch.execute(
+                """
+                SELECT value FROM stock_indicators
+                WHERE symbol = %(symbol)s
+                AND indicator_name = 'dividend_yield'
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """,
+                {"symbol": context.symbol}
+            )
+            if result and result[0]:
+                return result[0][0]
+        except Exception:
+            pass
         return None

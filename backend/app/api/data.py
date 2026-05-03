@@ -549,7 +549,7 @@ async def _run_sync_task(
     async with async_session() as session:
         service = SyncService(session)
         try:
-            logger.info(f"Starting sync task: {sync_type}")
+            logger.info(f"symbols={symbols}, start_date={start_date}, end_date={end_date}")
             if sync_type == "stock_info":
                 await service.sync_stock_info(
                     failure_strategy=failure_strategy,
@@ -584,7 +584,15 @@ async def _run_sync_task(
                     failure_strategy=failure_strategy,
                     full_sync=full_sync,
                 )
+            elif sync_type == "dividends":
+                await service.sync_dividends(
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    failure_strategy=failure_strategy,
+                )
             elif sync_type == "kline_minute":
+>>>>>>> Stashed changes
                 await service.sync_kline_minute(
                     symbols=symbols,
                     start_date=start_date,
@@ -615,8 +623,9 @@ async def trigger_sync(
     - kline_minute: 分钟K线数据
     - kline_weekly: 周K线数据
     - realtime_mv: 实时市值更新
+    - dividends: 分红送股数据(需QMT在线)
     """
-    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv")
+    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends")
     if request.sync_type not in valid_types:
         raise HTTPException(
             status_code=400,

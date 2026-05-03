@@ -55,8 +55,11 @@
         <BacktestList ref="backtestListRef" />
       </el-tab-pane>
 
-      <el-tab-pane label="回测运行" name="backtestRunner" v-if="activeStrategy">
-        <div class="split-layout">
+      <el-tab-pane label="回测运行" name="backtestRunner">
+        <div v-if="!activeStrategy" class="empty-runner">
+          <p>请先在"策略列表"中选择一个策略，然后点击"回测"按钮进入回测运行界面</p>
+        </div>
+        <div v-else class="split-layout">
           <div class="editor-panel">
             <div class="editor-toolbar">
               <el-input v-model="activeStrategy.name" size="small" class="strategy-name-input" placeholder="策略名称" />
@@ -140,23 +143,28 @@
             </div>
             <div class="bt-pool-bar">
               <span class="pool-label">股票池</span>
-              <el-tag
-                v-for="sym in btSymbols"
-                :key="sym"
-                closable
-                size="small"
-                type="info"
-                @close="removeSymbol(sym)"
-              >{{ sym }}</el-tag>
-              <el-input
-                v-model="newSymbolInput"
-                size="small"
-                placeholder="输入代码，回车添加"
-                style="width:180px"
-                @keyup.enter="addSymbol"
-                @blur="addSymbol"
-              />
-              <el-button size="small" text @click="showWatchlistPicker = true">从自选池导入</el-button>
+              <template v-if="isAllStocks">
+                <el-tag size="small" type="success" closable @close="clearAllStocks">全量A股 ({{ allStocksCount }} 只)</el-tag>
+              </template>
+              <template v-else>
+                <el-tag
+                  v-for="sym in btSymbols"
+                  :key="sym"
+                  closable
+                  size="small"
+                  type="info"
+                  @close="removeSymbol(sym)"
+                >{{ sym }}</el-tag>
+                <el-input
+                  v-model="newSymbolInput"
+                  size="small"
+                  placeholder="输入代码，回车添加"
+                  style="width:180px"
+                  @keyup.enter="addSymbol"
+                  @blur="addSymbol"
+                />
+              </template>
+              <el-button size="small" text @click="showWatchlistPicker = true" v-if="!isAllStocks">从自选池导入</el-button>
               <el-select
                 v-model="selectedPool"
                 size="small"
@@ -168,11 +176,12 @@
                 <el-option label="沪深Top100" value="top100" />
                 <el-option label="沪深Top300" value="top300" />
                 <el-option label="沪深Top500" value="top500" />
+                <el-option label="全量A股" value="all" />
               </el-select>
-              <el-button size="small" text type="danger" @click="btSymbols = []" v-if="btSymbols.length > 0">
-                清空 ({{ btSymbols.length }})
+              <el-button size="small" text type="danger" @click="clearAllStocks" v-if="isAllStocks || btSymbols.length > 0">
+                清空 ({{ isAllStocks ? allStocksCount : btSymbols.length }})
               </el-button>
-              <span class="pool-count">{{ btSymbols.length }} 只</span>
+              <span class="pool-count">{{ isAllStocks ? allStocksCount : btSymbols.length }} 只</span>
             </div>
 
             <Teleport to="body">
@@ -670,6 +679,8 @@ const btCapital = ref(1_000_000)
 const btFrequency = ref('monthly')
 const btBarType = ref('daily')
 const btSymbols = ref<string[]>([])
+const isAllStocks = ref(false)
+const allStocksCount = ref(0)
 const newSymbolInput = ref('')
 const showWatchlistPicker = ref(false)
 const selectedPool = ref<string | null>(null)
@@ -715,6 +726,8 @@ const applyWatchlistStocks = () => {
 
 const replaceWithWatchlistStocks = () => {
   if (selectedWatchlistStocks.value.length === 0) return
+  isAllStocks.value = false
+  allStocksCount.value = 0
   btSymbols.value = [...selectedWatchlistStocks.value]
   showWatchlistPicker.value = false
   ElMessage.success(`已替换为 ${btSymbols.value.length} 只自选股`)
@@ -726,8 +739,17 @@ const loadPoolSymbols = async (poolName: string | null) => {
     const { default: request } = await import('@/api/request')
     const res = await request.get<any>(`/v2/backtest/pools/${poolName}`, { timeout: 120000 })
     if (res?.symbols?.length) {
-      btSymbols.value = res.symbols
-      ElMessage.success(`已加载 ${poolName} 股票池 (${res.symbols.length} 只)`)
+      if (poolName === 'all') {
+        isAllStocks.value = true
+        allStocksCount.value = res.symbols.length
+        btSymbols.value = res.symbols  // store for API call, but don't render tags
+        ElMessage.success(`已切换全量A股模式 (${res.symbols.length} 只)`)
+      } else {
+        isAllStocks.value = false
+        allStocksCount.value = 0
+        btSymbols.value = res.symbols
+        ElMessage.success(`已加载 ${poolName} 股票池 (${res.symbols.length} 只)`)
+      }
     } else {
       ElMessage.warning(`${poolName} 股票池为空`)
     }
@@ -735,6 +757,12 @@ const loadPoolSymbols = async (poolName: string | null) => {
     ElMessage.error(`加载股票池失败: ${e?.message || e}`)
   }
   selectedPool.value = null
+}
+
+const clearAllStocks = () => {
+  btSymbols.value = []
+  isAllStocks.value = false
+  allStocksCount.value = 0
 }
 
 const btRunning = ref(false)
@@ -792,32 +820,37 @@ const handleSaveStrategy = async () => {
 }
 
 const handleBacktest = async (row: Strategy) => {
-  activeStrategy.value = { ...row }
-  const code = row.code || ''
-  // Auto-detect mode from code content
-  if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
-    btMode.value = 'script'
-    btCode.value = code
-  } else {
-    btMode.value = 'expression'
-    btExpression.value = code || SAMPLE_EXPRESSION
-    btCode.value = code
+  try {
+    activeStrategy.value = { ...row }
+    const code = row.code || ''
+    // Auto-detect mode from code content
+    if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
+      btMode.value = 'script'
+      btCode.value = code
+    } else {
+      btMode.value = 'expression'
+      btExpression.value = code || SAMPLE_EXPRESSION
+      btCode.value = code
+    }
+    // Auto-detect bar_type from code content
+    btBarType.value = (code.includes('get_intraday') || code.includes('compute_daily_signal'))
+      ? 'minute' : 'daily'
+    btLiveData.value = null
+    btFullResult.value = null
+    btMetrics.value = []
+    btLogs.value = []
+    btErrors.value = []
+    await nextTick()
+    activeTab.value = 'backtestRunner'
+  } catch (e) {
+    console.error('handleBacktest error:', e)
+    ElMessage.error('加载策略失败')
   }
-  // Auto-detect bar_type from code content
-  btBarType.value = (code.includes('get_intraday') || code.includes('compute_daily_signal'))
-    ? 'minute' : 'daily'
-  btLiveData.value = null
-  btFullResult.value = null
-  btMetrics.value = []
-  btLogs.value = []
-  btErrors.value = []
-  await nextTick()
-  activeTab.value = 'backtestRunner'
 }
 
 const handleRunBacktest = async () => {
   if (!activeStrategy.value) return
-  if (btSymbols.value.length === 0) {
+  if (btSymbols.value.length === 0 && !isAllStocks.value) {
     ElMessage.warning('请先添加回测股票')
     return
   }
@@ -1193,5 +1226,18 @@ onMounted(async () => {
 .param-label {
   font-size: 12px;
   color: #aaa;
+}
+
+.empty-runner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 400px;
+  color: #888;
+  text-align: center;
+}
+.empty-runner p {
+  font-size: 14px;
+  line-height: 1.6;
 }
 </style>

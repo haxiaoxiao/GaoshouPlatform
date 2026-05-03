@@ -180,10 +180,26 @@ async def get_pool_symbols(pool_name: str):
     if pool_name in _POOL_CACHE:
         return {"code": 0, "data": {"symbols": _POOL_CACHE[pool_name]}}
 
+    if pool_name == "all":
+        from app.db.models.stock import Stock
+        from app.core.config import settings
+        from sqlalchemy import create_engine, select
+        url = settings.database_url.replace("+aiosqlite", "")
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(Stock.symbol).where(Stock.is_st == 0, Stock.is_delist == 0)
+            ).all()
+        engine.dispose()
+        symbols = [r[0] for r in rows]
+        _POOL_CACHE["all"] = symbols
+        logger.info("Pool all: {} symbols loaded", len(symbols))
+        return {"code": 0, "data": {"symbols": symbols}}
+
     size_map = {"top100": 100, "top300": 300, "top500": 500}
     limit = size_map.get(pool_name)
     if limit is None:
-        return {"code": 1, "message": f"Unknown pool: {pool_name}. Use top100/top300/top500", "data": None}
+        return {"code": 1, "message": f"Unknown pool: {pool_name}. Use top100/top300/top500/all", "data": None}
 
     try:
         from app.db.clickhouse import get_ch_client

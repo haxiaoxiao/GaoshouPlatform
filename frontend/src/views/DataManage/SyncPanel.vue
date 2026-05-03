@@ -19,9 +19,10 @@
               <el-checkbox value="kline_daily">日K线</el-checkbox>
               <el-checkbox value="kline_minute">分钟K线</el-checkbox>
               <el-checkbox value="realtime_mv">实时市值</el-checkbox>
+              <el-checkbox value="dividends">分红送股</el-checkbox>
             </el-checkbox-group>
             <div class="form-tip">
-              股票信息=基础字段+市值；股票完整信息=含市值等；财务数据=从QMT下载季度财报(耗时较长)；实时市值=仅更新市值
+              股票信息=基础字段+市值；股票完整信息=含市值等；财务数据=从QMT下载季度财报(耗时较长)；实时市值=仅更新市值；分红送股=从QMT获取分红数据并计算股息率
             </div>
           </el-form-item>
 
@@ -326,7 +327,7 @@ const isSyncing = computed(() => syncStatus.value.status === 'running')
 // 是否禁用日期范围选择
 // 只有当选中的同步类型都不需要日期范围时才禁用
 const isDateRangeDisabled = computed(() => {
-  const needsDateTypes = ['kline_daily', 'kline_minute']
+  const needsDateTypes = ['kline_daily', 'kline_minute', 'dividends']
   // 如果选中的类型中有需要日期的，则不禁用
   const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
   // 如果没有选中任何需要日期的类型，则禁用
@@ -380,6 +381,7 @@ const syncTypeLabel = (type: string): string => {
     kline_daily: '日K线',
     kline_minute: '分钟K线',
     realtime_mv: '实时市值',
+    dividends: '分红送股',
   }
   return labels[type] || type
 }
@@ -429,7 +431,7 @@ const handleStartSync = async () => {
   }
 
   // 提前校验：K线类型需要日期范围
-  const needsDateTypes = ['kline_daily', 'kline_minute']
+  const needsDateTypes = ['kline_daily', 'kline_minute', 'dividends']
   const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
   if (hasNeedDate) {
     if (!syncConfig.value.dateRange || !syncConfig.value.dateRange[0] || !syncConfig.value.dateRange[1]) {
@@ -450,7 +452,7 @@ const handleStartSync = async () => {
   for (const syncType of syncConfig.value.syncTypes) {
     try {
       const params: Parameters<typeof syncApi.trigger>[0] = {
-        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv',
+        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv' | 'dividends',
         failure_strategy: syncConfig.value.failureStrategy as 'skip' | 'retry' | 'stop',
         full_sync: syncConfig.value.fullSync,  // 传递全量更新标记
       }

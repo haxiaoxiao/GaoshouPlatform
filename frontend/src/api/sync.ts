@@ -33,7 +33,7 @@ export interface SyncLog {
 
 // 同步请求参数
 export interface SyncRequest {
-  sync_type: 'stock_info' | 'stock_full' | 'kline_daily' | 'kline_minute' | 'realtime_mv'
+  sync_type: 'stock_info' | 'stock_full' | 'kline_daily' | 'kline_minute' | 'realtime_mv' | 'dividends'
   symbols?: string[]
   start_date?: string
   end_date?: string
