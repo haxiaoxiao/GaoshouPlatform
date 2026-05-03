@@ -278,6 +278,111 @@ def handle_bar(context, bar_dict):
 
 const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
+const DEEP_VALUE_CODE = `def init(context):
+    # 深度价值策略参数
+    context.price_to_ma_max = 0.9      # 股价 < 250周线 * 0.9
+    context.dividend_yield_min = 3.5   # 股息率 > 3.5%
+    context.pe_min = 0                 # PE > 0 (排除亏损)
+    context.pe_max = 40                # PE < 40
+    context.hold_weeks = 52            # 持有52周
+    context.rebalance_weeks = 13       # 每13周(约1季度)调仓
+    context.max_positions = 10         # 最多持仓数
+    context.single_position_pct = 0.10 # 单票10%仓位
+
+    # 运行状态
+    context.positions = {}             # {symbol: {"entry_price": x, "entry_week": n}}
+    context.week_count = 0
+    context.last_rebalance = -999
+
+    log("深度价值策略: 价格<250周线{:.0%} 股息率>{}% 0<PE<{} 持有{}周".format(
+        context.price_to_ma_max, context.dividend_yield_min, context.pe_max, context.hold_weeks
+    ))
+
+def handle_bar(context, bar_dict):
+    context.week_count += 1
+    today = context.now.date()
+
+    # ── 到期平仓 ──
+    expired = []
+    for sym, pos in context.positions.items():
+        held = context.week_count - pos["entry_week"]
+        if held >= context.hold_weeks:
+            expired.append(sym)
+    for sym in expired:
+        p = context.portfolio.get_position(sym)
+        if p and p.total_shares > 0:
+            order_shares(sym, -p.total_shares)
+            log(f"到期平仓 {sym}")
+        del context.positions[sym]
+
+    # ── 调仓 ──
+    if context.week_count - context.last_rebalance < context.rebalance_weeks:
+        return
+    if len(context.positions) >= context.max_positions:
+        return
+    context.last_rebalance = context.week_count
+
+    # ── 筛选候选 ──
+    candidates = []
+    for sym in list(context.universe):
+        try:
+            # 获取收盘价
+            close = context.get_daily_close(sym, today)
+            if not close or close <= 0:
+                continue
+
+            # 获取250周均线
+            ma250w = context.get_weekly_ma(sym, 250, today)
+            if not ma250w or ma250w <= 0:
+                continue
+
+            # 条件1: 价格 < 250周线 * 0.9
+            ratio = close / ma250w
+            if ratio >= context.price_to_ma_max:
+                continue
+
+            # 条件2: PE > 0 and PE < 40
+            pe = context.get_indicator(sym, "pe_ttm", today)
+            if pe is None or pe <= context.pe_min or pe >= context.pe_max:
+                continue
+
+            # 条件3: 股息率 > 3.5%
+            div_yield = context.get_indicator(sym, "dividend_yield", today)
+            if div_yield is None or div_yield <= context.dividend_yield_min:
+                continue
+
+            # 评分: 折价越多+股息越高=分数越高
+            score = (1 - ratio) * 50 + div_yield
+            candidates.append((sym, close, score))
+        except Exception:
+            continue
+
+    if not candidates:
+        log(f"{today} 无符合条件的标的")
+        return
+
+    # 按评分排序
+    candidates.sort(key=lambda x: -x[2])
+    candidates = candidates[:context.max_positions]
+
+    # 计算每只股票买入金额
+    available_cash = context.stock_account.cash
+    per_stock_cash = available_cash * context.single_position_pct
+
+    bought = 0
+    for sym, price, score in candidates:
+        if sym in context.positions:
+            continue
+        if bought >= context.max_positions - len(context.positions):
+            break
+        if per_stock_cash < price * 100:
+            continue
+        order_value(sym, per_stock_cash)
+        context.positions[sym] = {"entry_price": price, "entry_week": context.week_count}
+        bought += 1
+        log(f"买入 {sym} @ {price:.2f} 折价{1-close/ma250w:.1%} PE={pe:.1f} 股息率={div_yield:.1f}% score={score:.1f}")
+`
+
 const TREND_CAPITAL_CODE = `def init(context):
     # 趋势资金识别参数
     context.lookback = 5       # k: 回看天数
@@ -787,6 +892,22 @@ const handleRunBacktest = async () => {
   }
 }
 
+const seedDeepValueStrategy = async () => {
+  if (strategyList.value.some(s => s.name === '深度价值策略')) return
+  try {
+    const existing = await strategyApi.list(1, 100)
+    if (existing.items.some((s: Strategy) => s.name === '深度价值策略')) return
+    await strategyApi.create({
+      name: '深度价值策略',
+      code: DEEP_VALUE_CODE,
+      description: '低估值+高股息+深度折价：股价<250周线10%+，股息率>3.5%，0<PE<40，持有1年',
+    })
+    await loadStrategies()
+  } catch {
+    // non-critical
+  }
+}
+
 const seedTrendCapitalStrategy = async () => {
   // Skip if already seeded (check by name)
   if (strategyList.value.some(s => s.name === '趋势资金策略')) return
@@ -814,6 +935,7 @@ watch(activeTab, (tab) => {
 onMounted(async () => {
   await loadStrategies()
   await seedTrendCapitalStrategy()
+  await seedDeepValueStrategy()
   loadSavedFactors()
   loadWatchlistGroups()
 })

@@ -413,6 +413,90 @@ class UserContext:
             return pd.DataFrame()
         return self._event_source.get_intraday_history(symbol, ed, n_days)
 
+    def get_indicator(self, symbol: str, indicator_name: str, trade_date=None) -> float | None:
+        """Query a pre-computed indicator from ClickHouse stock_indicators.
+
+        Args:
+            symbol: stock code
+            indicator_name: e.g. 'pe_ttm', 'dividend_yield', 'price_to_ma250w'
+            trade_date: date to query (default: latest available)
+        """
+        from app.db.clickhouse import get_ch_client
+        ch = get_ch_client()
+        try:
+            if trade_date is None:
+                row = ch.execute(
+                    "SELECT value FROM stock_indicators "
+                    "WHERE symbol=%(s)s AND indicator_name=%(n)s "
+                    "ORDER BY trade_date DESC LIMIT 1",
+                    {"s": symbol, "n": indicator_name}
+                )
+            else:
+                row = ch.execute(
+                    "SELECT value FROM stock_indicators "
+                    "WHERE symbol=%(s)s AND indicator_name=%(n)s AND trade_date<=%(d)s "
+                    "ORDER BY trade_date DESC LIMIT 1",
+                    {"s": symbol, "n": indicator_name, "d": trade_date}
+                )
+            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+        except Exception:
+            return None
+
+    def get_weekly_ma(self, symbol: str, period: int = 250, as_of_date=None) -> float | None:
+        """Get weekly moving average from klines_weekly table.
+
+        Args:
+            symbol: stock code
+            period: MA period in weeks (default 250)
+            as_of_date: reference date
+        """
+        from app.db.clickhouse import get_ch_client
+        ch = get_ch_client()
+        try:
+            if as_of_date is None:
+                row = ch.execute(
+                    "SELECT avg(close) FROM ("
+                    "SELECT close FROM klines_weekly "
+                    "WHERE symbol=%(s)s "
+                    "ORDER BY trade_date DESC LIMIT %(p)s"
+                    ")",
+                    {"s": symbol, "p": period}
+                )
+            else:
+                row = ch.execute(
+                    "SELECT avg(close) FROM ("
+                    "SELECT close FROM klines_weekly "
+                    "WHERE symbol=%(s)s AND trade_date<=%(d)s "
+                    "ORDER BY trade_date DESC LIMIT %(p)s"
+                    ")",
+                    {"s": symbol, "p": period, "d": as_of_date}
+                )
+            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+        except Exception:
+            return None
+
+    def get_daily_close(self, symbol: str, as_of_date=None) -> float | None:
+        """Get latest daily close price."""
+        from app.db.clickhouse import get_ch_client
+        ch = get_ch_client()
+        try:
+            if as_of_date is None:
+                row = ch.execute(
+                    "SELECT close FROM klines_daily "
+                    "WHERE symbol=%(s)s ORDER BY trade_date DESC LIMIT 1",
+                    {"s": symbol}
+                )
+            else:
+                row = ch.execute(
+                    "SELECT close FROM klines_daily "
+                    "WHERE symbol=%(s)s AND trade_date<=%(d)s "
+                    "ORDER BY trade_date DESC LIMIT 1",
+                    {"s": symbol, "d": as_of_date}
+                )
+            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+        except Exception:
+            return None
+
     def history_bars(self, symbol: str, bar_count: int, frequency: str = "1d",
                      fields: str | list[str] | None = None) -> np.ndarray:
         """获取历史 Bar 数据返回 numpy 数组。兼容 RQAlpha history_bars()"""
