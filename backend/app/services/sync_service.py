@@ -1312,7 +1312,20 @@ class SyncService:
         failure_strategy: str = "skip",
         full_sync: bool = False,
     ) -> SyncProgress:
-        """同步周K线数据"""
+        """
+        同步周K线数据
+
+        Args:
+            symbols: 股票代码列表，为空则同步所有股票
+            start_date: 起始日期，默认为7年前（保证250周MA计算）
+            end_date: 结束日期，默认为今天
+            task_id: 关联任务ID
+            failure_strategy: 失败策略 (skip/retry/stop)
+            full_sync: 是否全量同步(True=先删除已有数据，False=增量追加)
+
+        Returns:
+            SyncProgress: 同步进度
+        """
         global _current_sync
 
         if end_date is None:
@@ -1353,6 +1366,7 @@ class SyncService:
                         )
                     except Exception:
                         pass
+                progress.details["message"] = "删除完成，开始同步..."
 
             failed_symbols: list[dict[str, str]] = []
             total_klines = 0
