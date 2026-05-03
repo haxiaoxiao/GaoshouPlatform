@@ -1779,7 +1779,8 @@ class SyncService:
             progress.details["message"] = "正在计算股息率..."
 
             yield_rows = []
-            for symbol in symbols_with_data:
+            for idx, symbol in enumerate(symbols_with_data):
+                progress.current = idx + 1
                 try:
                     result = ch_client.execute(
                         """SELECT trade_date, value FROM stock_indicators
@@ -1823,7 +1824,10 @@ class SyncService:
                             "trade_date": ex_date,
                             "value": round(div_yield, 4),
                         })
-                except Exception:
+                except Exception as e:
+                    if failure_strategy == "stop":
+                        raise
+                    logger.debug(f"sync_dividends: skipping {symbol}: {e}")
                     continue
 
             if yield_rows:
