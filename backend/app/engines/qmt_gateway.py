@@ -781,59 +781,58 @@ class QMTGateway:
         start_date: date,
         end_date: date,
     ) -> list[KlineData]:
-        """获取周K线数据"""
-        xt = self._get_xt()
+        """获取周K线数据（从日线聚合）"""
+        # Get daily data first
+        daily_klines = await self.get_kline_daily(symbol, start_date, end_date)
 
-        start_str = start_date.strftime("%Y%m%d")
-        end_str = end_date.strftime("%Y%m%d")
+        if not daily_klines:
+            return []
 
-        loop = asyncio.get_running_loop()
+        import pandas as pd
 
-        try:
-            await loop.run_in_executor(
-                None,
-                lambda: xt.download_history_data(symbol, period="1w", start_time=start_str, end_time=end_str),
-            )
-        except Exception:
-            pass
+        # Build DataFrame
+        df = pd.DataFrame([
+            {
+                "date": k.datetime if isinstance(k.datetime, date) else k.datetime.date(),
+                "open": k.open,
+                "high": k.high,
+                "low": k.low,
+                "close": k.close,
+                "volume": k.volume,
+                "amount": k.amount,
+                "turnover": k.turnover,
+            }
+            for k in daily_klines
+        ])
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.set_index("date").sort_index()
 
-        data = await loop.run_in_executor(
-            None,
-            lambda: xt.get_market_data_ex(
-                field_list=[],
-                stock_list=[symbol],
-                period="1w",
-                start_time=start_str,
-                end_time=end_str,
-            ),
-        )
+        # Resample to weekly (W-SUN = week ending Sunday, or use W-FRI for Friday)
+        weekly = df.resample("W").agg({
+            "open": "first",
+            "high": "max",
+            "low": "min",
+            "close": "last",
+            "volume": "sum",
+            "amount": "sum",
+            "turnover": "sum",
+        }).dropna()
 
+        # Convert back to KlineData list
         results = []
-        if symbol in data:
-            df = data[symbol]
-            for idx, row in df.iterrows():
-                try:
-                    if isinstance(idx, str):
-                        trade_date = datetime.strptime(idx, "%Y%m%d").date()
-                    elif hasattr(idx, "date"):
-                        trade_date = idx.date()
-                    else:
-                        trade_date = idx
-
-                    kline = KlineData(
-                        symbol=symbol,
-                        datetime=trade_date,
-                        open=float(row.get("open", 0)),
-                        high=float(row.get("high", 0)),
-                        low=float(row.get("low", 0)),
-                        close=float(row.get("close", 0)),
-                        volume=int(row.get("volume", 0)),
-                        amount=float(row.get("amount", 0)),
-                        turnover=float(row.get("turnover", 0)) if row.get("turnover") else None,
-                    )
-                    results.append(kline)
-                except Exception:
-                    continue
+        for idx, row in weekly.iterrows():
+            kline = KlineData(
+                symbol=symbol,
+                datetime=idx.date() if hasattr(idx, 'date') else idx,
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=int(row["volume"]),
+                amount=float(row["amount"]),
+                turnover=float(row["turnover"]) if row.get("turnover") and not pd.isna(row["turnover"]) else None,
+            )
+            results.append(kline)
 
         return results
 
