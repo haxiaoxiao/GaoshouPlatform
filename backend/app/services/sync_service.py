@@ -1303,6 +1303,153 @@ class SyncService:
 
         return progress
 
+    async def sync_kline_weekly(
+        self,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        task_id: int | None = None,
+        failure_strategy: str = "skip",
+        full_sync: bool = False,
+    ) -> SyncProgress:
+        """同步周K线数据"""
+        global _current_sync
+
+        if end_date is None:
+            end_date = date.today()
+        if start_date is None:
+            start_date = end_date - timedelta(days=365 * 7)
+
+        progress = SyncProgress(
+            sync_type="kline_weekly",
+            status="running",
+            start_time=datetime.now(),
+            details={
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "full_sync": full_sync,
+            },
+        )
+        _current_sync = progress
+
+        ch_client = get_ch_client()
+
+        try:
+            if symbols is None:
+                query = select(Stock.symbol)
+                result = await self.session.execute(query)
+                symbols = [row[0] for row in result.all()]
+
+            progress.total = len(symbols)
+
+            if full_sync and symbols:
+                progress.details["message"] = "正在删除已有数据..."
+                for symbol in symbols:
+                    try:
+                        ch_client.execute(
+                            "DELETE FROM klines_weekly WHERE symbol = %(symbol)s "
+                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
+                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
+                        )
+                    except Exception:
+                        pass
+
+            failed_symbols: list[dict[str, str]] = []
+            total_klines = 0
+
+            for i, symbol in enumerate(symbols):
+                try:
+                    klines = await qmt_gateway.get_kline_weekly(
+                        symbol, start_date, end_date
+                    )
+
+                    if not klines:
+                        progress.current = i + 1
+                        continue
+
+                    rows = [
+                        {
+                            "symbol": kline.symbol,
+                            "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
+                            "open": kline.open,
+                            "high": kline.high,
+                            "low": kline.low,
+                            "close": kline.close,
+                            "volume": kline.volume,
+                            "amount": kline.amount,
+                        }
+                        for kline in klines
+                    ]
+
+                    if rows:
+                        ch_client.execute(
+                            "INSERT INTO klines_weekly "
+                            "(symbol, trade_date, open, high, low, close, volume, amount) "
+                            "VALUES",
+                            rows,
+                        )
+                        total_klines += len(rows)
+
+                    progress.current = i + 1
+                    progress.success_count += 1
+
+                except Exception as e:
+                    progress.failed_count += 1
+                    failed_symbols.append({"symbol": symbol, "error": str(e)})
+                    if failure_strategy == "stop":
+                        raise
+
+            try:
+                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
+            indicator_scheduler.run_after_sync("kline_weekly", symbols=symbols, trade_date=end_date)
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["total_klines"] = total_klines
+            progress.details["failed_symbols"] = failed_symbols[:100]
+
+            await self.create_sync_log(
+                sync_type="kline_weekly",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            await self.create_sync_log(
+                sync_type="kline_weekly",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+
+        finally:
+            _current_sync = None
+
+        return progress
+
     async def get_sync_logs(
         self,
         sync_type: str | None = None,

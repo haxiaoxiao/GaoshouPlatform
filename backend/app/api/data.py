@@ -94,7 +94,7 @@ class WatchlistStockResponse(BaseModel):
 class SyncRequest(BaseModel):
     """同步请求"""
 
-    sync_type: str = Field(description="同步类型: stock_info/stock_full/kline_daily/kline_minute/realtime_mv")
+    sync_type: str = Field(description="同步类型: stock_info/stock_full/kline_daily/kline_minute/kline_weekly/realtime_mv")
     symbols: list[str] | None = Field(default=None, description="股票代码列表")
     start_date: date | None = Field(default=None, description="开始日期")
     end_date: date | None = Field(default=None, description="结束日期")
@@ -576,7 +576,15 @@ async def _run_sync_task(
                     failure_strategy=failure_strategy,
                     full_sync=full_sync,
                 )
-            else:  # kline_minute
+            elif sync_type == "kline_weekly":
+                await service.sync_kline_weekly(
+                    symbols=symbols,
+                    start_date=start_date,
+                    end_date=end_date,
+                    failure_strategy=failure_strategy,
+                    full_sync=full_sync,
+                )
+            elif sync_type == "kline_minute":
                 await service.sync_kline_minute(
                     symbols=symbols,
                     start_date=start_date,
@@ -605,9 +613,10 @@ async def trigger_sync(
     - financial_data: 下载并同步财务数据(需QMT在线，耗时长)
     - kline_daily: 日K线数据
     - kline_minute: 分钟K线数据
+    - kline_weekly: 周K线数据
     - realtime_mv: 实时市值更新
     """
-    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "realtime_mv")
+    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv")
     if request.sync_type not in valid_types:
         raise HTTPException(
             status_code=400,
