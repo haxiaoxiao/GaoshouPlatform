@@ -2,7 +2,7 @@
 """数据同步服务"""
 import asyncio
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta as td
 from typing import Any
 
 from loguru import logger
@@ -910,7 +910,7 @@ class SyncService:
         if end_date is None:
             end_date = date.today()
         if start_date is None:
-            start_date = end_date - timedelta(days=30)
+            start_date = end_date - td(days=30)
 
         # 初始化进度
         progress = SyncProgress(
@@ -1331,7 +1331,7 @@ class SyncService:
         if end_date is None:
             end_date = date.today()
         if start_date is None:
-            start_date = end_date - timedelta(days=365 * 7)
+            start_date = end_date - td(days=365 * 7)
 
         progress = SyncProgress(
             sync_type="kline_weekly",
@@ -1554,7 +1554,7 @@ class SyncService:
         Returns:
             int: 删除的记录数
         """
-        cutoff_date = datetime.now() - timedelta(days=before_days)
+        cutoff_date = datetime.now() - td(days=before_days)
         stmt = delete(SyncLog).where(SyncLog.created_at < cutoff_date)
         result = await self.session.execute(stmt)
         await self.session.commit()
@@ -1708,6 +1708,163 @@ class SyncService:
             # 记录失败日志
             await self.create_sync_log(
                 sync_type="realtime_mv",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_dividends(
+        self,
+        symbols: list[str] | None = None,
+        task_id: int | None = None,
+        failure_strategy: str = "skip",
+    ) -> SyncProgress:
+        """同步股息数据并计算股息率"""
+        global _current_sync
+
+        progress = SyncProgress(
+            sync_type="dividends",
+            status="running",
+            start_time=datetime.now(),
+        )
+        _current_sync = progress
+
+        ch_client = get_ch_client()
+
+        try:
+            # ========== 阶段1: 获取股票列表 ==========
+            progress.details["phase"] = "symbols"
+            progress.details["message"] = "正在获取股票列表..."
+
+            if symbols is None:
+                query = select(Stock.symbol)
+                result = await self.session.execute(query)
+                symbols = [row[0] for row in result.all()]
+
+            progress.total = len(symbols)
+
+            # ========== 阶段2: 筛选已有股息数据的股票 ==========
+            progress.details["phase"] = "dividend_data"
+            progress.details["message"] = "正在筛选已有股息数据的股票..."
+
+            symbols_with_data = []
+            for symbol in symbols:
+                try:
+                    has_data = ch_client.execute(
+                        "SELECT 1 FROM stock_indicators WHERE symbol = %(symbol)s AND indicator_name = 'dividend_cash' LIMIT 1",
+                        {"symbol": symbol}
+                    )
+                    if has_data:
+                        symbols_with_data.append(symbol)
+                except Exception:
+                    continue
+
+            progress.details["symbols_with_data"] = len(symbols_with_data)
+            progress.details["total_symbols"] = len(symbols)
+
+            # ========== 阶段3: 计算股息率 ==========
+            progress.details["phase"] = "yield"
+            progress.details["message"] = "正在计算股息率..."
+
+            yield_rows = []
+            for symbol in symbols_with_data:
+                try:
+                    result = ch_client.execute(
+                        """SELECT trade_date, value FROM stock_indicators
+                        WHERE symbol = %(symbol)s AND indicator_name = 'dividend_cash'
+                        ORDER BY trade_date DESC""",
+                        {"symbol": symbol}
+                    )
+                    if not result:
+                        continue
+
+                    price_rows = ch_client.execute(
+                        """SELECT trade_date, close FROM klines_daily
+                        WHERE symbol = %(symbol)s
+                        ORDER BY trade_date DESC""",
+                        {"symbol": symbol}
+                    )
+                    price_map = {str(r[0]): float(r[1]) for r in price_rows if r[1]}
+
+                    for ex_date, cash in result:
+                        cash = float(cash or 0)
+                        if cash <= 0:
+                            continue
+                        ex_date_str = str(ex_date)
+                        if ex_date_str not in price_map:
+                            continue
+                        price = price_map[ex_date_str]
+                        if price <= 0:
+                            continue
+                        # Sum trailing 12-month dividends from this ex_date
+                        one_year_ago = (ex_date - td(days=365)).isoformat()
+                        total_cash = sum(
+                            float(r[1] or 0) for r in result
+                            if str(r[0]) >= one_year_ago and str(r[0]) <= ex_date_str
+                        )
+                        if total_cash <= 0:
+                            continue
+                        div_yield = (total_cash / price) * 100
+                        yield_rows.append({
+                            "symbol": symbol,
+                            "indicator_name": "dividend_yield",
+                            "trade_date": ex_date,
+                            "value": round(div_yield, 4),
+                        })
+                except Exception:
+                    continue
+
+            if yield_rows:
+                ch_client.execute(
+                    "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_yield'"
+                )
+                batch_size = 500
+                for i in range(0, len(yield_rows), batch_size):
+                    ch_client.execute(
+                        "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
+                        yield_rows[i:i + batch_size]
+                    )
+
+            progress.success_count = len(yield_rows)
+            progress.details["yield_rows"] = len(yield_rows)
+
+            # ========== 完成 ==========
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+
+            await self.create_sync_log(
+                sync_type="dividends",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            logger.opt(exception=True).error(f"sync_dividends failed: {e}")
+            await self.create_sync_log(
+                sync_type="dividends",
                 status="failed",
                 total_count=progress.total,
                 success_count=progress.success_count,
