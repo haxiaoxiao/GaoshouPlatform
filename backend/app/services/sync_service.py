@@ -1398,6 +1398,42 @@ class SyncService:
                     failed_symbols.append({"symbol": symbol, "error": str(e)})
                     if failure_strategy == "stop":
                         raise
+                    elif failure_strategy == "retry":
+                        async def _retry_weekly_kline_insert():
+                            klines = await qmt_gateway.get_kline_weekly(
+                                symbol, start_date, end_date
+                            )
+                            if klines:
+                                rows = [
+                                    {
+                                        "symbol": kline.symbol,
+                                        "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
+                                        "open": kline.open,
+                                        "high": kline.high,
+                                        "low": kline.low,
+                                        "close": kline.close,
+                                        "volume": kline.volume,
+                                        "amount": kline.amount,
+                                    }
+                                    for kline in klines
+                                ]
+                                if rows:
+                                    get_ch_client().execute(
+                                        "INSERT INTO klines_weekly "
+                                        "(symbol, trade_date, open, high, low, close, volume, amount) "
+                                        "VALUES",
+                                        rows,
+                                    )
+                                    nonlocal total_klines
+                                    total_klines += len(rows)
+
+                        try:
+                            await async_retry(_retry_weekly_kline_insert, max_retries=3, base_delay=1.0)
+                            progress.success_count += 1
+                            progress.failed_count -= 1
+                            failed_symbols.pop()
+                        except Exception:
+                            pass
 
             try:
                 cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
@@ -1430,6 +1466,7 @@ class SyncService:
             progress.error_message = str(e)
             progress.details["error"] = str(e)[:500]
             progress.details["error_type"] = type(e).__name__
+            logger.opt(exception=True).error(f"sync_kline_weekly failed: {e}")
             await self.create_sync_log(
                 sync_type="kline_weekly",
                 status="failed",
