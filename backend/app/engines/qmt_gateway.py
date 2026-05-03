@@ -775,6 +775,68 @@ class QMTGateway:
 
         return results
 
+    async def get_kline_weekly(
+        self,
+        symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[KlineData]:
+        """获取周K线数据"""
+        xt = self._get_xt()
+
+        start_str = start_date.strftime("%Y%m%d")
+        end_str = end_date.strftime("%Y%m%d")
+
+        loop = asyncio.get_running_loop()
+
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: xt.download_history_data(symbol, period="1w", start_time=start_str, end_time=end_str),
+            )
+        except Exception:
+            pass
+
+        data = await loop.run_in_executor(
+            None,
+            lambda: xt.get_market_data_ex(
+                field_list=[],
+                stock_list=[symbol],
+                period="1w",
+                start_time=start_str,
+                end_time=end_str,
+            ),
+        )
+
+        results = []
+        if symbol in data:
+            df = data[symbol]
+            for idx, row in df.iterrows():
+                try:
+                    if isinstance(idx, str):
+                        trade_date = datetime.strptime(idx, "%Y%m%d").date()
+                    elif hasattr(idx, "date"):
+                        trade_date = idx.date()
+                    else:
+                        trade_date = idx
+
+                    kline = KlineData(
+                        symbol=symbol,
+                        datetime=trade_date,
+                        open=float(row.get("open", 0)),
+                        high=float(row.get("high", 0)),
+                        low=float(row.get("low", 0)),
+                        close=float(row.get("close", 0)),
+                        volume=int(row.get("volume", 0)),
+                        amount=float(row.get("amount", 0)),
+                        turnover=float(row.get("turnover", 0)) if row.get("turnover") else None,
+                    )
+                    results.append(kline)
+                except Exception:
+                    continue
+
+        return results
+
     async def get_realtime_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         """获取实时行情"""
         xt = self._get_xt()
