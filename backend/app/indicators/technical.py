@@ -96,3 +96,35 @@ class RSI14(IndicatorBase):
             return 100.0
         rs = avg_gain / avg_loss
         return round(100 - (100 / (1 + rs)), 4)
+
+
+@IndicatorRegistry.register
+class MA250Weekly(IndicatorBase):
+    name = "ma250_weekly"
+    display_name = "250周均线"
+    category = "technical"
+    tags = ["技术", "行情"]
+    data_type = "时序"
+    is_precomputed = False
+    dependencies = []
+    description = "250周移动平均线"
+    unit = "CNY"
+
+    def compute(self, context: IndicatorContext) -> float | None:
+        from app.db.clickhouse import get_ch_client
+        ch = get_ch_client()
+        try:
+            result = ch.execute(
+                """SELECT avg(close) FROM (
+                    SELECT close FROM klines_weekly
+                    WHERE symbol = %(symbol)s
+                    ORDER BY trade_date DESC
+                    LIMIT 250
+                )""",
+                {"symbol": context.symbol}
+            )
+            if result and result[0] and result[0][0]:
+                return round(float(result[0][0]), 4)
+        except Exception:
+            pass
+        return None
