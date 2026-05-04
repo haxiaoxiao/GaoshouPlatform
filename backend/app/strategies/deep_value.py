@@ -170,10 +170,11 @@ class DeepValueStrategy:
                         pnl = total_return * 100
                         all_trades.append({
                             "symbol": item["symbol"],
+                            "direction": "sell",
+                            "trade_date": rebalance_date.isoformat(),
                             "entry_date": basket.entry_date.isoformat(),
                             "entry_price": round(item["entry_price"], 2),
-                            "exit_date": rebalance_date.isoformat(),
-                            "exit_price": round(price, 2),
+                            "price": round(price, 2),
                             "dividend": round(div_sum, 4),
                             "pnl_pct": round(pnl, 2),
                         })
@@ -200,12 +201,14 @@ class DeepValueStrategy:
                 })
                 all_trades.append({
                     "symbol": c["symbol"],
-                    "entry_date": rebalance_date.isoformat(),
-                    "entry_price": round(price, 2),
+                    "direction": "buy",
+                    "trade_date": rebalance_date.isoformat(),
+                    "price": round(price, 2),
+                    "shares": shares,
                     "price_to_ma": c["ratio"],
                     "pe": c["pe"],
                     "dividend_yield": c["dividend_yield"],
-                   })
+                })
 
             if basket_stocks:
                 baskets.append(DVBasket(rebalance_date, basket_stocks))
@@ -222,10 +225,11 @@ class DeepValueStrategy:
                 pnl = total_return * 100
                 all_trades.append({
                     "symbol": item["symbol"],
+                    "direction": "sell",
+                    "trade_date": final_date.isoformat(),
                     "entry_date": basket.entry_date.isoformat(),
                     "entry_price": round(item["entry_price"], 2),
-                    "exit_date": final_date.isoformat(),
-                    "exit_price": round(price, 2),
+                    "price": round(price, 2),
                     "dividend": round(div_sum, 4),
                     "pnl_pct": round(pnl, 2),
                 })
@@ -257,7 +261,7 @@ class DeepValueStrategy:
             "initial_capital": initial_capital,
             "basket_count": len(basket_returns),
             "basket_returns": [round(r, 2) for r in basket_returns],
-            "trades": sorted(sell_trades, key=lambda x: x.get("entry_date", ""))[-100:],
+            "trades": sorted(all_trades, key=lambda x: x.get("trade_date", "")),
         }
 
     def _get_price(self, symbol: str, as_of: date) -> float | None:
