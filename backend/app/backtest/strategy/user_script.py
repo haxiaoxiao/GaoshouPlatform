@@ -497,6 +497,20 @@ class UserContext:
         except Exception:
             return None
 
+    def get_all_symbols(self) -> list[str]:
+        """获取全量A股列表（非ST、非退市）"""
+        from sqlalchemy import create_engine, select
+        from app.db.models.stock import Stock
+        from app.core.config import settings
+        url = settings.database_url.replace("+aiosqlite", "")
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            rows = conn.execute(
+                select(Stock.symbol).where(Stock.is_st == 0, Stock.is_delist == 0)
+            ).all()
+        engine.dispose()
+        return [r[0] for r in rows]
+
     def history_bars(self, symbol: str, bar_count: int, frequency: str = "1d",
                      fields: str | list[str] | None = None) -> np.ndarray:
         """获取历史 Bar 数据返回 numpy 数组。兼容 RQAlpha history_bars()"""

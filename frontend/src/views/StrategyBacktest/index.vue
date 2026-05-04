@@ -327,9 +327,10 @@ def handle_bar(context, bar_dict):
             log(f"到期平仓 {sym}")
         del context.positions[sym]
 
-    # ── 筛选候选 ──
+    # ── 筛选候选 (全量A股, 非ST非退市) ──
     candidates = []
-    for sym in list(context.universe):
+    all_symbols = context.get_all_symbols()
+    for sym in all_symbols:
         try:
             close = context.get_daily_close(sym, today)
             if not close or close <= 0:
