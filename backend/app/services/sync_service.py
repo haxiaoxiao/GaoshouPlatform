@@ -1313,19 +1313,21 @@ class SyncService:
         full_sync: bool = False,
     ) -> SyncProgress:
         """
-        同步周K线数据
+        同步周K线数据 — 从 ClickHouse 日线直接聚合，不走 QMT
 
         Args:
             symbols: 股票代码列表，为空则同步所有股票
-            start_date: 起始日期，默认为7年前（保证250周MA计算）
+            start_date: 起始日期，默认为7年前
             end_date: 结束日期，默认为今天
             task_id: 关联任务ID
             failure_strategy: 失败策略 (skip/retry/stop)
-            full_sync: 是否全量同步(True=先删除已有数据，False=增量追加)
+            full_sync: 是否全量同步
 
         Returns:
             SyncProgress: 同步进度
         """
+        import pandas as pd
+
         global _current_sync
 
         if end_date is None:
@@ -1346,6 +1348,7 @@ class SyncService:
         _current_sync = progress
 
         ch_client = get_ch_client()
+        BATCH_SIZE = 200
 
         try:
             if symbols is None:
@@ -1355,111 +1358,75 @@ class SyncService:
 
             progress.total = len(symbols)
 
-            if full_sync and symbols:
+            if full_sync:
                 progress.details["message"] = "正在删除已有数据..."
-                for symbol in symbols:
-                    try:
-                        ch_client.execute(
-                            "DELETE FROM klines_weekly WHERE symbol = %(symbol)s "
-                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
-                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
-                        )
-                    except Exception:
-                        pass
+                ch_client.execute(
+                    "DELETE FROM klines_weekly WHERE trade_date >= %(start)s AND trade_date <= %(end)s",
+                    {"start": start_date, "end": end_date},
+                )
                 progress.details["message"] = "删除完成，开始同步..."
 
-            failed_symbols: list[dict[str, str]] = []
             total_klines = 0
 
-            for i, symbol in enumerate(symbols):
-                try:
-                    klines = await qmt_gateway.get_kline_weekly(
-                        symbol, start_date, end_date
+            for batch_start in range(0, len(symbols), BATCH_SIZE):
+                batch = symbols[batch_start:batch_start + BATCH_SIZE]
+
+                # Batch query daily data from ClickHouse
+                daily_rows = ch_client.execute(
+                    "SELECT symbol, trade_date, open, high, low, close, volume, amount "
+                    "FROM klines_daily "
+                    "WHERE symbol IN %(syms)s "
+                    "  AND trade_date >= %(start)s AND trade_date <= %(end)s "
+                    "ORDER BY symbol, trade_date",
+                    {"syms": tuple(batch), "start": start_date, "end": end_date},
+                )
+                if not daily_rows:
+                    progress.current = min(batch_start + BATCH_SIZE, len(symbols))
+                    continue
+
+                # Build DataFrame
+                df = pd.DataFrame(
+                    daily_rows,
+                    columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"],
+                )
+                for col in ["open", "high", "low", "close", "amount"]:
+                    df[col] = df[col].astype(float)
+                df["trade_date"] = pd.to_datetime(df["trade_date"])
+
+                # Aggregate to weekly per symbol
+                weekly_rows = []
+                for sym, grp in df.groupby("symbol"):
+                    grp = grp.set_index("trade_date").sort_index()
+                    weekly = grp.resample("W").agg({
+                        "open": "first", "high": "max", "low": "min",
+                        "close": "last", "volume": "sum", "amount": "sum",
+                    }).dropna()
+                    for idx, row in weekly.iterrows():
+                        weekly_rows.append({
+                            "symbol": sym,
+                            "trade_date": idx.date(),
+                            "open": float(row["open"]),
+                            "high": float(row["high"]),
+                            "low": float(row["low"]),
+                            "close": float(row["close"]),
+                            "volume": int(row["volume"]),
+                            "amount": float(row["amount"]),
+                        })
+
+                if weekly_rows:
+                    ch_client.execute(
+                        "INSERT INTO klines_weekly "
+                        "(symbol, trade_date, open, high, low, close, volume, amount) VALUES",
+                        weekly_rows,
                     )
+                    total_klines += len(weekly_rows)
 
-                    if not klines:
-                        progress.current = i + 1
-                        continue
+                progress.current = min(batch_start + BATCH_SIZE, len(symbols))
+                progress.success_count += len(set(r["symbol"] for r in weekly_rows))
 
-                    rows = [
-                        {
-                            "symbol": kline.symbol,
-                            "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
-                            "open": kline.open,
-                            "high": kline.high,
-                            "low": kline.low,
-                            "close": kline.close,
-                            "volume": kline.volume,
-                            "amount": kline.amount,
-                        }
-                        for kline in klines
-                    ]
-
-                    if rows:
-                        ch_client.execute(
-                            "INSERT INTO klines_weekly "
-                            "(symbol, trade_date, open, high, low, close, volume, amount) "
-                            "VALUES",
-                            rows,
-                        )
-                        total_klines += len(rows)
-
-                    progress.current = i + 1
-                    progress.success_count += 1
-
-                except Exception as e:
-                    progress.failed_count += 1
-                    failed_symbols.append({"symbol": symbol, "error": str(e)})
-                    if failure_strategy == "stop":
-                        raise
-                    elif failure_strategy == "retry":
-                        async def _retry_weekly_kline_insert():
-                            klines = await qmt_gateway.get_kline_weekly(
-                                symbol, start_date, end_date
-                            )
-                            if klines:
-                                rows = [
-                                    {
-                                        "symbol": kline.symbol,
-                                        "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
-                                        "open": kline.open,
-                                        "high": kline.high,
-                                        "low": kline.low,
-                                        "close": kline.close,
-                                        "volume": kline.volume,
-                                        "amount": kline.amount,
-                                    }
-                                    for kline in klines
-                                ]
-                                if rows:
-                                    get_ch_client().execute(
-                                        "INSERT INTO klines_weekly "
-                                        "(symbol, trade_date, open, high, low, close, volume, amount) "
-                                        "VALUES",
-                                        rows,
-                                    )
-                                    nonlocal total_klines
-                                    total_klines += len(rows)
-
-                        try:
-                            await async_retry(_retry_weekly_kline_insert, max_retries=3, base_delay=1.0)
-                            progress.success_count += 1
-                            progress.failed_count -= 1
-                            failed_symbols.pop()
-                        except Exception:
-                            pass
-
-            try:
-                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
-                progress.details["cache_cleaned"] = cleaned
-            except Exception:
-                pass
-
-            indicator_scheduler.run_after_sync("kline_weekly", symbols=symbols, trade_date=end_date)
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
-            progress.details["failed_symbols"] = failed_symbols[:100]
 
             await self.create_sync_log(
                 sync_type="kline_weekly",
