@@ -1348,7 +1348,7 @@ class SyncService:
         _current_sync = progress
 
         ch_client = get_ch_client()
-        BATCH_SIZE = 200
+        BATCH_SIZE = 50
 
         try:
             if symbols is None:
@@ -1414,11 +1414,20 @@ class SyncService:
                         })
 
                 if weekly_rows:
-                    ch_client.execute(
-                        "INSERT INTO klines_weekly "
-                        "(symbol, trade_date, open, high, low, close, volume, amount) VALUES",
-                        weekly_rows,
-                    )
+                    # Split by month to stay under 100-partition limit
+                    weekly_rows.sort(key=lambda r: r["trade_date"])
+                    chunk_start = 0
+                    while chunk_start < len(weekly_rows):
+                        chunk_end = chunk_start
+                        chunk_month = weekly_rows[chunk_start]["trade_date"].strftime("%Y%m")
+                        while chunk_end < len(weekly_rows) and weekly_rows[chunk_end]["trade_date"].strftime("%Y%m") == chunk_month:
+                            chunk_end += 1
+                        ch_client.execute(
+                            "INSERT INTO klines_weekly "
+                            "(symbol, trade_date, open, high, low, close, volume, amount) VALUES",
+                            weekly_rows[chunk_start:chunk_end],
+                        )
+                        chunk_start = chunk_end
                     total_klines += len(weekly_rows)
 
                 progress.current = min(batch_start + BATCH_SIZE, len(symbols))
