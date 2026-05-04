@@ -870,8 +870,8 @@ const handleRunBacktest = async () => {
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
 
-  // 深度价值策略使用独立快速引擎
-  const isDeepValue = activeStrategy.value?.name === '深度价值策略'
+  // 深度价值策略使用独立快速引擎（ID=12 或名称匹配）
+  const isDeepValue = activeStrategy.value?.id === 12 || activeStrategy.value?.name === '深度价值策略'
 
   try {
     const { default: request } = await import('@/api/request')
