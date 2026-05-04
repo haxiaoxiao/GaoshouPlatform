@@ -163,13 +163,18 @@ class DeepValueStrategy:
                 for item in basket.stocks:
                     price = self._get_price(item["symbol"], rebalance_date)
                     if price and price > 0:
-                        pnl = (price / item["entry_price"] - 1) * 100
+                        div_sum = self._get_dividends_between(
+                            item["symbol"], basket.entry_date, rebalance_date
+                        )
+                        total_return = (price + div_sum) / item["entry_price"] - 1
+                        pnl = total_return * 100
                         all_trades.append({
                             "symbol": item["symbol"],
                             "entry_date": basket.entry_date.isoformat(),
                             "entry_price": round(item["entry_price"], 2),
                             "exit_date": rebalance_date.isoformat(),
                             "exit_price": round(price, 2),
+                            "dividend": round(div_sum, 4),
                             "pnl_pct": round(pnl, 2),
                         })
                 baskets.remove(basket)
@@ -210,13 +215,18 @@ class DeepValueStrategy:
         for basket in baskets:
             for item in basket.stocks:
                 price = self._get_price(item["symbol"], final_date) or item["entry_price"]
-                pnl = (price / item["entry_price"] - 1) * 100
+                div_sum = self._get_dividends_between(
+                    item["symbol"], basket.entry_date, final_date
+                )
+                total_return = (price + div_sum) / item["entry_price"] - 1
+                pnl = total_return * 100
                 all_trades.append({
                     "symbol": item["symbol"],
                     "entry_date": basket.entry_date.isoformat(),
                     "entry_price": round(item["entry_price"], 2),
                     "exit_date": final_date.isoformat(),
                     "exit_price": round(price, 2),
+                    "dividend": round(div_sum, 4),
                     "pnl_pct": round(pnl, 2),
                 })
 
@@ -233,6 +243,7 @@ class DeepValueStrategy:
 
         total_return = float(np.prod([1 + r/100 for r in basket_returns]) - 1) * 100 if basket_returns else 0.0
 
+        total_dividends = sum(t.get("dividend", 0) for t in sell_trades)
         return {
             "total_return": round(total_return, 2),
             "annual_return": round(total_return / max((end_date - start_date).days / 365, 1), 2),
@@ -241,7 +252,8 @@ class DeepValueStrategy:
             "loss_count": len(pnls) - len(winning),
             "win_rate": round(len(winning) / len(pnls) * 100, 2) if pnls else 0,
             "avg_return": round(float(np.mean(pnls)), 2) if pnls else 0,
-            "max_drawdown": 0,  # 简化：不计算日频 NAV
+            "total_dividends": round(total_dividends, 2),
+            "max_drawdown": 0,
             "initial_capital": initial_capital,
             "basket_count": len(basket_returns),
             "basket_returns": [round(r, 2) for r in basket_returns],
@@ -256,3 +268,13 @@ class DeepValueStrategy:
             {"s": symbol, "d": as_of},
         )
         return float(r[0][0]) if r and r[0] and r[0][0] else None
+
+    def _get_dividends_between(self, symbol: str, start: date, end: date) -> float:
+        """获取两个日期之间的累计现金分红（每股）"""
+        r = self.ch.execute(
+            "SELECT sum(value) FROM stock_indicators "
+            "WHERE symbol=%(s)s AND indicator_name='dividend_cash' "
+            "AND trade_date > %(start)s AND trade_date <= %(end)s",
+            {"s": symbol, "start": start, "end": end},
+        )
+        return float(r[0][0] or 0) if r and r[0] else 0.0
