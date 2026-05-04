@@ -28,7 +28,7 @@ class Settings(BaseSettings):
 
     # Redis 缓存配置
     redis_host: str = "localhost"
-    redis_port: int = 6379
+    redis_port: int = 16379
     redis_db: int = 0
     redis_password: str = ""
 
