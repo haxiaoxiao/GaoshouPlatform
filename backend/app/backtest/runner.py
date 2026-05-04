@@ -15,11 +15,22 @@ class BacktestRunner:
     """回测运行器 — 统一入口"""
 
     async def run(self, config: BacktestConfig, task_store: dict | None = None) -> BacktestResult:
-        """运行回测"""
+        """运行回测 (在线程池中执行, 不阻塞事件循环)"""
+        import asyncio
         if config.mode == "vectorized":
             return await self._run_vectorized(config)
         elif config.mode == "event_driven":
-            return await self._run_event_driven(config, task_store=task_store)
+            # Run entire backtest in a thread with its own event loop
+            def _run_sync():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(
+                        self._run_event_driven(config, task_store=task_store)
+                    )
+                finally:
+                    loop.close()
+            return await asyncio.to_thread(_run_sync)
         else:
             raise ValueError(f"Unknown backtest mode: {config.mode}")
 
