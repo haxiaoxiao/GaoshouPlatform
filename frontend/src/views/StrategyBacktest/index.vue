@@ -216,6 +216,7 @@
               :completed="!btRunning && btFullResult != null"
               :liveData="btLiveData"
               :logs="[...btLogs, ...btErrors.map(e => '[错误] ' + e)]"
+              :progress="btProgress"
               @viewReport="showReport = true"
             />
           </div>
@@ -288,55 +289,43 @@ def handle_bar(context, bar_dict):
 const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
 const DEEP_VALUE_CODE = `def init(context):
-    # 深度价值策略参数
+    # 深度价值策略参数 (年度调仓)
     context.price_to_ma_max = 0.9      # 股价 < 250周线 * 0.9
     context.dividend_yield_min = 3.5   # 股息率 > 3.5%
     context.pe_min = 0                 # PE > 0 (排除亏损)
     context.pe_max = 40                # PE < 40
-    context.hold_weeks = 52            # 持有52周
-    context.rebalance_weeks = 13       # 每13周(约1季度)调仓
     context.max_positions = 10         # 最多持仓数
     context.single_position_pct = 0.10 # 单票10%仓位
+    context.rebalance_month = 5        # 每年5月调仓 (Q1财报季结束后)
 
     # 运行状态
-    context.positions = {}             # {symbol: {"entry_price": x, "entry_week": n}}
-    context.week_count = 0
-    context.current_week = -1
-    context.last_rebalance_week = -999
+    context.positions = {}             # {symbol: {"entry_price": x, "entry_year": y}}
+    context.last_rebalance_year = None # 上次调仓年份
 
-    log("深度价值策略: 价格<250周线{:.0%} 股息率>{}% 0<PE<{} 持有{}周".format(
-        context.price_to_ma_max, context.dividend_yield_min, context.pe_max, context.hold_weeks
+    log("深度价值策略(年度): 股价<250周线{:.0%} 股息率>{}% 0<PE<{} 每年5月调仓".format(
+        context.price_to_ma_max, context.dividend_yield_min, context.pe_max
     ))
 
 def handle_bar(context, bar_dict):
     today = context.now.date()
 
-    # ── 周频控制: 使用 ISO 周号判断是否进入新的一周 ──
-    iso_week = today.isocalendar()[1]  # 1~53
-    if iso_week == context.current_week:
+    # ── 年度调仓判断：仅5月的第一个交易日触发 ──
+    if today.month < context.rebalance_month:
         return
-    context.current_week = iso_week
-    context.week_count += 1
+    if context.last_rebalance_year == today.year:
+        return
+    context.last_rebalance_year = today.year
+    log("=" * 40)
+    log(f"[{today}] 年度调仓开始")
 
-    # ── 到期平仓 ──
-    expired = []
-    for sym, pos in context.positions.items():
-        held = context.week_count - pos["entry_week"]
-        if held >= context.hold_weeks:
-            expired.append(sym)
+    # ── 到期平仓：上一年度的所有持仓全部清仓 ──
+    expired = list(context.positions.keys())
     for sym in expired:
         p = context.portfolio.get_position(sym)
         if p and p.total_shares > 0:
             order_shares(sym, -p.total_shares)
             log(f"到期平仓 {sym}")
         del context.positions[sym]
-
-    # ── 调仓 ──
-    if context.week_count - context.last_rebalance_week < context.rebalance_weeks:
-        return
-    if len(context.positions) >= context.max_positions:
-        return
-    context.last_rebalance_week = context.week_count
 
     # ── 筛选候选 ──
     candidates = []
@@ -365,7 +354,7 @@ def handle_bar(context, bar_dict):
             if div_yield is None or div_yield <= context.dividend_yield_min:
                 continue
 
-            # 评分: 折价维度(0~0.5) + 股息维度(0~1), 各占50%
+            # 评分: 折价维度(0~50) + 股息维度(0~50)
             discount_score = min((1 - ratio) / 0.5, 1.0) * 50
             yield_score = min(div_yield / 15.0, 1.0) * 50
             score = discount_score + yield_score
@@ -374,6 +363,7 @@ def handle_bar(context, bar_dict):
             continue
 
     if not candidates:
+        log("无符合条件的标的")
         return
 
     # 按评分排序
@@ -389,7 +379,7 @@ def handle_bar(context, bar_dict):
     for sym, price, score, ma_val, pe_val, div_val in candidates:
         if sym in context.positions:
             continue
-        if bought >= context.max_positions - len(context.positions):
+        if bought >= context.max_positions:
             break
         if target_cash_per_stock > available_cash:
             break
@@ -397,10 +387,12 @@ def handle_bar(context, bar_dict):
         if shares < 100:
             continue
         order_shares(sym, shares)
-        context.positions[sym] = {"entry_price": price, "entry_week": context.week_count}
+        context.positions[sym] = {"entry_price": price, "entry_year": today.year}
         available_cash -= shares * price
         bought += 1
         log(f"买入 {sym} @ {price:.2f} 折价{(1-price/ma_val)*100:.1f}% PE={pe_val:.1f} 股息率={div_val:.1f}% score={score:.1f}")
+
+    log(f"========== [{today}] 年度调仓完成: 平仓{len(expired)} 买入{bought} ==========")
 `
 
 const TREND_CAPITAL_CODE = `def init(context):
@@ -777,6 +769,7 @@ const clearAllStocks = () => {
 }
 
 const btRunning = ref(false)
+const btProgress = ref(0)
 const btLiveData = ref<LiveData | null>(null)
 const btFullResult = ref<BacktestResultData | null>(null)
 const showReport = ref(false)
@@ -898,6 +891,7 @@ const handleRunBacktest = async () => {
       while (attempts < 300) {
         await new Promise(r => setTimeout(r, 2000))
         const statusData = await request.get<any>(`/v2/backtest/status/${taskId}`)
+        btProgress.value = statusData?.progress ?? 0
         if (statusData?.live) {
           btLiveData.value = statusData.live
         }
@@ -937,16 +931,20 @@ const handleRunBacktest = async () => {
 }
 
 const seedDeepValueStrategy = async () => {
-  if (strategyList.value.some(s => s.name === '深度价值策略')) return
   try {
     const existing = await strategyApi.list(1, 100)
-    if (existing.items.some((s: Strategy) => s.name === '深度价值策略')) return
-    await strategyApi.create({
-      name: '深度价值策略',
-      code: DEEP_VALUE_CODE,
-      description: '低估值+高股息+深度折价：股价<250周线10%+，股息率>3.5%，0<PE<40，持有1年',
-    })
-    await loadStrategies()
+    const found = existing.items.find((s: Strategy) => s.name === '深度价值策略')
+    const description = '低估值+高股息+深度折价：股价<250周线10%+，股息率>3.5%，0<PE<40，每年5月调仓持有1年'
+    if (found) {
+      // Update if code is not the annual rebalance version
+      if (!found.code?.includes('last_rebalance_year')) {
+        await strategyApi.update(found.id, { code: DEEP_VALUE_CODE, description })
+        await loadStrategies()
+      }
+    } else {
+      await strategyApi.create({ name: '深度价值策略', code: DEEP_VALUE_CODE, description })
+      await loadStrategies()
+    }
   } catch {
     // non-critical
   }

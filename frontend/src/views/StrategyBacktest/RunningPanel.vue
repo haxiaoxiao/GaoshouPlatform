@@ -1,5 +1,19 @@
 <template>
   <div class="running-panel">
+    <!-- Progress bar -->
+    <div v-if="running || completed" class="progress-bar-section">
+      <el-progress
+        :percentage="progressPercent"
+        :status="completed ? 'success' : undefined"
+        :stroke-width="6"
+      />
+      <div class="progress-status" v-if="liveData?.current_date">
+        正在回测 {{ liveData.current_date }} ({{ progressPercent }}%)
+      </div>
+      <div v-else-if="running" class="progress-status">正在加载数据...</div>
+      <div v-else-if="completed" class="progress-status" style="color:#52c41a">回测完成</div>
+    </div>
+
     <!-- Mini metrics grid -->
     <div class="mini-metrics">
       <div v-for="m in miniMetrics" :key="m.label" class="mini-card">
@@ -112,7 +126,10 @@ const props = defineProps<{
   completed: boolean
   liveData: LiveData | null
   logs: string[]
+  progress?: number
 }>()
+
+const progressPercent = computed(() => Math.min(Math.round((props.progress || 0) * 100), 100))
 
 defineEmits<{
   viewReport: []
@@ -187,6 +204,15 @@ function formatEvent(ev: LiveEvent): string {
 </script>
 
 <style scoped>
+.progress-bar-section {
+  margin-bottom: 4px;
+}
+.progress-status {
+  font-size: 11px;
+  color: #8888a0;
+  margin-top: 2px;
+  text-align: center;
+}
 .running-panel {
   display: flex;
   flex-direction: column;

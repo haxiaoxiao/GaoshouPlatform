@@ -39,9 +39,7 @@
 
       <!-- 交易统计 -->
       <el-card shadow="never" class="stats-card">
-        <template #header>
-          <span>交易统计</span>
-        </template>
+        <template #header><span>交易统计</span></template>
         <el-row :gutter="24">
           <el-col :span="6">
             <div class="stat-item">
@@ -70,26 +68,74 @@
         </el-row>
       </el-card>
 
+      <!-- 成交明细 -->
+      <section v-if="report.result?.trades?.length" class="trades-section">
+        <div class="section-header">
+          <h3>成交明细 ({{ report.result.trades.length }} 笔)</h3>
+          <el-button size="small" type="primary" plain @click="downloadTradesCSV">
+            <el-icon><Download /></el-icon>导出CSV
+          </el-button>
+        </div>
+        <el-table :data="paginatedTrades" stripe size="small" max-height="400">
+          <el-table-column prop="trade_date" label="日期" width="100" />
+          <el-table-column prop="symbol" label="代码" width="100" />
+          <el-table-column label="名称" width="80">
+            <template #default="{ row }">{{ stockNameMap[row.symbol] || row.symbol }}</template>
+          </el-table-column>
+          <el-table-column label="方向" width="60">
+            <template #default="{ row }">
+              <span :style="{ color: row.direction === 'buy' ? '#d93026' : '#137333' }">
+                {{ row.direction === 'buy' ? '买' : '卖' }}
+              </span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="price" label="价格" width="80" :formatter="(r: any) => r.price?.toFixed(2)" />
+          <el-table-column prop="quantity" label="数量" width="80" />
+          <el-table-column label="成交额" width="100" :formatter="(r: any) => formatMoney(r.price * r.quantity)" />
+          <el-table-column label="盈亏" width="80">
+            <template #default="{ row }">
+              <span v-if="row.direction === 'sell' && row.pnl !== null" :style="{ color: pnlColor(row.pnl) }">
+                {{ row.pnl > 0 ? '+' : '' }}{{ row.pnl?.toFixed(2) }}%
+              </span>
+              <span v-else>-</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-pagination
+          v-if="(report.result?.trades?.length || 0) > 50"
+          v-model:current-page="tradePage"
+          :page-size="50"
+          :total="report.result?.trades?.length || 0"
+          layout="prev, pager, next"
+          small
+          style="margin-top:8px;justify-content:center"
+        />
+      </section>
+
+      <!-- 净值曲线 -->
+      <section v-if="report.result?.nav_series?.length" class="chart-section">
+        <h3>净值曲线</h3>
+        <div class="charts-row">
+          <div ref="navChartRef" class="chart-container chart-main"></div>
+          <div ref="returnChartRef" class="chart-container chart-side"></div>
+        </div>
+      </section>
+
       <!-- 回测信息 -->
       <el-card shadow="never" class="info-card">
-        <template #header>
-          <span>回测信息</span>
-        </template>
+        <template #header><span>回测信息</span></template>
         <el-descriptions :column="2" border>
-          <el-descriptions-item label="回测ID">{{ report.backtest_id }}</el-descriptions-item>
-          <el-descriptions-item label="策略ID">{{ report.strategy_id }}</el-descriptions-item>
-          <el-descriptions-item label="策略名称">{{ report.strategy_name || '-' }}</el-descriptions-item>
+          <el-descriptions-item label="回测ID">{{ report.id || report.backtest_id }}</el-descriptions-item>
+          <el-descriptions-item label="策略">{{ report.strategy_name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="状态">
-            <el-tag :type="getStatusType(report.status)" size="small">
-              {{ getStatusLabel(report.status) }}
-            </el-tag>
+            <el-tag :type="getStatusType(report.status)" size="small">{{ getStatusLabel(report.status) }}</el-tag>
           </el-descriptions-item>
-          <el-descriptions-item label="开始日期">{{ report.start_date }}</el-descriptions-item>
-          <el-descriptions-item label="结束日期">{{ report.end_date }}</el-descriptions-item>
+          <el-descriptions-item label="回测区间">{{ report.start_date }} ~ {{ report.end_date }}</el-descriptions-item>
           <el-descriptions-item label="初始资金">{{ formatCapital(report.initial_capital) }}</el-descriptions-item>
           <el-descriptions-item label="最终资金">{{ formatCapital(report.result?.final_capital?.toString() ?? null) }}</el-descriptions-item>
-          <el-descriptions-item label="创建时间">{{ formatDateTime(report.created_at) }}</el-descriptions-item>
-          <el-descriptions-item label="更新时间">{{ formatDateTime(report.updated_at) }}</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="股票数量">{{ report.parameters.symbol_count ?? '-' }} 只</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="模式">{{ report.parameters.mode === 'event_driven' ? '事件驱动' : report.parameters.mode }}</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="K线">{{ report.parameters.bar_type || '-' }}</el-descriptions-item>
         </el-descriptions>
       </el-card>
     </template>
@@ -99,8 +145,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch } from 'vue'
+import { ref, watch, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
+import { Download } from '@element-plus/icons-vue'
+import * as echarts from 'echarts'
 import { backtestApi, type BacktestReport as BacktestReportType } from '@/api/backtest'
 import { formatDateTime, formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
 
@@ -108,15 +156,26 @@ const props = defineProps<{
   backtestId: number
 }>()
 
-// 状态
 const loading = ref(false)
 const report = ref<BacktestReportType | null>(null)
+const tradePage = ref(1)
+const stockNameMap = ref<Record<string, string>>({})
+const navChartRef = ref<HTMLDivElement | null>(null)
+const returnChartRef = ref<HTMLDivElement | null>(null)
+let navChart: echarts.ECharts | null = null
+let returnChart: echarts.ECharts | null = null
 
-// 加载报告
 const loadReport = async () => {
   loading.value = true
   try {
     report.value = await backtestApi.get(props.backtestId)
+    if (report.value?.result?.trades?.length) {
+      await fetchStockNames()
+    }
+    if (report.value?.result?.nav_series?.length) {
+      await nextTick()
+      renderCharts()
+    }
   } catch {
     ElMessage.error('加载回测报告失败')
     report.value = null
@@ -125,103 +184,126 @@ const loadReport = async () => {
   }
 }
 
-// 获取收益率样式类
+const fetchStockNames = async () => {
+  const syms = [...new Set(report.value?.result?.trades?.map(t => t.symbol).filter(Boolean) || [])]
+  if (!syms.length) return
+  try {
+    const { default: request } = await import('@/api/request')
+    const res = await request.get<Record<string, string>>(`/v2/backtest/stock-names?syms=${syms.join(',')}`)
+    stockNameMap.value = res || {}
+  } catch { /* ignore */ }
+}
+
+const paginatedTrades = computed(() => {
+  const trades = report.value?.result?.trades || []
+  const start = (tradePage.value - 1) * 50
+  return trades.slice(start, start + 50)
+})
+
+const formatMoney = (v: number) => v >= 10000 ? `${(v/10000).toFixed(1)}万` : v.toFixed(0)
+
+const renderCharts = () => {
+  const navData = report.value?.result?.nav_series || []
+  const returnData = report.value?.result?.daily_returns || []
+
+  // NAV chart
+  if (navChartRef.value && navData.length) {
+    if (!navChart) navChart = echarts.init(navChartRef.value)
+    const dates = navData.map(d => d.date)
+    const navs = navData.map(d => d.nav)
+    navChart.setOption({
+      tooltip: { trigger: 'axis' },
+      grid: { left: 50, right: 50, top: 20, bottom: 30 },
+      xAxis: { type: 'category', data: dates, show: false },
+      yAxis: { type: 'value', axisLabel: { fontSize: 10, formatter: (v: number) => v.toFixed(2) } },
+      series: [{
+        type: 'line', data: navs, smooth: true,
+        lineStyle: { color: '#409eff', width: 1 },
+        areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+          { offset: 0, color: 'rgba(64,158,255,0.2)' }, { offset: 1, color: 'rgba(64,158,255,0)' }
+        ])},
+      }],
+    }, true)
+  }
+
+  // Daily returns chart
+  if (returnChartRef.value && returnData.length) {
+    if (!returnChart) returnChart = echarts.init(returnChartRef.value)
+    const dates = returnData.map(d => d.date)
+    const rets = returnData.map(d => d.return)
+    returnChart.setOption({
+      tooltip: { trigger: 'axis' },
+      grid: { left: 50, right: 20, top: 20, bottom: 30 },
+      xAxis: { type: 'category', data: dates, show: false },
+      yAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+      series: [{
+        type: 'bar', data: rets,
+        itemStyle: { color: (p: any) => p.data >= 0 ? '#d93026' : '#137333' },
+      }],
+    }, true)
+  }
+}
+
 const getReturnClass = (value: number | undefined): string => {
   if (value === undefined || value === null) return ''
-  if (value > 0) return 'positive'
-  if (value < 0) return 'negative'
-  return ''
+  return value > 0 ? 'positive' : value < 0 ? 'negative' : ''
 }
 
-// 格式化百分比
-const formatPercent = (value: number | undefined): string => {
-  if (value === undefined || value === null) return '-'
-  return `${(value * 100).toFixed(2)}%`
+const pnlColor = (pnl: number | null | undefined) =>
+  (pnl || 0) > 0 ? '#d93026' : '#137333'
+
+const formatPercent = (value: number | undefined): string =>
+  value !== undefined && value !== null ? `${(value * 100).toFixed(2)}%` : '-'
+
+const formatNumber = (value: number | undefined, decimals: number): string =>
+  value !== undefined && value !== null ? value.toFixed(decimals) : '-'
+
+const downloadTradesCSV = () => {
+  const trades = report.value?.result?.trades || []
+  if (!trades.length) return
+  const header = '日期,代码,名称,方向,价格,数量,金额,盈亏%'
+  const rows = trades.map(t => {
+    const name = stockNameMap.value[t.symbol || ''] || t.symbol || ''
+    const dir = t.direction === 'buy' ? '买' : '卖'
+    const amt = (t.price || 0) * (t.quantity || 0)
+    const pnl = t.direction === 'sell' && t.pnl != null ? t.pnl.toFixed(2) : ''
+    return `${t.trade_date || ''},${t.symbol || ''},${name},${dir},${t.price?.toFixed(2) || ''},${t.quantity || ''},${amt.toFixed(0)},${pnl}`
+  }).join('\n')
+  const csv = '﻿' + header + '\n' + rows
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = `trades_${new Date().toISOString().slice(0, 10)}.csv`
+  a.click(); URL.revokeObjectURL(url)
 }
 
-// 格式化数字
-const formatNumber = (value: number | undefined, decimals: number): string => {
-  if (value === undefined || value === null) return '-'
-  return value.toFixed(decimals)
-}
-
-// 监听 backtestId 变化
 watch(() => props.backtestId, () => {
-  if (props.backtestId) {
-    loadReport()
-  }
+  if (props.backtestId) loadReport()
 }, { immediate: true })
 </script>
 
 <style scoped>
-.backtest-report {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
+.backtest-report { display: flex; flex-direction: column; gap: 16px; }
+.metrics-row { margin-bottom: 0; }
+.metric-card { text-align: center; }
+.metric-card :deep(.el-card__body) { padding: 20px; }
+.metric-label { font-size: 14px; color: #909399; margin-bottom: 8px; }
+.metric-value { font-size: 28px; font-weight: bold; color: #303133; }
+.metric-value.positive { color: #d93026; }
+.metric-value.negative { color: #137333; }
+.stats-card :deep(.el-card__body) { padding: 20px; }
+.stat-item { display: flex; flex-direction: column; gap: 8px; }
+.stat-label { font-size: 14px; color: #909399; }
+.stat-value { font-size: 20px; font-weight: 500; color: #303133; }
+.stat-value.positive { color: #d93026; }
+.stat-value.negative { color: #137333; }
+.info-card :deep(.el-card__body) { padding: 20px; }
 
-.metrics-row {
-  margin-bottom: 0;
-}
-
-.metric-card {
-  text-align: center;
-}
-
-.metric-card :deep(.el-card__body) {
-  padding: 20px;
-}
-
-.metric-label {
-  font-size: 14px;
-  color: #909399;
-  margin-bottom: 8px;
-}
-
-.metric-value {
-  font-size: 28px;
-  font-weight: bold;
-  color: #303133;
-}
-
-.metric-value.positive {
-  color: #67c23a;
-}
-
-.metric-value.negative {
-  color: #f56c6c;
-}
-
-.stats-card :deep(.el-card__body) {
-  padding: 20px;
-}
-
-.stat-item {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.stat-label {
-  font-size: 14px;
-  color: #909399;
-}
-
-.stat-value {
-  font-size: 20px;
-  font-weight: 500;
-  color: #303133;
-}
-
-.stat-value.positive {
-  color: #67c23a;
-}
-
-.stat-value.negative {
-  color: #f56c6c;
-}
-
-.info-card :deep(.el-card__body) {
-  padding: 20px;
-}
+.trades-section { background: #1a1a24; border-radius: 8px; padding: 16px; }
+.section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.section-header h3 { margin: 0; font-size: 14px; color: #e2e2ea; }
+.chart-section { background: #1a1a24; border-radius: 8px; padding: 16px; }
+.chart-section h3 { margin: 0 0 12px; font-size: 14px; color: #e2e2ea; }
+.charts-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.chart-container { height: 200px; }
 </style>

@@ -31,20 +31,48 @@ export interface Backtest {
   start_date: string
   end_date: string
   initial_capital: string | null
+  parameters: Record<string, unknown> | null
   result: BacktestResult | null
   created_at: string | null
 }
 
+export interface BacktestTrade {
+  trade_date?: string
+  symbol?: string
+  direction?: string
+  price?: number
+  quantity?: number
+  commission?: number
+  pnl?: number | null
+}
+
 export interface BacktestResult {
-  total_return: number
-  annual_return: number
-  max_drawdown: number
-  sharpe_ratio: number
-  total_trades: number
-  win_trades: number
-  loss_trades: number
-  win_rate: number
-  final_capital: number
+  total_return?: number
+  annual_return?: number
+  annual_volatility?: number
+  max_drawdown?: number
+  sharpe_ratio?: number
+  sharpe?: number
+  sortino?: number
+  sortino_ratio?: number
+  calmar?: number
+  calmar_ratio?: number
+  alpha?: number
+  beta?: number
+  information_ratio?: number
+  total_trades?: number
+  win_trades?: number
+  loss_trades?: number
+  win_rate?: number
+  avg_return?: number
+  final_capital?: number
+  trades?: BacktestTrade[]
+  nav_series?: Array<{ date: string; nav: number }>
+  daily_returns?: Array<{ date: string; return: number }>
+  start_date?: string
+  end_date?: string
+  initial_capital?: number
+  n_trading_days?: number
 }
 
 export interface BacktestCreate {

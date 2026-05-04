@@ -75,8 +75,11 @@ async def _save_backtest_result(
                 parameters={
                     "mode": config.mode,
                     "symbols": config.symbols,
+                    "symbol_count": len(config.symbols),
                     "bar_type": config.bar_type,
                     "rebalance_freq": config.rebalance_freq,
+                    "commission_rate": config.commission_rate,
+                    "slippage": config.slippage,
                 },
                 result=result_dict if success else None,
             )
