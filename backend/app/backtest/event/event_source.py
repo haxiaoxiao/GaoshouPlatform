@@ -1,6 +1,7 @@
 """Bar 数据源 — 从 ClickHouse 加载日线数据"""
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
 from typing import Iterator, TYPE_CHECKING
 
@@ -247,77 +248,45 @@ class BarEventSource:
         calendar: TradingCalendar,
         bar_type: str = "daily",
     ) -> "BarEventSource":
-        """从 ClickHouse 加载日线/分钟数据"""
+        """从 ClickHouse 加载日线/分钟数据 (线程池中执行, 不阻塞事件循环)"""
         from app.db.clickhouse import get_ch_client
 
         source = cls(symbols, start_date, end_date, calendar, bar_type=bar_type)
-        ch = get_ch_client()
 
-        rows = ch.execute(
-            """
-            SELECT symbol, trade_date, open, high, low, close, volume, amount
-            FROM klines_daily
-            WHERE symbol IN %(syms)s
-              AND trade_date >= %(start)s
-              AND trade_date <= %(end)s
-            ORDER BY symbol, trade_date
-            """,
-            {"syms": symbols, "start": start_date, "end": end_date},
-        )
+        def _load():
+            ch = get_ch_client()
+            rows = ch.execute(
+                """
+                SELECT symbol, trade_date, open, high, low, close, volume, amount
+                FROM klines_daily
+                WHERE symbol IN %(syms)s
+                  AND trade_date >= %(start)s
+                  AND trade_date <= %(end)s
+                ORDER BY symbol, trade_date
+                """,
+                {"syms": symbols, "start": start_date, "end": end_date},
+            )
 
-        df = pd.DataFrame(
-            rows,
-            columns=["symbol", "trade_date", "open", "high", "low",
-                     "close", "volume", "amount"],
-        )
-        if df.empty:
-            raise ValueError(f"No kline data for symbols {symbols} in [{start_date}, {end_date}]")
+            df = pd.DataFrame(
+                rows,
+                columns=["symbol", "trade_date", "open", "high", "low",
+                         "close", "volume", "amount"],
+            )
+            if df.empty:
+                raise ValueError(f"No kline data")
 
-        for col in ["open", "high", "low", "close", "amount"]:
-            df[col] = df[col].astype(float)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
+            for col in ["open", "high", "low", "close", "amount"]:
+                df[col] = df[col].astype(float)
+            df["trade_date"] = pd.to_datetime(df["trade_date"])
+            df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
 
-        # ClickHouse klines_daily may have multiple rows per (symbol, date).
-        # Drop duplicates keeping the first row.
-        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
+            for sym, grp in df.groupby("symbol"):
+                source._data[sym] = grp.set_index("trade_date")
 
-        for sym, grp in df.groupby("symbol"):
-            source._data[sym] = grp.set_index("trade_date")
+            logger.info("BarEventSource: loaded {} symbols, {} rows", len(source._data), len(df))
 
-        # Load minute data when bar_type is minute
-        if bar_type in ("1m", "minute"):
-            try:
-                minute_rows = ch.execute(
-                    """
-                    SELECT symbol, datetime, open, high, low, close, volume, amount
-                    FROM klines_minute
-                    WHERE symbol IN %(syms)s
-                      AND toDate(datetime) >= %(start)s
-                      AND toDate(datetime) <= %(end)s
-                    ORDER BY symbol, datetime
-                    """,
-                    {"syms": symbols, "start": start_date, "end": end_date},
-                )
-            except Exception as e:
-                logger.warning("BarEventSource: failed to load minute data (table may not exist): {}", e)
-                minute_rows = []
-            if minute_rows:
-                mdf = pd.DataFrame(
-                    minute_rows,
-                    columns=["symbol", "datetime", "open", "high", "low",
-                             "close", "volume", "amount"],
-                )
-                for col in ["open", "high", "low", "close", "amount"]:
-                    mdf[col] = mdf[col].astype(float)
-                mdf["datetime"] = pd.to_datetime(mdf["datetime"])
-                mdf = mdf.drop_duplicates(subset=["symbol", "datetime"], keep="first")
-                for sym, grp in mdf.groupby("symbol"):
-                    source._minute_data[sym] = grp.set_index("datetime")
-                logger.info("BarEventSource: loaded {} symbols minute data, {} rows",
-                            len(source._minute_data), len(mdf))
-
+        await asyncio.to_thread(_load)
         source._loaded = True
-        logger.info("BarEventSource: loaded {} symbols, {} rows", len(source._data), len(df))
         return source
 
     @classmethod
