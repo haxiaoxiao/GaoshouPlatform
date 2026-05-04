@@ -1,0 +1,6 @@
+{
+  "name": "report-to-strategy",
+  "version": "1.0.0",
+  "author": "GaoshouPlatform",
+  "description": "Convert research reports (PDF/TXT) to executable trading strategy code"
+}
