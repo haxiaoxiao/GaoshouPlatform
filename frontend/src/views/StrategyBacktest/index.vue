@@ -301,15 +301,22 @@ const DEEP_VALUE_CODE = `def init(context):
     # 运行状态
     context.positions = {}             # {symbol: {"entry_price": x, "entry_week": n}}
     context.week_count = 0
-    context.last_rebalance = -999
+    context.current_week = -1
+    context.last_rebalance_week = -999
 
     log("深度价值策略: 价格<250周线{:.0%} 股息率>{}% 0<PE<{} 持有{}周".format(
         context.price_to_ma_max, context.dividend_yield_min, context.pe_max, context.hold_weeks
     ))
 
 def handle_bar(context, bar_dict):
-    context.week_count += 1
     today = context.now.date()
+
+    # ── 周频控制: 使用 ISO 周号判断是否进入新的一周 ──
+    iso_week = today.isocalendar()[1]  # 1~53
+    if iso_week == context.current_week:
+        return
+    context.current_week = iso_week
+    context.week_count += 1
 
     # ── 到期平仓 ──
     expired = []
@@ -325,22 +332,20 @@ def handle_bar(context, bar_dict):
         del context.positions[sym]
 
     # ── 调仓 ──
-    if context.week_count - context.last_rebalance < context.rebalance_weeks:
+    if context.week_count - context.last_rebalance_week < context.rebalance_weeks:
         return
     if len(context.positions) >= context.max_positions:
         return
-    context.last_rebalance = context.week_count
+    context.last_rebalance_week = context.week_count
 
     # ── 筛选候选 ──
     candidates = []
     for sym in list(context.universe):
         try:
-            # 获取收盘价
             close = context.get_daily_close(sym, today)
             if not close or close <= 0:
                 continue
 
-            # 获取250周均线
             ma250w = context.get_weekly_ma(sym, 250, today)
             if not ma250w or ma250w <= 0:
                 continue
@@ -360,23 +365,25 @@ def handle_bar(context, bar_dict):
             if div_yield is None or div_yield <= context.dividend_yield_min:
                 continue
 
-            # 评分: 折价越多+股息越高=分数越高
-            score = (1 - ratio) * 50 + div_yield
+            # 评分: 折价维度(0~0.5) + 股息维度(0~1), 各占50%
+            discount_score = min((1 - ratio) / 0.5, 1.0) * 50
+            yield_score = min(div_yield / 15.0, 1.0) * 50
+            score = discount_score + yield_score
             candidates.append((sym, close, score, ma250w, pe, div_yield))
         except Exception:
             continue
 
     if not candidates:
-        log(f"{today} 无符合条件的标的")
         return
 
     # 按评分排序
     candidates.sort(key=lambda x: -x[2])
     candidates = candidates[:context.max_positions]
 
-    # 计算每只股票买入金额
+    # 计算每只股票买入金额 (基于总资产的固定比例)
+    total_value = context.stock_account.total_value
+    target_cash_per_stock = total_value * context.single_position_pct
     available_cash = context.stock_account.cash
-    per_stock_cash = available_cash * context.single_position_pct
 
     bought = 0
     for sym, price, score, ma_val, pe_val, div_val in candidates:
@@ -384,10 +391,14 @@ def handle_bar(context, bar_dict):
             continue
         if bought >= context.max_positions - len(context.positions):
             break
-        if per_stock_cash < price * 100:
+        if target_cash_per_stock > available_cash:
+            break
+        shares = int(target_cash_per_stock / price / 100) * 100
+        if shares < 100:
             continue
-        order_value(sym, per_stock_cash)
+        order_shares(sym, shares)
         context.positions[sym] = {"entry_price": price, "entry_week": context.week_count}
+        available_cash -= shares * price
         bought += 1
         log(f"买入 {sym} @ {price:.2f} 折价{(1-price/ma_val)*100:.1f}% PE={pe_val:.1f} 股息率={div_val:.1f}% score={score:.1f}")
 `
