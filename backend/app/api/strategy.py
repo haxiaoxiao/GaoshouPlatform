@@ -1,7 +1,8 @@
 # backend/app/api/strategy.py
-"""策略 API — 趋势资金事件驱动策略"""
+"""策略 API — 趋势资金事件驱动策略 + 深度价值策略"""
 import asyncio
-from datetime import date
+from datetime import date, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -210,3 +211,47 @@ async def run_backtest(
         strategy.run_basket_strategy, sd, ed, sym_list
     )
     return result
+
+
+class DeepValueBacktestRequest(BaseModel):
+    start_date: date = "2015-01-01"
+    end_date: date = "2025-12-31"
+    initial_capital: float = 1_000_000
+    pool: str = "all"  # all / top100 / top300 / top500
+
+
+@router.post("/deep-value/backtest", summary="深度价值策略回测（独立引擎，秒级）")
+async def run_deep_value_backtest(req: DeepValueBacktestRequest):
+    """深度价值策略独立回测 — 每年5月调仓，直接查ClickHouse筛选"""
+    from app.strategies.deep_value import DeepValueStrategy
+
+    # Resolve pool
+    if req.pool == "all":
+        pool_symbols = None  # use all non-ST stocks
+    else:
+        pool_symbols = _POOL_CACHE.get(req.pool)
+
+    strategy = DeepValueStrategy(pool_symbols=pool_symbols)
+    result = await asyncio.to_thread(
+        strategy.run, req.start_date, req.end_date, req.initial_capital
+    )
+    return {"code": 0, "message": "success", "data": result}
+
+
+# Shared pool cache (matching backtest/api.py)
+_POOL_CACHE: dict[str, list[str]] = {}
+
+async def _ensure_pool_cache():
+    global _POOL_CACHE
+    if _POOL_CACHE:
+        return
+    from app.db.clickhouse import get_ch_client
+    ch = get_ch_client()
+    for pool_name, limit in [("top100", 100), ("top300", 300), ("top500", 500)]:
+        rows = ch.execute(
+            "SELECT symbol FROM klines_daily "
+            "WHERE trade_date >= %(s)s AND amount > 0 AND close > 0 "
+            "GROUP BY symbol ORDER BY avg(amount) DESC LIMIT %(n)s",
+            {"s": (date.today() - timedelta(days=365)).isoformat(), "n": limit},
+        )
+        _POOL_CACHE[pool_name] = [r[0] for r in rows]
