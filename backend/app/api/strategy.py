@@ -220,7 +220,13 @@ class DeepValueBacktestRequest(BaseModel):
     start_date: date = "2015-01-01"
     end_date: date = "2025-12-31"
     initial_capital: float = 1_000_000
-    pool: str = "all"  # all / top100 / top300 / top500
+    pool: str = "all"
+    pe_min: float = 0
+    pe_max: float = 40
+    dividend_yield_min: float = 3.5
+    price_to_ma_max: float = 0.9
+    max_positions: int = 10
+    single_pct: float = 0.10
 
 
 @router.post("/deep-value/backtest", summary="深度价值策略回测（独立引擎，秒级）")
@@ -241,6 +247,12 @@ async def run_deep_value_backtest(
         pool_label = req.pool
 
     strategy = DeepValueStrategy(pool_symbols=pool_symbols)
+    strategy.PE_MIN = req.pe_min
+    strategy.PE_MAX = req.pe_max
+    strategy.DIVIDEND_YIELD_MIN = req.dividend_yield_min
+    strategy.PRICE_TO_MA_MAX = req.price_to_ma_max
+    strategy.MAX_POSITIONS = req.max_positions
+    strategy.SINGLE_PCT = req.single_pct
     result = await asyncio.to_thread(
         strategy.run, req.start_date, req.end_date, req.initial_capital
     )
@@ -268,12 +280,16 @@ async def run_deep_value_backtest(
             end_date=req.end_date,
             initial_capital=Decimal(str(req.initial_capital)),
             parameters={
-                "mode": "deep_value_standalone",
+                "mode": "deep_value",
                 "pool": req.pool,
                 "pool_label": pool_label,
                 "symbol_count": pool_count,
-                "max_positions": 10,
-                "single_pct": 0.10,
+                "pe_min": req.pe_min,
+                "pe_max": req.pe_max,
+                "dividend_yield_min": req.dividend_yield_min,
+                "price_to_ma_max": req.price_to_ma_max,
+                "max_positions": req.max_positions,
+                "single_pct": req.single_pct,
             },
             result=result,
         )

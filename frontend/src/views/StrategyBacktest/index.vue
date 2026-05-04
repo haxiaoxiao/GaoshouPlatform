@@ -66,6 +66,7 @@
               <el-radio-group v-model="btMode" size="small" class="mode-switch">
                 <el-radio-button value="script">脚本</el-radio-button>
                 <el-radio-button value="expression">表达式</el-radio-button>
+                <el-radio-button value="builtin" v-if="activeStrategy?.name === '深度价值策略'">深度价值</el-radio-button>
               </el-radio-group>
               <div class="toolbar-actions">
                 <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
@@ -116,6 +117,48 @@
               <div class="expression-params">
                 <span class="param-label">分组数</span>
                 <el-input-number v-model="btNGroups" :min="2" :max="10" size="small" style="width:80px" />
+              </div>
+            </div>
+
+            <!-- 内置策略模式 — 深度价值参数配置 -->
+            <div class="builtin-panel" v-if="btMode === 'builtin'">
+              <div class="builtin-banner">
+                <span class="builtin-title">深度价值策略</span>
+                <el-tag size="small" type="success">独立引擎 · 秒级回测</el-tag>
+              </div>
+              <div class="builtin-desc">
+                每年5月（Q1财报季后）筛选全市场股票，等权买入10只，持有至次年5月调仓。
+                收益含股价变动+现金分红。
+              </div>
+              <div class="builtin-params">
+                <div class="param-row">
+                  <span class="param-label">选股池</span>
+                  <el-select v-model="dvPool" size="small" style="width:140px">
+                    <el-option label="全量A股" value="all" />
+                    <el-option label="沪深Top100" value="top100" />
+                    <el-option label="沪深Top300" value="top300" />
+                    <el-option label="沪深Top500" value="top500" />
+                  </el-select>
+                </div>
+                <div class="param-row">
+                  <span class="param-label">PE 范围</span>
+                  <el-input-number v-model="dvPeMin" :min="0" :max="100" size="small" style="width:70px" /> —
+                  <el-input-number v-model="dvPeMax" :min="0" :max="1000" size="small" style="width:70px" />
+                </div>
+                <div class="param-row">
+                  <span class="param-label">股息率 &gt;</span>
+                  <el-input-number v-model="dvDivMin" :min="0" :max="20" :step="0.5" size="small" style="width:80px" /> %
+                </div>
+                <div class="param-row">
+                  <span class="param-label">价格/周线 &lt;</span>
+                  <el-input-number v-model="dvPriceMA" :min="0.1" :max="1.0" :step="0.05" size="small" style="width:80px" />
+                </div>
+                <div class="param-row">
+                  <span class="param-label">持仓数</span>
+                  <el-input-number v-model="dvMaxPos" :min="1" :max="20" size="small" style="width:70px" />
+                  <span class="param-label">单票仓位</span>
+                  <el-input-number v-model="dvSinglePct" :min="5" :max="50" :step="5" size="small" style="width:70px" /> %
+                </div>
               </div>
             </div>
           </div>
@@ -661,7 +704,16 @@ const handleSizeChange = (size: number) => {
 
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
-const btMode = ref<'script' | 'expression'>('script')
+const btMode = ref<'script' | 'expression' | 'builtin'>('script')
+
+// 深度价值策略参数
+const dvPool = ref('all')
+const dvPeMin = ref(0)
+const dvPeMax = ref(40)
+const dvDivMin = ref(3.5)
+const dvPriceMA = ref(0.9)
+const dvMaxPos = ref(10)
+const dvSinglePct = ref(10)
 const btCode = ref('')
 const btExpression = ref(SAMPLE_EXPRESSION)
 const btNGroups = ref(5)
@@ -828,8 +880,11 @@ const handleBacktest = async (row: Strategy) => {
   try {
     activeStrategy.value = { ...row }
     const code = row.code || ''
-    // Auto-detect mode from code content
-    if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
+    // Auto-detect mode: builtin > script > expression
+    if (row.name === '深度价值策略' || row.id === 12) {
+      btMode.value = 'builtin'
+      btCode.value = code  // keep code for display only
+    } else if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
       btMode.value = 'script'
       btCode.value = code
     } else {
@@ -870,20 +925,25 @@ const handleRunBacktest = async () => {
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
 
-  // 深度价值策略使用独立快速引擎（ID=12 或名称匹配）
-  const isDeepValue = activeStrategy.value?.id === 12 || activeStrategy.value?.name === '深度价值策略'
+  // 深度价值策略使用独立快速引擎
+  const isBuiltin = btMode.value === 'builtin'
 
   try {
     const { default: request } = await import('@/api/request')
 
-    if (isDeepValue && !isExpression) {
-      // 独立快速回测 — 直接返回结果
-      const pool = isAllStocks.value ? 'all' : (selectedPool.value || 'all')
+    if (isBuiltin) {
+      // 内置策略独立引擎 — 直接返回结果
       const res = await request.post<any>('/strategy/deep-value/backtest', {
         start_date: btStartDate.value,
         end_date: btEndDate.value,
         initial_capital: btCapital.value,
-        pool,
+        pool: dvPool.value,
+        pe_min: dvPeMin.value,
+        pe_max: dvPeMax.value,
+        dividend_yield_min: dvDivMin.value,
+        price_to_ma_max: dvPriceMA.value,
+        max_positions: dvMaxPos.value,
+        single_pct: dvSinglePct.value / 100,
       }, { timeout: 120000 })
       btFullResult.value = {
         total_return: res.total_return ?? 0,
@@ -1279,6 +1339,46 @@ onMounted(async () => {
   color: #aaa;
 }
 
+.builtin-panel {
+  flex: 1;
+  background: #1a1a24;
+  border: 1px solid #2a7a4b;
+  border-radius: 8px;
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.builtin-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.builtin-title {
+  font-size: 18px;
+  font-weight: 700;
+  color: #4caf50;
+}
+.builtin-desc {
+  font-size: 13px;
+  color: #8888a0;
+  line-height: 1.6;
+}
+.builtin-params {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.builtin-params .param-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.builtin-params .param-label {
+  font-size: 13px;
+  color: #aaa;
+  min-width: 80px;
+}
 .empty-runner {
   display: flex;
   align-items: center;
