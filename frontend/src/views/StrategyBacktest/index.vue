@@ -886,14 +886,14 @@ const handleRunBacktest = async () => {
         pool,
       }, { timeout: 120000 })
       btFullResult.value = {
-        total_return: res.total_return ? res.total_return / 100 : 0,
-        annual_return: res.annual_return ? res.annual_return / 100 : 0,
+        total_return: res.total_return ?? 0,
+        annual_return: res.annual_return ?? 0,
         total_trades: res.total_trades,
-        win_trades: res.win_count,
-        loss_trades: res.loss_count,
-        win_rate: res.win_rate ? res.win_rate / 100 : 0,
-        avg_return: res.avg_return,
-        max_drawdown: res.max_drawdown,
+        win_trades: res.win_trades,
+        loss_trades: res.loss_trades,
+        win_rate: res.win_rate ?? 0,
+        avg_return: res.avg_return ?? 0,
+        max_drawdown: res.max_drawdown ?? 0,
         trades: res.trades?.map((t: any) => ({
           trade_date: t.trade_date,
           symbol: t.symbol,

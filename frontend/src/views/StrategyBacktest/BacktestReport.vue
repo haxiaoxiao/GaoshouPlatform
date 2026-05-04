@@ -133,9 +133,10 @@
           <el-descriptions-item label="回测区间">{{ report.start_date }} ~ {{ report.end_date }}</el-descriptions-item>
           <el-descriptions-item label="初始资金">{{ formatCapital(report.initial_capital) }}</el-descriptions-item>
           <el-descriptions-item label="最终资金">{{ formatCapital(report.result?.final_capital?.toString() ?? null) }}</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="股票池">{{ report.parameters.pool_label || report.parameters.pool || '-' }}</el-descriptions-item>
           <el-descriptions-item v-if="report.parameters" label="股票数量">{{ report.parameters.symbol_count ?? '-' }} 只</el-descriptions-item>
-          <el-descriptions-item v-if="report.parameters" label="模式">{{ report.parameters.mode === 'event_driven' ? '事件驱动' : report.parameters.mode }}</el-descriptions-item>
-          <el-descriptions-item v-if="report.parameters" label="K线">{{ report.parameters.bar_type || '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="持仓上限">{{ report.parameters.max_positions ?? '-' }} 只</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="单票仓位">{{ report.parameters.single_pct ? (report.parameters.single_pct * 100).toFixed(0) + '%' : '-' }}</el-descriptions-item>
         </el-descriptions>
       </el-card>
     </template>

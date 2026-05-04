@@ -249,16 +249,18 @@ class DeepValueStrategy:
 
         total_dividends = sum(t.get("dividend", 0) for t in sell_trades)
         return {
-            "total_return": round(total_return, 2),
-            "annual_return": round(total_return / max((end_date - start_date).days / 365, 1), 2),
+            "total_return": round(total_return / 100, 4),  # 转为小数，与 v1 格式一致
+            "annual_return": round(total_return / max((end_date - start_date).days / 365, 1) / 100, 4),
             "total_trades": len(sell_trades),
-            "win_count": len(winning),
-            "loss_count": len(pnls) - len(winning),
-            "win_rate": round(len(winning) / len(pnls) * 100, 2) if pnls else 0,
-            "avg_return": round(float(np.mean(pnls)), 2) if pnls else 0,
+            "win_trades": len(winning),
+            "loss_trades": len(pnls) - len(winning),
+            "win_rate": round(len(winning) / len(pnls), 4) if pnls else 0,
+            "avg_return": round(float(np.mean(pnls)) / 100, 4) if pnls else 0,
             "total_dividends": round(total_dividends, 2),
+            "sharpe_ratio": round(float(np.mean(pnls)) / (float(np.std(pnls)) + 0.001) / 100, 4) if pnls and len(pnls) > 1 else 0,
             "max_drawdown": 0,
             "initial_capital": initial_capital,
+            "final_capital": round(initial_capital * (1 + total_return / 100), 2),
             "basket_count": len(basket_returns),
             "basket_returns": [round(r, 2) for r in basket_returns],
             "trades": sorted(all_trades, key=lambda x: x.get("trade_date", "")),

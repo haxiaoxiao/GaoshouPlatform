@@ -53,6 +53,19 @@
           {{ row.start_date }} ~ {{ row.end_date }}
         </template>
       </el-table-column>
+      <el-table-column label="参数" width="160">
+        <template #default="{ row }">
+          <template v-if="row.parameters">
+            <el-tooltip :content="JSON.stringify(row.parameters)">
+              <span style="font-size:12px;color:#909399">
+                {{ row.parameters.pool_label || row.parameters.mode || '-' }}
+                {{ row.parameters.symbol_count ? ' / ' + row.parameters.symbol_count + '只' : '' }}
+              </span>
+            </el-tooltip>
+          </template>
+          <span v-else style="color:#666;font-size:12px">—</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="160">
         <template #default="{ row }">
           {{ formatDateTime(row.created_at) }}
