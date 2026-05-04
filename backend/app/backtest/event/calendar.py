@@ -25,24 +25,26 @@ class TradingCalendar:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> "TradingCalendar":
-        """从 ClickHouse klines_daily 加载唯一交易日"""
+        """从 ClickHouse klines_daily 加载唯一交易日 (线程池中执行)"""
+        import asyncio
         from app.db.clickhouse import get_ch_client
 
-        ch = get_ch_client()
-        query = "SELECT DISTINCT trade_date FROM klines_daily WHERE symbol IN %(syms)s"
-        params: dict = {"syms": symbols}
-        if start_date:
-            query += " AND trade_date >= %(start)s"
-            params["start"] = start_date
-        if end_date:
-            query += " AND trade_date <= %(end)s"
-            params["end"] = end_date
-        query += " ORDER BY trade_date"
+        def _load():
+            ch = get_ch_client()
+            query = "SELECT DISTINCT trade_date FROM klines_daily WHERE symbol IN %(syms)s"
+            params: dict = {"syms": symbols}
+            if start_date:
+                query += " AND trade_date >= %(start)s"
+                params["start"] = start_date
+            if end_date:
+                query += " AND trade_date <= %(end)s"
+                params["end"] = end_date
+            query += " ORDER BY trade_date"
+            rows = ch.execute(query, params)
+            return sorted({r[0] for r in rows})
 
-        rows = ch.execute(query, params)
-        dates = sorted({r[0] for r in rows})
-        logger.info("TradingCalendar: {} trading days from {}-{}", len(dates),
-                     dates[0] if dates else "N/A", dates[-1] if dates else "N/A")
+        dates = await asyncio.to_thread(_load)
+        logger.info("TradingCalendar: {} trading days", len(dates))
         return cls(dates)
 
     @classmethod
