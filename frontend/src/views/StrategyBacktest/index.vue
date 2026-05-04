@@ -892,12 +892,13 @@ const handleBacktest = async (row: Strategy) => {
     } else {
       builtinType.value = null
       if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
-      btMode.value = 'script'
-      btCode.value = code
-    } else {
-      btMode.value = 'expression'
-      btExpression.value = code || SAMPLE_EXPRESSION
-      btCode.value = code
+        btMode.value = 'script'
+        btCode.value = code
+      } else {
+        btMode.value = 'expression'
+        btExpression.value = code || SAMPLE_EXPRESSION
+        btCode.value = code
+      }
     }
     // Auto-detect bar_type from code content
     btBarType.value = (code.includes('get_intraday') || code.includes('compute_daily_signal'))
