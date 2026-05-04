@@ -7,10 +7,20 @@
           <el-icon><Document /></el-icon>
           使用手册
         </el-button>
-        <el-button type="primary" @click="handleCreate">
-          <el-icon><Plus /></el-icon>
-          新建策略
-        </el-button>
+        <el-dropdown @command="handleCreate" style="margin-left:8px">
+          <el-button type="primary">
+            <el-icon><Plus /></el-icon>
+            新建策略
+            <el-icon class="el-icon--right"><ArrowDown /></el-icon>
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="script">新建脚本策略</el-dropdown-item>
+              <el-dropdown-item command="expression">新建表达式策略</el-dropdown-item>
+              <el-dropdown-item command="builtin">新建内置策略(深度价值)</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
     </div>
     <el-tabs v-model="activeTab" class="strategy-tabs">
@@ -120,45 +130,35 @@
               </div>
             </div>
 
-            <!-- 内置策略面板 — 根据 builtinType 渲染不同策略配置 -->
+            <!-- 内置策略面板 — 展示完整 Python 代码 + 可调参数 -->
             <div class="builtin-panel" v-if="btMode === 'builtin' && builtinType === 'deep_value'">
-              <div class="builtin-banner">
-                <span class="builtin-title">深度价值策略</span>
-                <el-tag size="small" type="success">独立引擎 · 秒级回测</el-tag>
+              <div class="builtin-params-bar">
+                <span class="param-label">选股池</span>
+                <el-select v-model="dvPool" size="small" style="width:120px">
+                  <el-option label="全量A股" value="all" />
+                  <el-option label="Top100" value="top100" />
+                  <el-option label="Top300" value="top300" />
+                  <el-option label="Top500" value="top500" />
+                </el-select>
+                <span class="param-label">PE</span>
+                <el-input-number v-model="dvPeMin" :min="0" :max="100" size="small" style="width:60px" />—
+                <el-input-number v-model="dvPeMax" :min="0" :max="1000" size="small" style="width:60px" />
+                <span class="param-label">股息&gt;</span>
+                <el-input-number v-model="dvDivMin" :min="0" :max="20" :step="0.5" size="small" style="width:70px" />%
+                <span class="param-label">价/MA&lt;</span>
+                <el-input-number v-model="dvPriceMA" :min="0.1" :max="1.0" :step="0.05" size="small" style="width:70px" />
+                <span class="param-label">持仓</span>
+                <el-input-number v-model="dvMaxPos" :min="1" :max="20" size="small" style="width:60px" />
+                <span class="param-label">仓位</span>
+                <el-input-number v-model="dvSinglePct" :min="5" :max="50" :step="5" size="small" style="width:60px" />%
               </div>
-              <div class="builtin-desc">
-                每年5月（Q1财报季后）筛选全市场股票，等权买入，持有至次年5月调仓。
-                收益含股价变动 + 现金分红。不依赖 RiceQuant 事件引擎，直接批量查询 ClickHouse 计算。
-              </div>
-              <div class="builtin-params">
-                <div class="param-row">
-                  <span class="param-label">选股池</span>
-                  <el-select v-model="dvPool" size="small" style="width:140px">
-                    <el-option label="全量A股" value="all" />
-                    <el-option label="沪深Top100" value="top100" />
-                    <el-option label="沪深Top300" value="top300" />
-                    <el-option label="沪深Top500" value="top500" />
-                  </el-select>
-                </div>
-                <div class="param-row">
-                  <span class="param-label">PE 范围</span>
-                  <el-input-number v-model="dvPeMin" :min="0" :max="100" size="small" style="width:70px" /> —
-                  <el-input-number v-model="dvPeMax" :min="0" :max="1000" size="small" style="width:70px" />
-                </div>
-                <div class="param-row">
-                  <span class="param-label">股息率 &gt;</span>
-                  <el-input-number v-model="dvDivMin" :min="0" :max="20" :step="0.5" size="small" style="width:80px" /> %
-                </div>
-                <div class="param-row">
-                  <span class="param-label">价格/周线 &lt;</span>
-                  <el-input-number v-model="dvPriceMA" :min="0.1" :max="1.0" :step="0.05" size="small" style="width:80px" />
-                </div>
-                <div class="param-row">
-                  <span class="param-label">持仓数</span>
-                  <el-input-number v-model="dvMaxPos" :min="1" :max="20" size="small" style="width:70px" />
-                  <span class="param-label">单票仓位</span>
-                  <el-input-number v-model="dvSinglePct" :min="5" :max="50" :step="5" size="small" style="width:70px" /> %
-                </div>
+              <div class="code-editor">
+                <textarea
+                  v-model="builtinCode"
+                  class="editor-textarea"
+                  spellcheck="false"
+                  readonly
+                />
               </div>
             </div>
           </div>
@@ -274,7 +274,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Document } from '@element-plus/icons-vue'
+import { Plus, Document, ArrowDown } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/data'
@@ -639,14 +639,24 @@ const loadStrategies = async () => {
   }
 }
 
-const handleCreate = async () => {
+const handleCreate = async (type: string) => {
+  let name, code, desc
+  if (type === 'builtin') {
+    name = '深度价值策略'
+    code = BUILTIN_CODE
+    desc = '低估值+高股息+深度折价：每年5月调仓，独立引擎批量查询'
+  } else if (type === 'expression') {
+    name = '新建表达式'
+    code = SAMPLE_EXPRESSION
+    desc = '因子表达式策略'
+  } else {
+    name = '新建策略'
+    code = SAMPLE_CODE
+    desc = '双均线交叉策略示例'
+  }
   try {
-    const result = await strategyApi.create({
-      name: '新建策略',
-      code: SAMPLE_CODE,
-      description: '双均线交叉策略示例',
-    })
-    ElMessage.success('示例策略已创建')
+    const result = await strategyApi.create({ name, code, description: desc })
+    ElMessage.success('策略已创建')
     await loadStrategies()
     activeStrategy.value = {
       id: result.id,
@@ -657,8 +667,17 @@ const handleCreate = async () => {
       created_at: result.created_at,
       updated_at: result.updated_at,
     }
-    btMode.value = 'script'
-    btCode.value = result.code || SAMPLE_CODE
+    if (type === 'builtin') {
+      builtinType.value = 'deep_value'
+      builtinCode.value = BUILTIN_CODE
+      btMode.value = 'builtin'
+    } else if (type === 'expression') {
+      btMode.value = 'expression'
+      btExpression.value = result.code || SAMPLE_EXPRESSION
+    } else {
+      btMode.value = 'script'
+    }
+    btCode.value = result.code || ''
     btExpression.value = SAMPLE_EXPRESSION
     btBarType.value = 'daily'
     btMetrics.value = []
@@ -707,8 +726,162 @@ const handleSizeChange = (size: number) => {
 const activeStrategy = ref<Strategy | null>(null)
 const btMode = ref<'script' | 'expression' | 'builtin'>('script')
 
+const BUILTIN_CODE = `"""
+深度价值策略 — 年度调仓，独立引擎，批量 ClickHouse 查询
+每年5月筛选，等权买入，持有至次年5月。收益含股价变动+现金分红。
+"""
+from app.db.clickhouse import get_ch_client
+import numpy as np
+from datetime import date
+from dataclasses import dataclass
+
+@dataclass
+class Basket:
+    entry_date: date
+    stocks: list[dict]
+
+class DeepValueStrategy:
+    PRICE_TO_MA_MAX = 0.9
+    DIVIDEND_YIELD_MIN = 3.5
+    PE_MIN = 0
+    PE_MAX = 40
+    MAX_POSITIONS = 10
+    SINGLE_PCT = 0.10
+
+    def __init__(self, pool_symbols=None):
+        self.ch = get_ch_client()
+        self.pool_symbols = pool_symbols
+
+    def _get_pool(self):
+        if self.pool_symbols: return self.pool_symbols
+        from sqlalchemy import create_engine, select
+        from app.db.models.stock import Stock
+        from app.core.config import settings
+        url = settings.database_url.replace('+aiosqlite', '')
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            rows = conn.execute(select(Stock.symbol)
+                .where(Stock.is_st==0, Stock.is_delist==0)).all()
+        engine.dispose()
+        return [r[0] for r in rows]
+
+    def _get_may_dates(self, start, end):
+        rows = self.ch.execute(
+            'SELECT DISTINCT trade_date FROM klines_daily '
+            'WHERE trade_date>=%(s)s AND trade_date<=%(e)s ORDER BY trade_date',
+            {'s':start, 'e':end})
+        return [r[0] for r in rows if r[0].month==5
+                and (not may or may[-1].year!=r[0].year)]
+
+    def screen(self, as_of_date, pool):
+        # 批量查询：close + 250周MA + PE + 股息率
+        close_map = {r[0]:float(r[1]) for r in self.ch.execute(
+            'SELECT symbol, close FROM klines_daily WHERE symbol IN %(s)s '
+            'AND trade_date=(SELECT max(trade_date) FROM klines_daily '
+            'WHERE trade_date<=%(d)s AND symbol=klines_daily.symbol)',
+            {'s':tuple(pool), 'd':as_of_date})}
+        ma_map = {r[0]:float(r[1]) for r in self.ch.execute(
+            'SELECT symbol, avg(close) FROM (SELECT symbol, close, '
+            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
+            'FROM klines_weekly WHERE symbol IN %(s)s AND trade_date<=%(d)s) '
+            'WHERE rn<=250 GROUP BY symbol',
+            {'s':tuple(pool), 'd':as_of_date}) if r[1]}
+        pe_map = {r[0]:float(r[1]) for r in self.ch.execute(
+            'SELECT symbol, value FROM (SELECT symbol, value, '
+            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
+            'FROM stock_indicators WHERE symbol IN %(s)s AND indicator_name=%(n)s '
+            'AND trade_date<=%(d)s) WHERE rn=1',
+            {'s':tuple(pool), 'd':as_of_date, 'n':'pe_ttm'}) if r[1] and float(r[1])>0}
+        dy_map = {r[0]:float(r[1]) for r in self.ch.execute(
+            'SELECT symbol, value FROM (SELECT symbol, value, '
+            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
+            'FROM stock_indicators WHERE symbol IN %(s)s AND indicator_name=%(n)s '
+            'AND trade_date<=%(d)s) WHERE rn=1',
+            {'s':tuple(pool), 'd':as_of_date, 'n':'dividend_yield'}) if r[1] and float(r[1])>0}
+        # 评分筛选
+        result = []
+        for sym, close in close_map.items():
+            if close<=0: continue
+            ma=ma_map.get(sym); pe=pe_map.get(sym); dy=dy_map.get(sym)
+            if not ma or ma<=0: continue
+            ratio=close/ma
+            if ratio>=self.PRICE_TO_MA_MAX: continue
+            if pe is None or pe<=self.PE_MIN or pe>=self.PE_MAX: continue
+            if dy is None or dy<=self.DIVIDEND_YIELD_MIN: continue
+            score = min((1-ratio)/0.5,1)*50 + min(dy/15,1)*50
+            result.append({'symbol':sym,'close':close,'ratio':round(ratio,4),
+                'pe':pe,'dividend_yield':dy,'score':round(score,4)})
+        result.sort(key=lambda x:-x['score'])
+        return result[:self.MAX_POSITIONS]
+
+    def run(self, start_date, end_date, initial_capital=1_000_000):
+        pool = self._get_pool()
+        may_dates = self._get_may_dates(start_date, end_date)
+        baskets, all_trades = [], []
+        for d in may_dates:
+            # 平仓
+            for b in list(baskets):
+                for item in b.stocks:
+                    p = self._get_price(item['symbol'], d)
+                    if p:
+                        div = self._get_dividends(item['symbol'], b.entry_date, d)
+                        all_trades.append({'symbol':item['symbol'],'direction':'sell',
+                            'trade_date':d.isoformat(),'price':round(p,2),
+                            'dividend':round(div,4),'pnl_pct':round(((p+div)/item['entry_price']-1)*100,2)})
+                baskets.remove(b)
+            # 买入
+            candidates = self.screen(d, pool)
+            if not candidates: continue
+            invest = initial_capital * self.SINGLE_PCT
+            stocks = []
+            for c in candidates:
+                shares = int(invest/c['close']/100)*100
+                if shares<100: continue
+                stocks.append({'symbol':c['symbol'],'entry_price':c['close'],'shares':shares})
+                all_trades.append({'symbol':c['symbol'],'direction':'buy',
+                    'trade_date':d.isoformat(),'price':round(c['close'],2),'shares':shares})
+            if stocks: baskets.append(Basket(d, stocks))
+        # 强制平仓
+        for b in baskets:
+            for item in b.stocks:
+                p=self._get_price(item['symbol'],end_date) or item['entry_price']
+                div=self._get_dividends(item['symbol'],b.entry_date,end_date)
+                all_trades.append({'symbol':item['symbol'],'direction':'sell',
+                    'trade_date':end_date.isoformat(),'price':round(p,2),
+                    'dividend':round(div,4),'pnl_pct':round(((p+div)/item['entry_price']-1)*100,2)})
+        # 统计
+        sells = [t for t in all_trades if 'pnl_pct' in t]
+        pnls = [t['pnl_pct'] for t in sells]
+        win = [p for p in pnls if p>0]
+        groups = {}
+        for t in sells: groups.setdefault(t.get('trade_date','?'),[]).append(t['pnl_pct'])
+        basket_ret = [float(np.mean(v)) for v in groups.values()]
+        total = float(np.prod([1+r/100 for r in basket_ret])-1)*100 if basket_ret else 0
+        return {
+            'total_return': round(total/100,4),
+            'total_trades': len(sells), 'win_trades': len(win),
+            'loss_trades': len(pnls)-len(win),
+            'win_rate': round(len(win)/len(pnls),4) if pnls else 0,
+            'trades': sorted(all_trades, key=lambda x:x.get('trade_date','')),
+            'basket_returns': [round(r,2) for r in basket_ret],
+        }
+
+    def _get_price(self, symbol, as_of):
+        r = self.ch.execute('SELECT close FROM klines_daily '
+            'WHERE symbol=%(s)s AND trade_date<=%(d)s ORDER BY trade_date DESC LIMIT 1',
+            {'s':symbol,'d':as_of})
+        return float(r[0][0]) if r and r[0] and r[0][0] else None
+
+    def _get_dividends(self, symbol, start, end):
+        r = self.ch.execute('SELECT sum(value) FROM stock_indicators '
+            'WHERE symbol=%(s)s AND indicator_name=%(n)s AND trade_date>%(a)s AND trade_date<=%(b)s',
+            {'s':symbol,'n':'dividend_cash','a':start,'b':end})
+        return float(r[0][0] or 0) if r and r[0] else 0.0
+`
+
 // 内置策略类型
 const builtinType = ref<string | null>(null)
+const builtinCode = ref('')
 
 // 深度价值策略参数
 const dvPool = ref('all')
@@ -887,6 +1060,7 @@ const handleBacktest = async (row: Strategy) => {
     // Auto-detect mode: builtin > script > expression
     if (row.name === '深度价值策略' || row.id === 12) {
       builtinType.value = 'deep_value'
+      builtinCode.value = BUILTIN_CODE
       btMode.value = 'builtin'
       btCode.value = code
     } else {
@@ -1349,43 +1523,23 @@ onMounted(async () => {
 
 .builtin-panel {
   flex: 1;
-  background: #1a1a24;
-  border: 1px solid #2a7a4b;
-  border-radius: 8px;
-  padding: 20px;
+  background: #1e1e1e;
   display: flex;
   flex-direction: column;
-  gap: 16px;
 }
-.builtin-banner {
+.builtin-params-bar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #252530;
+  border-bottom: 1px solid #333;
+  flex-wrap: wrap;
 }
-.builtin-title {
-  font-size: 18px;
-  font-weight: 700;
-  color: #4caf50;
-}
-.builtin-desc {
-  font-size: 13px;
-  color: #8888a0;
-  line-height: 1.6;
-}
-.builtin-params {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-.builtin-params .param-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.builtin-params .param-label {
-  font-size: 13px;
-  color: #aaa;
-  min-width: 80px;
+.builtin-params-bar .param-label {
+  font-size: 11px;
+  color: #888;
+  margin-left: 4px;
 }
 .empty-runner {
   display: flex;
