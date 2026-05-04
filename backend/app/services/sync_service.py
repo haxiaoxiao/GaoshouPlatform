@@ -1777,11 +1777,19 @@ class SyncService:
                 ch_client.execute(
                     "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_cash'"
                 )
-                for batch_start in range(0, len(all_rows), 500):
+                # Sort and batch by month to avoid partition limit
+                all_rows.sort(key=lambda r: r["trade_date"])
+                batch_start = 0
+                while batch_start < len(all_rows):
+                    batch_end = batch_start
+                    month = all_rows[batch_start]["trade_date"].strftime("%Y%m")
+                    while batch_end < len(all_rows) and all_rows[batch_end]["trade_date"].strftime("%Y%m") == month:
+                        batch_end += 1
                     ch_client.execute(
                         "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
-                        all_rows[batch_start:batch_start + 500],
+                        all_rows[batch_start:batch_end],
                     )
+                    batch_start = batch_end
 
             # ========== 阶段3: 批量计算 dividend_yield ==========
             progress.details["phase"] = "yield"
@@ -1857,11 +1865,19 @@ class SyncService:
                 ch_client.execute(
                     "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_yield'"
                 )
-                for i in range(0, len(yield_rows), 500):
+                # Sort and batch by month to avoid partition limit
+                yield_rows.sort(key=lambda r: r["trade_date"])
+                y_start = 0
+                while y_start < len(yield_rows):
+                    y_end = y_start
+                    y_month = yield_rows[y_start]["trade_date"].strftime("%Y%m")
+                    while y_end < len(yield_rows) and yield_rows[y_end]["trade_date"].strftime("%Y%m") == y_month:
+                        y_end += 1
                     ch_client.execute(
                         "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
-                        yield_rows[i:i + 500],
+                        yield_rows[y_start:y_end],
                     )
+                    y_start = y_end
 
             progress.details["yield_rows"] = len(yield_rows)
 
