@@ -238,6 +238,8 @@ class BarEventSource:
         # {symbol: DataFrame(index=datetime)} — minute data
         self._minute_data: dict[str, pd.DataFrame] = {}
         self._loaded = False
+        self._prev_date_cache: dict = {}
+        self._all_dates_sorted: list = []
 
     @classmethod
     async def from_clickhouse(
@@ -315,21 +317,30 @@ class BarEventSource:
             if df is None or ts not in df.index:
                 continue
             row = df.loc[ts].to_dict()
-            # Inject prev_close from previous trading day
-            if prev_ts and sym in self._data:
-                pdf = self._data[sym]
-                if prev_ts in pdf.index:
-                    row["prev_close"] = float(pdf.loc[prev_ts, "close"])
+            if prev_ts is not None and prev_ts in df.index:
+                row["prev_close"] = float(df.loc[prev_ts, "close"])
             result[sym] = Bar.from_row(sym, trade_date, row, source=self)
         return result
 
     def _find_prev_trade_date(self, trade_date: date) -> pd.Timestamp | None:
-        """查找前一个可用的交易日（从数据中）"""
-        all_dates: set[pd.Timestamp] = set()
-        for df in self._data.values():
-            all_dates.update(df.index.tolist())
-        sorted_dates = sorted(d for d in all_dates if d < pd.Timestamp(trade_date))
-        return sorted_dates[-1] if sorted_dates else None
+        """查找前一个可用的交易日（缓存优化）"""
+        ts = pd.Timestamp(trade_date)
+        if ts in self._prev_date_cache:
+            return self._prev_date_cache[ts]
+
+        if not self._all_dates_sorted:
+            all_dates: set[pd.Timestamp] = set()
+            for df in self._data.values():
+                all_dates.update(df.index.tolist())
+            self._all_dates_sorted = sorted(all_dates)
+
+        result = None
+        for d in self._all_dates_sorted:
+            if d >= ts:
+                break
+            result = d
+        self._prev_date_cache[ts] = result
+        return result
 
     def get_history(self, symbol: str, end_date: date, n_days: int = 60) -> pd.DataFrame:
         """获取某标的截止某日的历史数据"""
