@@ -205,8 +205,8 @@ class DeepValueStrategy:
             if basket_stocks:
                 baskets.append(DVBasket(rebalance_date, basket_stocks))
 
-        # ── 强制平仓 ──
-        final_date = rebalance_dates[-1]
+        # ── 强制平仓（用 end_date 而非最后一期调仓日）──
+        final_date = end_date
         for basket in baskets:
             for item in basket.stocks:
                 price = self._get_price(item["symbol"], final_date) or item["entry_price"]
