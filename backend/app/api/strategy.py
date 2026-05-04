@@ -2,13 +2,16 @@
 """策略 API — 趋势资金事件驱动策略 + 深度价值策略"""
 import asyncio
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
+from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from app.db.models.strategy import Strategy, Backtest
 from app.db.models.watchlist import WatchlistGroup, WatchlistStock
 from app.db.sqlite import get_async_session
 from app.strategies.trend_capital import TrendCapitalStrategy
@@ -221,20 +224,66 @@ class DeepValueBacktestRequest(BaseModel):
 
 
 @router.post("/deep-value/backtest", summary="深度价值策略回测（独立引擎，秒级）")
-async def run_deep_value_backtest(req: DeepValueBacktestRequest):
-    """深度价值策略独立回测 — 每年5月调仓，直接查ClickHouse筛选"""
+async def run_deep_value_backtest(
+    req: DeepValueBacktestRequest,
+    session: AsyncSession = Depends(get_async_session),
+):
+    """深度价值策略独立回测 — 每年5月调仓，直接查ClickHouse筛选，结果自动保存"""
     from app.strategies.deep_value import DeepValueStrategy
 
     # Resolve pool
     if req.pool == "all":
-        pool_symbols = None  # use all non-ST stocks
+        pool_symbols = None
+        pool_label = "全量A股"
     else:
+        await _ensure_pool_cache()
         pool_symbols = _POOL_CACHE.get(req.pool)
+        pool_label = req.pool
 
     strategy = DeepValueStrategy(pool_symbols=pool_symbols)
     result = await asyncio.to_thread(
         strategy.run, req.start_date, req.end_date, req.initial_capital
     )
+
+    # Save to backtests table
+    try:
+        # Find or create the strategy record
+        stmt = select(Strategy).where(Strategy.name == "深度价值策略")
+        exec_result = await session.execute(stmt)
+        strategy_record = exec_result.scalar_one_or_none()
+        if not strategy_record:
+            strategy_record = Strategy(
+                name="深度价值策略",
+                code="standalone",
+                description="低估值+高股息+深度折价：每年5月调仓，持有1年",
+            )
+            session.add(strategy_record)
+            await session.flush()
+
+        pool_count = len(pool_symbols) if pool_symbols else 4968
+        backtest = Backtest(
+            strategy_id=strategy_record.id,
+            status="completed",
+            start_date=req.start_date,
+            end_date=req.end_date,
+            initial_capital=Decimal(str(req.initial_capital)),
+            parameters={
+                "mode": "deep_value_standalone",
+                "pool": req.pool,
+                "pool_label": pool_label,
+                "symbol_count": pool_count,
+                "max_positions": 10,
+                "single_pct": 0.10,
+            },
+            result=result,
+        )
+        session.add(backtest)
+        await session.commit()
+        result["backtest_id"] = backtest.id
+    except Exception as e:
+        logger.warning(f"Failed to save backtest: {e}")
+        await session.rollback()
+
     return {"code": 0, "message": "success", "data": result}
 
 
