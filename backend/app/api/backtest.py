@@ -333,6 +333,7 @@ async def get_backtests(
             "start_date": backtest.start_date,
             "end_date": backtest.end_date,
             "initial_capital": backtest.initial_capital,
+            "parameters": backtest.parameters,
             "result": backtest.result,
             "created_at": backtest.created_at.isoformat() if backtest.created_at else None,
         }
@@ -450,6 +451,17 @@ class BatchDeleteRequest(BaseModel):
     ids: list[int] = Field(min_length=1, description="要删除的回测 ID 列表")
 
 
+@router.delete("/backtests/batch", summary="批量删除回测")
+async def batch_delete_backtests(
+    request: BatchDeleteRequest = Body(description="回测 ID 列表"),
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    service = BacktestService(session)
+    count = await service.delete_backtests_batch(request.ids)
+    await session.commit()
+    return {"code": 0, "message": f"已删除 {count} 条回测记录", "data": {"deleted_count": count}}
+
+
 @router.delete("/backtests/{backtest_id}", summary="删除回测")
 async def delete_backtest(
     backtest_id: int = Path(description="回测ID"),
@@ -461,14 +473,3 @@ async def delete_backtest(
         raise HTTPException(status_code=404, detail=f"回测 {backtest_id} 不存在")
     await session.commit()
     return {"code": 0, "message": "success", "data": {"deleted": True}}
-
-
-@router.delete("/backtests/batch", summary="批量删除回测")
-async def batch_delete_backtests(
-    request: BatchDeleteRequest = Body(description="回测 ID 列表"),
-    session: AsyncSession = Depends(get_async_session),
-) -> dict[str, Any]:
-    service = BacktestService(session)
-    count = await service.delete_backtests_batch(request.ids)
-    await session.commit()
-    return {"code": 0, "message": f"已删除 {count} 条回测记录", "data": {"deleted_count": count}}
