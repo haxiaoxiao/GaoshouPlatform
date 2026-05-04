@@ -66,7 +66,7 @@
               <el-radio-group v-model="btMode" size="small" class="mode-switch">
                 <el-radio-button value="script">脚本</el-radio-button>
                 <el-radio-button value="expression">表达式</el-radio-button>
-                <el-radio-button value="builtin" v-if="activeStrategy?.name === '深度价值策略'">深度价值</el-radio-button>
+                <el-radio-button value="builtin" v-if="builtinType">内置策略</el-radio-button>
               </el-radio-group>
               <div class="toolbar-actions">
                 <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
@@ -120,15 +120,15 @@
               </div>
             </div>
 
-            <!-- 内置策略模式 — 深度价值参数配置 -->
-            <div class="builtin-panel" v-if="btMode === 'builtin'">
+            <!-- 内置策略面板 — 根据 builtinType 渲染不同策略配置 -->
+            <div class="builtin-panel" v-if="btMode === 'builtin' && builtinType === 'deep_value'">
               <div class="builtin-banner">
                 <span class="builtin-title">深度价值策略</span>
                 <el-tag size="small" type="success">独立引擎 · 秒级回测</el-tag>
               </div>
               <div class="builtin-desc">
-                每年5月（Q1财报季后）筛选全市场股票，等权买入10只，持有至次年5月调仓。
-                收益含股价变动+现金分红。
+                每年5月（Q1财报季后）筛选全市场股票，等权买入，持有至次年5月调仓。
+                收益含股价变动 + 现金分红。不依赖 RiceQuant 事件引擎，直接批量查询 ClickHouse 计算。
               </div>
               <div class="builtin-params">
                 <div class="param-row">
@@ -681,6 +681,7 @@ const handleDelete = async (row: Strategy) => {
     ElMessage.success('删除成功')
     if (activeStrategy.value?.id === row.id) {
       activeStrategy.value = null
+      builtinType.value = null
       activeTab.value = 'strategyList'
     }
     loadStrategies()
@@ -705,6 +706,9 @@ const handleSizeChange = (size: number) => {
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
 const btMode = ref<'script' | 'expression' | 'builtin'>('script')
+
+// 内置策略类型
+const builtinType = ref<string | null>(null)
 
 // 深度价值策略参数
 const dvPool = ref('all')
@@ -882,9 +886,12 @@ const handleBacktest = async (row: Strategy) => {
     const code = row.code || ''
     // Auto-detect mode: builtin > script > expression
     if (row.name === '深度价值策略' || row.id === 12) {
+      builtinType.value = 'deep_value'
       btMode.value = 'builtin'
-      btCode.value = code  // keep code for display only
-    } else if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
+      btCode.value = code
+    } else {
+      builtinType.value = null
+      if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
       btMode.value = 'script'
       btCode.value = code
     } else {
@@ -925,8 +932,8 @@ const handleRunBacktest = async () => {
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
 
-  // 深度价值策略使用独立快速引擎
-  const isBuiltin = btMode.value === 'builtin'
+  // 内置策略走独立引擎
+  const isBuiltin = btMode.value === 'builtin' && builtinType.value
 
   try {
     const { default: request } = await import('@/api/request')
