@@ -870,8 +870,47 @@ const handleRunBacktest = async () => {
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
 
+  // 深度价值策略使用独立快速引擎
+  const isDeepValue = activeStrategy.value?.name === '深度价值策略'
+
   try {
     const { default: request } = await import('@/api/request')
+
+    if (isDeepValue && !isExpression) {
+      // 独立快速回测 — 直接返回结果
+      const pool = isAllStocks.value ? 'all' : (selectedPool.value || 'all')
+      const res = await request.post<any>('/strategy/deep-value/backtest', {
+        start_date: btStartDate.value,
+        end_date: btEndDate.value,
+        initial_capital: btCapital.value,
+        pool,
+      }, { timeout: 120000 })
+      btFullResult.value = {
+        total_return: res.total_return ? res.total_return / 100 : 0,
+        annual_return: res.annual_return ? res.annual_return / 100 : 0,
+        total_trades: res.total_trades,
+        win_trades: res.win_count,
+        loss_trades: res.loss_count,
+        win_rate: res.win_rate ? res.win_rate / 100 : 0,
+        avg_return: res.avg_return,
+        max_drawdown: res.max_drawdown,
+        trades: res.trades?.map((t: any) => ({
+          trade_date: t.exit_date || t.entry_date,
+          symbol: t.symbol,
+          direction: t.pnl_pct !== undefined ? 'sell' : 'buy',
+          price: t.exit_price || t.entry_price,
+          pnl: t.pnl_pct,
+        })),
+        final_capital: res.final_capital,
+        basket_returns: res.basket_returns,
+      }
+      btProgress.value = 1
+      btLogs.value = [`回测完成 (${res.basket_count || 0} 期)`]
+      btRunning.value = false
+      showReport.value = true
+      return
+    }
+
     const res = await request.post<any>('/v2/backtest/run', {
       mode,
       factor_expression: code,
