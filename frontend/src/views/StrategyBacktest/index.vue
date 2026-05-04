@@ -13,6 +13,9 @@
             新建策略
             <el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
+        <el-button type="success" @click="showUploadDialog = true" style="margin-left:4px">
+          上传研报
+        </el-button>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="script">新建脚本策略</el-dropdown-item>
@@ -59,6 +62,37 @@
             />
           </div>
         </div>
+
+        <!-- 上传研报对话框 -->
+        <el-dialog v-model="showUploadDialog" title="上传研报生成策略" width="520px" :close-on-click-modal="false">
+          <div class="upload-area" v-if="!uploading && !uploadResult"
+               @drop.prevent="handleDrop" @dragover.prevent
+               @click="() => fileInput?.click()">
+            <input type="file" ref="fileInput" accept=".pdf,.txt,.md" @change="handleFileSelect" style="display:none" />
+            <p style="font-size:40px;margin:0">📄</p>
+            <p style="color:#aaa;margin:8px 0">点击选择或拖拽 PDF/TXT 文件</p>
+            <p style="color:#666;font-size:12px">{{ uploadFile?.name || '未选择文件' }}</p>
+          </div>
+          <div v-if="uploadFile && !uploading && !uploadResult" style="padding:12px 0;text-align:center">
+            <el-button type="primary" @click="handleUploadReport" :loading="uploading">开始生成策略</el-button>
+          </div>
+          <div v-if="uploading" style="text-align:center;padding:24px">
+            <el-icon class="is-loading" style="font-size:32px;color:#409eff"><Loading /></el-icon>
+            <p style="color:#aaa;margin-top:12px">AI 正在分析研报并生成策略...</p>
+          </div>
+          <div v-if="uploadResult" style="padding:12px 0">
+            <el-alert :title="uploadResult.summary" type="success" :closable="false" style="margin-bottom:12px" />
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="策略类型">{{ uploadResult.strategy_type === 'builtin' ? '内置策略' : uploadResult.strategy_type === 'expression' ? '表达式' : '脚本' }}</el-descriptions-item>
+              <el-descriptions-item label="调仓频率">{{ uploadResult.frequency || '-' }}</el-descriptions-item>
+              <el-descriptions-item label="选股条件" :span="2">{{ (uploadResult.conditions || []).join('; ') || '-' }}</el-descriptions-item>
+            </el-descriptions>
+            <div style="text-align:center;margin-top:16px">
+              <el-button @click="showUploadDialog = false">取消</el-button>
+              <el-button type="primary" @click="applyUploadResult">填充到编辑器</el-button>
+            </div>
+          </div>
+        </el-dialog>
       </el-tab-pane>
 
       <el-tab-pane label="回测记录" name="backtestList">
@@ -274,7 +308,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Document, ArrowDown } from '@element-plus/icons-vue'
+import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/data'
@@ -883,6 +917,13 @@ class DeepValueStrategy:
 const builtinType = ref<string | null>(null)
 const builtinCode = ref('')
 
+// 研报上传
+const showUploadDialog = ref(false)
+const uploadFile = ref<File | null>(null)
+const fileInput = ref<HTMLInputElement | null>(null)
+const uploading = ref(false)
+const uploadResult = ref<{ strategy_type: string; name: string; code: string; summary: string; conditions: string[]; frequency: string } | null>(null)
+
 // 深度价值策略参数
 const dvPool = ref('all')
 const dvPeMin = ref(0)
@@ -1258,6 +1299,85 @@ watch(activeTab, (tab) => {
   }
 })
 
+// ── 研报上传 ──
+const handleFileSelect = (e: Event) => {
+  const target = e.target as HTMLInputElement
+  if (target.files?.length) uploadFile.value = target.files[0]
+}
+const handleDrop = (e: DragEvent) => {
+  const file = e.dataTransfer?.files?.[0]
+  if (file) uploadFile.value = file
+}
+const handleUploadReport = async () => {
+  if (!uploadFile.value) return
+  uploading.value = true
+  uploadResult.value = null
+  try {
+    const form = new FormData()
+    form.append('file', uploadFile.value)
+    const { default: request } = await import('@/api/request')
+    const res = await request.post<any>('/strategy/from-report', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    })
+    uploadResult.value = res
+  } catch (e: any) {
+    ElMessage.error('生成失败: ' + (e?.message || '未知错误'))
+  } finally {
+    uploading.value = false
+  }
+}
+const applyUploadResult = () => {
+  if (!uploadResult.value) return
+  const r = uploadResult.value
+  // Create strategy in DB
+  strategyApi.create({
+    name: r.name || '研报策略',
+    code: r.code || '',
+    description: r.summary || '',
+  }).then((result) => {
+    // Fill editor
+    activeStrategy.value = {
+      id: result.id, name: result.name, code: result.code,
+      description: result.description,
+      parameters: result.parameters,
+      created_at: result.created_at, updated_at: result.updated_at,
+    }
+    if (r.strategy_type === 'builtin') {
+      builtinType.value = 'deep_value'
+      builtinCode.value = r.code
+      btMode.value = 'builtin'
+    } else if (r.strategy_type === 'expression') {
+      btMode.value = 'expression'
+      btExpression.value = r.code
+    } else {
+      btMode.value = 'script'
+      btCode.value = r.code
+    }
+    btBarType.value = 'daily'
+    showUploadDialog.value = false
+    uploadFile.value = null
+    uploadResult.value = null
+    activeTab.value = 'backtestRunner'
+    ElMessage.success('策略已生成并填充到编辑器')
+    loadStrategies()
+  }).catch((e) => {
+    // Still fill editor even if DB save fails
+    activeStrategy.value = { id: 0, name: r.name || '研报策略', code: r.code || '', description: r.summary || '', parameters: null, created_at: null, updated_at: null }
+    if (r.strategy_type === 'builtin') {
+      builtinType.value = 'deep_value'; builtinCode.value = r.code; btMode.value = 'builtin'
+    } else if (r.strategy_type === 'expression') {
+      btMode.value = 'expression'; btExpression.value = r.code
+    } else {
+      btMode.value = 'script'; btCode.value = r.code
+    }
+    showUploadDialog.value = false
+    uploadFile.value = null; uploadResult.value = null
+    activeTab.value = 'backtestRunner'
+    ElMessage.success('策略已填充到编辑器')
+  })
+}
+
 onMounted(async () => {
   await loadStrategies()
   await seedTrendCapitalStrategy()
@@ -1369,6 +1489,16 @@ onMounted(async () => {
 }
 .editor-textarea::placeholder { color: #6e6e6e; }
 .right-panel { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+
+.upload-area {
+  border: 2px dashed #444;
+  border-radius: 8px;
+  padding: 40px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .2s;
+}
+.upload-area:hover { border-color: #409eff; }
 .bt-config-bar {
   display: flex;
   align-items: center;

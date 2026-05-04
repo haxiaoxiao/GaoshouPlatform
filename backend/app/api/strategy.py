@@ -1,11 +1,13 @@
 # backend/app/api/strategy.py
-"""策略 API — 趋势资金事件驱动策略 + 深度价值策略"""
+"""策略 API — 趋势资金事件驱动策略 + 深度价值策略 + 研报转策略"""
 import asyncio
+import tempfile
 from datetime import date, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from loguru import logger
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -320,3 +322,29 @@ async def _ensure_pool_cache():
             {"s": (date.today() - timedelta(days=365)).isoformat(), "n": limit},
         )
         _POOL_CACHE[pool_name] = [r[0] for r in rows]
+
+
+@router.post("/from-report", summary="研报转策略 — 上传 PDF/TXT 自动生成策略代码")
+async def strategy_from_report(file: UploadFile = File(...)):
+    """上传研报文件, LLM 解析并生成策略代码"""
+    suffix = Path(file.filename or "report.txt").suffix.lower()
+    if suffix not in ('.pdf', '.txt', '.md'):
+        return {"code": 1, "message": "仅支持 PDF/TXT/MD 文件", "data": None}
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        from app.services.report_to_strategy import parse_report, generate_strategy
+        text = await asyncio.to_thread(parse_report, tmp_path)
+        if not text or text.startswith("PDF"):
+            return {"code": 1, "message": f"文本提取失败: {text}", "data": None}
+
+        result = await asyncio.to_thread(generate_strategy, text)
+        return {"code": 0, "message": "success", "data": result}
+    except Exception as e:
+        logger.error(f"from-report error: {e}")
+        return {"code": 1, "message": f"生成失败: {e}", "data": None}
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
