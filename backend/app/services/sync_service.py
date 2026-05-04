@@ -1733,23 +1733,29 @@ class SyncService:
         task_id: int | None = None,
         failure_strategy: str = "skip",
     ) -> SyncProgress:
-        """同步股息数据并计算股息率"""
+        """
+        同步分红送股数据 + 计算股息率
+
+        1. 从 QMT 批量下载分红数据
+        2. 写入 dividend_cash 到 ClickHouse
+        3. 批量计算 dividend_yield（历史时间点）
+        """
         global _current_sync
+
+        start_str = start_date.strftime("%Y%m%d") if start_date else ""
+        end_str = end_date.strftime("%Y%m%d") if end_date else ""
 
         progress = SyncProgress(
             sync_type="dividends",
             status="running",
             start_time=datetime.now(),
+            details={"start_date": start_str or "全部", "end_date": end_str or "全部"},
         )
         _current_sync = progress
 
         ch_client = get_ch_client()
 
         try:
-            # ========== 阶段1: 获取股票列表 ==========
-            progress.details["phase"] = "symbols"
-            progress.details["message"] = "正在获取股票列表..."
-
             if symbols is None:
                 query = select(Stock.symbol)
                 result = await self.session.execute(query)
@@ -1757,96 +1763,139 @@ class SyncService:
 
             progress.total = len(symbols)
 
-            # ========== 阶段2: 筛选已有股息数据的股票 ==========
-            progress.details["phase"] = "dividend_data"
-            progress.details["message"] = "正在筛选已有股息数据的股票..."
+            # ========== 阶段1: 批量下载 & 读取 QMT 分红数据 ==========
+            progress.details["phase"] = "download"
+            all_rows = []
+            symbols_with_cash = set()
 
-            symbols_with_data = []
-            for symbol in symbols:
+            for i, symbol in enumerate(symbols):
+                progress.current = i + 1
                 try:
-                    has_data = ch_client.execute(
-                        "SELECT 1 FROM stock_indicators WHERE symbol = %(symbol)s AND indicator_name = 'dividend_cash' LIMIT 1",
-                        {"symbol": symbol}
-                    )
-                    if has_data:
-                        symbols_with_data.append(symbol)
-                except Exception:
-                    continue
-
-            progress.details["symbols_with_data"] = len(symbols_with_data)
-            progress.details["total_symbols"] = len(symbols)
-
-            # ========== 阶段3: 计算股息率 ==========
-            progress.details["phase"] = "yield"
-            progress.details["message"] = "正在计算股息率..."
-
-            yield_rows = []
-            for idx, symbol in enumerate(symbols_with_data):
-                progress.current = idx + 1
-                try:
-                    result = ch_client.execute(
-                        """SELECT trade_date, value FROM stock_indicators
-                        WHERE symbol = %(symbol)s AND indicator_name = 'dividend_cash'
-                        ORDER BY trade_date DESC""",
-                        {"symbol": symbol}
-                    )
-                    if not result:
+                    dividends = await qmt_gateway.get_dividends(symbol, start_str, end_str)
+                    if not dividends:
                         continue
 
-                    price_rows = ch_client.execute(
-                        """SELECT trade_date, close FROM klines_daily
-                        WHERE symbol = %(symbol)s
-                        ORDER BY trade_date DESC""",
-                        {"symbol": symbol}
-                    )
-                    price_map = {str(r[0]): float(r[1]) for r in price_rows if r[1]}
+                    for div in dividends:
+                        ex_date = div.get("ex_date")
+                        cash = div.get("cash_dividend")
+                        if ex_date and cash and cash > 0:
+                            dt = datetime.strptime(ex_date, "%Y%m%d").date()
+                            all_rows.append({
+                                "symbol": symbol,
+                                "indicator_name": "dividend_cash",
+                                "trade_date": dt,
+                                "value": float(cash),
+                            })
+                            symbols_with_cash.add(symbol)
 
-                    for ex_date, cash in result:
-                        cash = float(cash or 0)
-                        if cash <= 0:
+                    progress.success_count += 1
+                except Exception as e:
+                    progress.failed_count += 1
+                    if failure_strategy == "stop":
+                        raise
+                    continue
+
+            # ========== 阶段2: 批量写入 dividend_cash ==========
+            if all_rows:
+                progress.details["phase"] = "insert_cash"
+                ch_client.execute(
+                    "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_cash'"
+                )
+                for batch_start in range(0, len(all_rows), 500):
+                    ch_client.execute(
+                        "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
+                        all_rows[batch_start:batch_start + 500],
+                    )
+
+            # ========== 阶段3: 批量计算 dividend_yield ==========
+            progress.details["phase"] = "yield"
+            progress.details["total_dividends"] = len(all_rows)
+            progress.details["symbols_with_cash"] = len(symbols_with_cash)
+
+            yield_rows = []
+
+            for symbol in symbols_with_cash:
+                progress.current += 1
+                try:
+                    # Query dividend_cash for this symbol, sorted ASC for sliding window
+                    cash_rows = ch_client.execute(
+                        "SELECT trade_date, value FROM stock_indicators "
+                        "WHERE symbol=%(s)s AND indicator_name='dividend_cash' "
+                        "ORDER BY trade_date ASC",
+                        {"s": symbol},
+                    )
+                    if not cash_rows:
+                        continue
+
+                    # Get prices only at ex-dates (not all klines!)
+                    ex_dates = [r[0] for r in cash_rows]
+                    min_date, max_date = ex_dates[0], ex_dates[-1]
+                    price_rows = ch_client.execute(
+                        "SELECT trade_date, close FROM klines_daily "
+                        "WHERE symbol=%(s)s AND trade_date>=%(min)s AND trade_date<=%(max)s "
+                        "ORDER BY trade_date ASC",
+                        {"s": symbol, "min": min_date, "max": max_date},
+                    )
+                    if not price_rows:
+                        continue
+
+                    # Sliding window: O(n) trailing 12-month sum
+                    dates = [r[0] for r in cash_rows]
+                    values = [float(r[1] or 0) for r in cash_rows]
+                    price_dates = [r[0] for r in price_rows]
+                    price_values = [float(r[1]) for r in price_rows]
+
+                    p_idx = 0
+                    trailing_sum = 0.0
+                    left = 0
+
+                    for right, (ex_date, cash) in enumerate(zip(dates, values)):
+                        trailing_sum += cash
+                        # Shrink window: remove entries older than 365 days
+                        while left <= right and (ex_date - dates[left]).days > 365:
+                            trailing_sum -= values[left]
+                            left += 1
+                        if trailing_sum <= 0:
                             continue
-                        ex_date_str = str(ex_date)
-                        if ex_date_str not in price_map:
+                        # Find closest price on or before ex_date
+                        while p_idx < len(price_dates) and price_dates[p_idx] <= ex_date:
+                            p_idx += 1
+                        if p_idx == 0:
                             continue
-                        price = price_map[ex_date_str]
+                        price = price_values[p_idx - 1]
                         if price <= 0:
                             continue
-                        # Sum trailing 12-month dividends from this ex_date
-                        one_year_ago = (ex_date - td(days=365)).isoformat()
-                        total_cash = sum(
-                            float(r[1] or 0) for r in result
-                            if str(r[0]) >= one_year_ago and str(r[0]) <= ex_date_str
-                        )
-                        if total_cash <= 0:
-                            continue
-                        div_yield = (total_cash / price) * 100
+                        div_yield = (trailing_sum / price) * 100
                         yield_rows.append({
                             "symbol": symbol,
                             "indicator_name": "dividend_yield",
-                            "trade_date": ex_date,
+                            "trade_date": dates[right],
                             "value": round(div_yield, 4),
                         })
                 except Exception as e:
                     if failure_strategy == "stop":
                         raise
-                    logger.debug(f"sync_dividends: skipping {symbol}: {e}")
                     continue
 
             if yield_rows:
                 ch_client.execute(
                     "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_yield'"
                 )
-                batch_size = 500
-                for i in range(0, len(yield_rows), batch_size):
+                for i in range(0, len(yield_rows), 500):
                     ch_client.execute(
                         "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
-                        yield_rows[i:i + batch_size]
+                        yield_rows[i:i + 500],
                     )
 
-            progress.success_count = len(yield_rows)
             progress.details["yield_rows"] = len(yield_rows)
 
-            # ========== 完成 ==========
+            # ========== 阶段4: 清理缓存 ==========
+            try:
+                cleaned = qmt_gateway.clean_local_cache(data_type="financial")
+                progress.details["cache_cleaned"] = cleaned
+            except Exception:
+                pass
+
             progress.status = "completed"
             progress.end_time = datetime.now()
 
