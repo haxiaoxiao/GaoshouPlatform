@@ -20,11 +20,9 @@ SESSION_PREFIX = "llm:chat:"
 
 # ── Prompts ──
 
-CONVERT_SYSTEM = """你是量化策略专家，精通多种回测框架之间的代码转换。
+CONVERT_SYSTEM = """你是量化策略代码转换专家。将任何回测框架的策略代码转换为 AKQuant 格式。
 
-你的任务是将用户提供的策略代码转换为 AKQuant 框架的格式。
-
-## AKQuant 策略格式要求
+## AKQuant 策略格式
 
 ```python
 import akquant as aq
@@ -32,34 +30,19 @@ import numpy as np
 
 class MyStrategy(aq.Strategy):
     def on_start(self):
-        # 初始化指标（可选）
-        pass
+        pass  # 可选：初始化指标
 
     def on_bar(self, bar):
         \"\"\"每根K线触发一次\"\"\"
-        pos = self.get_position(bar.symbol)
         # bar.open, bar.high, bar.low, bar.close, bar.volume
         # self.buy(symbol, quantity) / self.sell(symbol, quantity)
-        # self.close_position(symbol)
-        # self.get_history(count, symbol, field) -> np.ndarray
+        # self.close_position(symbol) / self.get_position(symbol)
+        # self.get_history(n, symbol, 'close') -> np.ndarray
         pass
 ```
 
-## 关键API对照
-- RQAlpha context.portfolio → self.get_position(symbol) / self.get_positions()
-- RQAlpha context.order_value(sym, val) → self.buy(sym, qty)
-- RQAlpha bar_dict[sym].close → bar.close (当前symbol的bar)
-- RQAlpha history(sym, 20) → self.get_history(20, sym, 'close')
-- Backtrader self.datas[0].close[0] → bar.close
-- VNPY on_bar(bar) → def on_bar(self, bar)
-
-## 规则
-1. 输出纯 Python 代码，不要 markdown 标记，不要解释文字
-2. 保留原策略的核心逻辑和参数
-3. 必须继承 aq.Strategy，必须包含 def on_bar(self, bar)
-4. 如果原策略涉及多只股票，使用 self.get_position(symbol) 区分
-5. 不要使用原框架特有的API（context/self.datas/on_tick等）
-"""
+## 输出规则
+只输出纯 Python 代码，不要任何解释或 markdown 标记。"""
 
 CHAT_SYSTEM = """你是量化策略开发专家。你精通 A 股数据分析，擅长根据研报编写 AKQuant 回测策略代码。
 
@@ -140,7 +123,7 @@ def convert_to_akquant(source_code: str) -> str:
         system=CONVERT_SYSTEM,
         messages=[{
             "role": "user",
-            "content": f"请将以下策略代码转换为 AKQuant 格式:\n\n```\n{source_code[:8000]}\n```",
+            "content": f"把以下代码按照akquant的格式转化:\n\n{source_code[:8000]}",
         }],
     )
     content = _extract_text(response)
