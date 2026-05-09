@@ -147,10 +147,10 @@ def convert_to_akquant(source_code: str) -> str:
     client = _get_llm()
     response = client.messages.create(
         model="deepseek-v4-pro",
-        max_tokens=32000,
+        max_tokens=1000000,
         temperature=0.2,
         timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 2000},
+        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CONVERT_SYSTEM,
         messages=[{
             "role": "user",
@@ -190,10 +190,10 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
     client = _get_llm()
     response = client.messages.create(
         model="deepseek-v4-pro",
-        max_tokens=32000,
+        max_tokens=1000000,
         temperature=0.3,
         timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 2000},
+        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CHAT_SYSTEM,
         messages=messages,
     )
@@ -232,10 +232,10 @@ def send_chat_message(session_id: str, message: str) -> dict:
     client = _get_llm()
     response = client.messages.create(
         model="deepseek-v4-pro",
-        max_tokens=32000,
+        max_tokens=1000000,
         temperature=0.3,
         timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 2000},
+        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CHAT_SYSTEM,
         messages=messages,
     )

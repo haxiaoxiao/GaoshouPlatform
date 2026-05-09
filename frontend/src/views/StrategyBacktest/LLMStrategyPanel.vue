@@ -101,7 +101,7 @@ const handleConvert = async () => {
   try {
     const res = await axios.post('/api/strategy/convert-to-akquant', {
       source_code: convertInput.value,
-    }, { timeout: 600000 })
+    }, { timeout: 900000 })
     const payload = res.data
     if (payload?.code === 0 && payload?.data?.code) {
       convertResult.value = payload.data.code
