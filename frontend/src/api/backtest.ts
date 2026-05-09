@@ -134,6 +134,17 @@ export interface TaskStatus {
   live: LiveData | null
 }
 
+export interface EngineOption {
+  name: string
+  label: string
+  modes: string[]
+}
+
+export const backtestV2Engines = {
+  list: () => request.get<EngineOption[]>('/v2/backtest/engines'),
+  report: (taskId: string) => request.get<string>(`/v2/backtest/report/${taskId}`),
+}
+
 export interface BacktestResultData {
   total_return?: number
   annual_return?: number

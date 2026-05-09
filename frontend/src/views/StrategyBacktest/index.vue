@@ -120,11 +120,14 @@
 
             <!-- 脚本模式 — 代码编辑器 -->
             <div class="code-editor" v-if="btMode === 'script'">
+              <div v-if="btEngine === 'akquant'" class="expression-hint" style="margin-bottom:4px">
+                <span>akquant Strategy 语法: class MyStrategy(aq.Strategy) → on_bar(self, bar)</span>
+              </div>
               <textarea
                 v-model="btCode"
                 class="editor-textarea"
                 spellcheck="false"
-                placeholder="def init(context):&#10;    context.ma_fast = 5&#10;&#10;def handle_bar(context, bar):&#10;    # 在这里写你的策略逻辑&#10;    pass"
+                :placeholder="codePlaceholder"
               />
             </div>
 
@@ -216,6 +219,10 @@
                 <el-option label="日线" value="daily" />
                 <el-option label="分钟" value="minute" />
               </el-select>
+              <span>引擎</span>
+              <el-select v-model="btEngine" size="small" style="width:100px" @change="onEngineChange">
+                <el-option v-for="e in engineOptions" :key="e.value" :label="e.label" :value="e.value" />
+              </el-select>
               <el-button type="primary" size="small" @click="handleRunBacktest" :loading="btRunning">运行回测</el-button>
             </div>
             <div class="bt-pool-bar">
@@ -298,7 +305,7 @@
             />
           </div>
 
-          <ReportOverlay v-model:visible="showReport" :result="btFullResult" />
+          <ReportOverlay v-model:visible="showReport" :result="btFullResult" :task-id="btTaskId" />
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -306,7 +313,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, onMounted, nextTick, watch } from 'vue'
+import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
@@ -759,6 +766,28 @@ const handleSizeChange = (size: number) => {
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
 const btMode = ref<'script' | 'expression' | 'builtin'>('script')
+const btEngine = ref('builtin')
+const engineOptions = ref<{ value: string; label: string; modes: string[] }[]>([])
+
+const AKQUANT_TEMPLATE = `import akquant as aq
+import numpy as np
+
+class MyStrategy(aq.Strategy):
+    def on_start(self):
+        # 策略初始化 — 可注册指标
+        pass
+
+    def on_bar(self, bar):
+        """每个 bar 调用一次"""
+        pos = self.get_position(bar.symbol)
+        if bar.close > bar.open and pos == 0:
+            self.buy(bar.symbol, 100)
+        elif bar.close < bar.open and pos > 0:
+            self.close_position(bar.symbol)
+
+    def on_stop(self):
+        # 策略结束
+        pass`
 
 const BUILTIN_CODE = `"""
 深度价值策略 — 年度调仓，独立引擎，批量 ClickHouse 查询
@@ -934,6 +963,12 @@ const dvMaxPos = ref(10)
 const dvSinglePct = ref(10)
 const btCode = ref('')
 const btExpression = ref(SAMPLE_EXPRESSION)
+
+const codePlaceholder = computed(() =>
+  btEngine.value === 'akquant'
+    ? 'class MyStrategy(aq.Strategy):\n    def on_bar(self, bar):\n        # akquant Strategy\n        pass'
+    : 'def init(context):\n    context.ma_fast = 5\n\ndef handle_bar(context, bar):\n    # write your strategy here\n    pass'
+)
 const btNGroups = ref(5)
 const selectedFactorId = ref<number | null>(null)
 const savedFactors = ref<Factor[]>([])
@@ -1043,6 +1078,7 @@ const btRunning = ref(false)
 const btProgress = ref(0)
 const btLiveData = ref<LiveData | null>(null)
 const btFullResult = ref<BacktestResultData | null>(null)
+const btTaskId = ref<string | null>(null)
 const showReport = ref(false)
 const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
@@ -1147,6 +1183,7 @@ const handleRunBacktest = async () => {
   const isExpression = btMode.value === 'expression'
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
+  const engine = btEngine.value
 
   // 内置策略走独立引擎
   const isBuiltin = btMode.value === 'builtin' && builtinType.value
@@ -1197,8 +1234,11 @@ const handleRunBacktest = async () => {
     }
 
     const res = await request.post<any>('/v2/backtest/run', {
+      engine,
       mode,
-      factor_expression: code,
+      factor_expression: isExpression ? code : undefined,
+      strategy_code: (!isExpression && engine === 'akquant') ? code : undefined,
+      buy_condition: (!isExpression && engine === 'builtin') ? code : undefined,
       symbols: btSymbols.value,
       start_date: btStartDate.value,
       end_date: btEndDate.value,
@@ -1211,6 +1251,7 @@ const handleRunBacktest = async () => {
     // 拦截器已解包 {code, data} → data 字段直接返回
     const taskId = (res as any)?.task_id
     if (taskId) {
+      btTaskId.value = taskId
       btLogs.value = [`任务已提交 (${taskId})，等待完成...`]
       let attempts = 0
       while (attempts < 300) {
@@ -1292,7 +1333,43 @@ const seedTrendCapitalStrategy = async () => {
   }
 }
 
-// Close report overlay when navigating away from runner tab
+// ── Engine ──
+const loadEngines = async () => {
+  try {
+    const { backtestV2Engines } = await import('@/api/backtest')
+    const data = await backtestV2Engines.list()
+    engineOptions.value = (data as any)?.map((e: any) => ({
+      value: e.name,
+      label: e.label,
+      modes: e.modes || [],
+    })) || []
+    if (engineOptions.value.length === 0) {
+      engineOptions.value = [
+        { value: 'builtin', label: '内置引擎', modes: ['vectorized', 'event_driven'] },
+        { value: 'akquant', label: 'AKQuant', modes: ['event_driven'] },
+      ]
+    }
+  } catch {
+    engineOptions.value = [
+      { value: 'builtin', label: '内置引擎', modes: ['vectorized', 'event_driven'] },
+      { value: 'akquant', label: 'AKQuant', modes: ['event_driven'] },
+    ]
+  }
+}
+
+const onEngineChange = (engine: string) => {
+  if (engine === 'akquant') {
+    // Switch to script mode with akquant template
+    if (btMode.value === 'expression') {
+      btMode.value = 'script'
+    }
+    if (!btCode.value || btCode.value.includes('def init(')) {
+      btCode.value = AKQUANT_TEMPLATE
+    }
+  }
+}
+
+// ── Report viewer for akquant ──
 watch(activeTab, (tab) => {
   if (tab !== 'backtestRunner') {
     showReport.value = false
@@ -1382,6 +1459,7 @@ onMounted(async () => {
   await loadStrategies()
   await seedTrendCapitalStrategy()
   await seedDeepValueStrategy()
+  await loadEngines()
   loadSavedFactors()
   loadWatchlistGroups()
 })

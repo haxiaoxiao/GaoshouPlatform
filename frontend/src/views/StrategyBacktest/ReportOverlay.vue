@@ -164,6 +164,27 @@
           </div>
         </div>
       </section>
+
+      <!-- Section 6: QuantStats 报告 (akquant 引擎) -->
+      <section class="report-section" v-if="result.report_path || taskId">
+        <h3>专业分析报告 (QuantStats)</h3>
+        <div style="display:flex;gap:12px;margin-top:8px">
+          <el-button type="primary" @click="openReport">
+            <el-icon><Document /></el-icon>
+            在新窗口打开 QuantStats 报告
+          </el-button>
+          <el-button v-if="taskId" type="success" plain @click="viewInlineReport">
+            内嵌预览
+          </el-button>
+        </div>
+        <div v-if="showInlineReport" style="margin-top:12px;border:1px solid #333;border-radius:6px;overflow:hidden">
+          <iframe
+            :src="reportUrl"
+            style="width:100%;height:600px;border:none"
+            sandbox="allow-scripts allow-same-origin"
+          />
+        </div>
+      </section>
     </div>
 
     <div v-else class="empty-report">无回测结果数据</div>
@@ -172,7 +193,7 @@
 
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
-import { Download } from '@element-plus/icons-vue'
+import { Download, Document } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 
 interface Trade {
@@ -213,6 +234,7 @@ interface BacktestResult {
   initial_capital?: number
   final_capital?: number
   n_trading_days?: number
+  report_path?: string | null
 }
 
 interface SymbolPnl {
@@ -228,6 +250,7 @@ interface SymbolPnl {
 const props = defineProps<{
   visible: boolean
   result: BacktestResult | null
+  taskId?: string
 }>()
 
 const emit = defineEmits<{
@@ -245,6 +268,18 @@ const navChartRef = ref<HTMLElement | null>(null)
 const returnChartRef = ref<HTMLElement | null>(null)
 let navChart: echarts.ECharts | null = null
 let returnChart: echarts.ECharts | null = null
+
+// ── QuantStats report ──
+const showInlineReport = ref(false)
+const reportUrl = computed(() => `/api/v2/backtest/report/${props.taskId}`)
+
+const openReport = () => {
+  window.open(reportUrl.value, '_blank')
+}
+
+const viewInlineReport = () => {
+  showInlineReport.value = !showInlineReport.value
+}
 
 // ── Stock names ──
 const stockNameMap = ref<Record<string, string>>({})

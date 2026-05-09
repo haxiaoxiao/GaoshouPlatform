@@ -35,6 +35,14 @@ class BacktestConfig:
     commission_rate: float = 0.0003
     slippage: float = 0.001
 
+    # 引擎选择
+    engine: str = "builtin"  # "builtin" | "akquant"
+    benchmark_symbol: str | None = None  # 基准指数，如 "000300.SH"
+    strategy_code: str | None = None  # akquant 策略代码
+
+    # 运行时缓存（不作为配置持久化）
+    _task_id: str | None = field(default=None, repr=False)
+
 
 @dataclass
 class BacktestResult:
@@ -64,6 +72,8 @@ class BacktestResult:
     group_navs: list[dict[str, Any]] | None = None
 
     trades: list[dict[str, Any]] = field(default_factory=list)
+    orders: list[dict[str, Any]] = field(default_factory=list)
+    report_path: str | None = None
 
     start_date: date | None = None
     end_date: date | None = None
@@ -94,6 +104,8 @@ class BacktestResult:
             "daily_returns": self.daily_returns,
             "group_navs": self.group_navs,
             "trades": self.trades,
+            "orders": self.orders,
+            "report_path": self.report_path,
             "start_date": str(self.start_date) if self.start_date else None,
             "end_date": str(self.end_date) if self.end_date else None,
             "initial_capital": self.initial_capital,
