@@ -20,7 +20,9 @@ SESSION_PREFIX = "llm:chat:"
 
 # ── Prompts ──
 
-CONVERT_SYSTEM = """你是量化策略代码转换专家。将任何回测框架的策略代码转换为 AKQuant 格式。
+CONVERT_SYSTEM = """你是量化策略专家，精通多种回测框架之间的代码转换。
+
+你的任务是将用户提供的策略代码转换为 AKQuant 框架的格式。
 
 ## AKQuant 策略格式
 
@@ -30,19 +32,39 @@ import numpy as np
 
 class MyStrategy(aq.Strategy):
     def on_start(self):
-        pass  # 可选：初始化指标
+        # 初始化指标（可选）
+        pass
 
     def on_bar(self, bar):
         \"\"\"每根K线触发一次\"\"\"
+        pos = self.get_position(bar.symbol)
         # bar.open, bar.high, bar.low, bar.close, bar.volume
         # self.buy(symbol, quantity) / self.sell(symbol, quantity)
-        # self.close_position(symbol) / self.get_position(symbol)
-        # self.get_history(n, symbol, 'close') -> np.ndarray
+        # self.close_position(symbol)
+        # self.get_history(count, symbol, field) -> np.ndarray
         pass
 ```
 
-## 输出规则
-只输出纯 Python 代码，不要任何解释或 markdown 标记。"""
+## 关键API对照
+- RQAlpha context.portfolio → self.get_position(symbol)
+- RQAlpha context.order_value(sym, val) → self.buy(sym, qty)
+- RQAlpha context.order_shares(sym, qty) → self.buy(sym, qty) / self.sell(sym, qty)
+- RQAlpha bar_dict[sym].close → bar.close（当前symbol的bar）
+- RQAlpha history(sym, 20) → self.get_history(20, sym, 'close')
+- RQAlpha context.now → bar.timestamp
+- Backtrader self.datas[0].close[0] → bar.close
+- Backtrader self.buy() / self.sell() → self.buy(symbol, qty) / self.sell(symbol, qty)
+- VNPY on_bar(bar) → def on_bar(self, bar)
+- VNPY self.buy(bar.close, 1) → self.buy(bar.symbol, 100)
+
+## 规则
+1. 输出纯 Python 代码，不要 markdown 标记，不要解释文字
+2. 保留原策略的核心逻辑、参数和风控规则
+3. 必须继承 aq.Strategy，必须包含 def on_bar(self, bar)
+4. 如果原策略涉及多只股票，使用 self.get_position(symbol) 区分
+5. A股最少交易100股，买价用 bar.close
+6. 不要使用原框架特有的API（context/self.datas/on_tick等）
+"""
 
 CHAT_SYSTEM = """你是量化策略开发专家。你精通 A 股数据分析，擅长根据研报编写 AKQuant 回测策略代码。
 
@@ -119,7 +141,7 @@ def convert_to_akquant(source_code: str) -> str:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.2,
-        timeout=60.0,
+        timeout=300.0,
         system=CONVERT_SYSTEM,
         messages=[{
             "role": "user",
@@ -152,7 +174,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.3,
-        timeout=60.0,
+        timeout=300.0,
         system=CHAT_SYSTEM,
         messages=messages,
     )
@@ -193,7 +215,7 @@ def send_chat_message(session_id: str, message: str) -> dict:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.3,
-        timeout=60.0,
+        timeout=300.0,
         system=CHAT_SYSTEM,
         messages=messages,
     )

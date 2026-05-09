@@ -100,7 +100,7 @@ const handleConvert = async () => {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>('/strategy/convert-to-akquant', {
       source_code: convertInput.value,
-    }, { timeout: 120000 })
+    }, { timeout: 300000 })  // 5 min for LLM
     convertResult.value = res?.code || res?.data?.code || ''
   } catch (e: any) {
     convertError.value = '转换失败: ' + (e?.message || '未知错误')
@@ -155,7 +155,7 @@ const handleChatSend = async () => {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>(`/strategy/chat-session/${chatSessionId.value}/send`, {
       message: msg,
-    }, { timeout: 120000 })
+    }, { timeout: 300000 })  // 5 min for LLM
     const reply = res?.reply || res?.data?.reply || ''
     chatMessages.value.push({ role: 'assistant', content: reply })
     const code = res?.code || res?.data?.code || ''
