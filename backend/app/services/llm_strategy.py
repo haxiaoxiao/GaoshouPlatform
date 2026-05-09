@@ -8,15 +8,14 @@ from __future__ import annotations
 import json
 import re
 import uuid
-from datetime import timedelta
 from typing import Any
 
 from anthropic import Anthropic
 from loguru import logger
 
-from app.cache.redis_cache import get_redis
+from app.cache.redis_cache import get_redis_client
 
-SESSION_TTL = timedelta(hours=1)
+SESSION_TTL = 3600  # 1 小时，秒
 SESSION_PREFIX = "llm:chat:"
 
 # ── Prompts ──
@@ -107,6 +106,15 @@ def _get_llm() -> Anthropic:
     return Anthropic()
 
 
+def _extract_text(response) -> str:
+    """从 LLM response 提取文本，跳过 ThinkingBlock"""
+    parts = []
+    for block in response.content:
+        if hasattr(block, "text"):
+            parts.append(block.text)
+    return "\n".join(parts)
+
+
 def _extract_code(content: str) -> str | None:
     """从 LLM 回复中提取 Python 代码块"""
     m = re.search(r'```python\s*\n([\s\S]*?)```', content)
@@ -134,7 +142,7 @@ def convert_to_akquant(source_code: str) -> str:
             "content": f"请将以下策略代码转换为 AKQuant 格式:\n\n```\n{source_code[:8000]}\n```",
         }],
     )
-    content = response.content[0].text
+    content = _extract_text(response)
     code = _extract_code(content)
     return code or content.strip()
 
@@ -148,7 +156,7 @@ def _session_key(session_id: str) -> str:
 def create_chat_session(report_text: str, report_filename: str = "") -> dict:
     """创建对话会话，返回首次 LLM 回复"""
     session_id = str(uuid.uuid4())[:12]
-    redis = get_redis()
+    redis = get_redis_client()
 
     # 初始化会话
     messages: list[dict] = [
@@ -163,7 +171,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
         system=CHAT_SYSTEM,
         messages=messages,
     )
-    reply = response.content[0].text
+    reply = _extract_text(response)
 
     # 保存到 Redis
     messages.append({"role": "assistant", "content": reply})
@@ -171,7 +179,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
         "report_filename": report_filename,
         "messages": messages,
     }
-    redis.setex(_session_key(session_id), SESSION_TTL, json.dumps(session_data, ensure_ascii=False))
+    redis.set(_session_key(session_id), json.dumps(session_data, ensure_ascii=False), ttl=SESSION_TTL)
     logger.info("Chat session {} created, TTL={}", session_id, SESSION_TTL)
 
     code = _extract_code(reply)
@@ -184,7 +192,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
 
 def send_chat_message(session_id: str, message: str) -> dict:
     """发送消息到已有会话，返回 LLM 回复"""
-    redis = get_redis()
+    redis = get_redis_client()
     raw = redis.get(_session_key(session_id))
     if not raw:
         raise ValueError(f"会话 {session_id} 不存在或已过期（1小时有效）")
@@ -203,11 +211,11 @@ def send_chat_message(session_id: str, message: str) -> dict:
         system=CHAT_SYSTEM,
         messages=messages,
     )
-    reply = response.content[0].text
+    reply = _extract_text(response)
 
     # 更新 Redis
     messages.append({"role": "assistant", "content": reply})
-    redis.setex(_session_key(session_id), SESSION_TTL, json.dumps(session_data, ensure_ascii=False))
+    redis.set(_session_key(session_id), json.dumps(session_data, ensure_ascii=False), ttl=SESSION_TTL)
     logger.info("Chat session {} updated, {} messages", session_id, len(messages))
 
     code = _extract_code(reply)
