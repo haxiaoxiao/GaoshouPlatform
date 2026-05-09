@@ -592,7 +592,6 @@ async def _run_sync_task(
                     failure_strategy=failure_strategy,
                 )
             elif sync_type == "kline_minute":
->>>>>>> Stashed changes
                 await service.sync_kline_minute(
                     symbols=symbols,
                     start_date=start_date,
