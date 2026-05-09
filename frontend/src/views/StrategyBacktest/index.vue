@@ -692,8 +692,8 @@ const handleCreate = async (type: string) => {
     desc = '因子表达式策略'
   } else {
     name = '新建策略'
-    code = btEngine.value === 'akquant' ? AKQUANT_TEMPLATE : SAMPLE_CODE
-    desc = btEngine.value === 'akquant' ? 'akquant Strategy 示例' : '双均线交叉策略示例'
+    code = AKQUANT_TEMPLATE
+    desc = 'akquant Strategy 示例'
   }
   try {
     const result = await strategyApi.create({ name, code, description: desc })
@@ -766,7 +766,7 @@ const handleSizeChange = (size: number) => {
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
 const btMode = ref<'script' | 'expression' | 'builtin'>('script')
-const btEngine = ref('builtin')
+const btEngine = ref('akquant')
 const engineOptions = ref<{ value: string; label: string; modes: string[] }[]>([])
 
 const AKQUANT_TEMPLATE = `import akquant as aq
