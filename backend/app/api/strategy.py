@@ -348,3 +348,71 @@ async def strategy_from_report(file: UploadFile = File(...)):
         return {"code": 1, "message": f"生成失败: {e}", "data": None}
     finally:
         Path(tmp_path).unlink(missing_ok=True)
+
+
+# ── LLM 策略生成（akquant 引擎）──
+
+class ConvertRequest(BaseModel):
+    source_code: str
+
+
+class ChatMessageRequest(BaseModel):
+    message: str
+
+
+@router.post("/convert-to-akquant", summary="将任意策略代码转换为 AKQuant 格式")
+async def convert_to_akquant(req: ConvertRequest):
+    """单次调用：LLM 将 RQAlpha/Backtrader/VNPY 等代码转为 akquant Strategy"""
+    if not req.source_code.strip():
+        return {"code": 1, "message": "代码不能为空", "data": None}
+    try:
+        from app.services.llm_strategy import convert_to_akquant as do_convert
+        code = await asyncio.to_thread(do_convert, req.source_code)
+        return {"code": 0, "message": "success", "data": {"code": code}}
+    except Exception as e:
+        logger.error(f"convert-to-akquant error: {e}")
+        return {"code": 1, "message": f"转换失败: {e}", "data": None}
+
+
+@router.post("/chat-session", summary="创建研报对话会话")
+async def create_chat_session(file: UploadFile = File(...)):
+    """上传研报文件，创建对话会话，返回首次 LLM 回复"""
+    suffix = Path(file.filename or "report.txt").suffix.lower()
+    if suffix not in ('.pdf', '.txt', '.md'):
+        return {"code": 1, "message": "仅支持 PDF/TXT/MD 文件", "data": None}
+
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(await file.read())
+        tmp_path = tmp.name
+
+    try:
+        from app.services.report_to_strategy import parse_report
+        from app.services.llm_strategy import create_chat_session as do_create
+
+        text = await asyncio.to_thread(parse_report, tmp_path)
+        if not text or text.startswith("PDF 解析失败"):
+            return {"code": 1, "message": f"文本提取失败: {text}", "data": None}
+
+        result = await asyncio.to_thread(do_create, text, file.filename or "report")
+        return {"code": 0, "message": "success", "data": result}
+    except Exception as e:
+        logger.error(f"chat-session error: {e}")
+        return {"code": 1, "message": f"创建会话失败: {e}", "data": None}
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+
+
+@router.post("/chat-session/{session_id}/send", summary="发送消息到对话会话")
+async def send_chat_message(session_id: str, req: ChatMessageRequest):
+    """向已有会话发送消息，返回 LLM 回复和可能的代码"""
+    if not req.message.strip():
+        return {"code": 1, "message": "消息不能为空", "data": None}
+    try:
+        from app.services.llm_strategy import send_chat_message as do_send
+        result = await asyncio.to_thread(do_send, session_id, req.message)
+        return {"code": 0, "message": "success", "data": result}
+    except ValueError as e:
+        return {"code": 1, "message": str(e), "data": None}
+    except Exception as e:
+        logger.error(f"chat-session/send error: {e}")
+        return {"code": 1, "message": f"发送失败: {e}", "data": None}

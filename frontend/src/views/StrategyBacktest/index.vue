@@ -107,54 +107,44 @@
           <div class="editor-panel">
             <div class="editor-toolbar">
               <el-input v-model="activeStrategy.name" size="small" class="strategy-name-input" placeholder="策略名称" />
-              <el-radio-group v-model="btMode" size="small" class="mode-switch">
-                <el-radio-button value="script">脚本</el-radio-button>
-                <el-radio-button value="expression">表达式</el-radio-button>
-                <el-radio-button value="builtin" v-if="builtinType">内置策略</el-radio-button>
-              </el-radio-group>
+              <el-tabs v-model="editorTab" class="editor-tabs">
+                <el-tab-pane
+                  v-for="tab in editorTabs"
+                  :key="tab.key"
+                  :label="tab.label"
+                  :name="tab.key"
+                />
+              </el-tabs>
               <div class="toolbar-actions">
                 <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
                 <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
               </div>
             </div>
 
-            <!-- 脚本模式 — 代码编辑器 -->
-            <div class="code-editor" v-if="btMode === 'script'">
-              <div v-if="btEngine === 'akquant'" class="expression-hint" style="margin-bottom:4px">
-                <span>akquant Strategy 语法: class MyStrategy(aq.Strategy) → on_bar(self, bar)</span>
+            <!-- akquant Python 代码编辑器 -->
+            <div class="code-editor" v-if="editorTab === 'akquant-code'">
+              <div class="expression-hint" style="margin-bottom:4px">
+                <span>akquant Strategy: class MyStrategy(aq.Strategy) → def on_bar(self, bar)</span>
               </div>
-              <textarea
-                v-model="btCode"
-                class="editor-textarea"
-                spellcheck="false"
-                :placeholder="codePlaceholder"
-              />
+              <textarea v-model="btCode" class="editor-textarea" spellcheck="false" :placeholder="codePlaceholder" />
             </div>
 
-            <!-- 表达式模式 — 因子表达式输入 -->
-            <div class="expression-panel" v-else>
+            <!-- RQAlpha Python 代码编辑器 -->
+            <div class="code-editor" v-if="editorTab === 'rqalpha-code'">
+              <div class="expression-hint" style="margin-bottom:4px">
+                <span>RQAlpha 语法: def init(context) + def handle_bar(context, bar_dict)</span>
+              </div>
+              <textarea v-model="btCode" class="editor-textarea" spellcheck="false" :placeholder="codePlaceholder" />
+            </div>
+
+            <!-- 表达式输入 -->
+            <div class="expression-panel" v-if="editorTab === 'expression'">
               <div class="expression-input-row">
-                <el-input
-                  v-model="btExpression"
-                  size="default"
-                  class="expression-input"
-                  placeholder="输入因子表达式，如: close/MA(close, 20) - 1"
-                  clearable
-                />
-                <el-select
-                  v-model="selectedFactorId"
-                  size="default"
-                  placeholder="从因子研究选择"
-                  clearable
-                  class="factor-select"
-                  @change="handleFactorSelect"
-                >
-                  <el-option
-                    v-for="f in savedFactors"
-                    :key="f.id"
-                    :label="f.name"
-                    :value="f.id"
-                  />
+                <el-input v-model="btExpression" size="default" class="expression-input"
+                  placeholder="输入因子表达式，如: close/MA(close, 20) - 1" clearable />
+                <el-select v-model="selectedFactorId" size="default" placeholder="从因子研究选择"
+                  clearable class="factor-select" @change="handleFactorSelect">
+                  <el-option v-for="f in savedFactors" :key="f.id" :label="f.name" :value="f.id" />
                 </el-select>
               </div>
               <div class="expression-hint">
@@ -167,8 +157,13 @@
               </div>
             </div>
 
-            <!-- 内置策略面板 — 展示完整 Python 代码 + 可调参数 -->
-            <div class="builtin-panel" v-if="btMode === 'builtin' && builtinType === 'deep_value'">
+            <!-- LLM 策略生成 -->
+            <div class="llm-panel" v-if="editorTab === 'llm'">
+              <LLMStrategyPanel :engine="btEngine" @code-generated="onLLMCodeGenerated" />
+            </div>
+
+            <!-- 内置策略面板 -->
+            <div class="builtin-panel" v-if="editorTab === 'builtin' && builtinType === 'deep_value'">
               <div class="builtin-params-bar">
                 <span class="param-label">选股池</span>
                 <el-select v-model="dvPool" size="small" style="width:120px">
@@ -190,12 +185,7 @@
                 <el-input-number v-model="dvSinglePct" :min="5" :max="50" :step="5" size="small" style="width:60px" />%
               </div>
               <div class="code-editor">
-                <textarea
-                  v-model="builtinCode"
-                  class="editor-textarea"
-                  spellcheck="false"
-                  readonly
-                />
+                <textarea v-model="builtinCode" class="editor-textarea" spellcheck="false" readonly />
               </div>
             </div>
           </div>
@@ -322,6 +312,7 @@ import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/da
 import BacktestList from './BacktestList.vue'
 import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
+import LLMStrategyPanel from './LLMStrategyPanel.vue'
 import { formatDateTime } from '@/utils/format'
 
 const SAMPLE_CODE = `def init(context):
@@ -711,11 +702,14 @@ const handleCreate = async (type: string) => {
     if (type === 'builtin') {
       builtinType.value = 'deep_value'
       builtinCode.value = BUILTIN_CODE
+      editorTab.value = 'builtin'
       btMode.value = 'builtin'
     } else if (type === 'expression') {
+      editorTab.value = 'expression'
       btMode.value = 'expression'
       btExpression.value = result.code || SAMPLE_EXPRESSION
     } else {
+      editorTab.value = btEngine.value === 'akquant' ? 'akquant-code' : 'rqalpha-code'
       btMode.value = 'script'
     }
     btCode.value = result.code || ''
@@ -765,9 +759,27 @@ const handleSizeChange = (size: number) => {
 
 // ── Backtest runner state ──
 const activeStrategy = ref<Strategy | null>(null)
-const btMode = ref<'script' | 'expression' | 'builtin'>('script')
+const btMode = ref<'script' | 'expression' | 'builtin'>('script')  // kept for backend compat
 const btEngine = ref('akquant')
 const engineOptions = ref<{ value: string; label: string; modes: string[] }[]>([])
+
+// ── Editor tabs driven by engine ──
+const editorTab = ref('akquant-code')
+const editorTabs = computed(() => {
+  if (builtinType.value) {
+    return [{ key: 'builtin', label: '内置策略' }]
+  }
+  if (btEngine.value === 'akquant') {
+    return [
+      { key: 'akquant-code', label: 'Python代码（AKQuant）' },
+      { key: 'llm', label: 'LLM策略生成' },
+    ]
+  }
+  return [
+    { key: 'rqalpha-code', label: 'Python代码（RQAlpha）' },
+    { key: 'expression', label: '表达式' },
+  ]
+})
 
 const AKQUANT_TEMPLATE = `import akquant as aq
 import numpy as np
@@ -1138,14 +1150,21 @@ const handleBacktest = async (row: Strategy) => {
     if (row.name === '深度价值策略' || row.id === 12) {
       builtinType.value = 'deep_value'
       builtinCode.value = BUILTIN_CODE
+      editorTab.value = 'builtin'
       btMode.value = 'builtin'
       btCode.value = code
     } else {
       builtinType.value = null
       if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
+        editorTab.value = 'rqalpha-code'
+        btMode.value = 'script'
+        btCode.value = code
+      } else if (code.includes('aq.Strategy') && code.includes('def on_bar')) {
+        editorTab.value = 'akquant-code'
         btMode.value = 'script'
         btCode.value = code
       } else {
+        editorTab.value = 'expression'
         btMode.value = 'expression'
         btExpression.value = code || SAMPLE_EXPRESSION
         btCode.value = code
@@ -1180,13 +1199,11 @@ const handleRunBacktest = async () => {
   btLogs.value = ['正在运行回测...']
   btErrors.value = []
 
-  const isExpression = btMode.value === 'expression'
+  const isExpression = editorTab.value === 'expression'
+  const isBuiltin = editorTab.value === 'builtin' && builtinType.value
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
   const engine = btEngine.value
-
-  // 内置策略走独立引擎
-  const isBuiltin = btMode.value === 'builtin' && builtinType.value
 
   try {
     const { default: request } = await import('@/api/request')
@@ -1359,14 +1376,20 @@ const loadEngines = async () => {
 
 const onEngineChange = (engine: string) => {
   if (engine === 'akquant') {
-    // Switch to script mode with akquant template
-    if (btMode.value === 'expression') {
-      btMode.value = 'script'
-    }
+    editorTab.value = 'akquant-code'
+    btMode.value = 'script'
     if (!btCode.value || btCode.value.includes('def init(')) {
       btCode.value = AKQUANT_TEMPLATE
     }
+  } else {
+    editorTab.value = 'rqalpha-code'
+    btMode.value = 'script'
   }
+}
+
+const onLLMCodeGenerated = (code: string) => {
+  btCode.value = code
+  editorTab.value = 'akquant-code'
 }
 
 // ── Report viewer for akquant ──
