@@ -149,8 +149,17 @@ def convert_to_akquant(source_code: str) -> str:
         }],
     )
     content = _extract_text(response)
+    logger.info("LLM raw response (first 300 chars): {}", content[:300])
     code = _extract_code(content)
-    return code or content.strip()
+    if code:
+        return code
+    # 如果没提取到代码块，返回整个文本（去掉可能的markdown标记）
+    fallback = content.strip()
+    if fallback.startswith("```"):
+        fallback = re.sub(r'^```\w*\n?', '', fallback)
+        fallback = re.sub(r'\n?```$', '', fallback)
+    logger.warning("Code extraction fallback, returning raw content")
+    return fallback
 
 
 # ── 研报对话（有状态，Redis 会话）──

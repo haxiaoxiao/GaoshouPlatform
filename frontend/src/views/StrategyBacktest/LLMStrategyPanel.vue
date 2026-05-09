@@ -80,6 +80,7 @@
 import { ref, nextTick } from 'vue'
 import { UploadFilled } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import axios from 'axios'
 
 defineProps<{ engine: string }>()
 const emit = defineEmits<{ 'code-generated': [code: string] }>()
@@ -98,20 +99,16 @@ const handleConvert = async () => {
   converting.value = true; convertError.value = ''; convertResult.value = ''
   const start = Date.now()
   try {
-    const axios = await import('axios')
-    const res = await axios.default.post('/api/strategy/convert-to-akquant', {
+    const res = await axios.post('/api/strategy/convert-to-akquant', {
       source_code: convertInput.value,
     }, { timeout: 600000 })
     const payload = res.data
-    if (payload?.code === 0 && payload?.data) {
-      const code = payload.data?.code || ''
-      if (code) {
-        convertResult.value = code
-        ElMessage.success(`转换成功 (${((Date.now()-start)/1000).toFixed(0)}s)`)
-        return
-      }
+    if (payload?.code === 0 && payload?.data?.code) {
+      convertResult.value = payload.data.code
+      ElMessage.success(`转换成功 (${((Date.now()-start)/1000).toFixed(0)}s)`)
+      return
     }
-    convertError.value = '返回格式异常: ' + JSON.stringify(payload).slice(0, 200)
+    convertError.value = '返回格式异常: ' + JSON.stringify(payload).slice(0, 300)
   } catch (e: any) {
     const msg = e?.code === 'ECONNABORTED' ? '请求超时'
       : e?.response?.data?.message || e?.message || '未知'
