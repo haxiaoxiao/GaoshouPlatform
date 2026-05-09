@@ -96,14 +96,26 @@ const converting = ref(false)
 const handleConvert = async () => {
   if (!convertInput.value.trim()) { ElMessage.warning('请先输入代码'); return }
   converting.value = true; convertError.value = ''; convertResult.value = ''
+  const start = Date.now()
   try {
-    const { default: request } = await import('@/api/request')
-    const res = await request.post<any>('/strategy/convert-to-akquant', {
+    const axios = await import('axios')
+    const res = await axios.default.post('/api/strategy/convert-to-akquant', {
       source_code: convertInput.value,
-    }, { timeout: 300000 })  // 5 min for LLM
-    convertResult.value = res?.code || res?.data?.code || ''
+    }, { timeout: 600000 })
+    const payload = res.data
+    if (payload?.code === 0 && payload?.data) {
+      const code = payload.data?.code || ''
+      if (code) {
+        convertResult.value = code
+        ElMessage.success(`转换成功 (${((Date.now()-start)/1000).toFixed(0)}s)`)
+        return
+      }
+    }
+    convertError.value = '返回格式异常: ' + JSON.stringify(payload).slice(0, 200)
   } catch (e: any) {
-    convertError.value = '转换失败: ' + (e?.message || '未知错误')
+    const msg = e?.code === 'ECONNABORTED' ? '请求超时'
+      : e?.response?.data?.message || e?.message || '未知'
+    convertError.value = '转换失败: ' + msg
   } finally { converting.value = false }
 }
 
