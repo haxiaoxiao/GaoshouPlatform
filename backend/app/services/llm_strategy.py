@@ -136,6 +136,7 @@ def convert_to_akquant(source_code: str) -> str:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.2,
+        timeout=60.0,
         system=CONVERT_SYSTEM,
         messages=[{
             "role": "user",
@@ -168,6 +169,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.3,
+        timeout=60.0,
         system=CHAT_SYSTEM,
         messages=messages,
     )
@@ -208,6 +210,7 @@ def send_chat_message(session_id: str, message: str) -> dict:
         model="deepseek-v4-pro",
         max_tokens=4096,
         temperature=0.3,
+        timeout=60.0,
         system=CHAT_SYSTEM,
         messages=messages,
     )
