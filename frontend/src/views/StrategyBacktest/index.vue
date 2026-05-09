@@ -692,8 +692,8 @@ const handleCreate = async (type: string) => {
     desc = '因子表达式策略'
   } else {
     name = '新建策略'
-    code = SAMPLE_CODE
-    desc = '双均线交叉策略示例'
+    code = btEngine.value === 'akquant' ? AKQUANT_TEMPLATE : SAMPLE_CODE
+    desc = btEngine.value === 'akquant' ? 'akquant Strategy 示例' : '双均线交叉策略示例'
   }
   try {
     const result = await strategyApi.create({ name, code, description: desc })

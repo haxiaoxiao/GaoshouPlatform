@@ -133,23 +133,38 @@ class AkquantEngine(IBacktestEngine):
 def _build_strategy(code: str, config: BacktestConfig) -> Any:
     """从用户代码构建 akquant 策略
 
-    支持两种模式:
-    1. 用户编写完整 Strategy 子类 → 动态加载
-    2. 因子表达式 → 生成简单 FunctionalStrategy
+    三种模式:
+    1. akquant Strategy 子类 → exec 加载
+    2. 因子表达式 → akquant FunctionalStrategy
+    3. 空/RQAlpha 代码 → 报错提示
     """
     if not code or not code.strip():
-        return _default_strategy()
+        raise ValueError(
+            "策略代码为空。请编写 akquant Strategy 子类，例如:\n"
+            "class MyStrategy(aq.Strategy):\n"
+            "    def on_bar(self, bar):\n"
+            "        if bar.close > bar.open:\n"
+            "            self.buy(bar.symbol, 100)"
+        )
 
     code = code.strip()
 
-    # 判断是否是完整策略代码（包含 class ... (aq.Strategy)）
-    if "Strategy" in code and "def on_bar" in code:
+    # 检测 RQAlpha 旧语法 → 直接报错
+    if "def handle_bar" in code or "def init(context)" in code:
+        raise ValueError(
+            "检测到 RQAlpha 语法 (def handle_bar / def init)。"
+            "AKQuant 引擎使用 Strategy 类语法:\n"
+            "class MyStrategy(aq.Strategy):\n"
+            "    def on_bar(self, bar): ..."
+        )
+
+    # 判断是否是 akquant Strategy 子类
+    if ("class " in code and "aq.Strategy" in code) or \
+       ("Strategy" in code and "def on_bar" in code):
         return _load_strategy_class(code)
-    elif "class " in code and "aq.Strategy" in code:
-        return _load_strategy_class(code)
-    else:
-        # 视为表达式，生成信号策略
-        return _build_expression_strategy(code, config)
+
+    # 因子表达式 → akquant FunctionalStrategy
+    return _build_expression_strategy(code, config)
 
 
 def _load_strategy_class(code: str) -> Any:
@@ -182,39 +197,32 @@ def _load_strategy_class(code: str) -> Any:
 
 
 def _build_expression_strategy(expression: str, config: BacktestConfig) -> Any:
-    """将因子表达式转为 akquant FunctionalStrategy"""
-    import akquant as aq
+    """将因子表达式转为 akquant FunctionalStrategy
+
+    表达式在每根 bar 上求值：signal > 0 买入，signal < 0 卖出。
+    可用变量: close, open, high, low, volume（当前 bar 值）
+    """
+    from akquant.backtest.engine import FunctionalStrategy
 
     def on_bar_fn(strategy, bar):
         pos = strategy.get_position(bar.symbol)
 
-        # 用 akquant 的 get_history 和 numpy 近似计算信号
-        closes = strategy.get_history(20, bar.symbol, "close")
-        if len(closes) < 20:
-            return
+        ctx = {
+            "close": float(bar.close),
+            "open": float(bar.open),
+            "high": float(bar.high),
+            "low": float(bar.low),
+            "volume": float(bar.volume),
+        }
 
         try:
-            close = float(bar.close)
-            ma5 = float(closes[-5:].mean()) if len(closes) >= 5 else close
-            # 简化信号: 当前价格 vs 5日均线
-            signal = (close - ma5) / ma5
-        except (ValueError, ZeroDivisionError):
-            signal = 0.0
+            signal = float(eval(expression, {"__builtins__": {}}, ctx))
+        except Exception:
+            return
 
-        if signal > 0.01 and pos == 0:
+        if signal > 0 and pos == 0:
             strategy.buy(bar.symbol, 100)
-        elif signal < -0.01 and pos > 0:
+        elif signal < 0 and pos > 0:
             strategy.close_position(bar.symbol)
 
-    return aq.FunctionalStrategy(on_bar=on_bar_fn)
-
-
-def _default_strategy() -> Any:
-    """默认策略模板"""
-    import akquant as aq
-
-    class DefaultStrategy(aq.Strategy):
-        def on_bar(self, bar):
-            pass
-
-    return DefaultStrategy
+    return FunctionalStrategy(lambda s: None, on_bar=on_bar_fn)
