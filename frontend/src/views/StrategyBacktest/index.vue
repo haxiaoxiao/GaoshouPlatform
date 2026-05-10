@@ -786,8 +786,7 @@ import numpy as np
 
 class MyStrategy(aq.Strategy):
     def on_start(self):
-        # 策略初始化 — 可注册指标
-        pass
+        self.set_history_depth(300)
 
     def on_bar(self, bar):
         """每个 bar 调用一次"""
@@ -796,10 +795,7 @@ class MyStrategy(aq.Strategy):
             self.buy(bar.symbol, 100)
         elif bar.close < bar.open and pos > 0:
             self.close_position(bar.symbol)
-
-    def on_stop(self):
-        # 策略结束
-        pass`
+`
 
 const BUILTIN_CODE = `"""
 深度价值策略 — 年度调仓，独立引擎，批量 ClickHouse 查询
@@ -1187,10 +1183,44 @@ const handleBacktest = async (row: Strategy) => {
 }
 
 const handleRunBacktest = async () => {
-  if (!activeStrategy.value) return
+  if (!activeStrategy.value) {
+    // 用户未创建/选择策略时，自动创建一条临时策略再运行
+    const code = btCode.value || btExpression.value || ''
+    if (!code.trim()) {
+      ElMessage.warning('请先编写策略代码')
+      return
+    }
+    try {
+      const { default: request } = await import('@/api/request')
+      const res = await request.post('/backtest/strategies', {
+        name: '临时策略',
+        code,
+        description: '自动创建'
+      })
+      const strategyId = res?.id
+      if (strategyId) {
+        activeStrategy.value = { id: strategyId, name: '临时策略', code }
+        handleBacktest(activeStrategy.value)
+      }
+    } catch {
+      // fallback: API 不可用时直接用内存策略
+      activeStrategy.value = { id: 0, name: '临时策略', code }
+      handleBacktest(activeStrategy.value)
+    }
+  }
   if (btSymbols.value.length === 0 && !isAllStocks.value) {
-    ElMessage.warning('请先添加回测股票')
-    return
+    // 自动加载 top10 作为默认股票池
+    try {
+      const { default: request } = await import('@/api/request')
+      const data = await request.get('/v2/backtest/pools/top100')
+      if (data?.symbols?.length) {
+        btSymbols.value = data.symbols.slice(0, 10).filter(Boolean)
+        ElMessage.success(`已自动加载 ${btSymbols.value.length} 只默认股票`)
+      }
+    } catch {
+      ElMessage.warning('请先添加回测股票或在右上角选择指数池')
+      return
+    }
   }
   btRunning.value = true
   btLiveData.value = null

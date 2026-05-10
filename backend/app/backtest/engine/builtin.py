@@ -41,8 +41,8 @@ class BuiltinEngine(IBacktestEngine):
         errors = []
         if config.mode == "vectorized" and not config.factor_expression:
             errors.append("向量化模式需要 factor_expression")
-        if config.mode == "event_driven" and not config.factor_expression and not config.buy_condition:
-            errors.append("事件驱动模式需要 factor_expression 或 buy_condition")
+        if config.mode == "event_driven" and not config.strategy_code and not config.factor_expression and not config.buy_condition:
+            errors.append("事件驱动模式需要 strategy_code / factor_expression 或 buy_condition")
         if not config.symbols:
             errors.append("symbols 不能为空")
         if config.start_date is None or config.end_date is None:

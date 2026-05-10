@@ -105,6 +105,9 @@ def normalize_result(
                 ]:
                     if old_key in t and new_key not in t:
                         t[new_key] = t[old_key]
+                # 添加 trade_date 字段（优先用 exit_time / date，否则 entry_date）
+                if "trade_date" not in t:
+                    t["trade_date"] = t.get("date") or t.get("entry_date") or ""
             trades = [_to_json_safe(t) for t in raw_trades]
     except Exception as e:
         logger.debug("Failed to parse trades: {}", e)
@@ -122,6 +125,8 @@ def normalize_result(
     total_trades = len(trades)
     win_count = sum(1 for t in trades if t.get("pnl", 0) > 0)
     loss_count = total_trades - win_count
+    total_pnl = sum(t.get("pnl", 0) for t in trades)
+    avg_return = total_pnl / total_trades if total_trades > 0 else 0.0
 
     # 指标 — akquant 内部为百分数，/100 转小数
     total_return = _safe_float(getattr(metrics, "total_return_pct", 0)) / 100.0
@@ -138,6 +143,7 @@ def normalize_result(
         max_drawdown=round(max_drawdown, 6),
         calmar_ratio=round(_safe_float(getattr(metrics, "calmar_ratio", 0)), 4),
         win_rate=round(win_rate_pct / 100.0, 4),  # 百分数→小数
+        avg_return=round(avg_return, 4),
         total_trades=total_trades,
         win_trades=win_count,
         loss_trades=loss_count,

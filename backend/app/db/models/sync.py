@@ -2,11 +2,11 @@
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base, TimestampMixin
+from .base import Base, TimestampMixin, _beijing_now
 
 
 class SyncTask(Base, TimestampMixin):
@@ -60,7 +60,7 @@ class SyncLog(Base):
     error_message: Mapped[str | None] = mapped_column(Text, comment="错误信息")
     details: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="详细结果")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=func.now(), nullable=False
+        DateTime, default=_beijing_now, nullable=False
     )
 
     # 关联任务

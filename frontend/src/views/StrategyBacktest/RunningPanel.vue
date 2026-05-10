@@ -218,6 +218,8 @@ function formatEvent(ev: LiveEvent): string {
   flex-direction: column;
   gap: 8px;
   height: 100%;
+  max-height: calc(100vh - 320px);
+  overflow-y: auto;
 }
 
 .mini-metrics {
@@ -304,5 +306,9 @@ function formatEvent(ev: LiveEvent): string {
   display: flex;
   justify-content: flex-end;
   padding-top: 4px;
+  position: sticky;
+  bottom: 0;
+  background: #121212;
+  z-index: 10;
 }
 </style>

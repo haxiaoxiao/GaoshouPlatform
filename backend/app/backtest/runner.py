@@ -154,7 +154,7 @@ class BacktestRunner:
         order_collector.register(event_bus)
 
         # ── 6. 策略上下文 + 策略注册 ──
-        script = config.factor_expression or config.buy_condition or ""
+        script = config.strategy_code or config.factor_expression or config.buy_condition or ""
 
         # 判断是用户脚本 (含 def handle_bar) 还是因子表达式
         if "def handle_bar" in script:

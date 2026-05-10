@@ -56,8 +56,8 @@
             <template #default="{ row }">{{ row.price?.toFixed(2) }}</template>
           </el-table-column>
           <el-table-column prop="quantity" label="数量" width="80" />
-          <el-table-column label="金额" width="100">
-            <template #default="{ row }">{{ (row.price * row.quantity).toFixed(0) }}</template>
+          <el-table-column label="金额" width="110">
+            <template #default="{ row }">{{ Math.round((row.price || 0) * (row.quantity || 0)).toLocaleString() }}</template>
           </el-table-column>
           <el-table-column prop="commission" label="手续费" width="80">
             <template #default="{ row }">{{ (row.commission || 0).toFixed(2) }}</template>
@@ -102,7 +102,12 @@
           </div>
         </div>
         <el-table :data="symbolPnls" stripe size="small" max-height="400" :default-sort="{ prop: 'total_pnl', order: 'descending' }">
-          <el-table-column prop="symbol" label="标的" width="100" sortable />
+          <el-table-column prop="symbol" label="代码" width="100" sortable />
+          <el-table-column label="名称" width="90">
+            <template #default="{ row }">
+              <span style="font-size:11px;color:#ccc">{{ stockNameMap[row.symbol] || '' }}</span>
+            </template>
+          </el-table-column>
           <el-table-column label="总盈亏" width="120" sortable prop="total_pnl">
             <template #default="{ row }">
               <span :style="{ color: row.total_pnl >= 0 ? '#d93026' : '#137333', fontWeight: 600 }">
@@ -155,7 +160,7 @@
           <div class="summary-item">
             <span class="summary-label">平均单笔收益</span>
             <span class="summary-value" :style="{ color: (result.avg_return || 0) >= 0 ? '#d93026' : '#137333' }">
-              {{ result.avg_return != null ? (result.avg_return >= 0 ? '+' : '') + result.avg_return.toFixed(4) : '—' }}
+              {{ result.avg_return != null ? (result.avg_return >= 0 ? '+¥' : '-¥') + Math.abs(result.avg_return).toFixed(2) : '—' }}
             </span>
           </div>
           <div class="summary-item">
@@ -410,11 +415,17 @@ watch(() => props.visible, async (v) => {
   }
 })
 
-// Fetch stock names when result trades change
-watch(() => props.result?.trades, (trades) => {
+// Fetch stock names when result trades or symbol PnLs change
+watch([() => props.result?.trades, symbolPnls], ([trades, pnls]) => {
+  const symbols = new Set<string>()
   if (trades?.length) {
-    const symbols = trades.map(t => t.symbol).filter(Boolean) as string[]
-    fetchStockNames(symbols)
+    trades.forEach(t => { if (t.symbol) symbols.add(t.symbol) })
+  }
+  if (pnls?.length) {
+    pnls.forEach(p => symbols.add(p.symbol))
+  }
+  if (symbols.size > 0) {
+    fetchStockNames([...symbols])
   }
 })
 

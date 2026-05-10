@@ -1,10 +1,10 @@
 # backend/app/db/models/watchlist.py
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from .base import Base, TimestampMixin
+from .base import Base, TimestampMixin, _beijing_now
 
 
 class WatchlistGroup(Base, TimestampMixin):
@@ -33,7 +33,7 @@ class WatchlistStock(Base):
     )
     symbol: Mapped[str] = mapped_column(String(20), nullable=False, comment="股票代码")
     added_at: Mapped[datetime] = mapped_column(
-        DateTime, default=func.now(), nullable=False
+        DateTime, default=_beijing_now, nullable=False
     )
 
     # 关联分组

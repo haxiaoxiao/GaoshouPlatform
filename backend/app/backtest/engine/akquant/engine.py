@@ -79,6 +79,7 @@ class AkquantEngine(IBacktestEngine):
             instruments=config.symbols,
             benchmark=config.benchmark_symbol,
             show_progress=False,
+            history_depth=300,
         )
 
         # ── 5. 在独立线程中运行 akquant（同步阻塞） ──
@@ -115,7 +116,20 @@ class AkquantEngine(IBacktestEngine):
             pass
 
         if progress_callback:
-            progress_callback(1.0, None)
+            live_data = {
+                "current_date": str(end_date),
+                "events": [],
+                "positions": {},
+                "metrics_snapshot": {
+                    "total_return": result.total_return,
+                    "max_drawdown": result.max_drawdown,
+                    "sharpe": result.sharpe_ratio,
+                    "cash": result.final_capital,
+                    "total_value": result.final_capital,
+                    "n_trades": result.total_trades,
+                },
+            }
+            progress_callback(1.0, live_data)
 
         return result
 

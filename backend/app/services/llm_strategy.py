@@ -32,6 +32,7 @@ import numpy as np
 
 class MyStrategy(aq.Strategy):
     def on_start(self):
+        self.set_history_depth(300)  # 必须调用！否则 get_history() 会报错
         # 初始化参数
         pass
 
@@ -62,6 +63,8 @@ class MyStrategy(aq.Strategy):
 4. A股最少100股，数量取整到100的倍数
 5. 禁止使用原框架特有API（context/self.datas/on_tick等）
 6. 常见错误：self.portfolio 不存在，用 self.equity 获取总资产；pos 是 float 不是对象
+7. 如果策略使用 self.get_history()，必须在 on_start 第一行调用 self.set_history_depth(300)
+8. on_start 的第一行必须是 self.set_history_depth(300)（如果要使用 get_history）
 
 ## 可用属性/方法清单
 - bar.symbol, bar.open, bar.high, bar.low, bar.close, bar.volume
@@ -84,6 +87,7 @@ import numpy as np
 
 class MyStrategy(aq.Strategy):
     def on_start(self):
+        self.set_history_depth(300)  # 必须调用！否则 get_history() 报错
         pass
 
     def on_bar(self, bar):
