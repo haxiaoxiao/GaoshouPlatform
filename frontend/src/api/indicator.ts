@@ -16,6 +16,7 @@ export interface IndicatorInfo {
   is_precomputed: boolean
   dependencies: string[]
   description: string
+  unit?: string
 }
 
 export interface IndicatorValueItem {

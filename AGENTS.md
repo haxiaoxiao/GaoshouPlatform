@@ -21,11 +21,51 @@
 | 层 | 技术 | 说明 |
 |---|---|---|
 | 后端框架 | FastAPI + SQLAlchemy (async) | Python 3.12+ |
-| 元数据库 | SQLite via aiosqlite | `backend/data/gaoshou.db` |
-| 时序数据库 | ClickHouse | 端口 19000，列式存储高性能查询 |
+| 元数据库 | SQLite via aiosqlite | `data/gaoshou.db` |
+| 时序数据库(默认) | DuckDB + Parquet | 文件型分析数据，零运维 |
+| 时序数据库(可选) | ClickHouse | 端口 19000，大规模高并发查询 |
 | 数据源 | xtquant (华泰 miniQMT) | 同步阻塞，必须用 `run_in_executor` 包装 |
 | 前端 | Vue 3 + TypeScript + Element Plus | Vite 构建，深色主题 |
 | 缓存 | Redis (可选) | 无 Redis 也可运行 |
+
+### 数据后端切换
+
+配置项 `MARKET_DATA_BACKEND` 控制行情数据来源：
+
+| 值 | 说明 | 启动要求 |
+|---|---|---|
+| `parquet` (默认) | DuckDB 查询 Parquet 文件 | 无需 Docker/ClickHouse |
+| `clickhouse` | ClickHouse 列式存储 | 需 ClickHouse 服务运行 |
+
+环境变量: `MARKET_DATA_BACKEND=parquet`, `PARQUET_DATA_DIR=data/parquet`, `DUCKDB_PATH=:memory:`, `CLICKHOUSE_ENABLED=false`
+
+---
+
+## 当前重点能力与文档入口
+
+| 文档 | 说明 |
+|---|---|
+| `README.md` | 项目入口、启动方式、AKQuant 回测入口、ID=43 推荐流程 |
+| `docs/user-manual.md` | 使用手册，面向平台使用和策略回测操作 |
+| `docs/data-source-cheatsheet.md` | 数据源小抄，记录 miniQMT/Tushare/AKShare 的优势、限制和使用场景 |
+| `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口小抄，记录历史分钟、集合竞价、财务、公告、指数等验证结果 |
+| `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 |
+| `docs/feature-store.md` | 因子研究 Feature Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
+| `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：当前参数、数据口径、已对齐节点和剩余差异 |
+
+当前 AKQuant 重点能力：
+
+- `engine="akquant"` 是策略事件驱动回测的主路径之一。
+- 支持 `bar_type="daily"`、`bar_type="minute"`、`bar_type="minute_timer"`。
+- `minute_timer` 用于只需要固定盘中时点的策略，从 Parquet `klines_minute_timer/klines_minute` 或 ClickHouse `klines_minute` 读取分钟数据。
+- 已接入 AKQuant capabilities、Grid Search、Walk-forward Validation、策略参数 schema/validate。
+- 已接入 AKQuant Polars 因子计算入口：`POST /api/v2/compute/evaluate`，`engine="akquant"`。
+
+参数原则：
+
+- 回测日期、资金、费用、滑点、股票池、bar type、timer times 必须由前端控制面板/API payload 控制。
+- 策略代码读取 `strategy_params`，不要硬编码日期、资金、股票池或固定 timer。
+- 只要用户在前端选择指数池，就通过 `index_symbol` 传递，不要把当前自选股静态展开成历史股票池。
 
 ---
 
@@ -37,14 +77,34 @@
 |------|----------|------|
 | 股票基础信息 | SQLite | `stocks` — 代码、名称、行业、市值、股本、财务指标 |
 | 财务数据 | SQLite | `financial_data` — 按季度，EPS/ROE/毛利率/营收增速等 |
-| 日 K 线 | ClickHouse | `klines_daily` — OHLCV + 换手率 |
-| 分钟 K 线 | ClickHouse | `klines_minute` — OHLCV + 成交额 |
+| 日 K 线 | Parquet / ClickHouse | `klines_daily/` — OHLCV + 换手率 |
+| 分钟 K 线 | Parquet / ClickHouse | `klines_minute_timer/` + `klines_minute/` |
 | 截面指标 | ClickHouse | `stock_indicators` — (symbol, indicator_name, trade_date, value) |
 | 时序指标 | ClickHouse | `indicator_timeseries` — (symbol, indicator_name, datetime, value) |
-| 因子缓存 | ClickHouse | `factor_cache` — (symbol, trade_date, expr_hash, value) |
+| 因子缓存 | Parquet / ClickHouse | `factor_cache/` — (symbol, trade_date, expr_hash, value) |
 | 自选股 | SQLite | `watchlist_groups` + `watchlist_stocks` |
 | 策略/回测 | SQLite | `strategies` / `backtests` / `orders` / `trades` |
 | 主题标注 | SQLite | `theme_annotations` — 人工标注的业务纯度/产业链定位 |
+| 指数历史成分 | SQLite | `index_components` — point-in-time 指数成分快照 |
+
+### Parquet 目录结构
+
+```text
+data/parquet/
+  klines_daily/       year=YYYY/month=MM/part-*.parquet
+  klines_minute_timer/ year=YYYY/month=MM/part-*.parquet
+  klines_minute/      year=YYYY/month=MM/part-*.parquet
+  factor_cache/       expr_hash=<hash>/year=YYYY/part-*.parquet
+```
+
+当前 `klines_minute` 已导入本地聚宽版全 A 1 分钟线：
+
+- 覆盖：`2005-01-04 09:31:00` 至 `2026-05-15 15:00:00`
+- 规模：约 `3.75B` 行、`5580` 个代码
+- 导入脚本：`backend/app/scripts/import_jq_minute_parquet.py`
+- zip/tar.gz 归档导入：`backend/app/scripts/import_jq_minute_archives.py`
+- 异常日期清理：`backend/app/scripts/clean_minute_parquet_dates.py`
+- 状态库：`data/parquet/import_state/jq_minute_import.sqlite`
 
 ### SQLite stocks 表核心字段
 
@@ -147,10 +207,13 @@ indicators = skill.get_indicators_batch(["600051.SH"], date(2025,4,1))
 | 数据类型 | 优先来源 | 兜底来源 |
 |----------|----------|----------|
 | 股票快照 | SQLite `stocks` 表 | QMT `get_stock_full_info` |
-| K 线 | ClickHouse | QMT `get_kline_daily/minute` |
+| K 线 | Parquet/DuckDB | ClickHouse → QMT |
 | 财务数据 | SQLite `financial_data` 表 | QMT `download_financial_data2` |
 | 实时行情 | QMT `get_realtime_quotes` | 无兜底 |
 | 指标 | ClickHouse `stock_indicators` | 无兜底 |
+| 指数历史成分 | SQLite `index_components` | Tushare `index_weight` |
+| 固定时间点分钟线 | Parquet/DuckDB | ClickHouse `klines_minute` |
+| 因子缓存 | Parquet/DuckDB | ClickHouse `factor_cache` |
 
 ---
 
@@ -309,6 +372,8 @@ def handle_bar(context, bar):
 |------|------|------|
 | 向量化回测 | `vectorized.py` | 基于 quantile 分组收益 |
 | 事件驱动回测 | `event_driven.py` | 完整的事件驱动引擎 |
+| AKQuant 引擎 | `engine/akquant/` | AKQuant adapter、runner、normalizer、capabilities、reporter |
+| 数据提供器 | `engine/data_provider.py` | 通过 MarketDataStore 从 Parquet/ClickHouse 加载 daily/minute/minute_timer |
 | 事件定义 | `event/events.py` | MarketEvent, SignalEvent, OrderEvent, FillEvent |
 | 事件总线 | `event/event_bus.py` | 事件注册与分发 |
 | 日历 | `event/calendar.py` | 交易日历 |
@@ -317,6 +382,32 @@ def handle_bar(context, bar):
 | 配置 | `config.py` | BacktestConfig |
 | 运行器 | `runner.py` | BacktestRunner |
 | 策略加载 | `strategy_loader.py` | 动态加载 UserScript |
+
+### AKQuant V2 回测 API
+
+| 路径 | 说明 |
+|---|---|
+| `GET /api/v2/backtest/capabilities` | 查询 AKQuant 可用性、版本、功能和 TA-Lib 函数数 |
+| `POST /api/v2/backtest/run` | 运行 V2 回测，`engine="akquant"` 走 AKQuant |
+| `POST /api/v2/backtest/optimize/grid` | AKQuant Grid Search |
+| `POST /api/v2/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
+| `POST /api/v2/backtest/strategy-params/schema` | 获取策略参数 schema |
+| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 payload |
+| `GET /api/v2/backtest/index-pools/{index_symbol}` | 查询指数池成分覆盖 |
+| `GET /api/v2/backtest/timer-coverage` | 查询稀疏分钟 timer 覆盖 |
+
+### ID=43 小市值策略约束
+
+- 聚宽源码在每次调仓时取 `get_index_stocks('399101.XSHE')`；平台应使用 `399101.SZ` 的历史成分快照，不能用当前自选股 960 只静态替代。
+- 前端股票池选择应走指数下拉菜单，传 `index_symbol="399101.SZ"`。
+- 策略若只需要固定时点，不要使用完整分钟线；使用 `bar_type="minute_timer"`。
+- 当前推荐先将所需 timer 点分钟数据同步到 Parquet 或 ClickHouse，再运行回测。
+- 日线交易价避免未来数据，不能用当天 close 模拟当日成交价。
+- 和聚宽对齐时重点检查：指数成分、市值排序输入、行业集中度、ST、停牌、退市、涨跌停、成交时点。
+- 年度 debug 推荐使用：
+  - `backend/app/scripts/run_small_cap_full_debug.py --start auto`
+  - `backend/app/scripts/run_small_cap_yearly_debug.py`
+  - `backend/app/scripts/compare_small_cap_logs.py`
 
 ---
 
@@ -374,12 +465,17 @@ def handle_bar(context, bar):
 3. **`get_financial_data` 返回 DataFrame**，不是 dict。`m_timetag` 列是 **STRING 类型**，必须用字符串比较（`'20240331'` 而非 `20240331`）。
 4. **`download_sector_data` 可能挂死** — 代码有兜底：`_scan_all_stocks()` 通过 SW1 板块扫描获取 A 股列表。
 5. **clean_local_cache 不要清理 `Sector/` 和 `TradeDateAndETFStockListCache`** — 清理后板块扫描会失败。
+6. **分钟线主动下载优先使用 `download_history_data2`**，再用 `get_local_data` 或平台封装读取本地缓存。
+7. **策略运行时不要反复读 QMT 分钟线**，应先同步到 Parquet/ClickHouse，回测只读本地列式库。
 
 ### 数据库操作
 
-- **ClickHouse 查询** — 使用 `get_ch_client()` 获取全局单例客户端。
+- **行情数据查询** — 使用 `get_market_data_store()` 获取抽象数据层实例，自动根据配置选择 Parquet 或 ClickHouse 后端。不要直接使用 `get_ch_client()`。
+- **ClickHouse 查询** — 仅在 ClickHouse backend 内部使用 `get_ch_client()`。
 - **SQLite 操作** — 使用 `get_async_session()` 依赖注入，`insert().on_conflict_do_update()` 做 upsert。
 - **SQLite 同步引擎** — 指标调度器中需创建同步引擎：`create_engine(settings.database_url.replace("+aiosqlite", ""))`。
+- **指数成分** — 使用 `backend/app/services/index_components.py`，按 `trade_date <= as_of` 最近快照取成分。
+- **timer 覆盖率** — 使用 `backend/app/services/timer_minute_sync.py` 和 `/api/v2/backtest/timer-coverage`。
 
 ### 代码修改注意事项
 
@@ -388,6 +484,9 @@ def handle_bar(context, bar):
 - 新增 API 路由需在 `api/router.py` 注册
 - 新增前端页面需在 `frontend/src/router/index.ts` 添加路由，在 `layouts/MainLayout.vue` 添加导航
 - **不要用 AKShare 替代 xtquant** — 用户明确拒绝
+- 修改 AKQuant 集成后至少跑：
+  - `.\backend\.venv\Scripts\python.exe -m pytest tests\backtest\test_akquant_integration.py -q`
+  - `cd frontend; npm run build`
 
 ---
 
@@ -418,3 +517,5 @@ npm run dev
 | `POST /api/data/sync` | `realtime_mv` | `get_full_tick` | SQLite stocks | 实时市值 |
 
 同步流程：下载 → 读取 → 写入数据库 → 清理本地缓存 → 触发指标自动计算
+
+固定 timer 分钟线流程：主动下载 1m → 读取本地缓存 → 抽取 timer 点 → 写入 Parquet `klines_minute_timer` 或 ClickHouse `klines_minute` → AKQuant `minute_timer` 回测。

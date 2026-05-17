@@ -2,6 +2,7 @@
 """Redis cache client wrapper"""
 
 import json
+import os
 from typing import Any, Optional
 
 import redis
@@ -69,9 +70,17 @@ class RedisClient:
             logger.warning("Redis get(%s) failed: %s", key, e)
             return None
 
-    def set(self, key: str, value: str, ttl: int = 3600) -> None:
+    def set(self, key: str, value: str | bytes, ttl: int = 3600) -> None:
         """设置缓存值，默认过期时间 3600 秒"""
         if not self._available or self._pool is None:
+            return
+        max_bytes = int(os.getenv("REDIS_MAX_VALUE_BYTES", str(2 * 1024 * 1024)))
+        if isinstance(value, str):
+            size = len(value.encode("utf-8"))
+        else:
+            size = len(value)
+        if size > max_bytes:
+            logger.info("Redis set(%s) skipped: value too large (%s bytes)", key, size)
             return
         try:
             r = redis.Redis(connection_pool=self._pool)

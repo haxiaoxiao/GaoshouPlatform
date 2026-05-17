@@ -161,7 +161,7 @@ import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'elem
 import { Plus, Delete } from '@element-plus/icons-vue'
 import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/backtest'
 import BacktestReport from './BacktestReport.vue'
-import { formatDateTime, formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
+import { formatDateTime, getStatusType, getStatusLabel } from '@/utils/format'
 
 // 状态
 const loading = ref(false)
@@ -291,17 +291,6 @@ const handleCreateSubmit = async () => {
   }
 }
 
-// 运行回测
-const handleRun = async (row: Backtest) => {
-  try {
-    ElMessage.info('开始运行回测...')
-    await backtestApi.run(row.id)
-    ElMessage.success('回测运行完成')
-    loadBacktests()
-  } catch {
-    ElMessage.error('回测运行失败')
-  }
-}
 
 // 查看报告
 const handleViewReport = (row: Backtest) => {

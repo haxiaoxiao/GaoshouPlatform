@@ -179,7 +179,7 @@ async function onTableChange() {
   if (!selectedTable.value) return
 
   loading.value = true
-  error.value = ''
+    error.value = ''
   try {
     const res = await getTableSchema(selectedTable.value)
     if (res && res.length > 0) schema.value = res

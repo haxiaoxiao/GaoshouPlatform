@@ -13,10 +13,56 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.retry import async_retry
 from app.db.clickhouse import get_ch_client
+from app.data_stores import get_market_data_store
+from app.core.config import settings as app_settings
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
+
+
+def _should_write_clickhouse() -> bool:
+    return app_settings.clickhouse_enabled or app_settings.market_data_backend == "clickhouse"
+
+
+def _write_ch_daily(ch_client: Any, rows: list[dict[str, Any]]) -> None:
+    if not rows or ch_client is None:
+        return
+    ch_client.execute(
+        "INSERT INTO klines_daily "
+        "(symbol, trade_date, open, high, low, close, volume, amount) "
+        "VALUES",
+        rows,
+    )
+
+
+def _write_ch_minute(ch_client: Any, rows: list[dict[str, Any]]) -> None:
+    if not rows or ch_client is None:
+        return
+    ch_client.execute(
+        "INSERT INTO klines_minute "
+        "(symbol, datetime, open, high, low, close, volume, amount) "
+        "VALUES",
+        rows,
+    )
+
+
+def _write_store_daily(rows: list[dict[str, Any]]) -> None:
+    if not rows or app_settings.market_data_backend != "parquet":
+        return
+    import pandas as pd
+
+    store = get_market_data_store()
+    store.write_daily(pd.DataFrame(rows))
+
+
+def _write_store_minute(rows: list[dict[str, Any]], *, dataset: str = "klines_minute") -> None:
+    if not rows or app_settings.market_data_backend != "parquet":
+        return
+    import pandas as pd
+
+    store = get_market_data_store()
+    store.write_minute(pd.DataFrame(rows), dataset=dataset)
 
 
 @dataclass
@@ -925,8 +971,10 @@ class SyncService:
         )
         _current_sync = progress
 
-        # 获取 ClickHouse 客户端
-        ch_client = get_ch_client()
+        # ClickHouse is optional. In parquet mode without clickhouse_enabled,
+        # sync writes directly to Parquet and does not require Docker/CH.
+        write_ch = _should_write_clickhouse()
+        ch_client = get_ch_client() if write_ch else None
 
         try:
             # 如果没有指定股票列表，获取所有股票
@@ -942,11 +990,12 @@ class SyncService:
                 progress.details["message"] = "正在删除已有数据..."
                 for symbol in symbols:
                     try:
-                        ch_client.execute(
-                            "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
-                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
-                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
-                        )
+                        if ch_client is not None:
+                            ch_client.execute(
+                                "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
+                                "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
+                                {"symbol": symbol, "start_date": start_date, "end_date": end_date},
+                            )
                     except Exception:
                         pass
                 progress.details["message"] = "删除完成，开始同步..."
@@ -983,12 +1032,11 @@ class SyncService:
                     ]
 
                     if rows:
-                        ch_client.execute(
-                            "INSERT INTO klines_daily "
-                            "(symbol, trade_date, open, high, low, close, volume, amount) "
-                            "VALUES",
-                            rows,
-                        )
+                        _write_ch_daily(ch_client, rows)
+                        try:
+                            _write_store_daily(rows)
+                        except Exception as e:
+                            logger.warning(f"Parquet write failed for {symbol}: {e}")
                         total_klines += len(rows)
 
                     progress.current = i + 1
@@ -1023,12 +1071,16 @@ class SyncService:
                                     for kline in klines
                                 ]
                                 if rows:
-                                    get_ch_client().execute(
-                                        "INSERT INTO klines_daily "
-                                        "(symbol, trade_date, open, high, low, close, volume, amount) "
-                                        "VALUES",
-                                        rows,
-                                    )
+                                    retry_ch = get_ch_client() if write_ch else None
+                                    try:
+                                        _write_ch_daily(retry_ch, rows)
+                                    finally:
+                                        if retry_ch is not None:
+                                            try:
+                                                retry_ch.disconnect()
+                                            except Exception:
+                                                pass
+                                    _write_store_daily(rows)
                                     nonlocal total_klines
                                     total_klines += len(rows)
 
@@ -1088,6 +1140,11 @@ class SyncService:
             await self.session.commit()
             raise
         finally:
+            if ch_client is not None:
+                try:
+                    ch_client.disconnect()
+                except Exception:
+                    pass
             _current_sync = None
 
         return progress
@@ -1136,8 +1193,10 @@ class SyncService:
         )
         _current_sync = progress
 
-        # 获取 ClickHouse 客户端
-        ch_client = get_ch_client()
+        # ClickHouse is optional. In parquet mode without clickhouse_enabled,
+        # sync writes directly to Parquet and does not require Docker/CH.
+        write_ch = _should_write_clickhouse()
+        ch_client = get_ch_client() if write_ch else None
 
         try:
             # 如果没有指定股票列表，获取所有股票
@@ -1153,11 +1212,12 @@ class SyncService:
                 progress.details["message"] = "正在删除已有数据..."
                 for symbol in symbols:
                     try:
-                        ch_client.execute(
-                            "DELETE FROM klines_minute WHERE symbol = %(symbol)s "
-                            "AND toDate(datetime) >= %(start_date)s AND toDate(datetime) <= %(end_date)s",
-                            {"symbol": symbol, "start_date": start_date, "end_date": end_date},
-                        )
+                        if ch_client is not None:
+                            ch_client.execute(
+                                "DELETE FROM klines_minute WHERE symbol = %(symbol)s "
+                                "AND toDate(datetime) >= %(start_date)s AND toDate(datetime) <= %(end_date)s",
+                                {"symbol": symbol, "start_date": start_date, "end_date": end_date},
+                            )
                     except Exception:
                         pass
                 progress.details["message"] = "删除完成，开始同步..."
@@ -1194,12 +1254,11 @@ class SyncService:
                     ]
 
                     if rows:
-                        ch_client.execute(
-                            "INSERT INTO klines_minute "
-                            "(symbol, datetime, open, high, low, close, volume, amount) "
-                            "VALUES",
-                            rows,
-                        )
+                        _write_ch_minute(ch_client, rows)
+                        try:
+                            _write_store_minute(rows)
+                        except Exception as e:
+                            logger.warning(f"Parquet write failed for {symbol}: {e}")
                         total_klines += len(rows)
 
                     progress.current = i + 1
@@ -1234,12 +1293,16 @@ class SyncService:
                                     for kline in klines
                                 ]
                                 if rows:
-                                    get_ch_client().execute(
-                                        "INSERT INTO klines_minute "
-                                        "(symbol, datetime, open, high, low, close, volume, amount) "
-                                        "VALUES",
-                                        rows,
-                                    )
+                                    retry_ch = get_ch_client() if write_ch else None
+                                    try:
+                                        _write_ch_minute(retry_ch, rows)
+                                    finally:
+                                        if retry_ch is not None:
+                                            try:
+                                                retry_ch.disconnect()
+                                            except Exception:
+                                                pass
+                                    _write_store_minute(rows)
                                     nonlocal total_klines
                                     total_klines += len(rows)
 
@@ -1299,6 +1362,11 @@ class SyncService:
             raise
 
         finally:
+            if ch_client is not None:
+                try:
+                    ch_client.disconnect()
+                except Exception:
+                    pass
             _current_sync = None
 
         return progress

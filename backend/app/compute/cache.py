@@ -1,8 +1,9 @@
-"""三级缓存管理器 — L1 内存 LRU → L1.5 Redis → L2 ClickHouse → L3 原始数据"""
+"""三级缓存管理器 — L1 内存 LRU → L1.5 Redis → L2 Parquet/ClickHouse → L3 原始数据"""
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 from collections import OrderedDict
 from datetime import date
@@ -13,6 +14,7 @@ from clickhouse_driver import Client
 from loguru import logger
 
 from app.cache.redis_cache import get_redis_client as _get_redis_client
+from app.core.config import settings
 
 
 class LRUCache:
@@ -50,8 +52,8 @@ class ComputeCache:
     """三级因子计算缓存
 
     L1: 进程内 LRU dict（请求级复用）
-    L2: ClickHouse factor_cache 表（跨请求持久化）
-    L3: ClickHouse klines_daily（原始数据，不算入缓存逻辑）
+    L2: Parquet/ClickHouse factor_cache（跨请求持久化，由 MARKET_DATA_BACKEND 决定）
+    L3: MarketDataStore klines_daily（原始数据）
     """
 
     def __init__(self, ch_client: Client | None = None):
@@ -59,7 +61,9 @@ class ComputeCache:
         self._ch = ch_client
 
     @property
-    def ch_client(self) -> Client:
+    def ch_client(self) -> Client | None:
+        if settings.market_data_backend == "parquet" and not settings.clickhouse_enabled:
+            return None
         if self._ch is None:
             from app.db.clickhouse import get_ch_client
             self._ch = get_ch_client()
@@ -103,13 +107,28 @@ class ComputeCache:
         L1 内存 LRU + L1.5 Redis（TTL=3600s）
         """
         key = self.make_key(expression)
+        max_points = int(os.getenv("COMPUTE_CACHE_MAX_POINTS", "200000"))
+        total_points = sum(len(series) for series in result.values())
+        if total_points > max_points:
+            logger.info(
+                "Compute cache skipped for key=%s: result too large (%s points)",
+                key[:8],
+                total_points,
+            )
+            return
+
+        try:
+            serialized = self._serialize_result(result)
+        except Exception:
+            logger.debug("Compute cache serialization failed for key=%s", key[:8], exc_info=True)
+            return
 
         # L1: 内存 LRU
         self.l1.set(key, result)
 
         # L1.5: Redis（后台写入，失败静默降级）
         try:
-            _get_redis_client().set(key, self._serialize_result(result), ttl=3600)
+            _get_redis_client().set(key, serialized, ttl=3600)
         except Exception:
             logger.debug("Redis set failed for key=%s", key[:8], exc_info=True)
 
@@ -188,6 +207,70 @@ class ComputeCache:
                 )
         except Exception:
             pass
+
+    def save_to_parquet(
+        self,
+        expr_hash: str,
+        trade_date: date,
+        series: pd.Series,
+        expression: str = "",
+        engine: str = "builtin",
+    ) -> None:
+        """写入 L2 Parquet factor_cache"""
+        from app.data_stores import get_market_data_store
+
+        try:
+            store = get_market_data_store()
+            rows = []
+            for sym, val in series.dropna().items():
+                rows.append({
+                    "symbol": sym,
+                    "trade_date": trade_date,
+                    "expr_hash": expr_hash,
+                    "value": float(val),
+                    "engine": engine,
+                    "expression": expression,
+                    "updated_at": pd.Timestamp.now(),
+                })
+            if rows:
+                df = pd.DataFrame(rows)
+                store._write_partitioned(df, dataset="factor_cache", date_col="trade_date")
+        except Exception:
+            logger.debug("Parquet factor cache save failed", exc_info=True)
+
+    def get_from_parquet(
+        self,
+        expr_hash: str,
+        symbols: list[str],
+        trade_date: date,
+    ) -> pd.Series | None:
+        """从 L2 Parquet 读取预计算结果"""
+        from app.data_stores import get_market_data_store
+
+        try:
+            store = get_market_data_store()
+            from app.data_stores.parquet_store import _list_param
+
+            store_impl = store
+            if not store_impl._exists("factor_cache"):
+                return None
+
+            from app.db.duckdb import get_duckdb
+            pattern = store_impl._glob_pattern("factor_cache")
+            sym_list = _list_param(symbols)
+            sql = f"""
+                SELECT symbol, value FROM read_parquet('{pattern}', hive_partitioning=true)
+                WHERE expr_hash = '{expr_hash}'
+                  AND trade_date = '{trade_date}'
+                  AND symbol IN {sym_list}
+            """
+            db = get_duckdb()
+            rows = db.execute(sql).fetchall()
+            if rows:
+                return pd.Series({r[0]: r[1] for r in rows})
+        except Exception:
+            logger.debug("Parquet factor cache read failed", exc_info=True)
+        return None
 
     def clear_l1(self) -> None:
         """清空 L1 缓存"""

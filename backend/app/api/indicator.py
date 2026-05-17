@@ -6,7 +6,6 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Path as FPath, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.clickhouse import get_ch_client
 from app.db.models.financial import FinancialData
 from app.db.sqlite import get_async_session
 from app.indicators import IndicatorRegistry
@@ -99,40 +98,28 @@ async def query_indicators(
     target_date = trade_date or date.today().isoformat()
 
     try:
-        ch = get_ch_client()
-        actual_date_row = ch.execute(
-            "SELECT max(trade_date) FROM stock_indicators WHERE indicator_name IN %(names)s",
-            params={"names": name_list},
-        )
-        if not actual_date_row or not actual_date_row[0]:
+        from app.data_stores import get_indicator_store
+
+        store = get_indicator_store()
+        df = store.load_cross_section(name_list, target_date, symbol_list)
+        if df.empty:
             return {"code": 0, "message": "success", "data": {"trade_date": target_date, "items": [
                 {"symbol": s, "name": None, "indicators": {n: None for n in name_list}} for s in symbol_list
             ]}}
-        use_date = str(actual_date_row[0][0])
-
-        rows = ch.execute(
-            """
-            SELECT symbol, indicator_name, value
-            FROM stock_indicators
-            WHERE trade_date = %(td)s
-              AND symbol IN %(syms)s
-              AND indicator_name IN %(names)s
-            """,
-            params={"td": use_date, "syms": symbol_list, "names": name_list},
-        )
+        rows = list(df.itertuples(index=False))
     except Exception:
         rows = []
 
     import pandas as pd
 
-    if rows:
-        df = pd.DataFrame(rows, columns=["symbol", "indicator_name", "value"])
+    items = []
+    if df is not None and not df.empty:
         for symbol in symbol_list:
             sub = df[df["symbol"] == symbol]
             indicators: dict[str, float | None] = {}
             for name in name_list:
-                row = sub[sub["indicator_name"] == name]
-                indicators[name] = float(row["value"].iloc[0]) if not row.empty else None
+                sub_name = sub[sub["indicator_name"] == name]
+                indicators[name] = float(sub_name["value"].iloc[0]) if not sub_name.empty and sub_name["value"].iloc[0] is not None else None
             items.append({"symbol": symbol, "name": None, "indicators": indicators})
     else:
         for symbol in symbol_list:
@@ -181,32 +168,20 @@ async def screen_stocks(
     target_date = trade_date or date_cls.today().isoformat()
 
     try:
-        ch = get_ch_client()
+        from app.data_stores import get_indicator_store
+
         filter_names = [f.get("indicator_name", "") for f in filters if f.get("indicator_name")]
         if not filter_names:
             raise HTTPException(status_code=400, detail="至少需要一个筛选条件")
 
-        actual_date = ch.execute(
-            "SELECT max(trade_date) FROM stock_indicators WHERE indicator_name IN %(names)s",
-            params={"names": filter_names},
-        )
-        if not actual_date or not actual_date[0]:
+        store = get_indicator_store()
+        df = store.load_cross_section(filter_names, target_date)
+        if df.empty:
             return {
                 "code": 0,
                 "message": "success",
                 "data": {"items": [], "total": 0, "trade_date": target_date},
             }
-        use_date = str(actual_date[0][0])
-
-        rows = ch.execute(
-            """
-            SELECT symbol, indicator_name, value
-            FROM stock_indicators
-            WHERE trade_date = %(td)s
-              AND indicator_name IN %(names)s
-            """,
-            params={"td": use_date, "names": filter_names},
-        )
     except HTTPException:
         raise
     except Exception:
@@ -216,16 +191,15 @@ async def screen_stocks(
             "data": {"items": [], "total": 0, "trade_date": target_date},
         }
 
-    if not rows:
+    import pandas as pd
+
+    if df.empty:
         return {
             "code": 0,
             "message": "success",
             "data": {"items": [], "total": 0, "trade_date": target_date},
         }
 
-    import pandas as pd
-
-    df = pd.DataFrame(rows, columns=["symbol", "indicator_name", "value"])
     pivot = df.pivot_table(index="symbol", columns="indicator_name", values="value", aggfunc="first")
     for f in filters:
         ind_name = f.get("indicator_name", "")

@@ -25,6 +25,7 @@ class EvaluateRequest(BaseModel):
     start_date: date = Field(..., description="开始日期")
     end_date: date = Field(..., description="结束日期")
     use_cache: bool = Field(default=True, description="是否使用缓存")
+    engine: str = Field(default="builtin", description="builtin or akquant")
 
 
 class ScreenRequest(BaseModel):
@@ -51,41 +52,45 @@ async def evaluate(req: EvaluateRequest):
     cache_hit = False
 
     cache: ComputeCache = get_compute_cache()
+    if req.engine == "akquant":
+        from app.services.akquant_factor import evaluate_akquant_factor
+
+        out = await evaluate_akquant_factor(
+            req.expression,
+            req.symbols,
+            req.start_date,
+            req.end_date,
+        )
+        elapsed = (time.time() - t0) * 1000
+        return {
+            "code": 0,
+            "message": "success",
+            "data": out,
+            "meta": {
+                "expression": req.expression,
+                "engine": "akquant",
+                "cache_hit": False,
+                "compute_time_ms": round(elapsed, 1),
+            },
+        }
+    if req.engine != "builtin":
+        return {"code": 1, "message": f"Unknown compute engine: {req.engine}", "data": None}
 
     result = None
     if req.use_cache:
         result = cache.get(req.expression)
 
     if result is None:
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
-        rows = ch.execute(
-            """
-            SELECT symbol, trade_date, open, high, low, close, volume, amount, turnover_rate
-            FROM klines_daily
-            WHERE symbol IN %(syms)s
-              AND trade_date >= %(start)s
-              AND trade_date <= %(end)s
-            ORDER BY symbol, trade_date
-            """,
-            {"syms": req.symbols, "start": req.start_date, "end": req.end_date},
-        )
+        from app.data_stores import get_market_data_store
 
-        if not rows:
+        store = get_market_data_store()
+        df = store.load_daily(req.symbols, req.start_date, req.end_date)
+        if df.empty:
             return {"code": 0, "message": "success", "data": {}, "meta": {"rows": 0}}
-
-        df = pd.DataFrame(
-            rows,
-            columns=["symbol", "trade_date", "open", "high", "low", "close",
-                     "volume", "amount", "turnover_rate"],
-        )
-        for col in ["open", "high", "low", "close", "amount", "turnover_rate"]:
-            df[col] = df[col].astype(float)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
 
         data = {}
         for sym, grp in df.groupby("symbol"):
-            data[sym] = grp.set_index("trade_date")
+            data[sym] = grp
 
         result = evaluate_expression(req.expression, data)
 
@@ -132,39 +137,26 @@ async def screen(req: ScreenRequest):
     if not valid:
         return {"code": 1, "message": f"Invalid condition: {err}", "data": None}
 
-    from app.db.clickhouse import get_ch_client
-    ch = get_ch_client()
+    from app.data_stores import get_market_data_store
 
-    rows = ch.execute("SELECT DISTINCT symbol FROM klines_daily WHERE trade_date = %(d)s",
-                      {"d": req.trade_date})
-    symbols = [r[0] for r in rows]
+    store = get_market_data_store()
+    symbols = store.load_trading_dates([], date(2000, 1, 1), req.trade_date)
+    # Get symbols from the coverage API for the target date
+    if not symbols:
+        # fallback: query daily data for all symbols on the exact date
+        info = store.coverage([], date(2000, 1, 1), req.trade_date, dataset="klines_daily")
+        symbols = info.get("symbols_covered", [])
 
     if not symbols:
         return {"code": 0, "message": "success", "data": {"symbols": [], "count": 0}}
 
-    rows = ch.execute(
-        """
-        SELECT symbol, trade_date, open, high, low, close, volume, amount, turnover_rate
-        FROM klines_daily
-        WHERE symbol IN %(syms)s
-          AND trade_date >= %(start)s
-        ORDER BY symbol, trade_date
-        """,
-        {"syms": symbols, "start": date(2020, 1, 1)},
-    )
-
-    df = pd.DataFrame(
-        rows,
-        columns=["symbol", "trade_date", "open", "high", "low", "close",
-                 "volume", "amount", "turnover_rate"],
-    )
-    for col in ["open", "high", "low", "close", "amount", "turnover_rate"]:
-        df[col] = df[col].astype(float)
-    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    df = store.load_daily(symbols, date(2020, 1, 1), req.trade_date)
+    if df.empty:
+        return {"code": 0, "message": "success", "data": {"symbols": [], "count": 0}}
 
     data = {}
     for sym, grp in df.groupby("symbol"):
-        data[sym] = grp.set_index("trade_date")
+        data[sym] = grp
 
     result = evaluate_expression(req.condition, data)
 

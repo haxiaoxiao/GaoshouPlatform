@@ -128,13 +128,6 @@ def init_clickhouse_tables():
     """)
 
 
-# 全局客户端
-_clickhouse_client: Client | None = None
-
-
 def get_ch_client() -> Client:
-    """获取全局 ClickHouse 客户端（单例）"""
-    global _clickhouse_client
-    if _clickhouse_client is None:
-        _clickhouse_client = get_clickhouse_client()
-    return _clickhouse_client
+    """获取 ClickHouse 客户端（每次新建，避免共享连接状态冲突）"""
+    return get_clickhouse_client()

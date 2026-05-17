@@ -96,7 +96,7 @@
       </el-tab-pane>
 
       <el-tab-pane label="回测记录" name="backtestList">
-        <BacktestList ref="backtestListRef" />
+        <BacktestList />
       </el-tab-pane>
 
       <el-tab-pane label="回测运行" name="backtestRunner">
@@ -117,7 +117,7 @@
               </el-tabs>
               <div class="toolbar-actions">
                 <el-button size="small" @click="handleSaveStrategy" :loading="saving">保存</el-button>
-                <el-button size="small" type="primary" @click="handleRunBacktest" :loading="btRunning">编译运行</el-button>
+                <el-button size="small" type="primary" @click="runBacktestTask" :loading="btRunning">编译运行</el-button>
               </div>
             </div>
 
@@ -205,21 +205,52 @@
                 </el-select>
               </template>
               <span>K线</span>
-              <el-select v-model="btBarType" size="small" style="width:80px">
+              <el-select v-model="btBarType" size="small" style="width:92px">
                 <el-option label="日线" value="daily" />
                 <el-option label="分钟" value="minute" />
+                <el-option label="定时" value="minute_timer" />
               </el-select>
               <span>引擎</span>
               <el-select v-model="btEngine" size="small" style="width:100px" @change="onEngineChange">
                 <el-option v-for="e in engineOptions" :key="e.value" :label="e.label" :value="e.value" />
               </el-select>
-              <el-button type="primary" size="small" @click="handleRunBacktest" :loading="btRunning">运行回测</el-button>
+              <el-button type="primary" size="small" @click="runBacktestTask" :loading="btRunning">运行回测</el-button>
+            </div>
+            <div class="smallcap-params-bar" v-if="isSmallCapStrategy">
+              <span>持仓</span>
+              <el-input-number v-model="scStockNum" :min="1" :max="20" size="small" style="width:70px" />
+              <span>现金</span>
+              <el-input-number v-model="scCashBufferPct" :min="0" :max="10" :step="0.1" size="small" style="width:78px" />%
+              <el-checkbox v-model="scEnableIndicator" size="small">指标</el-checkbox>
+              <el-checkbox v-model="scEnableIndicatorExit" size="small">指标卖出</el-checkbox>
+              <el-checkbox v-model="scEnableIndustryFilter" size="small">行业</el-checkbox>
+              <span>行业上限</span>
+              <el-input-number v-model="scMaxIndustryWeightPct" :min="10" :max="100" :step="5" size="small" style="width:78px" />%
+              <el-checkbox v-model="scHVControl" size="small">放量</el-checkbox>
+              <span>Vol x</span>
+              <el-input-number v-model="scDailyVolumeToShareMultiplier" :min="1" :max="1000" :step="1" size="small" style="width:88px" />
+              <el-checkbox v-model="scRunStoploss" size="small">止损</el-checkbox>
+              <el-checkbox v-model="scPassApril" size="small">空仓月</el-checkbox>
+              <span>指标模式</span>
+              <el-select v-model="scIndicatorMode" size="small" style="width:112px">
+                <el-option label="稳健" value="robust" />
+                <el-option label="JQ兼容" value="jq_fallback" />
+              </el-select>
+              <span>行业模式</span>
+              <el-select v-model="scIndustryMode" size="small" style="width:104px">
+                <el-option label="本地" value="local" />
+                <el-option label="JQ未知" value="jq_unknown" />
+              </el-select>
             </div>
             <div class="bt-pool-bar">
               <span class="pool-label">股票池</span>
-              <template v-if="isAllStocks">
-                <el-tag size="small" type="success" closable @close="clearAllStocks">全量A股 ({{ allStocksCount }} 只)</el-tag>
+              <!-- 池/自选组：单标签 -->
+              <template v-if="poolSource">
+                <el-tag size="small" type="success" closable @close="clearAllStocks">
+                  {{ poolSource.label }} ({{ poolSource.count }} 只)
+                </el-tag>
               </template>
+              <!-- 手动输入：逐个标签 -->
               <template v-else>
                 <el-tag
                   v-for="sym in btSymbols"
@@ -238,49 +269,35 @@
                   @blur="addSymbol"
                 />
               </template>
-              <el-button size="small" text @click="showWatchlistPicker = true" v-if="!isAllStocks">从自选池导入</el-button>
-              <el-select
+              <el-button size="small" text @click="showWatchlistPicker = true" v-if="!poolSource">从自选池导入</el-button>
+                <el-select
                 v-model="selectedPool"
                 size="small"
                 placeholder="指数池"
                 style="width:130px"
-                @change="loadPoolSymbols"
+                @change="loadSelectedPool"
                 clearable
               >
+                <el-option label="中小综指" value="index:399101.SZ" />
                 <el-option label="沪深Top100" value="top100" />
                 <el-option label="沪深Top300" value="top300" />
                 <el-option label="沪深Top500" value="top500" />
                 <el-option label="全量A股" value="all" />
               </el-select>
-              <el-button size="small" text type="danger" @click="clearAllStocks" v-if="isAllStocks || btSymbols.length > 0">
-                清空 ({{ isAllStocks ? allStocksCount : btSymbols.length }})
+              <el-button size="small" text type="danger" @click="clearAllStocks" v-if="poolSource || btSymbols.length > 0">
+                清空 ({{ poolSource ? poolSource.count : btSymbols.length }})
               </el-button>
-              <span class="pool-count">{{ isAllStocks ? allStocksCount : btSymbols.length }} 只</span>
+              <span class="pool-count">{{ poolSource ? poolSource.count : btSymbols.length }} 只</span>
             </div>
 
             <Teleport to="body">
-              <el-dialog v-model="showWatchlistPicker" title="从自选池导入" width="500px">
-                <el-select v-model="selectedWatchlistGroup" placeholder="选择分组" style="width:100%" @change="loadWatchlistStocks">
+              <el-dialog v-model="showWatchlistPicker" title="从自选池导入" width="420px">
+                <el-select v-model="selectedWatchlistGroup" placeholder="选择分组" style="width:100%">
                   <el-option v-for="g in watchlistGroups" :key="g.id" :label="g.name + ' (' + g.stock_count + '只)'" :value="g.id" />
                 </el-select>
-                <div v-if="watchlistStocks.length > 0" style="margin-top:12px">
-                  <el-button size="small" text @click="selectedWatchlistStocks = watchlistStocks.map(s => s.symbol)">全选</el-button>
-                  <el-button size="small" text @click="selectedWatchlistStocks = []">取消全选</el-button>
-                  <span style="color:#888;font-size:12px;margin-left:8px">已选 {{ selectedWatchlistStocks.length }}/{{ watchlistStocks.length }}</span>
-                </div>
-                <div style="margin-top:8px;max-height:260px;overflow-y:auto">
-                  <el-checkbox-group v-model="selectedWatchlistStocks">
-                    <div v-for="s in watchlistStocks" :key="s.symbol" style="padding:2px 0">
-                      <el-checkbox :value="s.symbol" :label="s.symbol">
-                        {{ s.symbol }} <span style="color:#888;font-size:12px">{{ s.stock_name }}</span>
-                      </el-checkbox>
-                    </div>
-                  </el-checkbox-group>
-                </div>
                 <template #footer>
                   <el-button size="small" @click="showWatchlistPicker = false">取消</el-button>
-                  <el-button size="small" @click="replaceWithWatchlistStocks" type="warning">替换为所选</el-button>
-                  <el-button size="small" type="primary" @click="applyWatchlistStocks">添加到股票池</el-button>
+                  <el-button size="small" type="primary" @click="useWatchlistGroup">使用此分组</el-button>
                 </template>
               </el-dialog>
             </Teleport>
@@ -303,63 +320,18 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
-import { strategyApi, type Strategy, type LiveData, type TaskStatus, type BacktestResultData } from '@/api/backtest'
+import { strategyApi, type Strategy, type LiveData, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
-import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/data'
+import { watchlistApi, type WatchlistGroup } from '@/api/data'
 import BacktestList from './BacktestList.vue'
 import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
 import LLMStrategyPanel from './LLMStrategyPanel.vue'
 import { formatDateTime } from '@/utils/format'
 
-const SAMPLE_CODE = `def init(context):
-    # 策略参数
-    context.fast = 5
-    context.slow = 20
-
-    # 运行信息
-    log(f"回测区间: {context.run_info.start_date} ~ {context.run_info.end_date}")
-    log(f"初始资金: {context.run_info.capital:,.0f}")
-    log(f"标的: {context.run_info.symbols}")
-
-def handle_bar(context, bar_dict):
-    # bar_dict 包含当日所有标的的 Bar，每天触发一次
-    for symbol in bar_dict:
-        bar = bar_dict[symbol]
-
-        # 跳过停牌
-        if bar.suspended or bar.isnan:
-            continue
-
-        # 获取历史收盘价序列
-        hist = context.get_history(symbol, 252)
-        if hist.empty or len(hist) < context.slow:
-            continue
-        close = hist['close']
-
-        # 计算快慢均线
-        mf = MA(close, context.fast)
-        ms = MA(close, context.slow)
-
-        # 金叉买入
-        if CROSS(mf, ms).iloc[-1] == 1:
-            if not context.portfolio.get_position(symbol):
-                context.order_value(symbol, context.portfolio.total_value * 0.2)
-
-        # 死叉卖出
-        elif CROSS(mf, ms).iloc[-1] == -1:
-            pos = context.portfolio.get_position(symbol)
-            if pos and pos.total_shares > 0:
-                context.order_shares(symbol, -pos.total_shares)
-
-    # 定期输出状态
-    now = context.now
-    if now.day % 30 == 0:
-        nav = context.portfolio.unit_net_value
-        log(f"[{now.date()}] nav={nav:.3f} cash={context.stock_account.available_cash:,.0f}")`
 
 const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
@@ -655,7 +627,6 @@ const currentPage = ref(1)
 const pageSize = ref(20)
 const saving = ref(false)
 
-const backtestListRef = ref<InstanceType<typeof BacktestList> | null>(null)
 
 // ── Strategy list ──
 const loadStrategies = async () => {
@@ -989,32 +960,166 @@ const getDefaultStartDate = () => {
   d.setFullYear(d.getFullYear() - 1)
   return d.toISOString().slice(0, 10)
 }
+const SMALL_CAP_MINUTE_START_DATE = '2021-05-15'
 
-const btStartDate = ref(getDefaultStartDate())
-const btEndDate = ref(getDefaultEndDate())
-const btCapital = ref(1_000_000)
-const btFrequency = ref('monthly')
-const btBarType = ref('daily')
-const btSymbols = ref<string[]>([])
+const BTSET_KEY = 'backtest_settings'
+
+interface BtSettings {
+  symbols?: string[]
+  poolSource?: { type: string; label: string; count: number; symbols: string[]; indexSymbol?: string } | null
+  startDate?: string
+  endDate?: string
+  capital?: number
+  frequency?: string
+  barType?: string
+  engine?: string
+  smallCap?: {
+    stockNum?: number
+    cashBufferPct?: number
+    enableIndicator?: boolean
+    enableIndicatorExit?: boolean
+    enableIndustryFilter?: boolean
+    maxIndustryWeightPct?: number
+    hvControl?: boolean
+    dailyVolumeToShareMultiplier?: number
+    runStoploss?: boolean
+    passApril?: boolean
+    indicatorMode?: string
+    industryMode?: string
+  }
+}
+
+const loadBtSettings = (): BtSettings => {
+  try {
+    const raw = localStorage.getItem(BTSET_KEY)
+    return raw ? JSON.parse(raw) : {}
+  } catch { return {} }
+}
+
+const saveBtSettings = () => {
+  const s: BtSettings = {
+    symbols: btSymbols.value.length > 0 ? btSymbols.value : undefined,
+    poolSource: poolSource.value ?? undefined,
+    startDate: btStartDate.value,
+    endDate: btEndDate.value,
+    capital: btCapital.value,
+    frequency: btFrequency.value,
+    barType: btBarType.value,
+    engine: btEngine.value,
+    smallCap: {
+      stockNum: scStockNum.value,
+      cashBufferPct: scCashBufferPct.value,
+      enableIndicator: scEnableIndicator.value,
+      enableIndicatorExit: scEnableIndicatorExit.value,
+      enableIndustryFilter: scEnableIndustryFilter.value,
+      maxIndustryWeightPct: scMaxIndustryWeightPct.value,
+      hvControl: scHVControl.value,
+      dailyVolumeToShareMultiplier: scDailyVolumeToShareMultiplier.value,
+      runStoploss: scRunStoploss.value,
+      passApril: scPassApril.value,
+      indicatorMode: scIndicatorMode.value,
+      industryMode: scIndustryMode.value,
+    },
+  }
+  try { localStorage.setItem(BTSET_KEY, JSON.stringify(s)) } catch { /* quota exceeded */ }
+}
+
+const saved = loadBtSettings()
+if (saved.engine) btEngine.value = saved.engine
+const btStartDate = ref(saved.startDate || getDefaultStartDate())
+const btEndDate = ref(saved.endDate || getDefaultEndDate())
+const btCapital = ref(saved.capital ?? 1_000_000)
+const btFrequency = ref(saved.frequency || 'monthly')
+const btBarType = ref(saved.barType || 'daily')
+const btSymbols = ref<string[]>(saved.symbols || [])
+const scStockNum = ref(saved.smallCap?.stockNum ?? 5)
+const scCashBufferPct = ref(saved.smallCap?.cashBufferPct ?? 1.0)
+const scEnableIndicator = ref(saved.smallCap?.enableIndicator ?? true)
+const scEnableIndicatorExit = ref(saved.smallCap?.enableIndicatorExit ?? true)
+const scEnableIndustryFilter = ref(saved.smallCap?.enableIndustryFilter ?? true)
+const scMaxIndustryWeightPct = ref(saved.smallCap?.maxIndustryWeightPct ?? 30)
+const scHVControl = ref(saved.smallCap?.hvControl ?? true)
+const scDailyVolumeToShareMultiplier = ref(saved.smallCap?.dailyVolumeToShareMultiplier ?? 100)
+const scRunStoploss = ref(saved.smallCap?.runStoploss ?? true)
+const scPassApril = ref(saved.smallCap?.passApril ?? true)
+const scIndicatorMode = ref(saved.smallCap?.indicatorMode ?? 'robust')
+const scIndustryMode = ref(saved.smallCap?.industryMode ?? 'local')
 const isAllStocks = ref(false)
+const poolSource = ref<{ type: string; label: string; count: number; symbols: string[]; indexSymbol?: string } | null>(saved.poolSource || null)
 const allStocksCount = ref(0)
 const newSymbolInput = ref('')
 const showWatchlistPicker = ref(false)
 const selectedPool = ref<string | null>(null)
 const watchlistGroups = ref<WatchlistGroup[]>([])
 const selectedWatchlistGroup = ref<number | null>(null)
-const watchlistStocks = ref<WatchlistStock[]>([])
-const selectedWatchlistStocks = ref<string[]>([])
+
+// 最终提交用的 symbol 列表
+const effectiveSymbols = computed(() => {
+  if (poolSource.value?.type === 'index') return []
+  if (poolSource.value) return poolSource.value.symbols
+  return btSymbols.value
+})
+const selectedIndexSymbol = computed(() => poolSource.value?.type === 'index' ? poolSource.value.indexSymbol : undefined)
+const isSmallCapStrategy = computed(() => {
+  const name = String(activeStrategy.value?.name || '')
+  const code = String(btCode.value || activeStrategy.value?.code || '')
+  return activeStrategy.value?.id === 43 || name.includes('小市值') || code.includes('SmallCapV4Strategy')
+})
+const refreshSmallCapTimerStartDate = async () => {
+  if (!isSmallCapStrategy.value || saved.startDate) return
+  try {
+    const { default: request } = await import('@/api/request')
+    const indexSymbol = selectedIndexSymbol.value || '399101.SZ'
+    const res = await request.get<any>(
+      `/v2/backtest/timer-coverage?index_symbol=${indexSymbol}&start_date=${SMALL_CAP_MINUTE_START_DATE}&end_date=${btEndDate.value}&times=10:00,10:30,14:30,14:50`,
+      { timeout: 120000 }
+    )
+    const start = res?.earliest_date
+    if (start && btStartDate.value < start) {
+      btStartDate.value = start
+      ElMessage.info(`已按 ClickHouse 稀疏分钟数据将起始日期设置为 ${start}`)
+    }
+  } catch {
+    if (btStartDate.value < '2025-04-23') {
+      btStartDate.value = '2025-04-23'
+    }
+  }
+}
+watch(isSmallCapStrategy, enabled => {
+  if (enabled && !saved.startDate && btStartDate.value < SMALL_CAP_MINUTE_START_DATE) {
+    btStartDate.value = SMALL_CAP_MINUTE_START_DATE
+  }
+  if (enabled) {
+    refreshSmallCapTimerStartDate()
+  }
+}, { immediate: true })
+const smallCapStrategyParams = computed(() => isSmallCapStrategy.value ? {
+  timer_times: ['09:15', '10:00', '10:30', '14:30', '14:50', '15:10'],
+  stock_num: scStockNum.value,
+  cash_buffer_rate: scCashBufferPct.value / 100,
+  enable_indicator: scEnableIndicator.value,
+  enable_indicator_exit: scEnableIndicatorExit.value,
+  enable_industry_filter: scEnableIndustryFilter.value,
+  max_industry_weight: scMaxIndustryWeightPct.value / 100,
+  HV_control: scHVControl.value,
+  daily_volume_to_share_multiplier: scDailyVolumeToShareMultiplier.value,
+  run_stoploss: scRunStoploss.value,
+  pass_april: scPassApril.value,
+  v4_indicator_mode: scIndicatorMode.value,
+  industry_mode: scIndustryMode.value,
+} : undefined)
 
 const addSymbol = () => {
   const s = newSymbolInput.value.trim().toUpperCase()
   if (s && /^\d{6}\.(SZ|SH|BJ)$/.test(s) && !btSymbols.value.includes(s)) {
-    btSymbols.value.push(s)
+    poolSource.value = null
+    btSymbols.value = [...btSymbols.value, s]
   }
   newSymbolInput.value = ''
 }
 
 const removeSymbol = (sym: string) => {
+  poolSource.value = null
   btSymbols.value = btSymbols.value.filter(s => s !== sym)
 }
 
@@ -1024,30 +1129,30 @@ const loadWatchlistGroups = async () => {
   } catch { /* non-critical */ }
 }
 
-const loadWatchlistStocks = async (groupId: number) => {
+const useWatchlistGroup = async () => {
+  const gid = selectedWatchlistGroup.value
+  if (!gid) return
   try {
-    const stocks = await watchlistApi.getGroupStocks(groupId)
-    watchlistStocks.value = stocks || []
-    selectedWatchlistStocks.value = []
-  } catch { /* non-critical */ }
-}
-
-const applyWatchlistStocks = () => {
-  for (const sym of selectedWatchlistStocks.value) {
-    if (!btSymbols.value.includes(sym)) {
-      btSymbols.value.push(sym)
+    const stocks = await watchlistApi.getGroupStocks(gid)
+    const symbols = (stocks || []).map((s: any) => s.symbol)
+    if (symbols.length === 0) {
+      ElMessage.warning('该分组无股票')
+      return
     }
+    const grp = watchlistGroups.value.find(g => g.id === gid)
+    poolSource.value = {
+      type: 'watchlist',
+      label: grp?.name || '自选池',
+      count: symbols.length,
+      symbols,
+    }
+    btSymbols.value = []
+    isAllStocks.value = false
+    showWatchlistPicker.value = false
+    ElMessage.success(`已加载 ${grp?.name || '自选池'} (${symbols.length} 只)`)
+  } catch (e: any) {
+    ElMessage.error(`加载失败: ${e?.message || e}`)
   }
-  showWatchlistPicker.value = false
-}
-
-const replaceWithWatchlistStocks = () => {
-  if (selectedWatchlistStocks.value.length === 0) return
-  isAllStocks.value = false
-  allStocksCount.value = 0
-  btSymbols.value = [...selectedWatchlistStocks.value]
-  showWatchlistPicker.value = false
-  ElMessage.success(`已替换为 ${btSymbols.value.length} 只自选股`)
 }
 
 const loadPoolSymbols = async (poolName: string | null) => {
@@ -1056,17 +1161,18 @@ const loadPoolSymbols = async (poolName: string | null) => {
     const { default: request } = await import('@/api/request')
     const res = await request.get<any>(`/v2/backtest/pools/${poolName}`, { timeout: 120000 })
     if (res?.symbols?.length) {
-      if (poolName === 'all') {
-        isAllStocks.value = true
-        allStocksCount.value = res.symbols.length
-        btSymbols.value = res.symbols  // store for API call, but don't render tags
-        ElMessage.success(`已切换全量A股模式 (${res.symbols.length} 只)`)
-      } else {
-        isAllStocks.value = false
-        allStocksCount.value = 0
-        btSymbols.value = res.symbols
-        ElMessage.success(`已加载 ${poolName} 股票池 (${res.symbols.length} 只)`)
+      const labelMap: Record<string, string> = {
+        top100: '沪深Top100', top300: '沪深Top300', top500: '沪深Top500', all: '全量A股',
       }
+      poolSource.value = {
+        type: 'pool',
+        label: labelMap[poolName] || poolName,
+        count: res.symbols.length,
+        symbols: res.symbols,
+      }
+      btSymbols.value = []
+      isAllStocks.value = false
+      ElMessage.success(`已加载 ${labelMap[poolName] || poolName} (${res.symbols.length} 只)`)
     } else {
       ElMessage.warning(`${poolName} 股票池为空`)
     }
@@ -1076,10 +1182,44 @@ const loadPoolSymbols = async (poolName: string | null) => {
   selectedPool.value = null
 }
 
+const loadIndexPool = async (indexSymbol: string | null) => {
+  if (!indexSymbol) return
+  try {
+    const { default: request } = await import('@/api/request')
+    const res = await request.get<any>(
+      `/v2/backtest/index-pools/${indexSymbol}?start_date=${btStartDate.value}&end_date=${btEndDate.value}`,
+      { timeout: 120000 }
+    )
+    poolSource.value = {
+      type: 'index',
+      label: res?.index_symbol === '399101.SZ' ? '中小综指' : (res?.index_symbol || indexSymbol),
+      count: res?.symbol_count || 0,
+      symbols: res?.symbols || [],
+      indexSymbol: res?.index_symbol || indexSymbol,
+    }
+    btSymbols.value = []
+    isAllStocks.value = false
+    ElMessage.success(`已选择指数池 ${poolSource.value.label}，历史成分 ${poolSource.value.count} 只`)
+  } catch (e: any) {
+    ElMessage.error(`加载指数池失败: ${e?.message || e}`)
+  }
+  selectedPool.value = null
+}
+
+const loadSelectedPool = async (poolName: string | null) => {
+  if (!poolName) return
+  if (poolName.startsWith('index:')) {
+    await loadIndexPool(poolName.slice('index:'.length))
+    return
+  }
+  await loadPoolSymbols(poolName)
+}
+
 const clearAllStocks = () => {
   btSymbols.value = []
   isAllStocks.value = false
   allStocksCount.value = 0
+  poolSource.value = null
 }
 
 const btRunning = ref(false)
@@ -1091,12 +1231,44 @@ const showReport = ref(false)
 const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
 const btErrors = ref<string[]>([])
+let lastLiveLogKey = ''
 
-const freqLabelMap: Record<string, string> = {
-  daily: '每天',
-  weekly: '每周',
-  monthly: '每月',
+const appendBtLog = (message: string) => {
+  if (!message) return
+  const line = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${message}`
+  if (btLogs.value[btLogs.value.length - 1] === line) return
+  btLogs.value = [...btLogs.value.slice(-199), line]
 }
+
+const syncLiveLogs = (live: LiveData | null, progress = 0) => {
+  if (!live) return
+  const metadata = (live as any).metadata || {}
+  const snapshot = (live as any).metrics_snapshot || {}
+  const chunkIndex = metadata.chunk_index ?? snapshot.chunk_index
+  const chunkTotal = metadata.chunk_total ?? snapshot.chunk_total
+  const currentDate = live.current_date || '-'
+  const latestEvent = Array.isArray(live.events) && live.events.length
+    ? live.events[live.events.length - 1]
+    : null
+  const eventMessage = latestEvent?.message || latestEvent?.type || ''
+  const logKey = [
+    metadata.phase || '',
+    currentDate,
+    chunkIndex || '',
+    chunkTotal || '',
+    Math.round(progress * 100),
+    eventMessage,
+  ].join('|')
+  if (logKey === lastLiveLogKey) return
+  lastLiveLogKey = logKey
+
+  if (chunkIndex && chunkTotal) {
+    appendBtLog(`分段 ${chunkIndex}/${chunkTotal} | 日期 ${currentDate} | 进度 ${Math.round(progress * 100)}% | ${eventMessage || '运行中'}`)
+    return
+  }
+  appendBtLog(`日期 ${currentDate} | 进度 ${Math.round(progress * 100)}% | ${eventMessage || '运行中'}`)
+}
+
 
 const openDocs = () => {
   window.open('/docs', '_blank')
@@ -1182,162 +1354,118 @@ const handleBacktest = async (row: Strategy) => {
   }
 }
 
-const handleRunBacktest = async () => {
+
+const runBacktestTask = async () => {
   if (!activeStrategy.value) {
-    // 用户未创建/选择策略时，自动创建一条临时策略再运行
     const code = btCode.value || btExpression.value || ''
     if (!code.trim()) {
       ElMessage.warning('请先编写策略代码')
       return
     }
-    try {
-      const { default: request } = await import('@/api/request')
-      const res = await request.post('/backtest/strategies', {
-        name: '临时策略',
-        code,
-        description: '自动创建'
-      })
-      const strategyId = res?.id
-      if (strategyId) {
-        activeStrategy.value = { id: strategyId, name: '临时策略', code }
-        handleBacktest(activeStrategy.value)
-      }
-    } catch {
-      // fallback: API 不可用时直接用内存策略
-      activeStrategy.value = { id: 0, name: '临时策略', code }
-      handleBacktest(activeStrategy.value)
-    }
   }
-  if (btSymbols.value.length === 0 && !isAllStocks.value) {
-    // 自动加载 top10 作为默认股票池
+
+  if (btSymbols.value.length === 0 && !isAllStocks.value && !poolSource.value) {
     try {
       const { default: request } = await import('@/api/request')
-      const data = await request.get('/v2/backtest/pools/top100')
+      const data = await request.get<{ symbols: string[] }>('/v2/backtest/pools/top100')
       if (data?.symbols?.length) {
         btSymbols.value = data.symbols.slice(0, 10).filter(Boolean)
         ElMessage.success(`已自动加载 ${btSymbols.value.length} 只默认股票`)
       }
     } catch {
-      ElMessage.warning('请先添加回测股票或在右上角选择指数池')
+      ElMessage.warning('请先添加回测股票或选择指数池')
       return
     }
   }
+
   btRunning.value = true
   btLiveData.value = null
   btFullResult.value = null
   btMetrics.value = []
-  btLogs.value = ['正在运行回测...']
+  btLogs.value = []
   btErrors.value = []
+  btProgress.value = 0
+  btTaskId.value = null
+  lastLiveLogKey = ''
+  appendBtLog('开始回测')
 
   const isExpression = editorTab.value === 'expression'
-  const isBuiltin = editorTab.value === 'builtin' && builtinType.value
   const code = isExpression ? btExpression.value : btCode.value
   const mode = isExpression ? 'vectorized' : 'event_driven'
   const engine = btEngine.value
 
   try {
     const { default: request } = await import('@/api/request')
-
-    if (isBuiltin) {
-      // 内置策略独立引擎 — 直接返回结果
-      const res = await request.post<any>('/strategy/deep-value/backtest', {
+    const res = await request.post<any>(
+      '/v2/backtest/run',
+      {
+        engine,
+        mode,
+        factor_expression: isExpression ? code : undefined,
+        strategy_code: !isExpression && engine === 'akquant' ? code : undefined,
+        strategy_id: activeStrategy.value?.id || undefined,
+        buy_condition: !isExpression && engine === 'builtin' ? code : undefined,
+        symbols: effectiveSymbols.value,
+        universe_mode: selectedIndexSymbol.value ? 'index' : 'symbols',
+        index_symbol: selectedIndexSymbol.value,
         start_date: btStartDate.value,
         end_date: btEndDate.value,
         initial_capital: btCapital.value,
-        pool: dvPool.value,
-        pe_min: dvPeMin.value,
-        pe_max: dvPeMax.value,
-        dividend_yield_min: dvDivMin.value,
-        price_to_ma_max: dvPriceMA.value,
-        max_positions: dvMaxPos.value,
-        single_pct: dvSinglePct.value / 100,
-      }, { timeout: 120000 })
-      btFullResult.value = {
-        total_return: res.total_return ?? 0,
-        annual_return: res.annual_return ?? 0,
-        total_trades: res.total_trades,
-        win_trades: res.win_trades,
-        loss_trades: res.loss_trades,
-        win_rate: res.win_rate ?? 0,
-        avg_return: res.avg_return ?? 0,
-        max_drawdown: res.max_drawdown ?? 0,
-        trades: res.trades?.map((t: any) => ({
-          trade_date: t.trade_date,
-          symbol: t.symbol,
-          direction: t.direction,
-          price: t.price,
-          quantity: t.shares,
-          pnl: t.pnl_pct,
-          dividend: t.dividend,
-        })),
-        final_capital: res.final_capital,
-        basket_returns: res.basket_returns,
+        rebalance_freq: btFrequency.value,
+        n_groups: isExpression ? btNGroups.value : 5,
+        bar_type: isSmallCapStrategy.value ? 'minute_timer' : btBarType.value,
+        max_positions: isSmallCapStrategy.value ? scStockNum.value : undefined,
+        commission_rate: isSmallCapStrategy.value ? 0.00025 : undefined,
+        stamp_tax_rate: isSmallCapStrategy.value ? 0.001 : undefined,
+        transfer_fee_rate: isSmallCapStrategy.value ? 0.00001 : undefined,
+        min_commission: isSmallCapStrategy.value ? 5 : undefined,
+        lot_size: isSmallCapStrategy.value ? 100 : undefined,
+        strategy_params: smallCapStrategyParams.value,
+      },
+      { timeout: 30000 }
+    )
+
+    const taskId = (res as any)?.task_id
+    if (!taskId) {
+      if (res) {
+        btFullResult.value = res as BacktestResultData
+        appendBtLog('回测完成')
+        saveBtSettings()
       }
-      btProgress.value = 1
-      btLogs.value = [`回测完成 (${res.basket_count || 0} 期)`]
-      btRunning.value = false
-      showReport.value = true
       return
     }
 
-    const res = await request.post<any>('/v2/backtest/run', {
-      engine,
-      mode,
-      factor_expression: isExpression ? code : undefined,
-      strategy_code: (!isExpression && engine === 'akquant') ? code : undefined,
-      buy_condition: (!isExpression && engine === 'builtin') ? code : undefined,
-      symbols: btSymbols.value,
-      start_date: btStartDate.value,
-      end_date: btEndDate.value,
-      initial_capital: btCapital.value,
-      rebalance_freq: btFrequency.value,
-      n_groups: isExpression ? btNGroups.value : 5,
-      bar_type: btBarType.value,
-    }, { timeout: 600000 })
+    btTaskId.value = taskId
+    appendBtLog(`任务已提交 (${taskId})，开始轮询状态`)
 
-    // 拦截器已解包 {code, data} → data 字段直接返回
-    const taskId = (res as any)?.task_id
-    if (taskId) {
-      btTaskId.value = taskId
-      btLogs.value = [`任务已提交 (${taskId})，等待完成...`]
-      let attempts = 0
-      while (attempts < 300) {
-        await new Promise(r => setTimeout(r, 2000))
-        const statusData = await request.get<any>(`/v2/backtest/status/${taskId}`)
-        btProgress.value = statusData?.progress ?? 0
-        if (statusData?.live) {
-          btLiveData.value = statusData.live
-        }
-        if (statusData?.status === 'done') {
-          btLiveData.value = statusData.live
-          const data = await request.get<any>(`/v2/backtest/result/${taskId}`)
-          if (data) {
-            btFullResult.value = data as BacktestResultData
-            btLogs.value = ['回测完成']
-          }
-          break
-        } else if (statusData?.status === 'failed') {
-          const errData = await request.get<any>(`/v2/backtest/result/${taskId}`)
-          btErrors.value = [errData?.error || '回测失败']
-          btLogs.value = ['回测执行失败']
-          break
-        }
-        attempts++
+    let terminal = false
+    while (!terminal) {
+      await new Promise(r => setTimeout(r, 2000))
+      const statusData = await request.get<any>(`/v2/backtest/status/${taskId}`)
+      btProgress.value = statusData?.progress ?? 0
+      if (statusData?.live) {
+        btLiveData.value = statusData.live
+        syncLiveLogs(statusData.live, btProgress.value)
       }
-      if (attempts >= 300) {
-        btErrors.value = ['回测超时']
-        btLogs.value = ['回测超时（10分钟）']
-      }
-    } else {
-      // 同步返回结果（vectorized 模式直接返回）
-      if (res) {
-        btFullResult.value = res as BacktestResultData
-        btLogs.value = ['回测完成']
+
+      if (statusData?.status === 'done') {
+        const data = await request.get<any>(`/v2/backtest/result/${taskId}`)
+        if (data) {
+          btFullResult.value = data as BacktestResultData
+          appendBtLog('回测完成')
+          saveBtSettings()
+        }
+        terminal = true
+      } else if (statusData?.status === 'failed') {
+        const errData = await request.get<any>(`/v2/backtest/result/${taskId}`)
+        btErrors.value = [errData?.error || '回测失败']
+        appendBtLog(`回测失败: ${btErrors.value[0]}`)
+        terminal = true
       }
     }
   } catch (e: any) {
     btErrors.value = [e?.message || '回测失败']
-    btLogs.value = ['回测执行失败']
+    appendBtLog(`回测执行失败: ${btErrors.value[0]}`)
   } finally {
     btRunning.value = false
   }
@@ -1491,7 +1619,7 @@ const applyUploadResult = () => {
     activeTab.value = 'backtestRunner'
     ElMessage.success('策略已生成并填充到编辑器')
     loadStrategies()
-  }).catch((e) => {
+  }).catch(() => {
     // Still fill editor even if DB save fails
     activeStrategy.value = { id: 0, name: r.name || '研报策略', code: r.code || '', description: r.summary || '', parameters: null, created_at: null, updated_at: null }
     if (r.strategy_type === 'builtin') {
@@ -1685,6 +1813,25 @@ onMounted(async () => {
   color: #c0c0cc;
 }
 .bt-pool-bar :deep(.el-select .el-input__wrapper) {
+  background: #141418;
+  box-shadow: none;
+}
+.smallcap-params-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #16161d;
+  border: 1px solid #2a2a35;
+  border-radius: 8px;
+  flex-wrap: wrap;
+  color: #9aa0aa;
+  font-size: 12px;
+}
+.smallcap-params-bar :deep(.el-checkbox) {
+  margin-right: 0;
+}
+.smallcap-params-bar :deep(.el-input__wrapper) {
   background: #141418;
   box-shadow: none;
 }

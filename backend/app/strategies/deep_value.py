@@ -1,7 +1,7 @@
 """深度价值策略 — 年度调仓版本
 
 每年5月第一个交易日后筛选，等权买入，持有到次年5月。
-直接查询 ClickHouse，绕过事件引擎，10年回测 < 30秒。
+通过 MarketDataStore 读取行情数据，ClickHouse 为可选高性能后端。
 """
 from __future__ import annotations
 
@@ -11,7 +11,9 @@ from typing import Any
 
 import numpy as np
 
-from app.db.clickhouse import get_ch_client
+from app.data_stores import get_market_data_store
+from app.data_stores.factory import get_indicator_store
+from app.core.config import settings
 
 
 @dataclass
@@ -31,7 +33,8 @@ class DeepValueStrategy:
     SINGLE_PCT = 0.10
 
     def __init__(self, pool_symbols: list[str] | None = None):
-        self.ch = get_ch_client()
+        self._store = get_market_data_store()
+        self._indicator_store = get_indicator_store()
         self.pool_symbols = pool_symbols
 
     def _get_pool(self) -> list[str]:
@@ -51,13 +54,7 @@ class DeepValueStrategy:
 
     def _get_may_dates(self, start: date, end: date) -> list[date]:
         """获取每个5月的第一个可用交易日"""
-        rows = self.ch.execute(
-            "SELECT DISTINCT trade_date FROM klines_daily "
-            "WHERE trade_date >= %(s)s AND trade_date <= %(e)s "
-            "ORDER BY trade_date",
-            {"s": start, "e": end},
-        )
-        all_dates = [r[0] for r in rows]
+        all_dates = self._store.load_trading_dates([], start, end)
         may_dates = []
         for d in all_dates:
             if d.month == 5:
@@ -68,47 +65,52 @@ class DeepValueStrategy:
 
     def screen(self, as_of_date: date, pool: list[str]) -> list[dict]:
         """批量筛选候选股票 — 一次查询获取全量数据，按 score 排序"""
-        # ── 批量获取收盘价 ──
-        close_rows = self.ch.execute(
-            "SELECT symbol, close FROM klines_daily "
-            "WHERE symbol IN %(syms)s AND trade_date=("
-            "SELECT max(trade_date) FROM klines_daily "
-            "WHERE trade_date<=%(d)s AND symbol=klines_daily.symbol)",
-            {"syms": tuple(pool), "d": as_of_date},
-        )
-        close_map = {r[0]: float(r[1]) for r in close_rows}
+        # ── 批量获取收盘价 (从 Parquet/ClickHouse klines_daily) ──
+        lookback = as_of_date - timedelta(days=30)
+        df = self._store.load_daily(pool, lookback, as_of_date)
+        if df.empty:
+            return []
+        # 获取每个 symbol 的最新收盘价
+        df_sorted = df.sort_index()
+        latest = df_sorted.groupby("symbol").last()
+        close_map = {sym: float(row["close"]) for sym, row in latest.iterrows()}
 
-        # ── 批量获取250周均线 ──
-        ma_rows = self.ch.execute(
-            "SELECT symbol, avg(close) FROM ("
-            "SELECT symbol, close, row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn "
-            "FROM klines_weekly WHERE symbol IN %(syms)s AND trade_date<=%(d)s"
-            ") WHERE rn <= 250 GROUP BY symbol",
-            {"syms": tuple(pool), "d": as_of_date},
-        )
-        ma_map = {r[0]: float(r[1]) for r in ma_rows if r[1]}
+        # ── 批量获取250周均线 (ClickHouse klines_weekly，Parquet 暂无周线) ──
+        if settings.clickhouse_enabled or settings.market_data_backend == "clickhouse":
+            from app.db.clickhouse import get_ch_client
+            ch = get_ch_client()
+            ma_rows = ch.execute(
+                "SELECT symbol, avg(close) FROM ("
+                "SELECT symbol, close, row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn "
+                "FROM klines_weekly WHERE symbol IN %(syms)s AND trade_date<=%(d)s"
+                ") WHERE rn <= 250 GROUP BY symbol",
+                {"syms": tuple(pool), "d": as_of_date},
+            )
+            ma_map = {r[0]: float(r[1]) for r in ma_rows if r[1]}
+        else:
+            # Fallback: 用日线估算 250 日均线替代 250 周均线
+            ma_map = {}
+            for sym in pool:
+                sym_data = df[df["symbol"] == sym]
+                if len(sym_data) >= 250:
+                    ma_map[sym] = float(sym_data["close"].tail(250).mean())
 
-        # ── 批量获取PE ──
-        pe_rows = self.ch.execute(
-            "SELECT symbol, value FROM ("
-            "SELECT symbol, value, row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn "
-            "FROM stock_indicators WHERE symbol IN %(syms)s "
-            "AND indicator_name='pe_ttm' AND trade_date<=%(d)s"
-            ") WHERE rn=1",
-            {"syms": tuple(pool), "d": as_of_date},
+        # ── 批量获取PE和股息率 (从 IndicatorStore) ──
+        ind_df = self._indicator_store.load_cross_section(
+            ["pe_ttm", "dividend_yield"], as_of_date, pool
         )
-        pe_map = {r[0]: float(r[1]) for r in pe_rows if r[1] and float(r[1]) > 0}
-
-        # ── 批量获取股息率 ──
-        dy_rows = self.ch.execute(
-            "SELECT symbol, value FROM ("
-            "SELECT symbol, value, row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn "
-            "FROM stock_indicators WHERE symbol IN %(syms)s "
-            "AND indicator_name='dividend_yield' AND trade_date<=%(d)s"
-            ") WHERE rn=1",
-            {"syms": tuple(pool), "d": as_of_date},
-        )
-        dy_map = {r[0]: float(r[1]) for r in dy_rows if r[1] and float(r[1]) > 0}
+        pe_map = {}
+        dy_map = {}
+        if not ind_df.empty:
+            for _, r in ind_df.iterrows():
+                name = r["indicator_name"]
+                val = float(r["value"]) if r["value"] is not None else None
+                if val is None:
+                    continue
+                if name == "pe_ttm" and val > 0:
+                    pe_map[r["symbol"]] = val
+                elif name == "dividend_yield":
+                    dy_map[r["symbol"]] = val
 
         # ── 计算评分 ──
         candidates = []
@@ -267,20 +269,32 @@ class DeepValueStrategy:
         }
 
     def _get_price(self, symbol: str, as_of: date) -> float | None:
-        r = self.ch.execute(
-            "SELECT close FROM klines_daily "
-            "WHERE symbol=%(s)s AND trade_date<=%(d)s "
-            "ORDER BY trade_date DESC LIMIT 1",
-            {"s": symbol, "d": as_of},
-        )
-        return float(r[0][0]) if r and r[0] and r[0][0] else None
+        lookback = as_of - timedelta(days=60)
+        df = self._store.load_daily([symbol], lookback, as_of, columns=["close"])
+        if df.empty:
+            return None
+        val = float(df["close"].iloc[-1])
+        return val if val > 0 else None
 
     def _get_dividends_between(self, symbol: str, start: date, end: date) -> float:
         """获取两个日期之间的累计现金分红（每股）"""
-        r = self.ch.execute(
-            "SELECT sum(value) FROM stock_indicators "
-            "WHERE symbol=%(s)s AND indicator_name='dividend_cash' "
-            "AND trade_date > %(start)s AND trade_date <= %(end)s",
-            {"s": symbol, "start": start, "end": end},
-        )
-        return float(r[0][0] or 0) if r and r[0] else 0.0
+        try:
+            if settings.clickhouse_enabled or settings.market_data_backend == "clickhouse":
+                from app.db.clickhouse import get_ch_client
+                ch = get_ch_client()
+                r = ch.execute(
+                    "SELECT sum(value) FROM stock_indicators "
+                    "WHERE symbol=%(s)s AND indicator_name='dividend_cash' "
+                    "AND trade_date > %(start)s AND trade_date <= %(end)s",
+                    {"s": symbol, "start": start, "end": end},
+                )
+                return float(r[0][0] or 0) if r and r[0] else 0.0
+        except Exception:
+            pass
+        # Parquet fallback: load indicator cross sections
+        df = self._indicator_store.load_cross_section(["dividend_cash"], end, [symbol])
+        if df.empty:
+            return 0.0
+        vals = df[(df["trade_date"] > str(start)) & (df["trade_date"] <= str(end))]
+        total = vals["value"].sum() if not vals.empty else 0.0
+        return float(total) if total else 0.0

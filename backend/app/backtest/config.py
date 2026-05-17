@@ -1,4 +1,4 @@
-"""回测配置与结果数据结构"""
+"""Backtest configuration and result schemas."""
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Literal
@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 @dataclass
 class BacktestConfig:
-    """回测配置"""
+    """Backtest configuration."""
 
     mode: Literal["vectorized", "event_driven"] = "vectorized"
     symbols: list[str] = field(default_factory=list)
@@ -14,39 +14,55 @@ class BacktestConfig:
     end_date: date | None = None
     initial_capital: float = 1_000_000.0
 
-    # 向量化模式
+    # Vectorized mode
     factor_expression: str | None = None
     rebalance_freq: str = "monthly"
     n_groups: int = 5
     weight_method: str = "equal"
 
-    # 事件驱动模式
+    # 浜嬩欢椹卞姩妯″紡
     buy_condition: str | None = None
     sell_condition: str | None = None
     bar_type: str = "daily"
-    strategy_params: dict | None = None  # 用户策略参数
+    strategy_params: dict | None = None  # 鐢ㄦ埛绛栫暐鍙傛暟
 
-    # 风控
+    # 椋庢帶
     stop_loss: float | None = None
     stop_profit: float | None = None
     max_positions: int | None = None
+    risk_config: dict[str, Any] | None = None
 
-    # 交易成本
+    # 浜ゆ槗鎴愭湰
     commission_rate: float = 0.0003
     slippage: float = 0.001
+    stamp_tax_rate: float = 0.001
+    transfer_fee_rate: float = 0.00001
+    min_commission: float = 5.0
+    volume_limit_pct: float | None = 0.25
+    lot_size: int | dict[str, int] | None = 100
+    t_plus_one: bool = True
+    exit_on_last_bar: bool = True
 
-    # 引擎选择
+    # 寮曟搸閫夋嫨
     engine: str = "builtin"  # "builtin" | "akquant"
-    benchmark_symbol: str | None = None  # 基准指数，如 "000300.SH"
-    strategy_code: str | None = None  # akquant 策略代码
+    benchmark_symbol: str | None = None  # 鍩哄噯鎸囨暟锛屽 "000300.SH"
+    strategy_id: int | None = None
+    strategy_code: str | None = None  # akquant 绛栫暐浠ｇ爜
 
-    # 运行时缓存（不作为配置持久化）
+    instruments_config: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None
+    indicator_mode: str = "precompute"
+    bootstrap_samples: int = 1000
+    analysis_config: dict[str, Any] | None = None
+
+    # Runtime-only cache, not persisted as user config.
     _task_id: str | None = field(default=None, repr=False)
+    index_symbol: str | None = None
+    universe_mode: str = "symbols"
 
 
 @dataclass
 class BacktestResult:
-    """回测结果"""
+    """Backtest result."""
 
     total_return: float = 0.0
     annual_return: float = 0.0
@@ -62,6 +78,7 @@ class BacktestResult:
     total_trades: int = 0
     win_trades: int = 0
     loss_trades: int = 0
+    total_positions: int = 0
     win_rate: float = 0.0
     avg_return: float = 0.0
     turnover_rate: float = 0.0
@@ -97,6 +114,7 @@ class BacktestResult:
             "total_trades": self.total_trades,
             "win_trades": self.win_trades,
             "loss_trades": self.loss_trades,
+            "total_positions": self.total_positions,
             "win_rate": self.win_rate,
             "avg_return": self.avg_return,
             "turnover_rate": self.turnover_rate,
@@ -112,3 +130,4 @@ class BacktestResult:
             "final_capital": self.final_capital,
             "n_trading_days": self.n_trading_days,
         }
+

@@ -1,11 +1,11 @@
-"""交易日历 — 基于 ClickHouse klines_daily"""
+"""交易日历 — 基于 MarketDataStore klines_daily"""
 from datetime import date, timedelta
 
 from loguru import logger
 
 
 class TradingCalendar:
-    """交易日历 — 从 ClickHouse 获取有效交易日列表"""
+    """交易日历 — 从行情存储获取有效交易日列表"""
 
     def __init__(self, trading_dates: list[date] | None = None):
         """
@@ -25,23 +25,15 @@ class TradingCalendar:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> "TradingCalendar":
-        """从 ClickHouse klines_daily 加载唯一交易日 (线程池中执行)"""
+        """从行情存储加载唯一交易日 (线程池中执行)"""
         import asyncio
-        from app.db.clickhouse import get_ch_client
+        from app.data_stores import get_market_data_store
 
         def _load():
-            ch = get_ch_client()
-            query = "SELECT DISTINCT trade_date FROM klines_daily WHERE symbol IN %(syms)s"
-            params: dict = {"syms": symbols}
-            if start_date:
-                query += " AND trade_date >= %(start)s"
-                params["start"] = start_date
-            if end_date:
-                query += " AND trade_date <= %(end)s"
-                params["end"] = end_date
-            query += " ORDER BY trade_date"
-            rows = ch.execute(query, params)
-            return sorted({r[0] for r in rows})
+            store = get_market_data_store()
+            sd = start_date or date(2000, 1, 1)
+            ed = end_date or date.today()
+            return store.load_trading_dates(symbols, sd, ed)
 
         dates = await asyncio.to_thread(_load)
         logger.info("TradingCalendar: {} trading days", len(dates))

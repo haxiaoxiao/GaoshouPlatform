@@ -644,8 +644,8 @@ class QMTGateway:
         """获取日K线数据"""
         xt = self._get_xt()
 
-        start_str = start_date.strftime("%Y%m%d")
-        end_str = end_date.strftime("%Y%m%d")
+        start_str = start_date.strftime("%Y%m%d") + "000000"
+        end_str = end_date.strftime("%Y%m%d") + "235959"
 
         loop = asyncio.get_running_loop()
 
@@ -711,35 +711,73 @@ class QMTGateway:
         """获取分钟K线数据"""
         xt = self._get_xt()
 
-        start_str = start_date.strftime("%Y%m%d")
-        end_str = end_date.strftime("%Y%m%d")
+        start_str = start_date.strftime("%Y%m%d000000")
+        end_str = end_date.strftime("%Y%m%d235959")
 
         loop = asyncio.get_running_loop()
 
-        # 先下载历史数据
+        # 先主动触发 miniQMT 下载。download_history_data2 会等待下载完成并返回进度；
+        # 旧 download_history_data 在当前 miniQMT 环境下可能只触发、不落盘。
         try:
             await loop.run_in_executor(
                 None,
-                lambda: xt.download_history_data(symbol, period="1m", start_time=start_str, end_time=end_str),
+                lambda: xt.download_history_data2(
+                    [symbol],
+                    period="1m",
+                    start_time=start_str,
+                    end_time=end_str,
+                    callback=None,
+                    incrementally=False,
+                ),
             )
         except Exception:
-            pass
+            try:
+                await loop.run_in_executor(
+                    None,
+                    lambda: xt.download_history_data(
+                        symbol,
+                        period="1m",
+                        start_time=start_str,
+                        end_time=end_str,
+                        incrementally=False,
+                    ),
+                )
+            except Exception:
+                pass
 
-        # 获取数据
+        # 优先直接读取 MiniQMT 本地文件；GUI 批量下载完成后会落在 userdata_mini/datadir。
         data = await loop.run_in_executor(
             None,
-            lambda: xt.get_market_data_ex(
+            lambda: xt.get_local_data(
                 field_list=[],
                 stock_list=[symbol],
                 period="1m",
                 start_time=start_str,
                 end_time=end_str,
+                count=-1,
+                dividend_type="none",
+                fill_data=False,
             ),
         )
+        if not self._extract_xt_minute_frame(data, symbol).empty:
+            pass
+        else:
+            data = await loop.run_in_executor(
+                None,
+                lambda: xt.get_market_data_ex(
+                    field_list=[],
+                    stock_list=[symbol],
+                    period="1m",
+                    start_time=start_str,
+                    end_time=end_str,
+                    count=-1,
+                    fill_data=False,
+                ),
+            )
 
         results = []
-        if symbol in data:
-            df = data[symbol]
+        df = self._extract_xt_minute_frame(data, symbol)
+        if not df.empty:
             for idx, row in df.iterrows():
                 try:
                     # 索引可能是时间戳(毫秒)或字符串格式 20250423093000
@@ -775,6 +813,35 @@ class QMTGateway:
                     continue
 
         return results
+
+    @staticmethod
+    def _extract_xt_minute_frame(data: Any, symbol: str) -> pd.DataFrame:
+        """Normalize xtdata minute results across local/API return shapes."""
+        if not isinstance(data, dict) or not data:
+            return pd.DataFrame()
+        if symbol in data and hasattr(data[symbol], "iterrows"):
+            return data[symbol]
+
+        # Some xtdata docs describe get_local_data as {field: DataFrame}, where
+        # each frame is indexed by stock and columned by timetag.
+        fields = ["time", "open", "high", "low", "close", "volume", "amount"]
+        if not all(field in data for field in fields):
+            return pd.DataFrame()
+        close_df = data.get("close")
+        if not hasattr(close_df, "index") or symbol not in close_df.index:
+            return pd.DataFrame()
+
+        rows = []
+        for timetag in close_df.columns:
+            row = {}
+            for field in fields:
+                frame = data.get(field)
+                if hasattr(frame, "loc"):
+                    row[field] = frame.loc[symbol, timetag]
+            rows.append((str(timetag), row))
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame([row for _, row in rows], index=[idx for idx, _ in rows])
 
     async def get_kline_weekly(
         self,

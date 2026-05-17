@@ -362,6 +362,9 @@ class BacktestRunner:
         final_nav = navs[-1]["nav"] if navs else 1.0
         n_days = len(navs)
 
+        trades_list = trade_collector.to_dicts()
+        total_positions = len({t.get("symbol") for t in trades_list if t.get("symbol")})
+
         return BacktestResult(
             total_return=metrics.total_return,
             annual_return=metrics.annual_return,
@@ -376,11 +379,12 @@ class BacktestRunner:
             total_trades=metrics.total_trades,
             win_trades=metrics.win_trades,
             loss_trades=metrics.loss_trades,
+            total_positions=total_positions,
             win_rate=metrics.win_rate,
             avg_return=metrics.avg_return,
             nav_series=navs,
             daily_returns=d_returns,
-            trades=trade_collector.to_dicts(),
+            trades=trades_list,
             start_date=start,
             end_date=end,
             initial_capital=config.initial_capital,
@@ -396,44 +400,19 @@ class BacktestRunner:
         end_date: date | None,
     ) -> pd.DataFrame:
         """加载并计算因子矩阵"""
-        from app.db.clickhouse import get_ch_client
         from app.compute.expression import evaluate_expression
+        from app.data_stores import get_market_data_store
 
-        ch = get_ch_client()
-
-        query = """
-            SELECT symbol, trade_date, open, high, low, close, volume, amount
-            FROM klines_daily
-            WHERE symbol IN %(syms)s
-        """
-        params: dict = {"syms": symbols}
-        if start_date:
-            query += " AND trade_date >= %(start)s"
-            params["start"] = start_date
-        if end_date:
-            query += " AND trade_date <= %(end)s"
-            params["end"] = end_date
-        query += " ORDER BY symbol, trade_date"
-
-        rows = ch.execute(query, params)
-        if not rows:
+        store = get_market_data_store()
+        sd = start_date or date(2000, 1, 1)
+        ed = end_date or date.today()
+        df = store.load_daily(symbols, sd, ed)
+        if df.empty:
             raise ValueError("No data found")
-
-        df = pd.DataFrame(
-            rows,
-            columns=["symbol", "trade_date", "open", "high", "low", "close",
-                     "volume", "amount"],
-        )
-        for col in ["open", "high", "low", "close", "amount"]:
-            df[col] = df[col].astype(float)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-
-        # ClickHouse klines_daily may have multiple rows per (symbol, date)
-        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
 
         data = {}
         for sym, grp in df.groupby("symbol"):
-            data[sym] = grp.set_index("trade_date")
+            data[sym] = grp
 
         result = evaluate_expression(expression, data)
 
@@ -455,29 +434,20 @@ class BacktestRunner:
         end_date: date | None,
     ) -> pd.DataFrame:
         """加载收益率矩阵 — 下一日收益率"""
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
+        from app.data_stores import get_market_data_store
 
-        rows = ch.execute(
-            """
-            SELECT symbol, trade_date, close
-            FROM klines_daily
-            WHERE symbol IN %(syms)s
-            ORDER BY symbol, trade_date
-            """,
-            {"syms": symbols},
-        )
-
-        df = pd.DataFrame(rows, columns=["symbol", "trade_date", "close"])
-        df["close"] = df["close"].astype(float)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
+        store = get_market_data_store()
+        sd = start_date or date(2000, 1, 1)
+        ed = end_date or date.today()
+        df = store.load_daily(symbols, sd, ed, columns=["symbol", "trade_date", "close"])
+        if df.empty:
+            return pd.DataFrame()
 
         return_matrix = {}
         for sym, grp in df.groupby("symbol"):
-            grp = grp.sort_values("trade_date")
+            grp = grp.sort_index()
             ret = grp["close"].pct_change().shift(-1)
-            ret.index = grp["trade_date"]
+            ret.index = grp.index
             return_matrix[sym] = ret
 
         if return_matrix:

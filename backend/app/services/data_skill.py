@@ -18,6 +18,7 @@ from sqlalchemy import delete, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.clickhouse import get_ch_client
+from app.data_stores import get_market_data_store
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
@@ -260,7 +261,7 @@ class DataSkill:
             end_date: 结束日期
             limit: 最大条数
         """
-        bars = self._query_ch_klines("klines_daily", symbol, start_date, end_date, limit)
+        bars = self._query_market_klines(symbol, start_date, end_date, limit)
         if bars:
             return bars
 
@@ -280,7 +281,7 @@ class DataSkill:
         limit: int = 500,
     ) -> list[KlineBar]:
         """获取分钟K线数据（同上，ClickHouse 优先）"""
-        bars = self._query_ch_klines_minute(symbol, start_date, end_date, limit)
+        bars = self._query_market_klines_minute(symbol, start_date, end_date, limit)
         if bars:
             return bars
 
@@ -396,31 +397,50 @@ class DataSkill:
         indicator_name: str,
         trade_date: date | None = None,
     ) -> float | None:
-        """从 ClickHouse 查询单只股票的指标值
+        """查询单只股票的指标值
 
         Args:
             symbol: 股票代码
             indicator_name: 指标名称
             trade_date: 交易日期，None 则取最新
         """
-        ch = get_ch_client()
+        from app.data_stores import get_indicator_store
+
+        store = get_indicator_store()
         if trade_date:
-            rows = ch.execute(
-                "SELECT value FROM stock_indicators "
-                "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                "AND trade_date = %(dt)s ORDER BY updated_at DESC LIMIT 1",
-                {"sym": symbol, "name": indicator_name, "dt": trade_date},
-            )
+            df = store.load_cross_section([indicator_name], trade_date, [symbol])
         else:
-            rows = ch.execute(
-                "SELECT value FROM stock_indicators "
-                "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                "ORDER BY trade_date DESC LIMIT 1",
-                {"sym": symbol, "name": indicator_name},
-            )
-        if rows and rows[0][0] is not None:
-            return float(rows[0][0])
-        return None
+            from datetime import date as dt_date
+            # Try today, then fall back to recent dates
+            df = store.load_cross_section([indicator_name], dt_date.today(), [symbol])
+            if df.empty:
+                for days_back in (1, 2, 3, 5, 10):
+                    td = dt_date.today() - timedelta(days=days_back)
+                    df = store.load_cross_section([indicator_name], td, [symbol])
+                    if not df.empty:
+                        break
+        if df.empty:
+            # Fallback to existing ClickHouse path
+            ch = get_ch_client()
+            if trade_date:
+                rows = ch.execute(
+                    "SELECT value FROM stock_indicators "
+                    "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
+                    "AND trade_date = %(dt)s ORDER BY updated_at DESC LIMIT 1",
+                    {"sym": symbol, "name": indicator_name, "dt": trade_date},
+                )
+            else:
+                rows = ch.execute(
+                    "SELECT value FROM stock_indicators "
+                    "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
+                    "ORDER BY trade_date DESC LIMIT 1",
+                    {"sym": symbol, "name": indicator_name},
+                )
+            if rows and rows[0][0] is not None:
+                return float(rows[0][0])
+            return None
+        val = df["value"].iloc[0]
+        return float(val) if val is not None else None
 
     def get_indicators_batch(
         self,
@@ -434,26 +454,38 @@ class DataSkill:
         """
         if not symbols:
             return []
-        ch = get_ch_client()
-        if trade_date:
-            rows = ch.execute(
-                "SELECT symbol, indicator_name, value, trade_date "
-                "FROM stock_indicators "
-                "WHERE symbol IN %(syms)s AND trade_date = %(dt)s "
-                "ORDER BY symbol, indicator_name",
-                {"syms": symbols, "dt": trade_date},
-            )
-        else:
-            rows = ch.execute(
-                "SELECT symbol, indicator_name, value, trade_date "
-                "FROM stock_indicators "
-                "WHERE symbol IN %(syms)s "
-                "ORDER BY symbol, indicator_name, trade_date DESC",
-                {"syms": symbols},
-            )
+        from app.data_stores import get_indicator_store
+        from datetime import date as dt_date
+
+        store = get_indicator_store()
+        target_date = trade_date or dt_date.today()
+        df = store.load_cross_section([], target_date, symbols)
+        if df.empty:
+            # Fallback to ClickHouse
+            ch = get_ch_client()
+            if trade_date:
+                rows = ch.execute(
+                    "SELECT symbol, indicator_name, value, trade_date "
+                    "FROM stock_indicators WHERE symbol IN %(syms)s AND trade_date = %(dt)s "
+                    "ORDER BY symbol, indicator_name",
+                    {"syms": symbols, "dt": trade_date},
+                )
+            else:
+                rows = ch.execute(
+                    "SELECT symbol, indicator_name, value, trade_date "
+                    "FROM stock_indicators WHERE symbol IN %(syms)s "
+                    "ORDER BY symbol, indicator_name, trade_date DESC",
+                    {"syms": symbols},
+                )
+            return [
+                {"symbol": r[0], "indicator_name": r[1], "value": float(r[2]) if r[2] is not None else None, "trade_date": r[3]}
+                for r in rows
+            ]
         return [
-            {"symbol": r[0], "indicator_name": r[1], "value": float(r[2]) if r[2] is not None else None, "trade_date": r[3]}
-            for r in rows
+            {"symbol": r["symbol"], "indicator_name": r["indicator_name"],
+             "value": float(r["value"]) if r["value"] is not None else None,
+             "trade_date": r.get("trade_date", target_date)}
+            for _, r in df.iterrows()
         ]
 
     # ─── 股票列表 ──────────────────────────────────────────
@@ -613,66 +645,51 @@ net_profit=s.net_profit,
         )
 
     @staticmethod
-    def _query_ch_klines(
-        table: str,
+    def _query_market_klines(
         symbol: str,
         start_date: date | None,
         end_date: date | None,
         limit: int,
     ) -> list[KlineBar]:
-        ch = get_ch_client()
-        conditions = [f"symbol = %(sym)s"]
-        params: dict[str, Any] = {"sym": symbol}
-        if start_date:
-            conditions.append("trade_date >= %(sd)s")
-            params["sd"] = start_date
-        if end_date:
-            conditions.append("trade_date <= %(ed)s")
-            params["ed"] = end_date
-        where = " AND ".join(conditions)
-        sql = f"SELECT symbol, trade_date, open, high, low, close, volume, amount FROM {table} WHERE {where} ORDER BY trade_date DESC LIMIT {limit}"
-        try:
-            rows = ch.execute(sql, params)
-            return [
-                KlineBar(
-                    symbol=r[0], datetime=r[1],
-                    open=float(r[2]), high=float(r[3]),
-                    low=float(r[4]), close=float(r[5]),
-                    volume=int(r[6]), amount=float(r[7]),
-                )
-                for r in rows
-            ]
-        except Exception:
+        store = get_market_data_store()
+        sd = start_date or date(2000, 1, 1)
+        ed = end_date or date.today()
+        df = store.load_daily([symbol], sd, ed)
+        if df.empty:
             return []
+        df = df.sort_index(ascending=False).head(limit)
+        return [
+            KlineBar(
+                symbol=r["symbol"], datetime=r.name,
+                open=float(r["open"]), high=float(r["high"]),
+                low=float(r["low"]), close=float(r["close"]),
+                volume=int(r["volume"]), amount=float(r["amount"]),
+            )
+            for _, r in df.iterrows()
+        ]
 
     @staticmethod
-    def _query_ch_klines_minute(
+    def _query_market_klines_minute(
         symbol: str,
         start_date: date | None,
         end_date: date | None,
         limit: int,
     ) -> list[KlineBar]:
-        ch = get_ch_client()
-        conditions = [f"symbol = %(sym)s"]
-        params: dict[str, Any] = {"sym": symbol}
-        if start_date:
-            conditions.append("toDate(datetime) >= %(sd)s")
-            params["sd"] = start_date
-        if end_date:
-            conditions.append("toDate(datetime) <= %(ed)s")
-            params["ed"] = end_date
-        where = " AND ".join(conditions)
-        sql = f"SELECT symbol, datetime, open, high, low, close, volume, amount FROM klines_minute WHERE {where} ORDER BY datetime DESC LIMIT {limit}"
-        try:
-            rows = ch.execute(sql, params)
-            return [
-                KlineBar(
-                    symbol=r[0], datetime=r[1],
-                    open=float(r[2]), high=float(r[3]),
-                    low=float(r[4]), close=float(r[5]),
-                    volume=int(r[6]), amount=float(r[7]),
-                )
-                for r in rows
-            ]
-        except Exception:
+        store = get_market_data_store()
+        sd = start_date or date(2000, 1, 1)
+        ed = end_date or date.today()
+        dt_start = datetime.combine(sd, datetime.min.time())
+        dt_end = datetime.combine(ed, datetime.min.time()) + timedelta(days=1)
+        df = store.load_minute([symbol], dt_start, dt_end)
+        if df.empty:
             return []
+        df = df.sort_index(ascending=False).head(limit)
+        return [
+            KlineBar(
+                symbol=r["symbol"], datetime=r.name,
+                open=float(r["open"]), high=float(r["high"]),
+                low=float(r["low"]), close=float(r["close"]),
+                volume=int(r["volume"]), amount=float(r["amount"]),
+            )
+            for _, r in df.iterrows()
+        ]

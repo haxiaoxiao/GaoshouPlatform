@@ -40,32 +40,28 @@
       <!-- 交易统计 -->
       <el-card shadow="never" class="stats-card">
         <template #header><span>交易统计</span></template>
-        <el-row :gutter="24">
-          <el-col :span="6">
-            <div class="stat-item">
-              <span class="stat-label">总交易次数</span>
-              <span class="stat-value">{{ report.result?.total_trades ?? '-' }}</span>
-            </div>
-          </el-col>
-          <el-col :span="6">
-            <div class="stat-item">
-              <span class="stat-label">盈利次数</span>
-              <span class="stat-value positive">{{ report.result?.win_trades ?? '-' }}</span>
-            </div>
-          </el-col>
-          <el-col :span="6">
-            <div class="stat-item">
-              <span class="stat-label">亏损次数</span>
-              <span class="stat-value negative">{{ report.result?.loss_trades ?? '-' }}</span>
-            </div>
-          </el-col>
-          <el-col :span="6">
-            <div class="stat-item">
-              <span class="stat-label">胜率</span>
-              <span class="stat-value">{{ formatPercent(report.result?.win_rate) }}</span>
-            </div>
-          </el-col>
-        </el-row>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-label">总交易次数</span>
+            <span class="stat-value">{{ report.result?.total_trades ?? '-' }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">盈利次数</span>
+            <span class="stat-value positive">{{ report.result?.win_trades ?? '-' }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">亏损次数</span>
+            <span class="stat-value negative">{{ report.result?.loss_trades ?? '-' }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">开仓标的</span>
+            <span class="stat-value" style="color:#a78bfa">{{ report.result?.total_positions ?? '—' }}</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-label">胜率</span>
+            <span class="stat-value">{{ formatPercent(report.result?.win_rate) }}</span>
+          </div>
+        </div>
       </el-card>
 
       <!-- 成交明细 -->
@@ -125,7 +121,7 @@
       <el-card shadow="never" class="info-card">
         <template #header><span>回测信息</span></template>
         <el-descriptions :column="2" border>
-          <el-descriptions-item label="回测ID">{{ report.id || report.backtest_id }}</el-descriptions-item>
+          <el-descriptions-item label="回测ID">{{ report.backtest_id }}</el-descriptions-item>
           <el-descriptions-item label="策略">{{ report.strategy_name || '-' }}</el-descriptions-item>
           <el-descriptions-item label="状态">
             <el-tag :type="getStatusType(report.status)" size="small">{{ getStatusLabel(report.status) }}</el-tag>
@@ -136,7 +132,7 @@
           <el-descriptions-item v-if="report.parameters" label="股票池">{{ report.parameters.pool_label || report.parameters.pool || '-' }}</el-descriptions-item>
           <el-descriptions-item v-if="report.parameters" label="股票数量">{{ report.parameters.symbol_count ?? '-' }} 只</el-descriptions-item>
           <el-descriptions-item v-if="report.parameters" label="持仓上限">{{ report.parameters.max_positions ?? '-' }} 只</el-descriptions-item>
-          <el-descriptions-item v-if="report.parameters" label="单票仓位">{{ report.parameters.single_pct ? (report.parameters.single_pct * 100).toFixed(0) + '%' : '-' }}</el-descriptions-item>
+          <el-descriptions-item v-if="report.parameters" label="单票仓位">{{ formatPercentParam(report.parameters.single_pct) }}</el-descriptions-item>
         </el-descriptions>
       </el-card>
     </template>
@@ -151,11 +147,14 @@ import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import * as echarts from 'echarts'
 import { backtestApi, type BacktestReport as BacktestReportType } from '@/api/backtest'
-import { formatDateTime, formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
+import { formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
 
 const props = defineProps<{
   backtestId: number
 }>()
+
+const formatPercentParam = (value: unknown): string =>
+  typeof value === 'number' ? `${(value * 100).toFixed(0)}%` : '-'
 
 const loading = ref(false)
 const report = ref<BacktestReportType | null>(null)
@@ -293,6 +292,7 @@ watch(() => props.backtestId, () => {
 .metric-value.positive { color: #d93026; }
 .metric-value.negative { color: #137333; }
 .stats-card :deep(.el-card__body) { padding: 20px; }
+.stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
 .stat-item { display: flex; flex-direction: column; gap: 8px; }
 .stat-label { font-size: 14px; color: #909399; }
 .stat-value { font-size: 20px; font-weight: 500; color: #303133; }

@@ -208,7 +208,7 @@ interface Trade {
   price?: number
   quantity?: number
   commission?: number
-  pnl?: number
+  pnl?: number | null
 }
 
 interface BacktestResult {
@@ -228,6 +228,7 @@ interface BacktestResult {
   total_trades?: number
   win_trades?: number
   loss_trades?: number
+  total_positions?: number
   win_rate?: number
   avg_return?: number
   turnover_rate?: number
@@ -255,7 +256,7 @@ interface SymbolPnl {
 const props = defineProps<{
   visible: boolean
   result: BacktestResult | null
-  taskId?: string
+  taskId?: string | null
 }>()
 
 const emit = defineEmits<{
@@ -357,6 +358,7 @@ const allMetrics = computed(() => {
     { label: '信息比率', value: r.information_ratio?.toFixed(2) || '—', color: '#e2e2ea' },
     { label: '胜率', value: r.win_rate != null ? (r.win_rate * 100).toFixed(1) + '%' : '—', color: '#e2e2ea' },
     { label: '总成交', value: r.total_trades != null ? String(r.total_trades) : '—', color: '#e2e2ea' },
+    { label: '开仓标的', value: r.total_positions != null ? String(r.total_positions) : '—', color: '#a78bfa' },
     { label: '最终资金', value: r.final_capital ? '¥' + (r.final_capital / 10000).toFixed(2) + '万' : '—', color: '#a78bfa' },
   ]
 })

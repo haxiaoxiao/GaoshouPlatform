@@ -4,13 +4,37 @@
 
 ---
 
+## 当前能力概览
+
+- 数据链路：华泰 miniQMT/xtquant 为主数据源，SQLite 存元数据，Parquet/DuckDB 为默认行情/因子数据层，ClickHouse 为可选高性能后端。
+- 回测引擎：支持内置事件驱动引擎和 AKQuant 引擎，AKQuant 已接入能力探测、事件驱动回测、Grid Search、Walk-forward Validation、参数 schema/校验。
+- 策略数据模式：支持 `daily`、`minute`、`minute_timer`。只需要固定盘中时点的策略应优先用 `minute_timer`，从 Parquet 或 ClickHouse 读取稀疏分钟数据。
+- **无需 ClickHouse**：默认 `MARKET_DATA_BACKEND=parquet`，零运维启动。切换 `MARKET_DATA_BACKEND=clickhouse` 可启用 ClickHouse。
+- 指数池：回测可通过 `index_symbol` 使用动态指数成分池，例如中小综指 `399101.SZ`，避免用当前自选股静态替代历史股票池。
+- 因子能力：既有指标注册体系，也有表达式 Compute Engine；AKQuant/Polars 因子引擎已通过 `engine="akquant"` 接入。
+
+关键文档：
+
+| 文档 | 用途 |
+|---|---|
+| `docs/user-manual.md` | 使用手册：启动、数据同步、AKQuant 回测、ID=43 小市值流程 |
+| `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare、AKShare 的优先级和适用场景 |
+| `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
+| `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 规划 |
+| `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：参数、数据口径、已对齐节点和剩余差异 |
+| `docs/feature-store.md` | 因子研究 Feature Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
+| `AGENTS.md` | AI coding agent 项目指南和关键约束 |
+
+---
+
 ## 技术栈
 
 | 层 | 技术 | 说明 |
 |---|---|---|
 | 后端 | Python 3.12 + FastAPI | REST API，异步架构 |
 | ORM | SQLAlchemy (async) + aiosqlite | SQLite 存储元数据（股票信息、同步日志、自选股等） |
-| 时序库 | ClickHouse | 存储 K 线、指标等时序数据 |
+| 时序库(默认) | DuckDB + Parquet | 文件型分析数据，零运维 |
+| 时序库(可选) | ClickHouse | 大规模多用户高并发查询 |
 | 数据源 | 华泰 QMT (miniQMT) via xtquant | A 股行情 + 财务数据 |
 | 前端 | Vue 3 + TypeScript + Element Plus | 暗色主题 UI |
 | 图表 | ECharts | K 线图、因子分析 |
@@ -97,7 +121,7 @@ GaoshouPlatform/
 |------|------|------|
 | Python | 3.12+ | 后端 |
 | Node.js | 18+ | 前端 |
-| Docker Desktop | 最新 | ClickHouse 容器 |
+| Docker Desktop | 最新 | ClickHouse 容器（可选，默认使用 Parquet） |
 | 华泰 QMT / miniQMT | - | 数据源（必须在线） |
 
 ### 1. 初始化后端
@@ -116,7 +140,9 @@ cd E:\projects\gaoshouplatform\frontend
 npm install
 ```
 
-### 3. 启动 ClickHouse
+### 3. 启动 ClickHouse（可选）
+
+仅当 `MARKET_DATA_BACKEND=clickhouse` 时需要。默认 Parquet 模式无需此步骤。
 
 ```powershell
 # 首次：创建目录 + 启动容器
@@ -166,7 +192,8 @@ QMT Server → download_financial_data2()/download_history_data()
           QMTGateway.parse → StockInfo / FinancialQuarter / KlineData
                 ↓
           SyncService → 写入 SQLite (股票信息/财务)
-                     → 写入 ClickHouse (K线/指标)
+                     → 写入 Parquet (K线/因子, 默认)
+                     → 写入 ClickHouse (K线/指标, 可选)
                 ↓
           QMTGateway.clean_local_cache() → 删除本地 .DAT 缓存释放磁盘
 ```
@@ -178,9 +205,87 @@ QMT Server → download_financial_data2()/download_history_data()
 | `stock_info` | 股票基础信息 | `get_stock_list_in_sector` → `get_instrument_detail` | SQLite |
 | `stock_full` | 股票完整信息（含市值+财务） | `get_stock_list` + `get_full_tick` + `get_financial_data` | SQLite |
 | `financial_data` | ⭐ 财务数据（按季度） | `download_financial_data2` + `get_financial_data` | SQLite (FinancialData表) |
-| `kline_daily` | 日 K 线 | `download_history_data` + `get_market_data_ex` | ClickHouse |
-| `kline_minute` | 分钟 K 线 | `download_history_data` + `get_market_data_ex` | ClickHouse |
+| `kline_daily` | 日 K 线 | `download_history_data` + `get_market_data_ex` | Parquet / ClickHouse |
+| `kline_minute` | 分钟 K 线 | `download_history_data` + `get_market_data_ex` | Parquet / ClickHouse |
 | `realtime_mv` | 实时市值 | `get_full_tick` | SQLite |
+
+固定时间点分钟线策略推荐链路：
+
+```
+miniQMT download_history_data2(period='1m')
+        ↓
+get_local_data / get_market_data_ex 读取本地缓存
+        ↓
+抽取 10:00 / 10:30 / 14:30 / 14:50 等 timer 点
+        ↓
+Parquet klines_minute_timer / ClickHouse klines_minute
+        ↓
+AKQuant bar_type="minute_timer" 回测
+```
+
+本地聚宽版全 A 1 分钟线已可直接作为 Parquet 数据源使用：
+
+- 数据集：`data/parquet/klines_minute/year=YYYY/month=MM/part-*.parquet`
+- 当前覆盖：`2005-01-04 09:31:00` 至 `2026-05-15 15:00:00`
+- 规模：约 `3.75B` 行、`5580` 个代码
+- 导入脚本：`backend/app/scripts/import_jq_minute_parquet.py`
+- zip/tar.gz 归档导入：`backend/app/scripts/import_jq_minute_archives.py`
+- 异常日期清理：`backend/app/scripts/clean_minute_parquet_dates.py`
+
+---
+
+## AKQuant 回测入口
+
+后端 V2 回测 API 位于 `/api/v2/backtest/*`：
+
+| 接口 | 说明 |
+|---|---|
+| `GET /api/v2/backtest/capabilities` | 查看 AKQuant 是否可用、版本、TA-Lib 函数数、可选模块 |
+| `POST /api/v2/backtest/run` | 运行回测，`engine="akquant"` 使用 AKQuant 引擎 |
+| `POST /api/v2/backtest/optimize/grid` | AKQuant Grid Search |
+| `POST /api/v2/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
+| `POST /api/v2/backtest/strategy-params/schema` | 读取策略参数 schema |
+| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 |
+| `GET /api/v2/backtest/index-pools/{index_symbol}` | 查询动态指数池覆盖情况 |
+| `GET /api/v2/backtest/timer-coverage` | 查询稀疏 timer 分钟数据覆盖率 |
+
+参数原则：
+
+- 前端右侧控制面板/API 请求控制日期、初始资金、股票池、费用、滑点、bar type、timer times。
+- 策略代码通过 `strategy_params` 读取参数，不要硬编码回测日期、股票池或固定资金。
+- 小市值类策略优先使用 `index_symbol="399101.SZ"`，不要用当前自选股 960 只静态替代历史中小综指成分。
+
+---
+
+## ID=43 小市值策略推荐流程
+
+1. 在回测页选择 AKQuant 引擎。
+2. 股票池选择指数池“中小综指 / `399101.SZ`”。
+3. `bar_type` 选择 `minute_timer`。
+4. timer 时间从控制面板传入，例如 `10:00,10:30,14:30,14:50`。
+5. 先用 timer 覆盖接口确认最早可跑日期。
+6. 若缺分钟数据，先用 miniQMT 主动下载，再同步所需 timer 点到 Parquet/ClickHouse；若已有完整分钟 Parquet，则直接读取本地数据集。
+7. 回测阶段只读 Parquet/ClickHouse，避免策略运行时反复读取 QMT。
+8. 和聚宽结果对齐时，按年度导出持仓、订单和日志，重点对比指数成分、市值排序、行业集中度、ST/停牌/退市、涨跌停成交语义。
+
+常用脚本：
+
+```powershell
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+
+# 同步中小综指动态成分所需的稀疏分钟点
+.\backend\.venv\Scripts\python.exe backend/app/scripts/sync_timer_minute_points.py `
+  --index-symbol 399101.SZ `
+  --start 20210515 `
+  --end 20260508 `
+  --times 10:00,10:30,14:30,14:50
+
+# 自动从最早可用 timer 数据起跑 ID=43
+.\backend\.venv\Scripts\python.exe backend/app/scripts/run_small_cap_full_debug.py --start auto
+
+# 年度切片调试，便于和聚宽日志逐年对比
+.\backend\.venv\Scripts\python.exe backend/app/scripts/run_small_cap_yearly_debug.py
+```
 
 ---
 
@@ -229,7 +334,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 **永远不要用 `asyncio.get_event_loop()`**（Python 3.10+ 已废弃），用 `asyncio.get_running_loop()`。
 
-完整 API 参考见 `backend/.opencode/skills/xtquant-data-api.md`。
+完整 API 参考见 `backend/.opencode/skills/xtquant-data-api.md`。数据源选择经验见 `docs/data-source-cheatsheet.md`。
 
 ---
 
@@ -247,7 +352,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 ## 数据库配置
 
-### SQLite（`backend/data/gaoshou.db`）
+### SQLite（`data/gaoshou.db`）
 
 路径通过 `backend/app/core/config.py` 自动解析为绝对路径，可以从任何工作目录启动。
 
@@ -334,4 +439,4 @@ chore: 构建/工具
 
 ---
 
-*最后更新: 2026-04-23*
+*最后更新: 2026-05-15*

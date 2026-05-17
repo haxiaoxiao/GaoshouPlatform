@@ -1,7 +1,7 @@
 # backend/app/services/data_service.py
 """数据查询服务"""
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.db.clickhouse import get_ch_client
+from app.data_stores import get_market_data_store
 from app.db.models import (
     Stock,
     WatchlistGroup,
@@ -218,71 +219,44 @@ class DataService:
         Returns:
             PaginatedResult: 分页结果
         """
-        # 选择表名
-        table_name = "klines_minute" if period == "minute" else "klines_daily"
-        datetime_field = "datetime" if period == "minute" else "trade_date"
+        store = get_market_data_store()
+        sd = start_date or date(2000, 1, 1)
+        ed = end_date or date.today()
 
-        # 获取 ClickHouse 客户端
-        client = get_ch_client()
+        from decimal import Decimal as D
 
-        # 构建 WHERE 条件
-        where_conditions = ["symbol = %(symbol)s"]
-        params: dict[str, Any] = {"symbol": symbol}
+        if period == "minute":
+            dt_start = datetime.combine(sd, datetime.min.time())
+            dt_end = datetime.combine(ed, datetime.min.time()) + timedelta(days=1)
+            df = store.load_minute([symbol], dt_start, dt_end)
+        else:
+            df = store.load_daily([symbol], sd, ed)
 
-        if start_date:
-            where_conditions.append(f"{datetime_field} >= %(start_date)s")
-            params["start_date"] = start_date
-        if end_date:
-            where_conditions.append(f"{datetime_field} <= %(end_date)s")
-            params["end_date"] = end_date
+        if df.empty:
+            total = 0
+            rows_list = []
+        else:
+            total = len(df)
+            df = df.sort_index(ascending=False)
+            offset = (page - 1) * page_size
+            df_page = df.iloc[offset : offset + page_size]
+            rows_list = df_page.reset_index().to_dict("records")
 
-        where_clause = " AND ".join(where_conditions)
-
-        # 查询总数 (基于去重后的日期数)
-        count_query = f"""
-            SELECT count() FROM (
-                SELECT {datetime_field} FROM {table_name}
-                WHERE {where_clause}
-                GROUP BY symbol, {datetime_field}
+        items = []
+        for r in rows_list:
+            dt_field = r.get("datetime", r.get("trade_date"))
+            items.append(
+                KlineData(
+                    symbol=r.get("symbol", symbol),
+                    datetime=dt_field,
+                    open=D(str(round(float(r["open"]), 4))),
+                    high=D(str(round(float(r["high"]), 4))),
+                    low=D(str(round(float(r["low"]), 4))),
+                    close=D(str(round(float(r["close"]), 4))),
+                    volume=int(r["volume"]),
+                    amount=D(str(round(float(r["amount"]), 2))),
+                )
             )
-        """
-        count_result = client.execute(count_query, params)
-        total = count_result[0][0] if count_result else 0
-
-        # 分页查询数据 (LIMIT 1 BY 去重 + round 精度 + 按日期倒序)
-        offset = (page - 1) * page_size
-        data_query = f"""
-            SELECT symbol, {datetime_field},
-                   round(open, 4) as open,
-                   round(high, 4) as high,
-                   round(low, 4) as low,
-                   round(close, 4) as close,
-                   volume,
-                   round(amount, 2) as amount
-            FROM {table_name}
-            WHERE {where_clause}
-            ORDER BY {datetime_field} DESC
-            LIMIT 1 BY symbol, {datetime_field}
-            LIMIT %(limit)s OFFSET %(offset)s
-        """
-        params["limit"] = page_size
-        params["offset"] = offset
-
-        rows = client.execute(data_query, params)
-
-        items = [
-            KlineData(
-                symbol=row[0],
-                datetime=row[1],
-                open=row[2],
-                high=row[3],
-                low=row[4],
-                close=row[5],
-                volume=row[6],
-                amount=row[7],
-            )
-            for row in rows
-        ]
 
         total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
 

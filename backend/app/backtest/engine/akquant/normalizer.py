@@ -59,6 +59,20 @@ def _to_json_safe(obj: Any) -> Any:
         return default
 
 
+def _compute_annual_return(total_return: float, nav_series: list[dict]) -> float:
+    """从净值曲线时间跨度计算年化收益率，避免依赖 akquant 内部指标"""
+    if not nav_series or len(nav_series) < 2:
+        return total_return
+    try:
+        first_date = date.fromisoformat(nav_series[0]["date"])
+        last_date = date.fromisoformat(nav_series[-1]["date"])
+        days = (last_date - first_date).days
+        years = max(days, 1) / 365.25
+        return round(float((1 + total_return) ** (1.0 / max(years, 0.01)) - 1.0), 6)
+    except (ValueError, KeyError):
+        return total_return
+
+
 def normalize_result(
     raw_result: Any,
     *,
@@ -128,9 +142,17 @@ def normalize_result(
     total_pnl = sum(t.get("pnl", 0) for t in trades)
     avg_return = total_pnl / total_trades if total_trades > 0 else 0.0
 
+    # 统计实际开仓标的数（含未平仓）
+    total_positions = len({
+        o.get("symbol") for o in orders
+        if o.get("side") == "buy" and o.get("status") == "filled"
+    })
+
     # 指标 — akquant 内部为百分数，/100 转小数
     total_return = _safe_float(getattr(metrics, "total_return_pct", 0)) / 100.0
-    annual_return = _safe_float(getattr(metrics, "annualized_return", 0)) / 100.0
+    # akquant 的 annualized_return 在部分版本中已是小数而非百分数，不可靠；
+    # 直接从 equity curve 的时间跨度 + total_return 计算，保证一致性
+    annual_return = _compute_annual_return(total_return, nav_series)
     max_drawdown = _safe_float(getattr(metrics, "max_drawdown_pct", 0)) / 100.0
     win_rate_pct = _safe_float(getattr(metrics, "win_rate", 0))  # akquant 已是百分数
 
@@ -147,6 +169,7 @@ def normalize_result(
         total_trades=total_trades,
         win_trades=win_count,
         loss_trades=loss_count,
+        total_positions=total_positions,
         nav_series=nav_series,
         daily_returns=daily_returns,
         group_navs=None,

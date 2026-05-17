@@ -28,8 +28,31 @@ build/
 # Environment
 .env
 .env.local
+TushareToken*.md
+TushareTokens*.md
+.claude/*.lock
+.claude/*.local.json
 
 # Database
 *.db
 data/*.db
+data/gaoshou.db
 .worktrees
+
+# Parquet data (large generated files)
+data/parquet/
+data/parquet_test_*/
+data/tmp_*/
+*.duckdb
+*.duckdb.wal
+
+# Generated runtime artifacts
+.tmp/
+.tmp_*
+.playwright-mcp/
+.superpowers/
+app/reports/
+backend/app/reports/
+backend/backend/app/reports/
+backend/logs/
+backend/tmp_*.txt

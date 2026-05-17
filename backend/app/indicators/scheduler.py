@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from app.core.config import settings as app_settings
 from app.db.clickhouse import get_ch_client
 from app.indicators.base import IndicatorContext, IndicatorRegistry
 
@@ -277,25 +278,56 @@ class IndicatorScheduler:
 
         if rows:
             if indicator.data_type == "截面":
-                # Delete old data first
                 ch.execute(
                     "DELETE FROM stock_indicators WHERE indicator_name = %(name)s AND trade_date = %(date)s",
                     {"name": indicator.name, "date": target_date}
                 )
-                # Then insert new data
                 ch.execute(
                     "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value, updated_at) VALUES",
                     rows,
                 )
+                if app_settings.market_data_backend == "parquet":
+                    self._write_indicator_parquet(
+                        rows, indicator.name, target_date, dataset="stock_indicators"
+                    )
             else:
                 ch.execute(
                     "DELETE FROM indicator_timeseries WHERE indicator_name = %(name)s AND datetime = %(dt)s",
                     {"name": indicator.name, "dt": datetime.combine(target_date, datetime.min.time())}
                 )
+                dt_rows = [(r[0], r[1], datetime.combine(r[2], datetime.min.time()) if isinstance(r[2], date) else r[2], r[3], r[4]) for r in rows]
                 ch.execute(
                     "INSERT INTO indicator_timeseries (symbol, indicator_name, datetime, value, updated_at) VALUES",
-                    [(r[0], r[1], datetime.combine(r[2], datetime.min.time()) if isinstance(r[2], date) else r[2], r[3], r[4]) for r in rows],
+                    dt_rows,
                 )
+                if app_settings.market_data_backend == "parquet":
+                    self._write_indicator_parquet(
+                        [(r[0], r[1], r[2], r[3], r[4]) for r in dt_rows],
+                        indicator.name, target_date, dataset="indicator_timeseries",
+                    )
+
+
+    @staticmethod
+    def _write_indicator_parquet(
+        rows: list[tuple], indicator_name: str, target_date: date, *, dataset: str
+    ) -> None:
+        try:
+            import pandas as pd
+            from app.data_stores import get_indicator_store
+
+            df = pd.DataFrame(
+                rows,
+                columns=["symbol", "indicator_name",
+                         "trade_date" if dataset == "stock_indicators" else "datetime",
+                         "value", "updated_at"],
+            )
+            store = get_indicator_store()
+            if dataset == "stock_indicators":
+                store.write_cross_section(df)
+            else:
+                store.write_timeseries(df)
+        except Exception:
+            pass
 
 
 indicator_scheduler = IndicatorScheduler()

@@ -96,6 +96,7 @@ import { ref, computed } from 'vue'
 interface LiveEvent {
   type: string
   timestamp: string
+  message?: string
   symbol?: string
   direction?: string
   quantity?: number
@@ -119,6 +120,7 @@ interface LiveData {
   events: LiveEvent[]
   positions: Record<string, PositionSnapshot>
   metrics_snapshot: Record<string, number>
+  metadata?: Record<string, string | number | null | undefined>
 }
 
 const props = defineProps<{
@@ -191,6 +193,7 @@ function eventColor(type: string): string {
 }
 
 function formatEvent(ev: LiveEvent): string {
+  if (ev.message) return ev.message
   switch (ev.type) {
     case 'BAR': return `BAR  ${ev.symbol || ''}  close=${ev.close ?? '?'}`
     case 'ORDER_PASS': return `${ev.direction === 'buy' ? '买入' : '卖出'} ${ev.symbol || ''}  ${ev.quantity ?? 0}股 @${ev.price ?? '?'}`

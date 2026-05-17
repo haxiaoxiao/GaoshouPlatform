@@ -137,7 +137,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import KlineChart from './DataManage/KlineChart.vue'
-import { klineApi, type KlineData, type KlineType } from '@/api/kline'
+import { klineApi, toDisplayFormat, type KlineDataDisplay, type KlineType } from '@/api/kline'
 import { stockApi, type StockDetail } from '@/api/data'
 
 // Router
@@ -146,7 +146,7 @@ const router = useRouter()
 
 // 状态
 const loading = ref(false)
-const klineData = ref<KlineData[]>([])
+const klineData = ref<KlineDataDisplay[]>([])
 const stockDetail = ref<StockDetail | null>(null)
 const klineType = ref<KlineType>('daily')
 const startDate = ref<string>('')
@@ -182,7 +182,7 @@ const loadKlineData = async () => {
     }
 
     const result = await klineApi.getKlines(params)
-    klineData.value = result.items || []
+    klineData.value = toDisplayFormat(result.items || [])
   } catch (error) {
     console.error('加载K线数据失败:', error)
     ElMessage.error('加载K线数据失败')

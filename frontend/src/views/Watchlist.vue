@@ -122,7 +122,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/data'
 import { ElMessage, ElMessageBox } from 'element-plus'
 

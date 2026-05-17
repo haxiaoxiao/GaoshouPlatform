@@ -13,7 +13,7 @@ app.use(router)
 app.use(ElementPlus)
 
 // 全局错误处理，防止错误导致 Vue 响应式系统失效
-app.config.errorHandler = (err, instance, info) => {
+app.config.errorHandler = (err, _instance, info) => {
   console.error('[Vue Error]', err)
   console.error('[Vue Error Info]', info)
 }

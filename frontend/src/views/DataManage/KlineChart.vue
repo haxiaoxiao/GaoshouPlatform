@@ -296,7 +296,7 @@ const handleResize = () => {
 // 监听数据变化
 watch(
   () => props.data,
-  (newData) => {
+  () => {
     // 使用 nextTick 确保 DOM 已更新
     nextTick(() => {
       if (!isInitialized) {

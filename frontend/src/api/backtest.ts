@@ -63,6 +63,7 @@ export interface BacktestResult {
   total_trades?: number
   win_trades?: number
   loss_trades?: number
+  total_positions?: number
   win_rate?: number
   avg_return?: number
   final_capital?: number
@@ -102,6 +103,7 @@ export interface LiveData {
   events: Array<{
     type: string
     timestamp: string
+    message?: string
     symbol?: string
     direction?: string
     quantity?: number
@@ -125,6 +127,18 @@ export interface LiveData {
     cash?: number
     total_value?: number
     n_trades?: number
+    chunk_index?: number
+    chunk_total?: number
+    symbol_count?: number
+  }
+  metadata?: {
+    phase?: string
+    chunk_index?: number
+    chunk_total?: number
+    chunk_start?: string
+    chunk_end?: string
+    symbol_count?: number
+    bar_type?: string
   }
 }
 
@@ -140,8 +154,75 @@ export interface EngineOption {
   modes: string[]
 }
 
+export interface AkquantCapabilities {
+  available: boolean
+  version: string | null
+  features: Record<string, boolean>
+  optional_modules?: Record<string, boolean>
+  talib_function_count?: number
+  talib_functions?: string[]
+}
+
+export interface BacktestCapabilities {
+  engines: EngineOption[]
+  akquant: AkquantCapabilities
+}
+
+export interface StrategyParamsSchemaRequest {
+  strategy_code?: string | null
+  strategy_id?: number | null
+}
+
+export interface StrategyParamsValidateRequest extends StrategyParamsSchemaRequest {
+  payload?: Record<string, unknown>
+}
+
+export interface GridOptimizeRequest {
+  engine: 'akquant'
+  mode?: string
+  strategy_code?: string
+  strategy_id?: number
+  param_grid: Record<string, unknown[]>
+  symbols?: string[]
+  universe_mode?: 'symbols' | 'index'
+  index_symbol?: string
+  start_date: string
+  end_date: string
+  initial_capital?: number
+  bar_type?: string
+  commission_rate?: number
+  slippage?: number
+  stamp_tax_rate?: number
+  transfer_fee_rate?: number
+  min_commission?: number
+  volume_limit_pct?: number | null
+  t_plus_one?: boolean
+  lot_size?: number | Record<string, number> | null
+  max_positions?: number | null
+  risk_config?: Record<string, unknown> | null
+  sort_by?: string | string[]
+  ascending?: boolean | boolean[]
+  max_workers?: number
+  timeout?: number | null
+}
+
+export interface WalkForwardOptimizeRequest extends GridOptimizeRequest {
+  train_period?: number
+  test_period?: number
+  metric?: string | string[]
+}
+
 export const backtestV2Engines = {
   list: () => request.get<EngineOption[]>('/v2/backtest/engines'),
+  capabilities: () => request.get<BacktestCapabilities>('/v2/backtest/capabilities'),
+  optimizeGrid: (data: GridOptimizeRequest) =>
+    request.post<{ task_id: string }>('/v2/backtest/optimize/grid', data),
+  optimizeWalkForward: (data: WalkForwardOptimizeRequest) =>
+    request.post<{ task_id: string }>('/v2/backtest/optimize/walk-forward', data),
+  strategyParamsSchema: (data: StrategyParamsSchemaRequest) =>
+    request.post<Record<string, unknown>>('/v2/backtest/strategy-params/schema', data),
+  validateStrategyParams: (data: StrategyParamsValidateRequest) =>
+    request.post<Record<string, unknown>>('/v2/backtest/strategy-params/validate', data),
   report: (taskId: string) => request.get<string>(`/v2/backtest/report/${taskId}`),
 }
 
@@ -162,6 +243,7 @@ export interface BacktestResultData {
   total_trades?: number
   win_trades?: number
   loss_trades?: number
+  total_positions?: number
   win_rate?: number
   avg_return?: number
   turnover_rate?: number
@@ -181,6 +263,9 @@ export interface BacktestResultData {
   initial_capital?: number
   final_capital?: number
   n_trading_days?: number
+  report_path?: string | null
+  basket_returns?: number[]
+  basket_count?: number
 }
 
 export const strategyApi = {

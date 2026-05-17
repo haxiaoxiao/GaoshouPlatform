@@ -250,40 +250,19 @@ class BarEventSource:
         calendar: TradingCalendar,
         bar_type: str = "daily",
     ) -> "BarEventSource":
-        """从 ClickHouse 加载日线/分钟数据 (线程池中执行, 不阻塞事件循环)"""
-        from app.db.clickhouse import get_ch_client
+        """从行情存储加载日线/分钟数据 (线程池中执行, 不阻塞事件循环)"""
+        from app.data_stores import get_market_data_store
 
         source = cls(symbols, start_date, end_date, calendar, bar_type=bar_type)
 
         def _load():
-            ch = get_ch_client()
-            rows = ch.execute(
-                """
-                SELECT symbol, trade_date, open, high, low, close, volume, amount
-                FROM klines_daily
-                WHERE symbol IN %(syms)s
-                  AND trade_date >= %(start)s
-                  AND trade_date <= %(end)s
-                ORDER BY symbol, trade_date
-                """,
-                {"syms": symbols, "start": start_date, "end": end_date},
-            )
-
-            df = pd.DataFrame(
-                rows,
-                columns=["symbol", "trade_date", "open", "high", "low",
-                         "close", "volume", "amount"],
-            )
+            store = get_market_data_store()
+            df = store.load_daily(symbols, start_date, end_date)
             if df.empty:
                 raise ValueError(f"No kline data")
 
-            for col in ["open", "high", "low", "close", "amount"]:
-                df[col] = df[col].astype(float)
-            df["trade_date"] = pd.to_datetime(df["trade_date"])
-            df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="first")
-
             for sym, grp in df.groupby("symbol"):
-                source._data[sym] = grp.set_index("trade_date")
+                source._data[sym] = grp
 
             logger.info("BarEventSource: loaded {} symbols, {} rows", len(source._data), len(df))
 

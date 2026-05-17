@@ -22,11 +22,11 @@ export interface PreviewResult {
 }
 
 export function getTables() {
-  return request.get<{ code: number; data: TableInfo[] }>('/explorer/tables')
+  return request.get<TableInfo[]>('/explorer/tables')
 }
 
 export function getTableSchema(tableName: string) {
-  return request.get<{ code: number; data: ColumnInfo[] }>(`/explorer/tables/${tableName}/schema`)
+  return request.get<ColumnInfo[]>(`/explorer/tables/${tableName}/schema`)
 }
 
 export function previewTable(
@@ -39,17 +39,17 @@ export function previewTable(
     where?: string
   } = {}
 ) {
-  return request.get<{ code: number; data: PreviewResult }>(`/explorer/tables/${tableName}/preview`, { params })
+  return request.get<PreviewResult>(`/explorer/tables/${tableName}/preview`, { params })
 }
 
 export function getDistinctValues(tableName: string, column: string, limit?: number) {
-  return request.get<{ code: number; data: any[] }>(`/explorer/tables/${tableName}/distinct`, {
+  return request.get<any[]>(`/explorer/tables/${tableName}/distinct`, {
     params: { column, limit }
   })
 }
 
 export function executeQuery(sql: string, limit?: number) {
-  return request.post<{ code: number; data?: any; message?: string }>('/explorer/query', null, {
+  return request.post<any>('/explorer/query', null, {
     params: { sql, limit }
   })
 }
