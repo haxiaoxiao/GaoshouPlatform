@@ -21,7 +21,7 @@ Verified available capabilities:
 | ClickHouse sparse timer minute feed | Done | `bar_type="minute_timer"` with timer time filtering |
 | AKQuant Grid Search | Done | `POST /api/v2/backtest/optimize/grid` |
 | AKQuant Walk-forward Validation | Done | `POST /api/v2/backtest/optimize/walk-forward` |
-| AKQuant Polars factor engine | Done | `POST /api/v2/compute/evaluate`, `engine="akquant"` |
+| AKQuant Polars factor engine | Done | `POST /api/compute/evaluate`, `engine="akquant"` |
 | Strategy id resolution for optimization | Done | Grid/Walk-forward accept `strategy_id` |
 | Index universe resolution for optimization | Done | Grid/Walk-forward accept `index_symbol` |
 | Strategy parameter schema | Done | `POST /api/v2/backtest/strategy-params/schema` |
@@ -72,7 +72,7 @@ Result: `7 passed`. Remaining warning: Pydantic class-based config deprecation.
   - `POST /api/v2/backtest/optimize/grid` route registration - done
   - `POST /api/v2/backtest/optimize/walk-forward` route registration - done
   - `minute_timer` optimization data loading - done
-  - `POST /api/v2/compute/evaluate` with `engine="akquant"` - pending API-level test
+  - `POST /api/compute/evaluate` with `engine="akquant"` - pending API-level test
 
 P0 status: core API and backend wiring are complete. Remaining P0 item is API-level coverage for AKQuant compute evaluation.
 
@@ -98,7 +98,7 @@ P0 status: core API and backend wiring are complete. Remaining P0 item is API-le
 
 - Feature Store baseline is now implemented for factor research:
   - generic Parquet dataset: `feature_values`
-  - API: `GET /api/v2/features/definitions`, `GET /api/v2/features/groups`, `GET /api/v2/features/coverage`, `GET /api/v2/features/preview`, `POST /api/v2/features/precompute`, `POST /api/v2/features/groups/precompute`, `POST /api/v2/features/query`
+  - API: `GET /api/features/definitions`, `GET /api/features/groups`, `GET /api/features/coverage`, `GET /api/features/preview`, `POST /api/features/precompute`, `POST /api/features/groups/precompute`, `POST /api/features/query`
   - frontend: Factor Research -> `Feature Store`, with feature group selection, coverage, precompute, and cross-section preview
   - initial built-ins: `cum_volume_at_time`, `max_volume_nd`, `high_volume_ratio`, `high_volume_signal`
   - ID=43 feature group: `small_cap_v4_core`

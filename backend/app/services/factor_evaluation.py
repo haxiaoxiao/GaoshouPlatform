@@ -11,7 +11,11 @@ from app.backtest.analyzers import compute_ic_series
 from app.backtest.config import BacktestConfig
 from app.backtest.runner import get_backtest_runner
 from app.compute.expression import evaluate_expression
+from app.compute.operators import auto_discover
 from app.data_stores import get_market_data_store
+
+# Ensure operators are registered before any expression evaluation
+auto_discover()
 from app.models.factor import (
     FactorConfig, EvalConfig, BtConfig, FactorReport,
     ICPoint, IndustryIC, TurnoverPoint, DecayPoint, StockFactorValue,
@@ -219,13 +223,24 @@ class FactorEvaluationService:
 
     async def board_query(self, query: BoardQuery) -> BoardResponse:
         """Query factor board with filters, sorting, and pagination."""
+        rows = await self._saved_factor_board_rows(query)
+        if rows:
+            total = len(rows)
+            rows = self._sort_and_page_rows(rows, query)
+            return BoardResponse(
+                rows=rows,
+                total=total,
+                page=query.page,
+                page_size=query.page_size,
+            )
+
         from app.services.factor_templates import FactorTemplatesService
         templates_svc = FactorTemplatesService()
         all_templates = templates_svc.list_templates()
         if query.categories:
             all_templates = [t for t in all_templates if t.category in query.categories]
 
-        rows: list[BoardRow] = []
+        rows = []
         for tmpl in all_templates:
             cfg = FactorConfig(
                 expression=tmpl.preset_expression,
@@ -259,20 +274,53 @@ class FactorEvaluationService:
                 logger.exception("board_query failed for template: %s", tmpl.name)
                 continue
 
-        # Sort
-        reverse = query.sort_order == "desc"
-        rows.sort(key=lambda r: getattr(r, query.sort_by, 0), reverse=reverse)
-
-        # Paginate
         total = len(rows)
-        start = (query.page - 1) * query.page_size
-        end = start + query.page_size
-        page_rows = rows[start:end]
-
+        rows = self._sort_and_page_rows(rows, query)
         return BoardResponse(
-            rows=page_rows, total=total,
+            rows=rows, total=total,
             page=query.page, page_size=query.page_size,
         )
+
+    async def _saved_factor_board_rows(self, query: BoardQuery) -> list[BoardRow]:
+        """Return saved custom factors for the board, with blank metrics if analysis is absent."""
+        from app.db.sqlite import async_session_factory
+        from app.db.models import Factor, FactorAnalysis
+        from sqlalchemy import select
+
+        async with async_session_factory() as session:
+            stmt = select(Factor)
+            if query.categories:
+                stmt = stmt.where(Factor.category.in_(query.categories))
+            result = await session.execute(stmt.order_by(Factor.created_at.desc()))
+            factors = list(result.scalars().all())
+            rows: list[BoardRow] = []
+            for factor in factors:
+                analysis_result = await session.execute(
+                    select(FactorAnalysis)
+                    .where(FactorAnalysis.factor_id == factor.id)
+                    .order_by(FactorAnalysis.created_at.desc())
+                    .limit(1)
+                )
+                analysis = analysis_result.scalar_one_or_none()
+                details = analysis.details if analysis and analysis.details else {}
+                rows.append(BoardRow(
+                    factor_name=factor.name,
+                    category=factor.category or "custom",
+                    min_quantile_excess_return=float(details.get("min_quantile_excess_return") or 0.0),
+                    max_quantile_excess_return=float(details.get("max_quantile_excess_return") or 0.0),
+                    min_quantile_turnover=float(analysis.turnover_rate or 0.0) if analysis else 0.0,
+                    max_quantile_turnover=float(details.get("max_quantile_turnover") or 0.0),
+                    ic_mean=float(analysis.ic_mean or 0.0) if analysis else 0.0,
+                    ir=float(analysis.ir or 0.0) if analysis else 0.0,
+                ))
+        return rows
+
+    def _sort_and_page_rows(self, rows: list[BoardRow], query: BoardQuery) -> list[BoardRow]:
+        reverse = query.sort_order == "desc"
+        rows.sort(key=lambda r: getattr(r, query.sort_by, 0), reverse=reverse)
+        start = (query.page - 1) * query.page_size
+        end = start + query.page_size
+        return rows[start:end]
 
     # ------------------------------------------------------------------
     # Report helpers
@@ -293,10 +341,130 @@ class FactorEvaluationService:
         return []  # Requires industry classification data
 
     def _compute_turnover(self, factor_df) -> list[tuple]:
-        return []  # Requires quantile group tracking
+        """Compute quantile turnover between consecutive dates.
+
+        For each pair of consecutive trading dates, assigns stocks to
+        quintiles based on factor rank, then measures what fraction of
+        stocks in the top quintile (and bottom quintile) changed from
+        the previous date.
+
+        Returns list of (date, top_quintile_turnover, bottom_quintile_turnover).
+        """
+        if not isinstance(factor_df, pd.DataFrame) or factor_df.empty:
+            return []
+        n_groups = 5
+        dates = sorted(factor_df.index.unique())
+        if len(dates) < 2:
+            return []
+
+        # Assign quintile labels per date
+        quantile_map: dict[object, pd.Series] = {}
+        for d in dates:
+            row = factor_df.loc[d]
+            if isinstance(row, pd.DataFrame):
+                row = row.iloc[:, 0]
+            valid = row.dropna()
+            if len(valid) < n_groups * 2:
+                quantile_map[d] = pd.Series(dtype=int)
+                continue
+            try:
+                quantile_map[d] = pd.qcut(valid, n_groups, labels=False, duplicates="drop")
+            except Exception:
+                quantile_map[d] = pd.Series(dtype=int)
+
+        result: list[tuple] = []
+        for i in range(1, len(dates)):
+            prev_d = dates[i - 1]
+            curr_d = dates[i]
+            prev_q = quantile_map.get(prev_d, pd.Series(dtype=int))
+            curr_q = quantile_map.get(curr_d, pd.Series(dtype=int))
+            if prev_q.empty or curr_q.empty:
+                continue
+
+            common = prev_q.index.intersection(curr_q.index)
+            if len(common) < n_groups * 2:
+                continue
+            prev_q = prev_q.loc[common]
+            curr_q = curr_q.loc[common]
+
+            # Top quintile turnover (label == n_groups-1)
+            top_prev = set(prev_q[prev_q == n_groups - 1].index)
+            top_curr = set(curr_q[curr_q == n_groups - 1].index)
+            top_stayers = len(top_prev & top_curr)
+            top_turnover = 1.0 - top_stayers / max(len(top_prev), 1)
+
+            # Bottom quintile turnover (label == 0)
+            bot_prev = set(prev_q[prev_q == 0].index)
+            bot_curr = set(curr_q[curr_q == 0].index)
+            bot_stayers = len(bot_prev & bot_curr)
+            bot_turnover = 1.0 - bot_stayers / max(len(bot_prev), 1)
+
+            try:
+                d = date.fromisoformat(str(curr_d)[:10])
+            except (ValueError, TypeError):
+                continue
+            result.append((d, round(bot_turnover, 4), round(top_turnover, 4)))
+        return result
 
     def _compute_signal_decay(self, factor_df, return_df) -> list[tuple]:
-        return []  # Requires lagged IC computation
+        """Compute IC decay across multiple forward-return horizons.
+
+        For each lag in [1, 3, 5, 10, 20], shifts the return matrix
+        forward by `lag` periods and computes the cross-sectional
+        Spearman IC, returning the mean IC at each lag.
+
+        Returns list of (lag, mean_ic, top_quintile_return, bottom_quintile_return).
+        """
+        lags = [1, 3, 5, 10, 20]
+        if not isinstance(factor_df, pd.DataFrame) or factor_df.empty:
+            return [(lag, 0.0, 0.0, 0.0) for lag in lags]
+        if not isinstance(return_df, pd.DataFrame) or return_df.empty:
+            return [(lag, 0.0, 0.0, 0.0) for lag in lags]
+
+        result: list[tuple] = []
+        for lag in lags:
+            lagged_return = return_df.shift(-lag)
+            try:
+                ic_series = compute_ic_series(factor_df, lagged_return)
+            except Exception:
+                result.append((lag, 0.0, 0.0, 0.0))
+                continue
+            if ic_series.empty:
+                result.append((lag, 0.0, 0.0, 0.0))
+                continue
+            mean_ic = float(ic_series.mean())
+
+            # Also compute top/bottom quantile returns at this lag
+            dates = sorted(factor_df.index.intersection(lagged_return.dropna(how="all").index))
+            top_ret = 0.0
+            bot_ret = 0.0
+            if len(dates) >= 2:
+                top_rets = []
+                bot_rets = []
+                for d in dates:
+                    f = factor_df.loc[d]
+                    r = lagged_return.loc[d]
+                    if isinstance(f, pd.DataFrame):
+                        f = f.iloc[:, 0]
+                    if isinstance(r, pd.DataFrame):
+                        r = r.iloc[:, 0]
+                    common = f.dropna().index.intersection(r.dropna().index)
+                    if len(common) < 10:
+                        continue
+                    f_common = f.loc[common]
+                    r_common = r.loc[common]
+                    try:
+                        labels = pd.qcut(f_common, 5, labels=False, duplicates="drop")
+                        top_rets.append(r_common[labels == 4].mean())
+                        bot_rets.append(r_common[labels == 0].mean())
+                    except Exception:
+                        continue
+                if top_rets:
+                    top_ret = float(np.mean(top_rets))
+                    bot_ret = float(np.mean(bot_rets))
+
+            result.append((lag, round(mean_ic, 4), round(bot_ret, 4), round(top_ret, 4)))
+        return result
 
     def _top_n_stocks(self, sorted_series, n, ascending) -> list[StockFactorValue]:
         items = sorted_series.nlargest(n) if not ascending else sorted_series.nsmallest(n)
@@ -365,7 +533,12 @@ class FactorEvaluationService:
         start_date: date | None,
         end_date: date | None,
     ) -> pd.DataFrame:
-        """加载收益率矩阵 — 下一日收益率"""
+        """加载收益率矩阵 — 下一日收益率
+
+        load_daily returns a DataFrame with trade_date as the index
+        (via set_index), so we use sort_index / .index rather than
+        referencing a "trade_date" column.
+        """
         store = get_market_data_store()
         sd = start_date or date(2000, 1, 1)
         ed = end_date or date.today()
@@ -375,9 +548,9 @@ class FactorEvaluationService:
 
         return_matrix: dict[str, pd.Series] = {}
         for sym, grp in df.groupby("symbol"):
-            grp = grp.sort_values("trade_date")
+            grp = grp.sort_index()
             ret = grp["close"].pct_change().shift(-1)
-            ret.index = grp["trade_date"]
+            ret.index = grp.index
             return_matrix[sym] = ret
 
         if return_matrix:

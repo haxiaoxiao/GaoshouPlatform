@@ -19,6 +19,7 @@
 |---|---|
 | `docs/user-manual.md` | 使用手册：启动、数据同步、AKQuant 回测、ID=43 小市值流程 |
 | `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare、AKShare 的优先级和适用场景 |
+| `docs/local-data-onboarding.md` | 本地数据接入配置：SQLite + Parquet/DuckDB + 前端验证流程 |
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
 | `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 规划 |
 | `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：参数、数据口径、已对齐节点和剩余差异 |

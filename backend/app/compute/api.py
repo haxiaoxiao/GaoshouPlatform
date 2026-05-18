@@ -1,4 +1,4 @@
-"""计算层 API — /api/v2/compute"""
+"""计算层 API — /api/compute, with /api/v2/compute compatibility."""
 import time
 from datetime import date
 
@@ -13,7 +13,7 @@ from app.compute.operators.registry import OperatorRegistry
 from app.models.factor import FactorConfig
 from app.services.compute_service import compute_service
 
-router = APIRouter(prefix="/v2/compute")
+router = APIRouter()
 
 # 启动时自动发现所有算子
 auto_discover()
@@ -42,6 +42,21 @@ async def list_operators():
         "code": 0,
         "message": "success",
         "data": OperatorRegistry.to_api_list(),
+    }
+
+
+@router.get("/capabilities")
+async def capabilities():
+    """Return compute/TA runtime capabilities for the UI."""
+    from app.compute.operators.ta_ops import get_ta_capabilities
+
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "engines": ["builtin", "akquant"],
+            "ta": get_ta_capabilities(),
+        },
     }
 
 

@@ -48,7 +48,7 @@ def jq_index_symbol(symbol: str) -> str:
 
 
 def _db_path() -> Path:
-    return Path(settings.data_dir) / "gaoshou.db"
+    return settings.sqlite_db_path
 
 
 def _connect() -> sqlite3.Connection:
@@ -204,6 +204,8 @@ async def ensure_index_components(index_symbol: str, start: date, end: date) -> 
     fetch_start = start - timedelta(days=370)
     if _has_snapshot_covering(idx, start, end):
         return {"index_symbol": idx, "inserted": 0, "source": "cache"}
+    if _has_any_snapshot(idx, start, end):
+        return {"index_symbol": idx, "inserted": 0, "source": "partial_cache"}
 
     def _sync() -> dict[str, Any]:
         df = _fetch_tushare_index_weight(idx, fetch_start, end)
@@ -212,6 +214,23 @@ async def ensure_index_components(index_symbol: str, start: date, end: date) -> 
         return {"index_symbol": idx, "inserted": inserted, "source": "tushare.index_weight"}
 
     return await asyncio.to_thread(_sync)
+
+
+def _has_any_snapshot(index_symbol: str, start: date, end: date) -> bool:
+    init_index_component_table()
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    with _connect() as conn:
+        row = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM index_components
+            WHERE index_symbol = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            """,
+            (idx, (start - timedelta(days=370)).isoformat(), end.isoformat()),
+        ).fetchone()
+    return bool(row and int(row[0] or 0) > 0)
 
 
 async def load_index_symbols(index_symbol: str, start: date, end: date) -> list[str]:

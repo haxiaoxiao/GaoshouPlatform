@@ -39,6 +39,14 @@ class IndicatorStore(ABC):
         """
         ...
 
+    def latest_trade_date(
+        self,
+        names: list[str] | None = None,
+        symbols: list[str] | None = None,
+    ) -> date | None:
+        """Return the latest cross-section trade date available in the store."""
+        return None
+
     @abstractmethod
     def write_cross_section(self, df: pd.DataFrame) -> int:
         """写入截面指标，返回写入行数"""

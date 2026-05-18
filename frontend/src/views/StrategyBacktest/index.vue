@@ -1077,7 +1077,7 @@ const refreshSmallCapTimerStartDate = async () => {
     const start = res?.earliest_date
     if (start && btStartDate.value < start) {
       btStartDate.value = start
-      ElMessage.info(`已按 ClickHouse 稀疏分钟数据将起始日期设置为 ${start}`)
+      ElMessage.info(`已按本地稀疏分钟数据将起始日期设置为 ${start}`)
     }
   } catch {
     if (btStartDate.value < '2025-04-23') {

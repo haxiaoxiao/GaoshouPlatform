@@ -17,7 +17,27 @@ def get_akquant_capabilities() -> dict[str, Any]:
         return {
             "available": False,
             "version": None,
-            "features": {},
+            "features": {
+                "backtest": False,
+                "grid_search": False,
+                "walk_forward": False,
+                "polars_factor_engine": False,
+                "talib_compat": False,
+                "strategy_params": False,
+                "risk_config": False,
+                "instrument_config": False,
+                "live_runner": False,
+                "ml_adapters": False,
+            },
+            "optional_modules": {
+                "polars": _module_available("polars"),
+                "sklearn": _module_available("sklearn"),
+                "torch": _module_available("torch"),
+                "talib": _module_available("talib"),
+                "joblib": _module_available("joblib"),
+            },
+            "talib_function_count": 0,
+            "talib_functions": [],
             "missing": ["akquant"],
         }
 

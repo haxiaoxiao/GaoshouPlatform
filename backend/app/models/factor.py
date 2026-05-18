@@ -211,7 +211,7 @@ class FactorTemplate(BaseModel):
 class FactorCreate(BaseModel):
     name: str
     expression: str
-    stock_pool: StockPool = StockPool.HS300
+    stock_pool: str = StockPool.HS300.value
     category: str | None = None
     description: str | None = None
     params: dict = Field(default_factory=dict)
@@ -220,7 +220,7 @@ class FactorCreate(BaseModel):
 class FactorUpdate(BaseModel):
     name: str | None = None
     expression: str | None = None
-    stock_pool: StockPool | None = None
+    stock_pool: str | None = None
     category: str | None = None
     description: str | None = None
     params: dict | None = None
@@ -230,7 +230,7 @@ class FactorResponse(BaseModel):
     id: int
     name: str
     expression: str
-    stock_pool: StockPool
+    stock_pool: str
     category: str | None
     description: str | None
     params: dict

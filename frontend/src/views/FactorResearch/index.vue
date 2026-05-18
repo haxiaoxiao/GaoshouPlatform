@@ -1,10 +1,10 @@
 <template>
   <div class="factor-research">
     <el-tabs v-model="activeTab" class="factor-tabs">
-      <el-tab-pane label="Factor Board" name="board">
+      <el-tab-pane label="因子看板" name="board">
         <FactorBoard />
       </el-tab-pane>
-      <el-tab-pane label="Feature Store" name="features">
+      <el-tab-pane label="Feature Store / 数据仓库" name="features">
         <FeatureStore />
       </el-tab-pane>
     </el-tabs>

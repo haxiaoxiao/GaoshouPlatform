@@ -7,6 +7,7 @@ from loguru import logger
 
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
+from app.core.config import settings
 from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
 from app.db.clickhouse import init_clickhouse_tables
@@ -24,12 +25,15 @@ async def lifespan(app: FastAPI):
     await init_db()
     logger.info("Database initialized")
 
-    # 初始化 ClickHouse 表
-    try:
-        init_clickhouse_tables()
-        logger.info("ClickHouse tables initialized")
-    except Exception as e:
-        logger.warning(f"ClickHouse not available, skipping: {e}")
+    # 初始化 ClickHouse 表（Parquet 模式无需 ClickHouse）
+    if settings.clickhouse_enabled:
+        try:
+            init_clickhouse_tables()
+            logger.info("ClickHouse tables initialized")
+        except Exception as e:
+            logger.warning(f"ClickHouse not available, skipping: {e}")
+    else:
+        logger.info("ClickHouse disabled, using Parquet/DuckDB backend")
 
     # 启动调度器
     start_scheduler()

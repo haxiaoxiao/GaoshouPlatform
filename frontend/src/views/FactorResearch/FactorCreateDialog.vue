@@ -124,7 +124,7 @@
 
     <template #footer>
       <el-button @click="visible = false">取消</el-button>
-      <el-button type="primary" @click="doCreate" :disabled="!canCreate">创建并计算</el-button>
+      <el-button type="primary" @click="doCreate" :disabled="!canCreate">创建因子</el-button>
     </template>
   </el-dialog>
 </template>
@@ -133,8 +133,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowRight } from '@element-plus/icons-vue'
-import { factorApi, computeApi } from '@/api/v2'
-import request from '@/api/request'
+import { factorApi, computeApi } from '@/api/factorResearch'
 import type { FactorTemplate } from '@/types/factor'
 
 interface WatchlistGroup { id: number; name: string }
@@ -200,7 +199,7 @@ function insertOperator(name: string) {
 async function loadOperators() {
   loadingRef.value = true
   try {
-    const res = await request.get<any>('/v2/compute/operators')
+    const res = await computeApi.operators() as any
     operators.value = res || []
   } catch {
     // operators endpoint unavailable, use fallback
@@ -228,13 +227,17 @@ async function doValidate() {
 async function doCreate() {
   if (!canCreate.value) return
   try {
-    await computeApi.evaluate({
+    await factorApi.create({
+      name: factorName.value.trim(),
       expression: expression.value,
-      stock_pool: params.value.stock_pool as any,
-      start_date: dateRange.value[0],
-      end_date: dateRange.value[1],
-      direction: params.value.direction as any,
-    })
+      stock_pool: params.value.stock_pool,
+      category: selectedTemplate.value?.category,
+      params: {
+        ...params.value,
+        kind: selectedTemplate.value?.type === 'technical' ? 'indicator' : 'factor',
+        engine: 'builtin',
+      },
+    } as any)
     ElMessage.success(`因子"${factorName.value}"创建成功`)
     emit('created')
     visible.value = false

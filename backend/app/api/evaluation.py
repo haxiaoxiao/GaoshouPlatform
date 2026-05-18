@@ -1,4 +1,4 @@
-"""因子评估 API — /v2/evaluation"""
+"""因子评估 API — /api/evaluation, with /api/v2/evaluation compatibility."""
 from datetime import date
 
 from fastapi import APIRouter
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from app.models.factor import FactorConfig, EvalConfig, BoardQuery
 from app.services.factor_evaluation import FactorEvaluationService, get_evaluation_service
 
-router = APIRouter(prefix="/v2/evaluation")
+router = APIRouter()
 
 
 # ============== Request Models ==============

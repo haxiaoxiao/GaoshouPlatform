@@ -18,6 +18,14 @@ class ParquetIndicatorStore(IndicatorStore):
         from app.core.config import settings
 
         self._data_dir = Path(data_dir or settings.parquet_data_dir)
+        self._cross_section_dataset = self._first_existing_dataset(
+            "stock_indicators",
+            "feature_values",
+        )
+        self._timeseries_dataset = self._first_existing_dataset(
+            "indicator_timeseries",
+            "feature_timeseries",
+        )
 
     def _dataset_path(self, dataset: str) -> Path:
         return self._data_dir / dataset
@@ -29,26 +37,45 @@ class ParquetIndicatorStore(IndicatorStore):
         root = self._dataset_path(dataset)
         return root.exists() and any(root.rglob("*.parquet"))
 
+    def _first_existing_dataset(self, *datasets: str) -> str:
+        for dataset in datasets:
+            if self._exists(dataset):
+                return dataset
+        return datasets[0]
+
+    def _indicator_col(self, dataset: str) -> str:
+        return "feature_name" if dataset == "feature_values" else "indicator_name"
+
+    def _updated_col(self, dataset: str) -> str:
+        return "created_at" if dataset == "feature_values" else "updated_at"
+
     def load_cross_section(
         self,
         names: list[str],
         trade_date: date,
         symbols: list[str] | None = None,
     ) -> pd.DataFrame:
-        if not self._exists("stock_indicators"):
+        dataset = self._cross_section_dataset
+        if not self._exists(dataset):
             return pd.DataFrame()
 
+        indicator_col = self._indicator_col(dataset)
+        updated_col = self._updated_col(dataset)
         conditions = f"trade_date = '{trade_date}'"
         if names:
-            conditions += f" AND indicator_name IN {_list_param(names)}"
+            conditions += f" AND {indicator_col} IN {_list_param(names)}"
         if symbols:
             conditions += f" AND symbol IN {_list_param(symbols)}"
 
         sql = f"""
-            SELECT symbol, indicator_name, trade_date, value, updated_at
-            FROM read_parquet('{self._glob_pattern("stock_indicators")}', hive_partitioning=true)
+            SELECT symbol,
+                   {indicator_col} AS indicator_name,
+                   trade_date,
+                   value,
+                   {updated_col} AS updated_at
+            FROM read_parquet('{self._glob_pattern(dataset)}', hive_partitioning=true)
             WHERE {conditions}
-            ORDER BY symbol, indicator_name
+            ORDER BY symbol, {indicator_col}
         """
         db = get_duckdb()
         return db.execute(sql).df()
@@ -60,24 +87,55 @@ class ParquetIndicatorStore(IndicatorStore):
         end: date,
         symbols: list[str] | None = None,
     ) -> pd.DataFrame:
-        if not names or not self._exists("indicator_timeseries"):
+        dataset = self._timeseries_dataset
+        if not names or not self._exists(dataset):
             return pd.DataFrame()
 
+        indicator_col = self._indicator_col(dataset)
+        updated_col = self._updated_col(dataset)
         name_list = _list_param(names)
-        conditions = f"""indicator_name IN {name_list}
+        conditions = f"""{indicator_col} IN {name_list}
           AND datetime >= '{start}'
           AND datetime < '{end}'"""
         if symbols:
             conditions += f" AND symbol IN {_list_param(symbols)}"
 
         sql = f"""
-            SELECT symbol, indicator_name, datetime, value, updated_at
-            FROM read_parquet('{self._glob_pattern("indicator_timeseries")}', hive_partitioning=true)
+            SELECT symbol,
+                   {indicator_col} AS indicator_name,
+                   datetime,
+                   value,
+                   {updated_col} AS updated_at
+            FROM read_parquet('{self._glob_pattern(dataset)}', hive_partitioning=true)
             WHERE {conditions}
-            ORDER BY symbol, indicator_name, datetime
+            ORDER BY symbol, {indicator_col}, datetime
         """
         db = get_duckdb()
         return db.execute(sql).df()
+
+    def latest_trade_date(
+        self,
+        names: list[str] | None = None,
+        symbols: list[str] | None = None,
+    ) -> date | None:
+        dataset = self._cross_section_dataset
+        if not self._exists(dataset):
+            return None
+
+        indicator_col = self._indicator_col(dataset)
+        conditions = ["trade_date IS NOT NULL"]
+        if names:
+            conditions.append(f"{indicator_col} IN {_list_param(names)}")
+        if symbols:
+            conditions.append(f"symbol IN {_list_param(symbols)}")
+
+        sql = f"""
+            SELECT max(trade_date) AS trade_date
+            FROM read_parquet('{self._glob_pattern(dataset)}', hive_partitioning=true)
+            WHERE {' AND '.join(conditions)}
+        """
+        row = get_duckdb().execute(sql).fetchone()
+        return row[0] if row and row[0] is not None else None
 
     def write_cross_section(self, df: pd.DataFrame) -> int:
         return self._write_partitioned(

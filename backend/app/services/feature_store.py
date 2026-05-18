@@ -274,11 +274,76 @@ FEATURE_GROUPS: dict[str, dict[str, Any]] = {
 
 
 def list_feature_definitions() -> list[dict[str, Any]]:
-    return [definition.to_dict() for definition in FEATURE_DEFINITIONS.values()]
+    return [definition.to_dict() for definition in FEATURE_DEFINITIONS.values()] + list_custom_feature_definitions()
 
 
 def get_feature_definition(name: str) -> FeatureDefinition | None:
-    return FEATURE_DEFINITIONS.get(name)
+    return FEATURE_DEFINITIONS.get(name) or get_custom_feature_definition(name)
+
+
+def list_custom_feature_definitions() -> list[dict[str, Any]]:
+    """Expose saved expression factors/indicators as Feature Store definitions."""
+    import sqlite3
+
+    db_path = Path(settings.data_dir) / "gaoshou.db"
+    if not db_path.exists():
+        return []
+    try:
+        with sqlite3.connect(db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT name, category, source, code, parameters, description
+                FROM factors
+                WHERE COALESCE(source, '') = 'custom'
+                   OR code IS NOT NULL
+                ORDER BY name
+                """
+            ).fetchall()
+    except sqlite3.Error:
+        return []
+
+    definitions: list[dict[str, Any]] = []
+    for row in rows:
+        params = _parse_json_params(row["parameters"])
+        expression = str(row["code"] or params.get("expression") or "")
+        if not expression:
+            continue
+        feature_type = str(params.get("kind") or params.get("feature_type") or "factor")
+        definitions.append(FeatureDefinition(
+            name=str(row["name"]),
+            display_name=str(params.get("display_name") or row["name"]),
+            feature_type=feature_type,
+            category=str(row["category"] or params.get("category") or "custom"),
+            frequency=str(params.get("frequency") or "daily"),
+            description=str(row["description"] or params.get("description") or expression),
+            unit=str(params.get("unit") or ""),
+            as_of_time=params.get("as_of_time"),
+            params_schema=dict(params.get("params_schema") or {}),
+            dependencies=[str(item) for item in params.get("dependencies", [])],
+            lookback_days=int(params.get("lookback_days") or 0),
+            point_in_time_safe=bool(params.get("point_in_time_safe", True)),
+            source="custom.factor",
+        ).to_dict())
+    return definitions
+
+
+def get_custom_feature_definition(name: str) -> FeatureDefinition | None:
+    for item in list_custom_feature_definitions():
+        if item["name"] == name:
+            return FeatureDefinition(**item)
+    return None
+
+
+def _parse_json_params(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not value:
+        return {}
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
 
 
 def list_feature_groups() -> list[dict[str, Any]]:

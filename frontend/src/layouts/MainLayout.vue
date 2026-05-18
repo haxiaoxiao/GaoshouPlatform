@@ -206,7 +206,7 @@ const systemNavItems = [
 // Page titles
 const pageTitles: Record<string, { title: string; subtitle?: string }> = {
   '/data': { title: '数据管理', subtitle: '股票数据查询与同步' },
-  '/explorer': { title: '数据浏览器', subtitle: 'ClickHouse数据查询' },
+  '/explorer': { title: '数据浏览器', subtitle: '本地行情与指标数据查询' },
   '/watchlist': { title: '自选股', subtitle: '分组管理自选股票' },
   '/factor': { title: '因子研究', subtitle: '因子分析与筛选' },
   '/backtest': { title: '策略回测', subtitle: '策略开发与验证' },

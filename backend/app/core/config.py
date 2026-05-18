@@ -1,8 +1,10 @@
+import socket
 from pathlib import Path
 from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _BASE_DIR = _BACKEND_DIR.parent
+_HOSTNAME = socket.gethostname().split(".")[0]
 _DATA_DIR = _BASE_DIR / "data"
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 _LEGACY_DATA_DIR = _BACKEND_DIR / "data"
@@ -16,6 +18,15 @@ if not _DB_PATH.exists() and _LEGACY_DB_PATH.exists():
         # If another process keeps SQLite open, keep using the legacy DB for
         # this process. The file can be moved after the process stops.
         _DB_PATH = _LEGACY_DB_PATH
+
+_ENV_FILES = (
+    str(_BASE_DIR / ".env"),
+    str(_BASE_DIR / ".env.local"),
+    str(_BASE_DIR / f".env.{_HOSTNAME}.local"),
+    str(_BACKEND_DIR / ".env"),
+    str(_BACKEND_DIR / ".env.local"),
+    str(_BACKEND_DIR / f".env.{_HOSTNAME}.local"),
+)
 
 
 class Settings(BaseSettings):
@@ -57,10 +68,19 @@ class Settings(BaseSettings):
 
     @property
     def data_dir(self) -> Path:
-        return _DATA_DIR
+        return self.sqlite_db_path.parent
+
+    @property
+    def sqlite_db_path(self) -> Path:
+        """Return the SQLite file configured by DATABASE_URL."""
+        for prefix in ("sqlite+aiosqlite:///", "sqlite:///"):
+            if self.database_url.startswith(prefix):
+                path = Path(self.database_url[len(prefix):])
+                return path if path.is_absolute() else (_BASE_DIR / path).resolve()
+        return _DB_PATH
 
     class Config:
-        env_file = ".env"
+        env_file = _ENV_FILES
         env_file_encoding = "utf-8"
 
 

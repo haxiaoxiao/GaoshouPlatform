@@ -81,6 +81,25 @@ class ClickHouseIndicatorStore(IndicatorStore):
             return pd.DataFrame(columns=["symbol", "indicator_name", "datetime", "value", "updated_at"])
         return pd.DataFrame(rows, columns=["symbol", "indicator_name", "datetime", "value", "updated_at"])
 
+    def latest_trade_date(
+        self,
+        names: list[str] | None = None,
+        symbols: list[str] | None = None,
+    ) -> date | None:
+        where = ["trade_date IS NOT NULL"]
+        params = {}
+        if names:
+            where.append("indicator_name IN %(names)s")
+            params["names"] = names
+        if symbols:
+            where.append("symbol IN %(symbols)s")
+            params["symbols"] = symbols
+        rows = self.ch.execute(
+            f"SELECT max(trade_date) FROM stock_indicators WHERE {' AND '.join(where)}",
+            params,
+        )
+        return rows[0][0] if rows and rows[0][0] is not None else None
+
     def write_cross_section(self, df: pd.DataFrame) -> int:
         logger.warning("ClickHouseIndicatorStore.write_cross_section 未实现，请使用现有调度器")
         return 0

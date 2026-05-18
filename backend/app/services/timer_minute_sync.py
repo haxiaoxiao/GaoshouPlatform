@@ -84,7 +84,7 @@ def _minute_strings(timer_times: tuple[time, ...]) -> tuple[str, ...]:
 
 
 def _index_symbols(index_symbol: str, start: date, end: date) -> list[str]:
-    db_path = Path(settings.data_dir) / "gaoshou.db"
+    db_path = settings.sqlite_db_path
     normalized = normalize_index_symbol(index_symbol) or _normalize_symbol(index_symbol)
     jq_symbol = normalized.replace(".SH", ".XSHG").replace(".SZ", ".XSHE")
 

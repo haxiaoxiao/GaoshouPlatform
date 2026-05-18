@@ -410,15 +410,12 @@ class DataSkill:
         if trade_date:
             df = store.load_cross_section([indicator_name], trade_date, [symbol])
         else:
-            from datetime import date as dt_date
-            # Try today, then fall back to recent dates
-            df = store.load_cross_section([indicator_name], dt_date.today(), [symbol])
-            if df.empty:
-                for days_back in (1, 2, 3, 5, 10):
-                    td = dt_date.today() - timedelta(days=days_back)
-                    df = store.load_cross_section([indicator_name], td, [symbol])
-                    if not df.empty:
-                        break
+            latest_date = store.latest_trade_date([indicator_name], [symbol])
+            df = (
+                store.load_cross_section([indicator_name], latest_date, [symbol])
+                if latest_date
+                else store.load_cross_section([indicator_name], date.today(), [symbol])
+            )
         if df.empty:
             # Fallback to existing ClickHouse path
             ch = get_ch_client()
@@ -458,7 +455,7 @@ class DataSkill:
         from datetime import date as dt_date
 
         store = get_indicator_store()
-        target_date = trade_date or dt_date.today()
+        target_date = trade_date or store.latest_trade_date(None, symbols) or dt_date.today()
         df = store.load_cross_section([], target_date, symbols)
         if df.empty:
             # Fallback to ClickHouse

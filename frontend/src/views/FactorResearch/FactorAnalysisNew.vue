@@ -57,7 +57,7 @@
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import * as echarts from 'echarts'
-import { evaluationApi } from '@/api/v2'
+import { evaluationApi } from '@/api/factorResearch'
 import type { FactorReport } from '@/types/factor'
 
 const route = useRoute()

@@ -74,7 +74,9 @@ class VectorizedBacktestEngine:
                     group_daily_returns[g].append(0.0)
                     continue
                 g_returns = hold_returns[valid_symbols]
-                mean_ret = g_returns.mean(axis=1).mean()
+                mean_ret = g_returns.mean(axis=1).dropna().mean()
+                if pd.isna(mean_ret):
+                    mean_ret = 0.0
                 group_daily_returns[g].append(mean_ret)
 
             nav_dates.append(rb_date)

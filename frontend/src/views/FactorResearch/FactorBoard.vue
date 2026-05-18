@@ -58,6 +58,10 @@
     </div>
 
     <div class="toolbar">
+      <div class="board-title">
+        <strong>因子看板</strong>
+        <span>展示保存因子的研究表现，Feature Store 负责数据覆盖和预计算。</span>
+      </div>
       <el-button type="primary" @click="showCreateDialog = true">+ 新建因子</el-button>
     </div>
 
@@ -115,7 +119,7 @@
 <script setup lang="ts">
 import { ref, reactive, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
-import { evaluationApi } from '@/api/v2'
+import { evaluationApi } from '@/api/factorResearch'
 import { watchlistApi } from '@/api/data'
 import type { BoardRow, BoardQuery } from '@/types/factor'
 import type { WatchlistGroup } from '@/api/data'
@@ -218,7 +222,9 @@ onMounted(() => {
   color: var(--text-secondary);
   white-space: nowrap;
 }
-.toolbar { margin-bottom: 12px; }
+.toolbar { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; }
+.board-title { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); }
+.board-title strong { font-size: 14px; color: var(--text-bright); }
 .positive { color: #d93026; }
 .negative { color: #137333; }
 </style>

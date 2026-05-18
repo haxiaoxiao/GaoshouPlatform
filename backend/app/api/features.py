@@ -21,7 +21,7 @@ from app.services.feature_store import (
 )
 from app.services.index_components import load_index_symbols
 
-router = APIRouter(prefix="/v2/features", tags=["features"])
+router = APIRouter(tags=["features"])
 
 
 HIGH_VOLUME_FEATURES = {

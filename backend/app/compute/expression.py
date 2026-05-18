@@ -319,6 +319,32 @@ class Evaluator:
         # 求值所有参数
         args = [self.evaluate(arg) for arg in node.args]
 
+        # If the first positional arg is a dict of Series (multi-symbol),
+        # apply the function per-symbol.
+        first_arg = args[0] if args else None
+        if isinstance(first_arg, dict) and all(isinstance(v, pd.Series) for v in first_arg.values() if v is not None):
+            symbols = list(first_arg.keys())
+            results: dict[str, pd.Series] = {}
+            for sym in symbols:
+                # Build per-symbol args by extracting sym from dict args
+                sym_args = []
+                for arg in args:
+                    if isinstance(arg, dict):
+                        sym_args.append(arg.get(sym))
+                    else:
+                        sym_args.append(arg)
+                # Skip if the primary series is missing
+                if sym_args[0] is None:
+                    continue
+                sym_result = self._call_operator(op, node, sym_args)
+                if sym_result is not None:
+                    results[sym] = sym_result
+            return results
+
+        return self._call_operator(op, node, args)
+
+    def _call_operator(self, op, node, args):
+        """Call an operator with evaluated args, returning a Series or scalar."""
         kwargs: dict[str, Any] = {}
 
         # 多参数指标需要特殊处理参数名映射
@@ -335,7 +361,7 @@ class Evaluator:
                 kwargs["close_series"] = args[2]
             if len(args) >= 4:
                 kwargs["period"] = int(args[3]) if isinstance(args[3], (int, float)) else args[3]
-        elif node.name in ("CCI", "WILLR", "KDJ_K"):
+        elif node.name in ("CCI", "WILLR", "KDJ_K", "STOCH_K", "STOCH_D"):
             kwargs["high"] = args[0]
             kwargs["low"] = args[1]
             kwargs["close"] = args[2]
@@ -366,6 +392,37 @@ class Evaluator:
         op_fn = self._BINOPS.get(node.op)
         if op_fn is None:
             raise ValueError(f"Unknown operator '{node.op}'")
+
+        # Handle dict[str, Series] (multi-symbol) operands
+        if isinstance(left, dict) and isinstance(right, dict):
+            # Both are multi-symbol dicts — apply per-symbol
+            symbols = set(left.keys()) & set(right.keys())
+            results: dict[str, pd.Series] = {}
+            for sym in symbols:
+                lv = left.get(sym)
+                rv = right.get(sym)
+                if lv is not None and rv is not None:
+                    results[sym] = self._apply_binary(op_fn, lv, rv)
+            return results
+        if isinstance(left, dict) and not isinstance(right, dict):
+            # left is multi-symbol, right is scalar/series
+            results = {}
+            for sym, lv in left.items():
+                if lv is not None:
+                    results[sym] = self._apply_binary(op_fn, lv, right)
+            return results
+        if isinstance(right, dict) and not isinstance(left, dict):
+            # right is multi-symbol, left is scalar/series
+            results = {}
+            for sym, rv in right.items():
+                if rv is not None:
+                    results[sym] = self._apply_binary(op_fn, left, rv)
+            return results
+
+        return self._apply_binary(op_fn, left, right)
+
+    def _apply_binary(self, op_fn, left, right):
+        """Apply a binary operator to two operands, handling scalar/Series mixing."""
         # 处理 literal + series 的情况
         if isinstance(left, (int, float)) and isinstance(right, pd.Series):
             left = pd.Series(left, index=right.index)

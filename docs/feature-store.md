@@ -61,13 +61,13 @@ the strategy-side calculation to match `get_bars(..., include_now=True)`.
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/v2/features/definitions` | list feature definitions, schemas, and dependencies |
-| `GET /api/v2/features/groups` | list feature groups such as `small_cap_v4_core` |
-| `GET /api/v2/features/coverage` | inspect stored coverage for a feature/date range |
-| `GET /api/v2/features/preview` | preview one date's cross-section values |
-| `POST /api/v2/features/precompute` | precompute supported features into Parquet |
-| `POST /api/v2/features/groups/precompute` | precompute a supported feature group |
-| `POST /api/v2/features/query` | query a feature cross-section |
+| `GET /api/features/definitions` | list feature definitions, schemas, and dependencies |
+| `GET /api/features/groups` | list feature groups such as `small_cap_v4_core` |
+| `GET /api/features/coverage` | inspect stored coverage for a feature/date range |
+| `GET /api/features/preview` | preview one date's cross-section values |
+| `POST /api/features/precompute` | precompute supported features into Parquet |
+| `POST /api/features/groups/precompute` | precompute a supported feature group |
+| `POST /api/features/query` | query a feature cross-section |
 
 ## CLI
 

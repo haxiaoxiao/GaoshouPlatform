@@ -1,6 +1,10 @@
 <template>
   <div class="feature-store">
     <section class="toolbar">
+      <div class="store-title">
+        <strong>Feature Store / 数据仓库</strong>
+        <span>管理特征定义、覆盖率、预览和预计算；因子收益表现请回到因子看板。</span>
+      </div>
       <el-form :inline="true" :model="form" label-width="76px" class="control-form">
         <el-form-item label="Group">
           <el-select v-model="form.groupName" filterable class="feature-select">
@@ -309,6 +313,20 @@ onMounted(loadDefinitions)
   border: 1px solid var(--el-border-color-light);
   border-radius: 6px;
   background: var(--el-bg-color);
+}
+
+.store-title {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 10px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+
+.store-title strong {
+  font-size: 14px;
+  color: var(--el-text-color-primary);
 }
 
 .control-form {

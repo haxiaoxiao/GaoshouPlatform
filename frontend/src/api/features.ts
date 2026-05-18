@@ -69,11 +69,11 @@ export interface FeaturePreview {
 
 export const featureApi = {
   definitions() {
-    return request.get<FeatureDefinition[]>('/v2/features/definitions')
+    return request.get<FeatureDefinition[]>('/features/definitions')
   },
 
   groups() {
-    return request.get<FeatureGroup[]>('/v2/features/groups')
+    return request.get<FeatureGroup[]>('/features/groups')
   },
 
   coverage(params: {
@@ -87,11 +87,11 @@ export const featureApi = {
     threshold?: number
     daily_volume_to_share_multiplier?: number
   }) {
-    return request.get<FeatureCoverage>('/v2/features/coverage', { params })
+    return request.get<FeatureCoverage>('/features/coverage', { params })
   },
 
   precompute(data: FeaturePrecomputeRequest) {
-    return request.post<FeaturePrecomputeResult>('/v2/features/precompute', data)
+    return request.post<FeaturePrecomputeResult>('/features/precompute', data)
   },
 
   precomputeGroup(data: {
@@ -102,7 +102,7 @@ export const featureApi = {
     index_symbol?: string
     params: Record<string, unknown>
   }) {
-    return request.post<FeaturePrecomputeResult>('/v2/features/groups/precompute', data)
+    return request.post<FeaturePrecomputeResult>('/features/groups/precompute', data)
   },
 
   preview(params: {
@@ -115,6 +115,6 @@ export const featureApi = {
     threshold?: number
     limit?: number
   }) {
-    return request.get<FeaturePreview>('/v2/features/preview', { params })
+    return request.get<FeaturePreview>('/features/preview', { params })
   },
 }

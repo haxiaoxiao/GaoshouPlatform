@@ -1,15 +1,85 @@
 # backend/app/api/data_explorer.py
-"""ClickHouse数据浏览器API"""
+"""Data explorer API for ClickHouse or local Parquet/DuckDB."""
 from fastapi import APIRouter, Query
 from typing import Any
 
+from app.core.config import settings
+from app.data_stores.parquet_store import ParquetMarketDataStore
+from app.db.duckdb import get_duckdb
 from app.db.clickhouse import get_ch_client
 
 router = APIRouter()
 
+_PARQUET_DATASETS = [
+    "klines_daily",
+    "klines_minute",
+    "klines_minute_timer",
+    "klines_minute_cum_timer",
+    "factor_cache",
+    "stock_indicators",
+    "feature_values",
+    "indicator_timeseries",
+]
+
+
+def _use_parquet() -> bool:
+    return settings.market_data_backend == "parquet" and not settings.clickhouse_enabled
+
+
+def _parquet_store() -> ParquetMarketDataStore:
+    return ParquetMarketDataStore(settings.parquet_data_dir)
+
+
+def _parquet_pattern(dataset: str) -> str:
+    store = _parquet_store()
+    if dataset not in _PARQUET_DATASETS or not store._exists(dataset):
+        raise ValueError(f"Dataset '{dataset}' not found")
+    return store._glob_pattern(dataset)
+
+
+def _sql_literal(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _safe_identifier(name: str, columns: list[str]) -> str | None:
+    return name if name in columns else None
+
+
+def _normalize_value(value: Any) -> Any:
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value
+
+
+def _parquet_schema(table_name: str) -> list[dict[str, Any]]:
+    pattern = _parquet_pattern(table_name)
+    df = get_duckdb().execute(
+        f"SELECT * FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true) LIMIT 0"
+    ).df()
+    return [
+        {"name": name, "type": str(dtype), "default": None, "comment": None}
+        for name, dtype in df.dtypes.items()
+    ]
+
 
 @router.get("/tables", summary="获取所有表")
 def list_tables():
+    if _use_parquet():
+        store = _parquet_store()
+        db = get_duckdb()
+        tables = []
+        for name in _PARQUET_DATASETS:
+            if not store._exists(name):
+                continue
+            pattern = store._glob_pattern(name)
+            count = db.execute(
+                f"SELECT count(*) FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true)"
+            ).fetchone()[0]
+            tables.append({"name": name, "row_count": int(count or 0)})
+        return {"code": 0, "data": tables}
+
     ch = get_ch_client()
     rows = ch.execute("SHOW TABLES")
     tables = []
@@ -22,6 +92,12 @@ def list_tables():
 
 @router.get("/tables/{table_name}/schema", summary="获取表结构")
 def get_table_schema(table_name: str):
+    if _use_parquet():
+        try:
+            return {"code": 0, "data": _parquet_schema(table_name)}
+        except Exception as e:
+            return {"code": 1, "message": str(e)}
+
     ch = get_ch_client()
     rows = ch.execute(f"DESCRIBE TABLE `{table_name}`")
     columns = []
@@ -44,6 +120,39 @@ def preview_table(
     order_dir: str = Query("ASC"),
     where: str | None = Query(None),
 ):
+    if _use_parquet():
+        try:
+            pattern = _parquet_pattern(table_name)
+            columns = [col["name"] for col in _parquet_schema(table_name)]
+            safe_dir = "ASC" if order_dir.upper() == "ASC" else "DESC"
+            where_clause = f"WHERE {where}" if where else ""
+            safe_order = _safe_identifier(order_by, columns) if order_by else None
+            order_clause = f'ORDER BY "{safe_order}" {safe_dir}' if safe_order else ""
+            offset = (page - 1) * page_size
+            source = f"read_parquet({_sql_literal(pattern)}, hive_partitioning=true)"
+            db = get_duckdb()
+            total = db.execute(f"SELECT count(*) FROM {source} {where_clause}").fetchone()[0]
+            raw_rows = db.execute(
+                f"SELECT * FROM {source} {where_clause} {order_clause} LIMIT {page_size} OFFSET {offset}"
+            ).fetchall()
+            rows = [
+                {col: _normalize_value(raw[i]) for i, col in enumerate(columns)}
+                for raw in raw_rows
+            ]
+            return {
+                "code": 0,
+                "data": {
+                    "columns": columns,
+                    "rows": rows,
+                    "total": int(total or 0),
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": (int(total or 0) + page_size - 1) // page_size,
+                },
+            }
+        except Exception as e:
+            return {"code": 1, "message": str(e)}
+
     ch = get_ch_client()
 
     safe_dir = "ASC" if order_dir.upper() == "ASC" else "DESC"
@@ -91,6 +200,20 @@ def get_distinct_values(
     column: str = Query(...),
     limit: int = Query(100, ge=1, le=1000),
 ):
+    if _use_parquet():
+        try:
+            pattern = _parquet_pattern(table_name)
+            columns = [col["name"] for col in _parquet_schema(table_name)]
+            safe_column = _safe_identifier(column, columns)
+            if not safe_column:
+                return {"code": 1, "message": f"Unknown column: {column}"}
+            rows = get_duckdb().execute(
+                f'SELECT DISTINCT "{safe_column}" FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true) LIMIT {limit}'
+            ).fetchall()
+            return {"code": 0, "data": [_normalize_value(row[0]) for row in rows]}
+        except Exception as e:
+            return {"code": 1, "message": str(e)}
+
     ch = get_ch_client()
     rows = ch.execute(
         f"SELECT DISTINCT `{column}` FROM `{table_name}` LIMIT {limit}"

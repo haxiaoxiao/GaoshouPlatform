@@ -9,8 +9,16 @@ from app.db.duckdb import get_duckdb
 
 router = APIRouter(prefix="/explorer/parquet", tags=["parquet"])
 
-_DATASETS = ["klines_daily", "klines_minute", "klines_minute_timer", "factor_cache",
-             "stock_indicators", "indicator_timeseries"]
+_DATASETS = [
+    "klines_daily",
+    "klines_minute",
+    "klines_minute_timer",
+    "klines_minute_cum_timer",
+    "factor_cache",
+    "stock_indicators",
+    "feature_values",
+    "indicator_timeseries",
+]
 
 
 def _get_store():
