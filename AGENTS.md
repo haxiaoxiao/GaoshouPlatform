@@ -508,6 +508,7 @@ npm run dev
 - 桌面脚本位置：
   - `C:\Users\Albert\Desktop\启动GaoshouPlatform.bat`
   - `C:\Users\Albert\Desktop\关闭GaoshouPlatform.bat`
+- 每次完成任务后按影响范围重启对应模块：改前端则重启前端 dev server，改后端 API/服务则重启后端，改数据同步服务/脚本/数据管线则重启数据同步模块；跨模块改动只重启受影响模块，并做必要健康检查。
 - 每次新增后端服务、前端 dev server、Docker 容器、外部依赖健康检查、常驻任务或实盘接口，都必须同步更新这两个脚本。
 - 启动脚本应包含：必要配置读取、依赖启动或检查、健康检查、失败提示、最终访问地址。
 - 关闭脚本应包含：平台自管进程停止、可选 Docker 容器停止、端口校验；外部客户端如 miniQMT 只提示状态，不由脚本强杀。
