@@ -15,7 +15,7 @@ from .parquet_explorer import router as parquet_explorer_router
 from app.compute.api import router as compute_router
 from app.backtest.api import router as backtest_v2_router
 from app.api.factors import router as factors_router
-from app.api.features import router as features_router
+from app.api.factor_values import router as factor_values_router
 
 api_router = APIRouter()
 
@@ -36,5 +36,5 @@ api_router.include_router(evaluation_router, prefix="/evaluation", tags=["因子
 api_router.include_router(evaluation_router, prefix="/v2/evaluation", tags=["因子评估"])
 api_router.include_router(factors_router, prefix="/factors", tags=["因子管理"])
 api_router.include_router(factors_router, prefix="/v2/factors", tags=["因子管理"])
-api_router.include_router(features_router, prefix="/features", tags=["features"])
-api_router.include_router(features_router, prefix="/v2/features", tags=["features"])
+api_router.include_router(factor_values_router, prefix="/factor-values", tags=["因子值缓存"])
+api_router.include_router(factor_values_router, prefix="/v2/factor-values", tags=["因子值缓存"])
