@@ -2,8 +2,9 @@ import request from './request'
 
 // 同步状态接口
 export interface SyncStatus {
+  task_id?: string
   sync_type: string | null
-  status: 'idle' | 'running' | 'completed' | 'failed'
+  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   total: number
   current: number
   success_count: number
@@ -33,12 +34,14 @@ export interface SyncLog {
 
 // 同步请求参数
 export interface SyncRequest {
-  sync_type: 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv' | 'dividends'
+  sync_type: 'datasync' | 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'index_daily' | 'kline_minute' | 'realtime_mv' | 'dividends' | 'factor_dependency'
   symbols?: string[]
+  index_symbols?: string[]
   start_date?: string
   end_date?: string
   failure_strategy?: 'skip' | 'retry' | 'stop'
   full_sync?: boolean  // 全量同步标记(适用于K线数据)
+  factor_sync_plan?: Record<string, unknown>
 }
 
 // 同步日志查询参数
@@ -58,11 +61,14 @@ export interface SyncLogsParams {
 export const syncApi = {
   // 触发数据同步（同步任务可能耗时较长，超时设为 10 分钟）
   trigger: (params: SyncRequest) =>
-    request.post<SyncStatus>('/data/sync', params, { timeout: 600000 }),
+    request.post<SyncStatus>('/data/sync', params),
 
   // 获取同步状态
   getStatus: () =>
     request.get<SyncStatus>('/data/sync/status'),
+
+  cancel: () =>
+    request.post<{ cancelled: boolean }>('/data/sync/cancel', {}),
 
   // 获取同步日志
   getLogs: (params?: SyncLogsParams) =>

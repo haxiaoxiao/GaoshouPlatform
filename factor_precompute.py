@@ -1,4 +1,4 @@
-"""Precompute feature values for factor research and strategy reuse."""
+"""Precompute factor values for factor research and strategy reuse."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ import pandas as pd
 
 from app.data_stores import get_market_data_store
 from app.db.duckdb import get_duckdb
-from app.services.feature_store import (
-    FeatureValueStore,
-    feature_params_hash,
-    get_feature_store,
-    normalize_feature_time,
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+    normalize_factor_time,
 )
 from app.services.index_components import load_index_symbols
 
@@ -27,7 +27,7 @@ def _parse_date(value: str | date) -> date:
 
 
 def _timer_datetime(trade_date: date, as_of_time: str) -> datetime:
-    hour, minute = [int(part) for part in normalize_feature_time(as_of_time).split(":")[:2]]
+    hour, minute = [int(part) for part in normalize_factor_time(as_of_time).split(":")[:2]]
     return datetime.combine(trade_date, datetime.min.time()).replace(hour=hour, minute=minute)
 
 
@@ -238,13 +238,13 @@ def precompute_small_cap_core_features(
     index_symbol: str | None = None,
     timer_time: str = "10:30",
     include_high_volume: bool = True,
-    store: FeatureValueStore | None = None,
+    store: FactorValueStore | None = None,
 ) -> dict[str, Any]:
-    """Precompute core ID=43 cross-section/status features."""
+    """Precompute core small-cap cross-section/status factors."""
 
     start = _parse_date(start_date)
     end = _parse_date(end_date)
-    timer_time = normalize_feature_time(timer_time)
+    timer_time = normalize_factor_time(timer_time)
     symbol_list = _resolve_symbols(
         symbols=symbols,
         index_symbol=index_symbol,
@@ -254,7 +254,7 @@ def precompute_small_cap_core_features(
     if not symbol_list:
         return {"symbols": 0, "rows": {}, "message": "no symbols"}
 
-    feature_store = store or get_feature_store()
+    factor_store = store or get_factor_value_store()
     created_at = datetime.now()
     rows: list[dict[str, Any]] = []
     by_feature: dict[str, int] = {}
@@ -264,8 +264,8 @@ def precompute_small_cap_core_features(
     def add_feature_row(row: dict[str, Any]) -> None:
         nonlocal rows
         rows.append(row)
-        feature_name = str(row["feature_name"])
-        by_feature[feature_name] = by_feature.get(feature_name, 0) + 1
+        factor_name = str(row["factor_name"])
+        by_feature[factor_name] = by_feature.get(factor_name, 0) + 1
         if len(rows) >= 250_000:
             flush_rows()
 
@@ -273,7 +273,7 @@ def precompute_small_cap_core_features(
         nonlocal rows, written
         if not rows:
             return
-        written += feature_store.write(pd.DataFrame(rows))
+        written += factor_store.write(pd.DataFrame(rows))
         rows = []
 
     # Daily market cap and universe rank.
@@ -291,8 +291,8 @@ def precompute_small_cap_core_features(
                     "symbol": row.symbol,
                     "trade_date": row.trade_date,
                     "as_of_time": "",
-                    "feature_name": "smallcap_market_cap",
-                    "params_hash": feature_params_hash({}),
+                    "factor_name": "market_cap",
+                    "params_hash": factor_params_hash({}),
                     "value": float(row.market_cap),
                     "source": "precompute.small_cap_core",
                     "created_at": created_at,
@@ -307,8 +307,8 @@ def precompute_small_cap_core_features(
                         "symbol": row.symbol,
                         "trade_date": trade_date,
                         "as_of_time": "",
-                        "feature_name": "smallcap_market_cap_rank",
-                        "params_hash": feature_params_hash({}),
+                        "factor_name": "market_cap_rank",
+                        "params_hash": factor_params_hash({}),
                         "value": float(rank),
                         "source": "precompute.small_cap_core",
                         "created_at": created_at,
@@ -389,13 +389,13 @@ def precompute_small_cap_core_features(
                 "source": "precompute.small_cap_core",
                 "created_at": created_at,
             }
-            add_feature_row({**common, "as_of_time": "", "feature_name": "smallcap_is_st", "params_hash": feature_params_hash({}), "value": 1.0 if symbol in st_symbols else 0.0})
+            add_feature_row({**common, "as_of_time": "", "factor_name": "is_st", "params_hash": factor_params_hash({}), "value": 1.0 if symbol in st_symbols else 0.0})
             paused = (symbol, day) not in minute_keys
-            add_feature_row({**common, "as_of_time": timer_time, "feature_name": "smallcap_is_paused", "params_hash": feature_params_hash({"time": timer_time}), "value": 1.0 if paused else 0.0})
+            add_feature_row({**common, "as_of_time": timer_time, "factor_name": "is_paused", "params_hash": factor_params_hash({"time": timer_time}), "value": 1.0 if paused else 0.0})
             price = minute_close.get((symbol, day), 0.0)
             up_limit, down_limit = limit_map.get((symbol, day), (0.0, 0.0))
-            add_feature_row({**common, "as_of_time": timer_time, "feature_name": "smallcap_is_limit_up", "params_hash": feature_params_hash({"time": timer_time}), "value": 1.0 if price > 0 and up_limit > 0 and price >= up_limit - 1e-4 else 0.0})
-            add_feature_row({**common, "as_of_time": timer_time, "feature_name": "smallcap_is_limit_down", "params_hash": feature_params_hash({"time": timer_time}), "value": 1.0 if price > 0 and down_limit > 0 and price <= down_limit + 1e-4 else 0.0})
+            add_feature_row({**common, "as_of_time": timer_time, "factor_name": "is_limit_up", "params_hash": factor_params_hash({"time": timer_time}), "value": 1.0 if price > 0 and up_limit > 0 and price >= up_limit - 1e-4 else 0.0})
+            add_feature_row({**common, "as_of_time": timer_time, "factor_name": "is_limit_down", "params_hash": factor_params_hash({"time": timer_time}), "value": 1.0 if price > 0 and down_limit > 0 and price <= down_limit + 1e-4 else 0.0})
 
     if limit_map and daily_close:
         for day in days:
@@ -410,8 +410,8 @@ def precompute_small_cap_core_features(
                         "symbol": symbol,
                         "trade_date": day,
                         "as_of_time": "",
-                        "feature_name": "smallcap_yesterday_limit_up",
-                        "params_hash": feature_params_hash({}),
+                        "factor_name": "yesterday_limit_up",
+                        "params_hash": factor_params_hash({}),
                         "value": 1.0 if close > 0 and up_limit > 0 and close >= up_limit - 1e-4 else 0.0,
                         "source": "precompute.small_cap_core",
                         "created_at": created_at,
@@ -430,7 +430,7 @@ def precompute_small_cap_core_features(
             window=120,
             threshold=0.9,
             daily_volume_to_share_multiplier=100.0,
-            store=feature_store,
+            store=factor_store,
         )
 
     return {
@@ -454,7 +454,7 @@ def precompute_high_volume_features(
     window: int = 120,
     threshold: float = 0.9,
     daily_volume_to_share_multiplier: float = 100.0,
-    store: FeatureValueStore | None = None,
+    store: FactorValueStore | None = None,
 ) -> dict[str, Any]:
     """Build 14:30 volume features used by ID=43, as generic factor values."""
 
@@ -462,7 +462,7 @@ def precompute_high_volume_features(
     end = _parse_date(end_date)
     if end < start:
         raise ValueError("end_date must be greater than or equal to start_date")
-    as_of_time = normalize_feature_time(as_of_time)
+    as_of_time = normalize_factor_time(as_of_time)
     window = max(int(window), 2)
     threshold = float(threshold)
     multiplier = float(daily_volume_to_share_multiplier)
@@ -505,8 +505,8 @@ def precompute_high_volume_features(
         "daily_volume_to_share_multiplier": multiplier,
     }
     signal_params = {**params_base, "threshold": threshold}
-    hash_base = feature_params_hash(params_base)
-    hash_signal = feature_params_hash(signal_params)
+    hash_base = factor_params_hash(params_base)
+    hash_signal = factor_params_hash(signal_params)
     created_at = datetime.now()
 
     daily_by_symbol = {
@@ -541,36 +541,36 @@ def precompute_high_volume_features(
             [
                 {
                     **common,
-                    "feature_name": "cum_volume_at_time",
-                    "params_hash": feature_params_hash({"time": as_of_time}),
+                    "factor_name": "cum_volume_at_time",
+                    "params_hash": factor_params_hash({"time": as_of_time}),
                     "value": current_volume,
                 },
                 {
                     **common,
-                    "feature_name": "max_volume_nd",
+                    "factor_name": "rolling_max_volume",
                     "params_hash": hash_base,
                     "value": max_volume,
                 },
                 {
                     **common,
-                    "feature_name": "high_volume_ratio",
+                    "factor_name": "high_volume_ratio",
                     "params_hash": hash_base,
                     "value": ratio,
                 },
                 {
                     **common,
-                    "feature_name": "high_volume_signal",
+                    "factor_name": "high_volume_signal",
                     "params_hash": hash_signal,
                     "value": signal,
                 },
             ]
         )
 
-    feature_store = store or get_feature_store()
-    written = feature_store.write(pd.DataFrame(rows)) if rows else 0
+    factor_store = store or get_factor_value_store()
+    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
     by_feature: dict[str, int] = {}
     for row in rows:
-        by_feature[row["feature_name"]] = by_feature.get(row["feature_name"], 0) + 1
+        by_feature[row["factor_name"]] = by_feature.get(row["factor_name"], 0) + 1
 
     return {
         "symbols": len(symbol_list),

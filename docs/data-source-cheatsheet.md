@@ -71,7 +71,7 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
 覆盖率检查：
 
 ```text
-GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
+GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
 ```
 
 ## 本地 JQ 1 分钟数据 → Parquet
@@ -201,9 +201,9 @@ $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版
 
 - 缺失日线/元数据补数脚本：`backend/app/scripts/fill_small_cap_missing_data.py`
 - 指数成分缓存服务：`backend/app/services/index_components.py`
-- 指数池接口：`GET /api/v2/backtest/index-pools/{index_symbol}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+- 指数池接口：`GET /api/backtest/index-pools/{index_symbol}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
 - 稀疏 timer 分钟线同步脚本：`backend/app/scripts/sync_timer_minute_points.py`
-- timer 覆盖探测接口：`GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50`
+- timer 覆盖探测接口：`GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50`
 - ID=43 连续区间调试脚本：`backend/app/scripts/run_small_cap_full_debug.py --start auto`
 - ID=43 年度对比调试脚本：`backend/app/scripts/run_small_cap_yearly_debug.py`
 - JQ 日志对比脚本：`backend/app/scripts/compare_small_cap_logs.py`

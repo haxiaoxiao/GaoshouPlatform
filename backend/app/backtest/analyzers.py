@@ -1,6 +1,10 @@
 """回测分析器 — 收益/回撤/夏普/IC/换手率"""
+import warnings
 import numpy as np
 import pandas as pd
+
+# 抑制 ConstantInputWarning — 常数值导致 spearman 相关系数无定义，属于正常现象
+warnings.filterwarnings("ignore", message="An input array is constant")
 
 
 def compute_annual_return(nav_series: list[dict], n_trading_days: int) -> float:
@@ -46,6 +50,14 @@ def compute_ic_series(
     return_matrix: pd.DataFrame,
 ) -> pd.Series:
     """计算 IC 序列（Spearman 秩相关）"""
+    if factor_matrix.empty or return_matrix.empty:
+        return pd.Series()
+
+    factor_matrix = factor_matrix.copy()
+    return_matrix = return_matrix.copy()
+    factor_matrix.index = pd.to_datetime(factor_matrix.index).normalize()
+    return_matrix.index = pd.to_datetime(return_matrix.index).normalize()
+
     ic_list = []
     common_dates = factor_matrix.index.intersection(return_matrix.index)
     common_symbols = factor_matrix.columns.intersection(return_matrix.columns)
@@ -58,7 +70,8 @@ def compute_ic_series(
             continue
         ic = f[common].corr(r[common], method="spearman")
         if not np.isnan(ic):
-            ic_list.append({"date": str(d.date()), "ic": float(ic)})
+            d_str = str(d.date()) if hasattr(d, "date") else str(d)[:10]
+            ic_list.append({"date": d_str, "ic": float(ic)})
 
     if not ic_list:
         return pd.Series()

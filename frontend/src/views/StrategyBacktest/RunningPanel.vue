@@ -7,11 +7,17 @@
         :status="completed ? 'success' : undefined"
         :stroke-width="6"
       />
-      <div class="progress-status" v-if="liveData?.current_date">
+      <div class="progress-status" v-if="progressMessage">
+        {{ progressMessage }} ({{ progressPercent }}%)
+      </div>
+      <div class="bar-progress-detail" v-if="barProgressDetail">
+        {{ barProgressDetail }}
+      </div>
+      <div class="progress-status" v-else-if="liveData?.current_date">
         正在回测 {{ liveData.current_date }} ({{ progressPercent }}%)
       </div>
-      <div v-else-if="running" class="progress-status">正在加载数据...</div>
-      <div v-else-if="completed" class="progress-status" style="color:#52c41a">回测完成</div>
+      <div v-else-if="running" class="progress-status">任务运行中... ({{ progressPercent }}%)</div>
+      <div v-else-if="completed" class="progress-status" style="color:#52c41a">任务完成</div>
     </div>
 
     <!-- Mini metrics grid -->
@@ -132,6 +138,28 @@ const props = defineProps<{
 }>()
 
 const progressPercent = computed(() => Math.min(Math.round((props.progress || 0) * 100), 100))
+const progressMessage = computed(() => {
+  const metadata = props.liveData?.metadata as any
+  return metadata?.progress_message || ''
+})
+const barProgressDetail = computed(() => {
+  const metadata = props.liveData?.metadata as any
+  const totalBars = Number(metadata?.total_bars || 0)
+  const servedBars = Number(metadata?.served_bars || 0)
+  const barRatio = Number(metadata?.bar_progress_ratio || 0)
+  if (!totalBars || !servedBars) return ''
+  const label = barTypeLabel(String(metadata?.bar_type || 'daily'))
+  const symbolPart = metadata?.served_symbols && metadata?.total_symbols
+    ? ` · 股票 ${Number(metadata.served_symbols).toLocaleString()} / ${Number(metadata.total_symbols).toLocaleString()}`
+    : ''
+  return `${label} ${Math.min(100, barRatio * 100).toFixed(1)}% · ${servedBars.toLocaleString()} / ${totalBars.toLocaleString()} bars${symbolPart}`
+})
+
+const barTypeLabel = (barType: string) => {
+  if (barType === 'minute_timer') return '定时分钟Bar'
+  if (barType === 'minute') return '分钟Bar'
+  return '日线Bar'
+}
 
 defineEmits<{
   viewReport: []
@@ -214,6 +242,13 @@ function formatEvent(ev: LiveEvent): string {
   font-size: 11px;
   color: #8888a0;
   margin-top: 2px;
+  text-align: center;
+}
+.bar-progress-detail {
+  margin-top: 3px;
+  color: #60a5fa;
+  font-size: 11px;
+  font-family: var(--font-data, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
   text-align: center;
 }
 .running-panel {

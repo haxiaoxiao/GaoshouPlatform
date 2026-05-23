@@ -1,4 +1,4 @@
-"""Backtest API - /api/v2/backtest.
+"""Backtest engine API - /api/backtest.
 
 Flow: Frontend -> API -> EngineRegistry.get(engine) -> IBacktestEngine.run().
 """
@@ -22,6 +22,7 @@ from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory
 from app.models.factor import FactorConfig, BtConfig
 from app.services.factor_backtest import factor_backtest_service
+from app.services.index_catalog import get_index_item, list_index_items
 from app.services.index_components import (
     KNOWN_INDEX_POOLS,
     index_pool_summary,
@@ -34,11 +35,25 @@ from app.services.timer_minute_sync import (
     timer_times_from_params,
     parse_timer_times,
 )
+from app.services.optimization_result_store import save_optimization_result
+from app.services.runtime_tasks import register_task, update_task
 from sqlalchemy import select
+from app.backtest.strategies.builtin_templates import (
+    DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
+    DEFAULT_DUAL_STOCK_GRID_PARAMS,
+    DEFAULT_MULTI_FACTOR_PARAMS,
+    DEFAULT_MULTI_FACTOR_RISK_CONFIG,
+    DUAL_STOCK_GRID_STRATEGY_CODE,
+    DUAL_STOCK_GRID_SYMBOLS,
+    MULTI_FACTOR_STRATEGY_CODE,
+    get_builtin_strategy_template,
+    list_builtin_strategy_templates,
+)
 
-router = APIRouter(prefix="/v2/backtest")
+router = APIRouter()
 
 _tasks: dict[str, dict] = {}
+_task_handles: dict[str, asyncio.Task] = {}
 _TASK_TTL_SECONDS = 3600
 _MAX_TASKS = 100
 
@@ -53,6 +68,7 @@ def _cleanup_tasks() -> None:
     ]
     for task_id in expired:
         _tasks.pop(task_id, None)
+        _task_handles.pop(task_id, None)
 
     if len(_tasks) <= _MAX_TASKS:
         return
@@ -60,6 +76,64 @@ def _cleanup_tasks() -> None:
     for task_id, task in sorted_items[: max(0, len(_tasks) - _MAX_TASKS)]:
         if task.get("status") != "running":
             _tasks.pop(task_id, None)
+            _task_handles.pop(task_id, None)
+
+
+def _set_task_progress(
+    task_id: str,
+    task_store: dict,
+    *,
+    progress: float,
+    phase: str,
+    message: str,
+    event_type: str = "progress",
+) -> None:
+    progress = max(0.0, min(float(progress), 0.99))
+    progress = max(progress, float(task_store.get("progress") or 0.0))
+    task_store["progress"] = progress
+    live = task_store.setdefault(
+        "live",
+        {"events": [], "positions": {}, "metrics_snapshot": {}, "metadata": {}},
+    )
+    live.setdefault("events", []).append({"type": event_type, "message": message})
+    live.setdefault("metadata", {})["phase"] = phase
+    live["metadata"]["progress_message"] = message
+    update_task(task_id, status="running", progress=progress, meta={"phase": phase})
+
+
+async def _run_progress_heartbeat(
+    task_id: str,
+    task_store: dict,
+    *,
+    label: str,
+    phase: str,
+    start_progress: float = 0.15,
+    max_progress: float = 0.88,
+    interval_seconds: float = 5.0,
+    expected_seconds: float = 180.0,
+) -> None:
+    start_ts = time.time()
+    tick = 0
+    while task_store.get("status") == "running":
+        await asyncio.sleep(interval_seconds)
+        if task_store.get("status") != "running":
+            break
+        elapsed = max(0.0, time.time() - start_ts)
+        ratio = min(elapsed / max(expected_seconds, interval_seconds), 1.0)
+        progress = start_progress + (max_progress - start_progress) * ratio
+        tick += 1
+        message = f"{label} AKQuant native WFO running internally... elapsed {int(elapsed)}s"
+        live = task_store.setdefault(
+            "live",
+            {"events": [], "positions": {}, "metrics_snapshot": {}, "metadata": {}},
+        )
+        live.setdefault("metadata", {})["phase"] = phase
+        live["metadata"]["progress_message"] = message
+        live.setdefault("metrics_snapshot", {})["elapsed_seconds"] = int(elapsed)
+        if tick % 6 == 0:
+            live.setdefault("events", []).append({"type": "heartbeat", "message": message})
+        task_store["progress"] = max(float(task_store.get("progress") or 0.0), min(progress, max_progress))
+        update_task(task_id, status="running", progress=task_store["progress"], meta={"phase": phase, "elapsed_seconds": int(elapsed)})
 
 
 def _sanitize_json(obj: object) -> object:
@@ -95,6 +169,94 @@ def _validate_backtest_request(req: "RunBacktestRequest", start: date, end: date
     return None
 
 
+def _timer_times_for_config(config: BacktestConfig):
+    if config.timer_times:
+        return parse_timer_times(config.timer_times)
+    return timer_times_from_params(config.strategy_params)
+
+
+def _market_dataset_for_bar_type(bar_type: str) -> str:
+    text = str(bar_type or "daily").strip().lower()
+    if text == "minute_timer":
+        return "klines_minute_timer"
+    if text == "minute":
+        return "klines_minute"
+    return "klines_daily"
+
+
+def _coverage_ratio(covered: int, requested: int) -> float:
+    if requested <= 0:
+        return 0.0
+    return round(covered / requested, 4)
+
+
+def _is_multi_factor_strategy(config: BacktestConfig) -> bool:
+    code = str(config.strategy_code or "")
+    return "class MultiFactorStrategy" in code or (
+        "FactorPipeline" in code and "FACTOR_CONFIGS" in code
+    )
+
+
+def _multi_factor_coverage(
+    *,
+    symbols: list[str],
+    start_date: date,
+    end_date: date,
+) -> dict:
+    from app.services.factor_value_store import get_factor_value_store
+
+    store = get_factor_value_store()
+    factors = [
+        {"name": "market_cap", "required": True},
+        {"name": "market_cap_rank", "required": True},
+        {"name": "v4gv", "required": True},
+        {"name": "is_st", "required": False},
+        {
+            "name": "is_paused",
+            "required": False,
+            "as_of_time": "10:30",
+            "params": {"time": "10:30"},
+        },
+        {
+            "name": "is_limit_up",
+            "required": False,
+            "as_of_time": "10:30",
+            "params": {"time": "10:30"},
+        },
+        {
+            "name": "is_limit_down",
+            "required": False,
+            "as_of_time": "10:30",
+            "params": {"time": "10:30"},
+        },
+    ]
+    items = []
+    requested = len(symbols)
+    for item in factors:
+        summary = store.coverage(
+            item["name"],
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbols,
+            as_of_time=item.get("as_of_time"),
+            params=item.get("params"),
+        )
+        covered = int(summary.get("symbol_count") or 0)
+        items.append({
+            **summary,
+            "required": bool(item["required"]),
+            "coverage_ratio": _coverage_ratio(covered, requested),
+        })
+    required_items = [item for item in items if item["required"]]
+    min_required_ratio = min((float(item["coverage_ratio"]) for item in required_items), default=0.0)
+    return {
+        "strategy": "multi_factor",
+        "min_required_symbol_coverage": min_required_ratio,
+        "items": items,
+        "warning": min_required_ratio < 0.6,
+    }
+
+
 def _config_from_request(req: "RunBacktestRequest", start_date: date, end_date: date) -> BacktestConfig:
     return BacktestConfig(
         mode=req.mode,
@@ -108,6 +270,7 @@ def _config_from_request(req: "RunBacktestRequest", start_date: date, end_date: 
         rebalance_freq=req.rebalance_freq,
         n_groups=req.n_groups,
         bar_type=req.bar_type,
+        timer_times=req.timer_times,
         commission_rate=req.commission_rate,
         slippage=req.slippage,
         stamp_tax_rate=req.stamp_tax_rate,
@@ -145,13 +308,6 @@ async def _prepare_backtest_config(
     if config.index_symbol:
         config.universe_mode = "index"
         config.symbols = await load_index_symbols(config.index_symbol, start_date, end_date)
-        if config.strategy_params is None:
-            config.strategy_params = {}
-        config.strategy_params = {
-            **config.strategy_params,
-            "index_symbol": config.index_symbol,
-            "universe_mode": "index",
-        }
         if not config.symbols:
             return None, {
                 "code": 1,
@@ -195,6 +351,7 @@ class RunBacktestRequest(BaseModel):
     rebalance_freq: str = "monthly"
     n_groups: int = 5
     bar_type: str = "daily"
+    timer_times: list[str] | None = None
     commission_rate: float = 0.0003
     slippage: float = 0.001
     stamp_tax_rate: float = 0.001
@@ -240,6 +397,10 @@ class StrategyParamsValidateRequest(StrategyParamsSchemaRequest):
     payload: dict = Field(default_factory=dict)
 
 
+class BuiltinStrategyCreateRequest(BaseModel):
+    name: str = Field(default="dual_stock_grid")
+
+
 async def _save_backtest_result(
     task_id: str,
     config: BacktestConfig,
@@ -269,7 +430,7 @@ async def _save_backtest_result(
                 strategy = Strategy(
                     name=f"backtest-{task_id}",
                     code=code,
-                    description=f"auto-created {config.engine} backtest strategy",
+                description="完美世界 + 昆仑万维分钟级底仓网格策略",
                 )
                 session.add(strategy)
                 await session.flush()
@@ -341,12 +502,44 @@ async def run_backtest(req: RunBacktestRequest):
         "created_at": time.time(),
     }
     _tasks[task_id] = task_store
+    register_task(
+        task_id=task_id,
+        kind="backtest",
+        title=f"回测任务 {req.strategy_name or req.strategy_id or req.engine}",
+        status="queued",
+        progress=0,
+        result_ref=f"/backtest?task_id={task_id}",
+        meta={"engine": req.engine, "start_date": req.start_date, "end_date": req.end_date},
+    )
 
     async def _run():
         try:
             task_store["status"] = "running"
+            task_store["live"] = {
+                "current_date": str(start_date),
+                "events": [{
+                    "type": "queued",
+                    "timestamp": time.time(),
+                    "message": "回测任务已启动，正在准备配置",
+                }],
+                "positions": {},
+                "metrics_snapshot": {},
+                "metadata": {
+                    "phase": "preparing",
+                    "progress_message": "正在准备回测配置",
+                    "bar_type": config.bar_type,
+                    "engine": config.engine,
+                    "symbol_count": len(config.symbols or []),
+                },
+            }
+            update_task(
+                task_id,
+                status="running",
+                progress=0.01,
+                meta=task_store["live"]["metadata"],
+            )
             if config.engine == "akquant" and config.bar_type == "minute_timer":
-                timer_times = timer_times_from_params(config.strategy_params)
+                timer_times = _timer_times_for_config(config)
                 coverage = await asyncio.to_thread(
                     find_earliest_timer_coverage_date,
                     symbols=config.symbols,
@@ -409,6 +602,12 @@ async def run_backtest(req: RunBacktestRequest):
                 task_store["progress"] = 0.25 + pct * 0.75 if config.bar_type == "minute_timer" else pct
                 if live:
                     task_store["live"] = live
+                metadata = (task_store.get("live") or {}).get("metadata") or {}
+                update_task(
+                    task_id,
+                    progress=task_store["progress"],
+                    meta=metadata if isinstance(metadata, dict) else None,
+                )
 
             result = await engine.run(config, data_provider, progress_callback=on_progress)
             result_dict = _sanitize_json(result.to_dict())
@@ -419,16 +618,26 @@ async def run_backtest(req: RunBacktestRequest):
             task_store["result"] = result_dict
             task_store["live"] = task_store.get("live")
             task_store["finished_at"] = time.time()
+            update_task(task_id, status="done", progress=1.0, result_ref=f"/backtest?task_id={task_id}")
             await _save_backtest_result(task_id, config, result_dict, success=True)
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             logger.error("Backtest task {} failed: {} ({})", task_id, e, type(e).__name__)
             task_store["status"] = "failed"
             task_store["progress"] = 1.0
             task_store["result"] = _sanitize_json({"error": f"{type(e).__name__}: {e}"})
             task_store["finished_at"] = time.time()
+            update_task(
+                task_id,
+                status="failed",
+                progress=1.0,
+                result_ref=f"/backtest?task_id={task_id}",
+                error=f"{type(e).__name__}: {e}",
+            )
             await _save_backtest_result(task_id, config, task_store["result"], success=False)
 
-    asyncio.create_task(_run())
+    _task_handles[task_id] = asyncio.create_task(_run())
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 
@@ -457,9 +666,43 @@ async def get_result(task_id: str):
     task = _tasks.get(task_id)
     if task is None:
         return {"code": 1, "message": "Task not found", "data": None}
-    if task["status"] not in ("done", "failed"):
+    if task["status"] not in ("done", "failed", "cancelled"):
         return {"code": 1, "message": f"Task status: {task['status']}", "data": None}
     return {"code": 0, "message": "success", "data": task["result"]}
+
+
+@router.post("/cancel/{task_id}")
+async def cancel_task(task_id: str):
+    """Cancel a running backtest or optimization task."""
+    _cleanup_tasks()
+    task = _tasks.get(task_id)
+    if task is None:
+        return {"code": 1, "message": "Task not found", "data": None}
+    if task.get("status") in ("done", "failed", "cancelled"):
+        return {"code": 0, "message": "Task already finished", "data": {"task_id": task_id, "status": task.get("status")}}
+
+    handle = _task_handles.get(task_id)
+    if handle is not None and not handle.done():
+        handle.cancel()
+    _task_handles.pop(task_id, None)
+
+    task["status"] = "cancelled"
+    task["progress"] = 1.0
+    task["result"] = _sanitize_json({"error": "Task cancelled by user"})
+    task["finished_at"] = time.time()
+    live = task.setdefault("live", {"events": [], "positions": {}, "metrics_snapshot": {}, "metadata": {}})
+    live.setdefault("events", []).append({"type": "cancelled", "message": "Task cancelled by user"})
+    live.setdefault("metadata", {})["phase"] = "cancelled"
+    live["metadata"]["progress_message"] = "任务已停止"
+    update_task(
+        task_id,
+        status="cancelled",
+        progress=1.0,
+        result_ref=f"/backtest?task_id={task_id}",
+        error="Task cancelled by user",
+        meta={"phase": "cancelled"},
+    )
+    return {"code": 0, "message": "success", "data": {"task_id": task_id, "status": "cancelled"}}
 
 
 @router.get("/engines")
@@ -482,6 +725,113 @@ async def get_capabilities():
             "akquant": get_akquant_capabilities(),
         },
     }
+
+
+@router.get("/presets/dual-stock-grid")
+async def get_dual_stock_grid_preset():
+    """Return the built-in dual-stock grid strategy preset."""
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "name": "双标的底仓网格",
+            "strategy_key": "dual_stock_grid",
+            "symbols": DUAL_STOCK_GRID_SYMBOLS,
+            "engine": "akquant",
+            "mode": "event_driven",
+            "bar_type": "minute",
+            "strategy_code": DUAL_STOCK_GRID_STRATEGY_CODE,
+            "strategy_params": DEFAULT_DUAL_STOCK_GRID_PARAMS,
+            "param_grid": DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
+            "walk_forward": {
+                "train_period": 14400,
+                "test_period": 2400,
+                "metric": "calmar_ratio",
+                "ascending": False,
+            },
+        },
+    }
+
+
+@router.post("/presets/dual-stock-grid/strategy")
+async def create_dual_stock_grid_strategy(req: BuiltinStrategyCreateRequest):
+    """Create or update the built-in dual-stock grid strategy in the strategy list."""
+    strategy_name = "双标的底仓网格"
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Strategy).where(Strategy.name == strategy_name).limit(1)
+        )
+        strategy = result.scalars().first()
+        if strategy is None:
+            strategy = Strategy(
+                name=strategy_name,
+                code=DUAL_STOCK_GRID_STRATEGY_CODE,
+                parameters=DEFAULT_DUAL_STOCK_GRID_PARAMS,
+                description="完美世界 + 昆仑万维分钟级底仓网格策略",
+            )
+            session.add(strategy)
+            await session.flush()
+        else:
+            strategy.code = DUAL_STOCK_GRID_STRATEGY_CODE
+            strategy.parameters = DEFAULT_DUAL_STOCK_GRID_PARAMS
+            strategy.description = "完美世界 + 昆仑万维分钟级底仓网格策略"
+        await session.commit()
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": strategy.id,
+                "name": strategy.name,
+                "code": strategy.code,
+                "parameters": strategy.parameters,
+                "description": strategy.description,
+            },
+        }
+
+
+@router.post("/presets/multi-factor/strategy")
+async def create_multi_factor_strategy(req: BuiltinStrategyCreateRequest):
+    """Create or update the built-in generic multi-factor strategy in the strategy list."""
+    strategy_name = "通用多因子模型"
+    parameters = {
+        **DEFAULT_MULTI_FACTOR_PARAMS,
+        "risk_config": DEFAULT_MULTI_FACTOR_RISK_CONFIG,
+        "backtest_settings": {
+            "engine": "akquant",
+            "barType": "daily",
+            "showOptimizationPanel": False,
+        },
+    }
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Strategy).where(Strategy.name == strategy_name).limit(1)
+        )
+        strategy = result.scalars().first()
+        if strategy is None:
+            strategy = Strategy(
+                name=strategy_name,
+                code=MULTI_FACTOR_STRATEGY_CODE,
+                parameters=parameters,
+                description="AKQuant 通用多因子选股模板；因子、权重、标准化和 ML 接口在策略代码顶部配置。",
+            )
+            session.add(strategy)
+            await session.flush()
+        else:
+            strategy.code = MULTI_FACTOR_STRATEGY_CODE
+            strategy.parameters = parameters
+            strategy.description = "AKQuant 通用多因子选股模板；因子、权重、标准化和 ML 接口在策略代码顶部配置。"
+        await session.commit()
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": strategy.id,
+                "name": strategy.name,
+                "code": strategy.code,
+                "parameters": strategy.parameters,
+                "description": strategy.description,
+            },
+        }
 
 
 @router.post("/optimize/grid")
@@ -516,6 +866,15 @@ async def optimize_grid(req: OptimizeRequest):
         "created_at": time.time(),
     }
     _tasks[task_id] = task_store
+    register_task(
+        task_id=task_id,
+        kind="optimization",
+        title="Grid Search 参数优化",
+        status="queued",
+        progress=0,
+        result_ref=f"/backtest?task_id={task_id}",
+        meta={"optimization_type": "grid_search"},
+    )
 
     async def _run():
         try:
@@ -527,6 +886,23 @@ async def optimize_grid(req: OptimizeRequest):
                 "metrics_snapshot": {"param_count": len(req.param_grid)},
                 "metadata": {"phase": "optimization"},
             }
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.05,
+                phase="prepare",
+                message="准备 Grid Search 参数组合",
+                event_type="optimize_prepare",
+            )
+            await asyncio.sleep(0)
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.15,
+                phase="running",
+                message="AKQuant Grid Search 正在运行",
+                event_type="optimize_running",
+            )
             rows = await run_grid_search(
                 config,
                 req.param_grid,
@@ -534,6 +910,14 @@ async def optimize_grid(req: OptimizeRequest):
                 ascending=req.ascending,
                 max_workers=req.max_workers,
                 timeout=req.timeout,
+            )
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.9,
+                phase="saving",
+                message="Grid Search 完成，正在保存结果",
+                event_type="optimize_saving",
             )
             task_store["status"] = "done"
             task_store["progress"] = 1.0
@@ -543,15 +927,55 @@ async def optimize_grid(req: OptimizeRequest):
                 "sort_by": req.sort_by,
                 "ascending": req.ascending,
             })
+            update_task(task_id, status="done", progress=1.0, result_ref=f"/backtest?task_id={task_id}")
+            db_id = await save_optimization_result(
+                task_id=task_id,
+                optimization_type="grid_search",
+                config=config,
+                request_params={
+                    "param_grid": req.param_grid,
+                    "sort_by": req.sort_by,
+                    "ascending": req.ascending,
+                    "max_workers": req.max_workers,
+                    "timeout": req.timeout,
+                },
+                result=task_store["result"],
+                success=True,
+            )
+            if db_id is not None:
+                task_store["result"]["backtest_id"] = db_id
             task_store["finished_at"] = time.time()
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             logger.error("Optimization task {} failed: {} ({})", task_id, e, type(e).__name__)
             task_store["status"] = "failed"
             task_store["progress"] = 1.0
             task_store["result"] = _sanitize_json({"error": f"{type(e).__name__}: {e}"})
+            update_task(
+                task_id,
+                status="failed",
+                progress=1.0,
+                result_ref=f"/backtest?task_id={task_id}",
+                error=f"{type(e).__name__}: {e}",
+            )
+            await save_optimization_result(
+                task_id=task_id,
+                optimization_type="grid_search",
+                config=config,
+                request_params={
+                    "param_grid": req.param_grid,
+                    "sort_by": req.sort_by,
+                    "ascending": req.ascending,
+                    "max_workers": req.max_workers,
+                    "timeout": req.timeout,
+                },
+                result=task_store["result"],
+                success=False,
+            )
             task_store["finished_at"] = time.time()
 
-    asyncio.create_task(_run())
+    _task_handles[task_id] = asyncio.create_task(_run())
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 
@@ -587,6 +1011,15 @@ async def optimize_walk_forward(req: WalkForwardRequest):
         "created_at": time.time(),
     }
     _tasks[task_id] = task_store
+    register_task(
+        task_id=task_id,
+        kind="optimization",
+        title="Walk-forward 滚动验证",
+        status="queued",
+        progress=0,
+        result_ref=f"/backtest?task_id={task_id}",
+        meta={"optimization_type": "walk_forward"},
+    )
 
     async def _run():
         try:
@@ -602,14 +1035,75 @@ async def optimize_walk_forward(req: WalkForwardRequest):
                 },
                 "metadata": {"phase": "walk_forward"},
             }
-            rows = await run_walk_forward(
-                config,
-                req.param_grid,
-                train_period=req.train_period,
-                test_period=req.test_period,
-                metric=req.metric,
-                ascending=req.ascending,
-                timeout=req.timeout,
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.05,
+                phase="prepare",
+                message="准备 Walk-forward 滚动窗口",
+                event_type="walk_forward_prepare",
+            )
+            await asyncio.sleep(0)
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.15,
+                phase="running",
+                message="AKQuant Walk-forward 正在运行",
+                event_type="walk_forward_running",
+            )
+            def _on_wfo_progress(
+                phase: str,
+                message: str,
+                progress: float | None = None,
+                meta: dict | None = None,
+            ) -> None:
+                current = float(task_store.get("progress") or 0.0)
+                _set_task_progress(
+                    task_id,
+                    task_store,
+                    progress=max(current, float(progress if progress is not None else current)),
+                    phase=phase,
+                    message=message,
+                    event_type=f"walk_forward_{phase}",
+                )
+                if meta:
+                    task_store.setdefault("live", {}).setdefault("metrics_snapshot", {}).update(meta)
+
+            heartbeat = asyncio.create_task(
+                _run_progress_heartbeat(
+                    task_id,
+                    task_store,
+                    label="Walk-forward",
+                    phase="akquant_running",
+                    start_progress=0.25,
+                    max_progress=0.84,
+                    interval_seconds=5.0,
+                    expected_seconds=900.0,
+                )
+            )
+            try:
+                rows = await run_walk_forward(
+                    config,
+                    req.param_grid,
+                    train_period=req.train_period,
+                    test_period=req.test_period,
+                    metric=req.metric,
+                    ascending=req.ascending,
+                    max_workers=req.max_workers,
+                    timeout=req.timeout,
+                    progress_callback=_on_wfo_progress,
+                )
+            finally:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            _set_task_progress(
+                task_id,
+                task_store,
+                progress=0.9,
+                phase="saving",
+                message="Walk-forward 完成，正在保存结果",
+                event_type="walk_forward_saving",
             )
             task_store["status"] = "done"
             task_store["progress"] = 1.0
@@ -621,15 +1115,59 @@ async def optimize_walk_forward(req: WalkForwardRequest):
                 "train_period": req.train_period,
                 "test_period": req.test_period,
             })
+            update_task(task_id, status="done", progress=1.0, result_ref=f"/backtest?task_id={task_id}")
+            db_id = await save_optimization_result(
+                task_id=task_id,
+                optimization_type="walk_forward",
+                config=config,
+                request_params={
+                    "param_grid": req.param_grid,
+                    "metric": req.metric,
+                    "ascending": req.ascending,
+                    "train_period": req.train_period,
+                    "test_period": req.test_period,
+                    "max_workers": req.max_workers,
+                    "timeout": req.timeout,
+                },
+                result=task_store["result"],
+                success=True,
+            )
+            if db_id is not None:
+                task_store["result"]["backtest_id"] = db_id
             task_store["finished_at"] = time.time()
         except Exception as e:
+            if isinstance(e, asyncio.CancelledError):
+                raise
             logger.error("Walk-forward task {} failed: {} ({})", task_id, e, type(e).__name__)
             task_store["status"] = "failed"
             task_store["progress"] = 1.0
             task_store["result"] = _sanitize_json({"error": f"{type(e).__name__}: {e}"})
+            update_task(
+                task_id,
+                status="failed",
+                progress=1.0,
+                result_ref=f"/backtest?task_id={task_id}",
+                error=f"{type(e).__name__}: {e}",
+            )
+            await save_optimization_result(
+                task_id=task_id,
+                optimization_type="walk_forward",
+                config=config,
+                request_params={
+                    "param_grid": req.param_grid,
+                    "metric": req.metric,
+                    "ascending": req.ascending,
+                    "train_period": req.train_period,
+                    "test_period": req.test_period,
+                    "max_workers": req.max_workers,
+                    "timeout": req.timeout,
+                },
+                result=task_store["result"],
+                success=False,
+            )
             task_store["finished_at"] = time.time()
 
-    asyncio.create_task(_run())
+    _task_handles[task_id] = asyncio.create_task(_run())
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 
@@ -770,7 +1308,18 @@ async def get_pool_symbols(pool_name: str):
 
 @router.get("/index-pools")
 async def list_index_pools():
-    return {"code": 0, "data": KNOWN_INDEX_POOLS}
+    items = [
+        {
+            "symbol": item.symbol,
+            "jq_symbol": item.jq_symbol or item.symbol,
+            "name": item.display_name,
+            "display_name": item.display_name,
+            "component_mode": item.component_mode,
+            "pool_enabled": item.pool_enabled,
+        }
+        for item in list_index_items(pool_only=True)
+    ]
+    return {"code": 0, "data": items}
 
 
 @router.get("/index-pools/{index_symbol}")
@@ -781,8 +1330,25 @@ async def get_index_pool(
 ):
     start = date.fromisoformat(start_date) if start_date else date.today() - timedelta(days=365)
     end = date.fromisoformat(end_date) if end_date else date.today()
+    item = get_index_item(index_symbol)
+    if item is None:
+        return {"code": 1, "message": f"Unknown index symbol: {index_symbol}", "data": None}
+    if not item.pool_enabled:
+        return {
+            "code": 0,
+            "data": {
+                "index_symbol": item.symbol,
+                "display_name": item.display_name,
+                "pool_enabled": False,
+                "component_status": "unavailable",
+                "reason": "market_only_index" if item.benchmark_enabled else "strict_snapshot_missing",
+                "symbol_count": 0,
+                "snapshot_count": 0,
+                "symbols": [],
+            },
+        }
     try:
-        summary = await index_pool_summary(index_symbol, start, end)
+        summary = await index_pool_summary(item.symbol, start, end)
         return {"code": 0, "data": summary}
     except Exception as e:
         logger.error("Index pool {} query failed: {}", index_symbol, e)
@@ -811,6 +1377,87 @@ async def get_timer_coverage(
     except Exception as e:
         logger.error("Timer coverage query failed: {}", e)
         return {"code": 1, "message": f"Timer coverage query failed: {e}", "data": None}
+
+
+@router.post("/data-coverage")
+async def get_backtest_data_coverage(req: RunBacktestRequest):
+    """Check market and factor data coverage for a backtest request."""
+    from datetime import date as date_cls
+    from app.data_stores import get_market_data_store
+
+    start_date = date_cls.fromisoformat(req.start_date)
+    end_date = date_cls.fromisoformat(req.end_date)
+    validation_error = _validate_backtest_request(req, start_date, end_date)
+    if validation_error:
+        return {"code": 1, "message": validation_error, "data": None}
+
+    config, config_error = await _prepare_backtest_config(req, start_date, end_date)
+    if config_error:
+        return config_error
+    assert config is not None
+
+    symbols = [str(item) for item in config.symbols or [] if str(item).strip()]
+    dataset = _market_dataset_for_bar_type(config.bar_type)
+    try:
+        store = get_market_data_store()
+        market = store.coverage(
+            symbols,
+            start_date,
+            end_date,
+            dataset=dataset,
+            timer_times=_timer_times_for_config(config),
+        )
+        covered_symbols = [str(item) for item in market.get("symbols_covered") or []]
+        requested_set = set(symbols)
+        covered_set = set(covered_symbols)
+        missing_symbols = sorted(requested_set - covered_set)
+        market_summary = {
+            **market,
+            "dataset": dataset,
+            "requested_symbol_count": len(symbols),
+            "covered_symbol_count": len(covered_symbols),
+            "missing_symbol_count": len(missing_symbols),
+            "coverage_ratio": _coverage_ratio(len(covered_symbols), len(symbols)),
+            "missing_symbols_sample": missing_symbols[:30],
+            "symbols_covered_sample": covered_symbols[:30],
+        }
+
+        factor_summary = None
+        if _is_multi_factor_strategy(config):
+            factor_summary = _multi_factor_coverage(
+                symbols=symbols,
+                start_date=start_date,
+                end_date=end_date,
+            )
+
+        warnings = []
+        if market_summary["coverage_ratio"] < 0.8:
+            warnings.append(
+                f"{dataset} symbol coverage is {market_summary['coverage_ratio']:.0%}"
+            )
+        if factor_summary and factor_summary.get("warning"):
+            warnings.append(
+                "multi-factor required factor coverage is below 60%"
+            )
+
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "bar_type": config.bar_type,
+                "index_symbol": config.index_symbol,
+                "symbol_count": len(symbols),
+                "market": market_summary,
+                "factor": factor_summary,
+                "warnings": warnings,
+                "ok": not warnings,
+            },
+        }
+    except Exception as e:
+        logger.error("Backtest data coverage query failed: {}", e)
+        return {"code": 1, "message": f"Data coverage query failed: {e}", "data": None}
 
 
 @router.get("/stock-names")

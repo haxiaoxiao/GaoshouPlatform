@@ -14,6 +14,12 @@ from app.compute.expression import evaluate_expression
 from app.compute.operators import auto_discover
 from app.data_stores import get_market_data_store
 
+try:
+    from app.db.clickhouse import get_ch_client
+except Exception:  # pragma: no cover - compatibility for parquet-only deployments.
+    def get_ch_client():
+        return None
+
 # Ensure operators are registered before any expression evaluation
 auto_discover()
 from app.models.factor import (
@@ -224,9 +230,11 @@ class FactorEvaluationService:
     async def board_query(self, query: BoardQuery) -> BoardResponse:
         """Query factor board with filters, sorting, and pagination."""
         rows = await self._saved_factor_board_rows(query)
-        if rows:
+        if rows or query.factor_groups:
             total = len(rows)
             rows = self._sort_and_page_rows(rows, query)
+            self._attach_board_coverage(rows, query)
+            await self._attach_latest_research_runs(rows)
             return BoardResponse(
                 rows=rows,
                 total=total,
@@ -276,24 +284,37 @@ class FactorEvaluationService:
 
         total = len(rows)
         rows = self._sort_and_page_rows(rows, query)
+        self._attach_board_coverage(rows, query)
+        await self._attach_latest_research_runs(rows)
         return BoardResponse(
             rows=rows, total=total,
             page=query.page, page_size=query.page_size,
         )
 
     async def _saved_factor_board_rows(self, query: BoardQuery) -> list[BoardRow]:
-        """Return saved custom factors for the board, with blank metrics if analysis is absent."""
+        """Return saved custom factors + built-in indicator definitions for the board."""
         from app.db.sqlite import async_session_factory
         from app.db.models import Factor, FactorAnalysis
         from sqlalchemy import select
 
+        rows: list[BoardRow] = []
+        from app.services.factor_value_store import list_factor_definitions, list_factor_groups
+
+        definitions = list_factor_definitions()
+        definition_by_name = {str(item.get("name")): item for item in definitions}
+        group_by_factor: dict[str, dict[str, Any]] = {}
+        selected_group_names = set(query.factor_groups or [])
+        for group in list_factor_groups():
+            if selected_group_names and str(group.get("name")) not in selected_group_names:
+                continue
+            for factor_name in group.get("factor_names") or []:
+                group_by_factor[str(factor_name)] = group
+
+        # 1) 用户自建因子 (factors 表)
         async with async_session_factory() as session:
             stmt = select(Factor)
-            if query.categories:
-                stmt = stmt.where(Factor.category.in_(query.categories))
             result = await session.execute(stmt.order_by(Factor.created_at.desc()))
             factors = list(result.scalars().all())
-            rows: list[BoardRow] = []
             for factor in factors:
                 analysis_result = await session.execute(
                     select(FactorAnalysis)
@@ -303,9 +324,21 @@ class FactorEvaluationService:
                 )
                 analysis = analysis_result.scalar_one_or_none()
                 details = analysis.details if analysis and analysis.details else {}
+                definition = definition_by_name.get(str(factor.name), {})
+                group = group_by_factor.get(str(factor.name))
+                if selected_group_names and group is None:
+                    continue
+                category = str(definition.get("category") or "custom")
+                if query.categories and category not in set(query.categories):
+                    continue
                 rows.append(BoardRow(
                     factor_name=factor.name,
-                    category=factor.category or "custom",
+                    display_name=str(definition.get("display_name") or factor.name),
+                    description=str(definition.get("description") or factor.description or ""),
+                    source=str(definition.get("source") or factor.source or "custom.factor"),
+                    factor_group=str(group.get("name")) if group else None,
+                    factor_group_display_name=str(group.get("display_name")) if group else None,
+                    category=category,
                     min_quantile_excess_return=float(details.get("min_quantile_excess_return") or 0.0),
                     max_quantile_excess_return=float(details.get("max_quantile_excess_return") or 0.0),
                     min_quantile_turnover=float(analysis.turnover_rate or 0.0) if analysis else 0.0,
@@ -313,7 +346,93 @@ class FactorEvaluationService:
                     ic_mean=float(analysis.ic_mean or 0.0) if analysis else 0.0,
                     ir=float(analysis.ir or 0.0) if analysis else 0.0,
                 ))
+
+        # 2) 内置指标定义（因子值缓存中的通用因子）
+        builtins = definitions
+        if query.categories:
+            builtins = [d for d in builtins if d.get("category") in query.categories]
+        seen_names = {row.factor_name for row in rows}
+        for d in builtins:
+            name = d["name"]
+            if name in seen_names:
+                continue
+            group = group_by_factor.get(str(name))
+            if selected_group_names and group is None:
+                continue
+            rows.append(BoardRow(
+                factor_name=name,
+                display_name=str(d.get("display_name") or name),
+                description=str(d.get("description") or ""),
+                source=str(d.get("source") or "builtin"),
+                factor_group=str(group.get("name")) if group else None,
+                factor_group_display_name=str(group.get("display_name")) if group else None,
+                category=d.get("category", "builtin"),
+                min_quantile_excess_return=0.0,
+                max_quantile_excess_return=0.0,
+                min_quantile_turnover=0.0,
+                max_quantile_turnover=0.0,
+                ic_mean=0.0,
+                ir=0.0,
+            ))
         return rows
+
+    def _attach_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
+        if not rows:
+            return
+        from app.services.factor_value_store import get_factor_value_store
+
+        end_date = date.today()
+        store = get_factor_value_store()
+        try:
+            coverage_by_factor = store.coverage_many([row.factor_name for row in rows])
+        except Exception:
+            logger.exception("Failed to batch attach factor board coverage")
+            coverage_by_factor = {}
+        for row in rows:
+            try:
+                coverage = coverage_by_factor.get(row.factor_name) or store._empty_coverage(row.factor_name)
+                row.coverage_total_rows = int(coverage.get("total_rows") or 0)
+                row.coverage_symbol_count = int(coverage.get("symbol_count") or 0)
+                row.coverage_date_count = int(coverage.get("date_count") or 0)
+                row.coverage_min_date = coverage.get("min_date")
+                row.coverage_max_date = coverage.get("max_date")
+                row.coverage_status = self._coverage_status(row.coverage_total_rows, row.coverage_max_date, end_date)
+            except Exception:
+                logger.exception("Failed to attach factor board coverage: %s", row.factor_name)
+                row.coverage_status = "unknown"
+
+    async def _attach_latest_research_runs(self, rows: list[BoardRow]) -> None:
+        if not rows:
+            return
+        try:
+            from app.services.factor_research_runs import factor_research_run_service
+
+            summaries = await factor_research_run_service.latest_summaries([row.factor_name for row in rows])
+        except Exception:
+            logger.exception("Failed to attach latest factor research runs")
+            return
+
+        for row in rows:
+            summary = summaries.get(row.factor_name)
+            if not summary:
+                continue
+            row.latest_run_id = summary.get("run_id")
+            row.latest_run_at = summary.get("completed_at") or summary.get("created_at")
+            row.latest_ic_mean = summary.get("ic_mean")
+            row.latest_icir = summary.get("icir")
+            row.latest_long_short_return = summary.get("long_short_return")
+            row.latest_max_drawdown = summary.get("max_drawdown")
+            row.latest_turnover = summary.get("turnover")
+            row.ic_mean = float(row.latest_ic_mean or 0.0)
+            row.ir = float(row.latest_icir or 0.0)
+
+    @staticmethod
+    def _coverage_status(total_rows: int, max_date: str | None, end_date: date) -> str:
+        if total_rows <= 0:
+            return "empty"
+        if max_date == end_date.isoformat():
+            return "covered"
+        return "partial"
 
     def _sort_and_page_rows(self, rows: list[BoardRow], query: BoardQuery) -> list[BoardRow]:
         reverse = query.sort_order == "desc"
@@ -338,7 +457,69 @@ class FactorEvaluationService:
         return result
 
     def _compute_industry_ic(self, factor_df, return_df) -> list[tuple]:
-        return []  # Requires industry classification data
+        """Compute IC per industry using SQLite stocks.industry classification.
+
+        Returns list of (industry_name, mean_ic).
+        """
+        if not isinstance(factor_df, pd.DataFrame) or factor_df.empty:
+            return []
+        if not isinstance(return_df, pd.DataFrame) or return_df.empty:
+            return []
+
+        # Load industry mapping
+        symbols = list(factor_df.columns) if isinstance(factor_df, pd.DataFrame) else []
+        if not symbols:
+            return []
+        industry_map = self._load_industry_map(symbols)
+        if not industry_map:
+            return []
+
+        result: list[tuple] = []
+        # Group symbols by industry
+        industries: dict[str, list[str]] = {}
+        for sym in symbols:
+            ind = industry_map.get(sym, "未知")
+            industries.setdefault(ind, []).append(sym)
+
+        # Compute IC per industry
+        for ind_name, ind_symbols in industries.items():
+            if len(ind_symbols) < 5:  # skip industries with too few stocks
+                continue
+            ind_factor = factor_df[ind_symbols].dropna(how="all")
+            ind_return = return_df[ind_symbols].dropna(how="all")
+            if ind_factor.empty or ind_return.empty:
+                continue
+            try:
+                ic_series = compute_ic_series(ind_factor, ind_return)
+                if ic_series.empty:
+                    continue
+                mean_ic = float(ic_series.mean())
+                result.append((ind_name, round(mean_ic, 4)))
+            except Exception:
+                continue
+
+        result.sort(key=lambda x: -abs(x[1]))  # sort by absolute IC
+        return result
+
+    def _load_industry_map(self, symbols: list[str]) -> dict[str, str]:
+        """Load industry classification from SQLite stocks table."""
+        import sqlite3
+        from pathlib import Path
+        from app.core.config import settings
+
+        db_path = Path(settings.data_dir) / "gaoshou.db"
+        if not db_path.exists():
+            return {}
+        placeholders = ",".join("?" for _ in symbols)
+        try:
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    f"SELECT symbol, industry FROM stocks WHERE symbol IN ({placeholders})",
+                    list(symbols),
+                ).fetchall()
+        except sqlite3.Error:
+            return {}
+        return {str(row[0]): str(row[1] or "未知") for row in rows if row[1]}
 
     def _compute_turnover(self, factor_df) -> list[tuple]:
         """Compute quantile turnover between consecutive dates.
@@ -417,9 +598,14 @@ class FactorEvaluationService:
         """
         lags = [1, 3, 5, 10, 20]
         if not isinstance(factor_df, pd.DataFrame) or factor_df.empty:
-            return [(lag, 0.0, 0.0, 0.0) for lag in lags]
+            return [(lag, 0.0, 0.0) for lag in lags]
         if not isinstance(return_df, pd.DataFrame) or return_df.empty:
-            return [(lag, 0.0, 0.0, 0.0) for lag in lags]
+            return [(lag, 0.0, 0.0) for lag in lags]
+
+        factor_df = factor_df.copy()
+        return_df = return_df.copy()
+        factor_df.index = pd.to_datetime(factor_df.index).normalize()
+        return_df.index = pd.to_datetime(return_df.index).normalize()
 
         result: list[tuple] = []
         for lag in lags:
@@ -427,10 +613,10 @@ class FactorEvaluationService:
             try:
                 ic_series = compute_ic_series(factor_df, lagged_return)
             except Exception:
-                result.append((lag, 0.0, 0.0, 0.0))
+                result.append((lag, 0.0, 0.0))
                 continue
             if ic_series.empty:
-                result.append((lag, 0.0, 0.0, 0.0))
+                result.append((lag, 0.0, 0.0))
                 continue
             mean_ic = float(ic_series.mean())
 
@@ -463,7 +649,7 @@ class FactorEvaluationService:
                     top_ret = float(np.mean(top_rets))
                     bot_ret = float(np.mean(bot_rets))
 
-            result.append((lag, round(mean_ic, 4), round(bot_ret, 4), round(top_ret, 4)))
+            result.append((lag, round(bot_ret, 4), round(top_ret, 4)))
         return result
 
     def _top_n_stocks(self, sorted_series, n, ascending) -> list[StockFactorValue]:
@@ -480,8 +666,7 @@ class FactorEvaluationService:
         return today - timedelta(days=days)
 
     async def _resolve_pool(self, stock_pool) -> list[str]:
-        sp = stock_pool if isinstance(stock_pool, StockPool) else StockPool(stock_pool)
-        return await compute_service._resolve_stock_pool(sp)
+        return await compute_service._resolve_stock_pool(str(stock_pool))
 
     # ------------------------------------------------------------------
     # Internal helpers (mirror BacktestRunner data-loading logic)
@@ -494,10 +679,26 @@ class FactorEvaluationService:
         start_date: date | None,
         end_date: date | None,
     ) -> pd.DataFrame:
-        """加载并计算因子矩阵"""
-        store = get_market_data_store()
+        """加载并计算因子矩阵。
+
+        支持两种来源：
+        1) 因子值缓存中的内置指标名（如 market_cap, v4gv）
+        2) DSL 表达式（如 ts_mean($close, 20)）
+        """
         sd = start_date or date(2000, 1, 1)
         ed = end_date or date.today()
+
+        # 1) 尝试从因子值缓存读取（内置指标）
+        factor_df = self._load_from_factor_store(expression, symbols, sd, ed)
+        if factor_df is not None and not factor_df.empty:
+            return factor_df
+
+        # 内置因子无缓存数据时返回空，不尝试 DSL 解析
+        if self._is_builtin_factor(expression):
+            return pd.DataFrame()
+
+        # 2) DSL 表达式计算
+        store = get_market_data_store()
         df = store.load_daily(symbols, sd, ed)
         if df.empty:
             return pd.DataFrame()
@@ -526,6 +727,44 @@ class FactorEvaluationService:
             return result
 
         return pd.DataFrame()
+
+    def _is_builtin_factor(self, name: str) -> bool:
+        """检查名称是否是内置因子定义（非 DSL 表达式）。"""
+        try:
+            from app.services.factor_value_store import FACTOR_DEFINITIONS
+            return name in FACTOR_DEFINITIONS
+        except Exception:
+            return False
+
+    def _load_from_factor_store(
+        self,
+        name: str,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+    ) -> pd.DataFrame | None:
+        """尝试从 FactorValueStore (Parquet) 加载内置因子的历史矩阵。"""
+        try:
+            from app.services.factor_value_store import get_factor_value_store
+            store = get_factor_value_store()
+            if not store.exists():
+                return None
+            df = store.load(
+                factor_names=[name],
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+            )
+            if df.empty:
+                return None
+            # 转换为因子矩阵：index=trade_date, columns=symbol, values=value
+            df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="last")
+            matrix = df.pivot_table(
+                index="trade_date", columns="symbol", values="value", aggfunc="last"
+            )
+            return matrix if not matrix.empty else None
+        except Exception:
+            return None
 
     def _load_return_matrix(
         self,

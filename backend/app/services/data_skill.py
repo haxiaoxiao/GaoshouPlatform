@@ -22,6 +22,7 @@ from app.data_stores import get_market_data_store
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
+from app.services.security_symbols import normalize_security_symbol
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -150,6 +151,7 @@ class DataSkill:
         Returns:
             StockSnapshot 或 None
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         db_stock = await self._get_db_stock(symbol)
         if db_stock and db_stock.total_mv:
             return self._stock_to_snapshot(db_stock)
@@ -167,6 +169,7 @@ class DataSkill:
             {symbol: StockSnapshot} 字典，找不到的不会包含
         """
         result: dict[str, StockSnapshot] = {}
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
 
         if not symbols:
             return result
@@ -261,6 +264,7 @@ class DataSkill:
             end_date: 结束日期
             limit: 最大条数
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         bars = self._query_market_klines(symbol, start_date, end_date, limit)
         if bars:
             return bars
@@ -281,6 +285,7 @@ class DataSkill:
         limit: int = 500,
     ) -> list[KlineBar]:
         """获取分钟K线数据（同上，ClickHouse 优先）"""
+        symbol = normalize_security_symbol(symbol) or symbol
         bars = self._query_market_klines_minute(symbol, start_date, end_date, limit)
         if bars:
             return bars
@@ -306,6 +311,7 @@ class DataSkill:
             symbol: 股票代码
             report_count: 获取最近 N 个季度
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         stmt = (
             select(FinancialData)
             .where(FinancialData.symbol == symbol)
@@ -331,6 +337,7 @@ class DataSkill:
             {symbol: [FinancialReport, ...]}
         """
         result: dict[str, list[FinancialReport]] = {}
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return result
 
@@ -369,11 +376,13 @@ class DataSkill:
 
     async def get_realtime_quote(self, symbol: str) -> dict[str, Any] | None:
         """获取单只股票实时行情"""
+        symbol = normalize_security_symbol(symbol) or symbol
         quotes = await qmt_gateway.get_realtime_quotes([symbol])
         return quotes[0] if quotes else None
 
     async def get_realtime_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         """批量获取实时行情"""
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         return await qmt_gateway.get_realtime_quotes(symbols)
 
     # ─── 行业统计 ──────────────────────────────────────────
@@ -404,6 +413,7 @@ class DataSkill:
             indicator_name: 指标名称
             trade_date: 交易日期，None 则取最新
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         from app.data_stores import get_indicator_store
 
         store = get_indicator_store()
@@ -449,6 +459,7 @@ class DataSkill:
         Returns:
             [{symbol, indicator_name, value, trade_date}, ...]
         """
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return []
         from app.data_stores import get_indicator_store

@@ -156,6 +156,7 @@ async def coverage(
     window: int | None = Query(default=None),
     threshold: float | None = Query(default=None),
     daily_volume_to_share_multiplier: float | None = Query(default=None),
+    full_range: bool = Query(default=False),
 ) -> dict[str, Any]:
     if get_factor_definition(factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Unknown factor: {factor_name}")
@@ -163,14 +164,24 @@ async def coverage(
     if symbol_list is None and index_symbol:
         symbol_list = await load_index_symbols(index_symbol, start_date, end_date)
     params = _build_params(factor_name, as_of_time, window, threshold, daily_volume_to_share_multiplier)
-    data = get_factor_value_store().coverage(
-        factor_name=factor_name,
-        start_date=start_date,
-        end_date=end_date,
-        symbols=symbol_list,
-        as_of_time=_effective_as_of_time(factor_name, as_of_time, params),
-        params=params,
-    )
+    store = get_factor_value_store()
+    effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
+    if full_range:
+        data = store.coverage_many(
+            [factor_name],
+            symbols=symbol_list,
+            as_of_time=effective_as_of_time,
+            params=params,
+        ).get(factor_name, store._empty_coverage(factor_name))
+    else:
+        data = store.coverage(
+            factor_name=factor_name,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            as_of_time=effective_as_of_time,
+            params=params,
+        )
     data["requested_symbol_count"] = len(symbol_list or [])
     return {"code": 0, "message": "success", "data": data}
 
@@ -495,19 +506,26 @@ def _merge_precompute_results(
     factor_names: list[str],
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    merged_rows: dict[str, int] = {}
+    requested_factor_names = list(dict.fromkeys(str(name) for name in factor_names if str(name)))
+    merged_rows: dict[str, int] = {name: 0 for name in requested_factor_names}
     total_written = 0
     for result in results:
         total_written += int(result.get("rows_written") or 0)
         for factor_name, count in (result.get("rows") or {}).items():
             merged_rows[str(factor_name)] = merged_rows.get(str(factor_name), 0) + int(count or 0)
+    written_factor_names = [name for name, count in merged_rows.items() if count > 0]
+    zero_row_factor_names = [name for name, count in merged_rows.items() if count <= 0]
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "factor_names": factor_names,
+        "factor_names": requested_factor_names,
         "rows": merged_rows,
         "rows_written": total_written,
+        "requested_factor_count": len(requested_factor_names),
+        "written_factor_count": len(written_factor_names),
+        "zero_row_factor_count": len(zero_row_factor_names),
+        "zero_row_factor_names": zero_row_factor_names,
     }
 
 

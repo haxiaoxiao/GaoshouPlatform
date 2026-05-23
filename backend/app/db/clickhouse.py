@@ -128,6 +128,18 @@ def init_clickhouse_tables():
     """)
 
 
-def get_ch_client() -> Client:
-    """获取 ClickHouse 客户端（每次新建，避免共享连接状态冲突）"""
-    return get_clickhouse_client()
+def get_ch_client():
+    """获取 ClickHouse 客户端；不可用时返回空操作代理，不抛异常。"""
+    try:
+        return get_clickhouse_client()
+    except Exception:
+        return _NoopClient()
+
+
+class _NoopClient:
+    """空操作客户端 — ClickHouse 不可用时的安全回退"""
+    def execute(self, *args, **kwargs): return None
+    def query_df(self, *args, **kwargs): return None
+    def query(self, *args, **kwargs): return []
+    def insert_dataframe(self, *args, **kwargs): return None
+    def __getattr__(self, name): return lambda *a, **kw: None

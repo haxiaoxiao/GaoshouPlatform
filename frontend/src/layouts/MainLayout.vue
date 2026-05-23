@@ -172,10 +172,12 @@ function closeNotificationPanel(e: MouseEvent) {
 
 onMounted(() => {
   document.addEventListener('click', closeNotificationPanel)
+  notificationStore.startTaskPolling()
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', closeNotificationPanel)
+  notificationStore.stopTaskPolling()
 })
 
 // SVG icons as strings

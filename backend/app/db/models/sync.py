@@ -2,7 +2,7 @@
 from datetime import date, datetime
 from typing import Any
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -65,3 +65,30 @@ class SyncLog(Base):
 
     # 关联任务
     task: Mapped["SyncTask | None"] = relationship(back_populates="logs")
+
+
+class SyncRun(Base):
+    """Persisted runtime state for manual and scheduled sync runs."""
+
+    __tablename__ = "sync_runs"
+
+    run_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    sync_task_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sync_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="queued")
+    total: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    current: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    success_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    progress_percent: Mapped[float] = mapped_column(Float, default=0.0, nullable=False)
+    start_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    request: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_beijing_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_beijing_now, onupdate=_beijing_now, nullable=False
+    )

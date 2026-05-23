@@ -63,6 +63,30 @@ export const industryApi = {
     request.get<Industry[]>('/data/industries'),
 }
 
+export interface IndexCatalogItem {
+  symbol: string
+  display_name: string
+  provider: string
+  provider_symbol: string
+  market_family: string
+  benchmark_enabled: boolean
+  pool_enabled: boolean
+  requires_daily_market_data: boolean
+  requires_components_when_pool: boolean
+  component_mode: 'snapshot' | 'derived_union' | 'none'
+  available_from: string | null
+  notes: string
+  stock_pool_alias?: string | null
+  jq_symbol?: string | null
+  component_status: 'available' | 'unavailable'
+  reason: string | null
+}
+
+export const indexCatalogApi = {
+  list: () =>
+    request.get<IndexCatalogItem[]>('/data/index-catalog'),
+}
+
 export interface WatchlistGroup {
   id: number
   name: string

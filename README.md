@@ -23,7 +23,7 @@
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
 | `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 规划 |
 | `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：参数、数据口径、已对齐节点和剩余差异 |
-| `docs/feature-store.md` | 因子研究 Feature Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
+| `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
 | `AGENTS.md` | AI coding agent 项目指南和关键约束 |
 
 ---
@@ -237,18 +237,18 @@ AKQuant bar_type="minute_timer" 回测
 
 ## AKQuant 回测入口
 
-后端 V2 回测 API 位于 `/api/v2/backtest/*`：
+后端统一回测 API 位于 `/api/backtest/*`：
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/v2/backtest/capabilities` | 查看 AKQuant 是否可用、版本、TA-Lib 函数数、可选模块 |
-| `POST /api/v2/backtest/run` | 运行回测，`engine="akquant"` 使用 AKQuant 引擎 |
-| `POST /api/v2/backtest/optimize/grid` | AKQuant Grid Search |
-| `POST /api/v2/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
-| `POST /api/v2/backtest/strategy-params/schema` | 读取策略参数 schema |
-| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 |
-| `GET /api/v2/backtest/index-pools/{index_symbol}` | 查询动态指数池覆盖情况 |
-| `GET /api/v2/backtest/timer-coverage` | 查询稀疏 timer 分钟数据覆盖率 |
+| `GET /api/backtest/capabilities` | 查看 AKQuant 是否可用、版本、TA-Lib 函数数、可选模块 |
+| `POST /api/backtest/run` | 运行回测，`engine="akquant"` 使用 AKQuant 引擎 |
+| `POST /api/backtest/optimize/grid` | AKQuant Grid Search |
+| `POST /api/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
+| `POST /api/backtest/strategy-params/schema` | 读取策略参数 schema |
+| `POST /api/backtest/strategy-params/validate` | 校验策略参数 |
+| `GET /api/backtest/index-pools/{index_symbol}` | 查询动态指数池覆盖情况 |
+| `GET /api/backtest/timer-coverage` | 查询稀疏 timer 分钟数据覆盖率 |
 
 参数原则：
 

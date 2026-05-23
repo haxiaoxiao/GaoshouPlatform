@@ -24,6 +24,9 @@ from app.services.factor_catalog import (
     list_catalog_groups,
 )
 
+CUSTOM_FACTOR_CATEGORY = "custom"
+CUSTOM_FACTOR_GROUP_NAME = "custom_factor_library"
+
 
 @dataclass(frozen=True)
 class FactorDefinition:
@@ -322,7 +325,7 @@ def list_custom_factor_definitions() -> list[dict[str, Any]]:
             name=str(row["name"]),
             display_name=str(params.get("display_name") or row["name"]),
             factor_type=str(params.get("kind") or params.get("factor_type") or "factor"),
-            category=str(row["category"] or params.get("category") or "custom"),
+            category=CUSTOM_FACTOR_CATEGORY,
             frequency=str(params.get("frequency") or "daily"),
             description=str(row["description"] or params.get("description") or expression),
             unit=str(params.get("unit") or ""),
@@ -346,10 +349,28 @@ def get_custom_factor_definition(name: str) -> dict[str, Any] | None:
 
 
 def list_factor_groups() -> list[dict[str, Any]]:
-    return list(FACTOR_GROUPS.values()) + list_catalog_groups()
+    groups = list(FACTOR_GROUPS.values()) + list_catalog_groups()
+    custom_names = [item["name"] for item in list_custom_factor_definitions()]
+    if custom_names:
+        groups.append({
+            "name": CUSTOM_FACTOR_GROUP_NAME,
+            "display_name": "自定义因子库",
+            "description": "用户创建的 DSL / Python 自定义因子。",
+            "factor_names": custom_names,
+        })
+    return groups
 
 
 def get_factor_group(name: str) -> dict[str, Any] | None:
+    if name == CUSTOM_FACTOR_GROUP_NAME:
+        custom_names = [item["name"] for item in list_custom_factor_definitions()]
+        if custom_names:
+            return {
+                "name": CUSTOM_FACTOR_GROUP_NAME,
+                "display_name": "自定义因子库",
+                "description": "用户创建的 DSL / Python 自定义因子。",
+                "factor_names": custom_names,
+            }
     return FACTOR_GROUPS.get(name) or get_catalog_group(name)
 
 
@@ -681,6 +702,84 @@ class FactorValueStore:
             "max_date": str(stats[4]) if stats[4] is not None else None,
             "symbols_sample": sample_df["symbol"].astype(str).tolist() if not sample_df.empty else [],
         }
+
+    def coverage_many(
+        self,
+        factor_names: Sequence[str],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        symbols: Sequence[str] | None = None,
+        as_of_time: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Return factor coverage in one DuckDB scan.
+
+        When start_date/end_date are omitted, this reports the actual effective
+        cached range. The factor board uses that mode so the displayed range is
+        not clipped by the selected research window.
+        """
+        names = sorted({str(name) for name in factor_names if str(name)})
+        if not names or not self.exists():
+            return {name: self._empty_coverage(name) for name in names}
+
+        params_hash = factor_params_hash(params) if params is not None else None
+        conditions = [f"factor_name IN {_list_param(names)}"]
+        partition_filter = ""
+        if start_date is not None:
+            conditions.append(f"trade_date >= {_sql_literal(start_date)}")
+        if end_date is not None:
+            conditions.append(f"trade_date <= {_sql_literal(end_date)}")
+        if symbols:
+            conditions.append(f"symbol IN {_list_param(symbols)}")
+        if start_date is not None and end_date is not None:
+            partition_filter = self._year_month_filter(start_date, end_date)
+        if as_of_time is not None:
+            conditions.append(f"as_of_time = {_sql_literal(normalize_factor_time(as_of_time))}")
+        if params_hash is not None:
+            conditions.append(f"params_hash = {_sql_literal(params_hash)}")
+
+        where_sql = " AND ".join(conditions)
+        name_expr = self._name_expr()
+        sql = f"""
+            WITH factor_values_normalized AS (
+                SELECT
+                    symbol,
+                    trade_date,
+                    as_of_time,
+                    {name_expr} AS factor_name,
+                    params_hash,
+                    value,
+                    year,
+                    month
+                FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            )
+            SELECT
+                factor_name,
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT symbol) AS symbol_count,
+                COUNT(DISTINCT trade_date) AS date_count,
+                MIN(trade_date) AS min_date,
+                MAX(trade_date) AS max_date
+            FROM factor_values_normalized
+            WHERE {where_sql}
+              {partition_filter}
+            GROUP BY factor_name
+        """
+        rows = get_duckdb().execute(sql).fetchall()
+        result = {name: self._empty_coverage(name) for name in names}
+        for row in rows:
+            factor_name = str(row[0])
+            result[factor_name] = {
+                "factor_name": factor_name,
+                "total_rows": int(row[1] or 0),
+                "symbol_count": int(row[2] or 0),
+                "date_count": int(row[3] or 0),
+                "min_date": str(row[4]) if row[4] is not None else None,
+                "max_date": str(row[5]) if row[5] is not None else None,
+                "symbols_sample": [],
+            }
+        return result
 
     def preview(
         self,

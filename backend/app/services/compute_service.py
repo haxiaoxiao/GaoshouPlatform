@@ -45,20 +45,45 @@ class ComputeService:
         return results
 
     async def _resolve_stock_pool(self, stock_pool: StockPool) -> list[str]:
-        """Resolve stock pool name to list of symbols."""
-        from datetime import date as dt_date, timedelta
+        """Resolve stock pool name to list of symbols via index components."""
+        from datetime import date as dt_date
 
-        from app.data_stores import get_market_data_store
+        pool_name = stock_pool.value if hasattr(stock_pool, "value") else str(stock_pool)
+        today = dt_date.today()
 
-        store = get_market_data_store()
-        # Look back 2 years to capture symbols active during the evaluation window
-        info = store.coverage(
-            [],
-            dt_date.today() - timedelta(days=730),
-            dt_date.today(),
-            dataset="klines_daily",
-        )
-        return sorted(info.get("symbols_covered", []))
+        # 指数池：走 index_components 表
+        try:
+            from app.services.index_catalog import get_index_item
+            from app.services.index_components import load_index_symbols
+        except Exception:
+            get_index_item = None
+            load_index_symbols = None
+
+        item = get_index_item(pool_name) if get_index_item else None
+        if item is not None:
+            if not item.pool_enabled:
+                raise ValueError(
+                    f"Stock pool {pool_name} is unavailable because strict historical constituents are missing"
+                )
+            if load_index_symbols is None:
+                raise RuntimeError("Index component loader is unavailable")
+            symbols = await load_index_symbols(item.symbol, today, today)
+            if symbols:
+                return sorted(symbols)
+            raise ValueError(f"Historical constituents for {item.symbol} are unavailable in the requested window")
+
+        # Fallback: 从 SQLite stocks 表读取
+        import sqlite3
+        from pathlib import Path
+        from app.core.config import settings
+        db_path = Path(settings.data_dir) / "gaoshou.db"
+        if db_path.exists():
+            with sqlite3.connect(db_path) as conn:
+                rows = conn.execute(
+                    "SELECT symbol FROM stocks WHERE is_delist=0 AND is_st=0 ORDER BY symbol"
+                ).fetchall()
+                return [r[0] for r in rows]
+        return []
 
     async def _load_market_data(
         self, symbols: list[str], start_date: date, end_date: date
@@ -92,7 +117,7 @@ class ComputeService:
         if isinstance(result, pd.DataFrame):
             return {
                 "expression": config.expression,
-                "stock_pool": config.stock_pool.value,
+                "stock_pool": str(config.stock_pool),
                 "start_date": config.start_date.isoformat(),
                 "end_date": config.end_date.isoformat(),
                 "data": result.to_dict(orient="records"),
@@ -101,7 +126,7 @@ class ComputeService:
         if isinstance(result, pd.Series):
             return {
                 "expression": config.expression,
-                "stock_pool": config.stock_pool.value,
+                "stock_pool": str(config.stock_pool),
                 "start_date": config.start_date.isoformat(),
                 "end_date": config.end_date.isoformat(),
                 "data": result.to_dict(),
@@ -123,7 +148,7 @@ class ComputeService:
                 ]
             return {
                 "expression": config.expression,
-                "stock_pool": config.stock_pool.value,
+                "stock_pool": str(config.stock_pool),
                 "start_date": config.start_date.isoformat(),
                 "end_date": config.end_date.isoformat(),
                 "data": out,

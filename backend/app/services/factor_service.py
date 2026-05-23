@@ -11,6 +11,20 @@ from sqlalchemy.orm import selectinload
 from app.db.models import Factor, FactorAnalysis
 from app.engines.factor_engine import FactorConfig, FactorEngine, get_factor_engine
 
+CUSTOM_FACTOR_CATEGORY = "custom"
+
+
+def normalize_factor_category(
+    category: str | None,
+    *,
+    source: str | None = None,
+    code: str | None = None,
+) -> str | None:
+    """User-authored factors should stay under one custom library."""
+    if code or str(source or "").lower() in {"custom", "dsl", "python"}:
+        return CUSTOM_FACTOR_CATEGORY
+    return category
+
 
 @dataclass
 class FactorCreate:
@@ -62,7 +76,7 @@ class FactorService:
         """
         factor = Factor(
             name=data.name,
-            category=data.category,
+            category=normalize_factor_category(data.category, source=data.source, code=data.code),
             source=data.source,
             code=data.code,
             parameters=data.parameters,
@@ -144,7 +158,7 @@ class FactorService:
         if data.name is not None:
             factor.name = data.name
         if data.category is not None:
-            factor.category = data.category
+            factor.category = normalize_factor_category(data.category, source=data.source or factor.source, code=data.code or factor.code)
         if data.source is not None:
             factor.source = data.source
         if data.code is not None:
@@ -153,6 +167,7 @@ class FactorService:
             factor.parameters = data.parameters
         if data.description is not None:
             factor.description = data.description
+        factor.category = normalize_factor_category(factor.category, source=factor.source, code=factor.code)
 
         factor.updated_at = datetime.now()
         await self.session.flush()

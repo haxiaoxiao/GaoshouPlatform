@@ -66,53 +66,77 @@ RESEARCH_FACTOR_SPECS: dict[str, dict[str, Any]] = {
         "label": "Gross Profitability",
         "category": "research_quality",
         "dependencies": ["stocks.gross_margin", "stocks.revenue"],
-        "description": "Gross profitability proxy inspired by Novy-Marx quality research.",
+        "description": (
+            "Gross profitability proxy inspired by Novy-Marx quality research. "
+            "Source: https://ssrn.com/abstract=1598056"
+        ),
     },
     "research_asset_growth": {
         "label": "Asset Growth",
         "category": "research_investment",
         "dependencies": ["financial_data.total_assets"],
-        "description": "Asset growth / investment proxy.",
+        "description": (
+            "Asset growth / investment proxy. "
+            "Source: https://ssrn.com/abstract=760967"
+        ),
     },
     "research_accruals": {
         "label": "Accruals",
         "category": "research_quality",
         "dependencies": ["financial_data.net_profit", "financial_data.total_assets"],
-        "description": "Accounting accrual quality proxy using available local fields.",
+        "description": (
+            "Accounting accrual quality proxy using available local fields. "
+            "Source: https://ssrn.com/abstract=2598"
+        ),
     },
     "research_low_beta": {
         "label": "Low Beta",
         "category": "research_risk",
         "dependencies": ["klines_daily.close"],
-        "description": "Negative market beta proxy inspired by betting-against-beta research.",
+        "description": (
+            "Negative market beta proxy inspired by betting-against-beta research. "
+            "Source: https://ssrn.com/abstract=1723048"
+        ),
         "lookback": 252,
     },
     "research_idiosyncratic_volatility": {
         "label": "Idiosyncratic Volatility",
         "category": "research_risk",
         "dependencies": ["klines_daily.close"],
-        "description": "Negative residual volatility proxy versus equal-weight market return.",
+        "description": (
+            "Negative residual volatility proxy versus equal-weight market return. "
+            "Source: https://ssrn.com/abstract=1947020"
+        ),
         "lookback": 252,
     },
     "research_residual_momentum": {
         "label": "Residual Momentum",
         "category": "research_momentum",
         "dependencies": ["klines_daily.close"],
-        "description": "12-1 month momentum residualized by market return.",
+        "description": (
+            "12-1 month momentum residualized by market return. "
+            "Source: https://repub.eur.nl/pub/22252/ResidualMomentum-2011.pdf"
+        ),
         "lookback": 252,
     },
     "research_short_reversal": {
         "label": "Short Reversal",
         "category": "research_reversal",
         "dependencies": ["klines_daily.close"],
-        "description": "Negative 5-day return short-term reversal.",
+        "description": (
+            "Negative 5-day return short-term reversal. "
+            "Source: https://www.nber.org/papers/w2533"
+        ),
         "lookback": 10,
     },
     "research_turnover_liquidity": {
         "label": "Turnover Liquidity",
         "category": "research_liquidity",
         "dependencies": ["klines_daily.volume", "klines_daily.amount"],
-        "description": "Liquidity proxy using amount and volume.",
+        "description": (
+            "Liquidity proxy using amount and volume. "
+            "Source: https://ideas.repec.org/a/eee/finmar/v5y2002i1p31-56.html"
+        ),
         "lookback": 20,
     },
 }
@@ -192,4 +216,3 @@ def is_catalog_factor(name: str) -> bool:
         or name in RESEARCH_FACTOR_SPECS
         or (name.startswith("alpha101_") and name[-3:].isdigit() and 1 <= int(name[-3:]) <= 101)
     )
-

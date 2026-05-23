@@ -204,7 +204,7 @@ class BacktestService:
             tuple[list[Backtest], int]: 回测列表和总数
         """
         # 构建查询
-        query = select(Backtest)
+        query = select(Backtest).join(Strategy, Strategy.id == Backtest.strategy_id)
 
         if strategy_id is not None:
             query = query.where(Backtest.strategy_id == strategy_id)
@@ -343,6 +343,7 @@ class BacktestService:
             "success": True,
             "report": {
                 "id": backtest.id,
+                "backtest_id": backtest.id,
                 "strategy_id": backtest.strategy_id,
                 "strategy_name": strategy.name if strategy else None,
                 "status": backtest.status,

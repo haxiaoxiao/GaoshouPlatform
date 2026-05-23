@@ -32,14 +32,23 @@
       </el-form-item>
       <el-form-item label="日期范围">
         <el-date-picker
-          v-model="dateRange"
-          type="daterange"
+          v-model="queryParams.start_date"
+          type="date"
           range-separator="至"
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           format="YYYY-MM-DD"
           value-format="YYYY-MM-DD"
-          style="width: 260px"
+          style="width: 130px"
+        />
+        <span class="date-separator">至</span>
+        <el-date-picker
+          v-model="queryParams.end_date"
+          type="date"
+          placeholder="结束日期"
+          format="YYYY-MM-DD"
+          value-format="YYYY-MM-DD"
+          style="width: 130px"
         />
       </el-form-item>
       <el-form-item>
@@ -205,7 +214,6 @@ const stockOptions = ref<StockOption[]>([])
 const chartRef = ref<HTMLDivElement | null>(null)
 let chartInstance: echarts.ECharts | null = null
 
-const dateRange = ref<string[]>([])
 const queryParams = reactive({
   symbol: '',
   period: 'daily',
@@ -231,9 +239,8 @@ const setDateRange = (days: number) => {
   const end = new Date()
   const start = new Date()
   start.setDate(start.getDate() - days)
-  dateRange.value = [formatDate(start), formatDate(end)]
-  queryParams.start_date = dateRange.value[0]
-  queryParams.end_date = dateRange.value[1]
+  queryParams.start_date = formatDate(start)
+  queryParams.end_date = formatDate(end)
 }
 
 const formatDate = (date: Date): string => {
@@ -264,7 +271,7 @@ const searchStocks = async (query: string) => {
 
 // 股票选择变化
 const handleSymbolChange = () => {
-  if (queryParams.symbol && dateRange.value.length === 0) {
+  if (queryParams.symbol && (!queryParams.start_date || !queryParams.end_date)) {
     setDateRange(365)
   }
 }
@@ -276,11 +283,6 @@ const handleQuery = async () => {
   }
 
   // 更新日期参数
-  if (dateRange.value && dateRange.value.length === 2) {
-    queryParams.start_date = dateRange.value[0]
-    queryParams.end_date = dateRange.value[1]
-  }
-
   loading.value = true
   try {
     const params: Record<string, unknown> = {
@@ -584,6 +586,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+}
+
+.date-separator {
+  margin: 0 8px;
+  color: #606266;
 }
 
 .chart-card {

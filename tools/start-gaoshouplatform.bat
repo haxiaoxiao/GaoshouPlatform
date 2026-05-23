@@ -59,7 +59,7 @@ if errorlevel 1 (
 )
 
 echo [4/5] Starting backend on 127.0.0.1:8000...
-start "GaoshouPlatform-Backend" /D "%BACKEND_DIR%" cmd /k ""%PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000"
+start "GaoshouPlatform-Backend" /D "%BACKEND_DIR%" cmd /k ""%PYTHON%" -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload"
 call :wait_http "%BACKEND_URL%" 60
 if errorlevel 1 (
   echo       ERROR: Backend health check failed: %BACKEND_URL%

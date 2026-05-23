@@ -25,7 +25,7 @@
         :key="n.id"
         class="notification-item"
         :class="{ 'notification-item--unread': !n.read }"
-        @click="store.markAsRead(n.id)"
+        @click="handleNotificationClick(n)"
       >
         <div class="notif-dot" :class="`notif-dot--${n.type}`"></div>
         <div class="notif-content">
@@ -39,9 +39,18 @@
 </template>
 
 <script setup lang="ts">
-import { useNotificationStore } from '@/stores/notification'
+import { useRouter } from 'vue-router'
+import { useNotificationStore, type Notification } from '@/stores/notification'
 
 const store = useNotificationStore()
+const router = useRouter()
+
+function handleNotificationClick(notification: Notification) {
+  store.markAsRead(notification.id)
+  if (notification.route) {
+    router.push(notification.route)
+  }
+}
 
 function formatTime(date: Date): string {
   const d = date instanceof Date ? date : new Date(date)

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # 数据库配置
-    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH}"
+    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"
 
     # ClickHouse 配置
     clickhouse_host: str = "localhost"
@@ -55,9 +55,21 @@ class Settings(BaseSettings):
 
     # 行情数据存储配置
     market_data_backend: str = "parquet"  # parquet | clickhouse
-    parquet_data_dir: str = "E:/Projects/GaoshouPlatform/data/parquet"
+    parquet_data_dir: str = str(_DATA_DIR / "parquet")
     duckdb_path: str = ":memory:"
     clickhouse_enabled: bool = False
+    parquet_minute_append_only: bool = True
+    qmt_minute_clean_cache_after_sync: bool = False
+    qmt_minute_compute_indicators_after_sync: bool = False
+    sync_service_url: str = "http://127.0.0.1:8810"
+    sync_service_port: int = 8810
+    enable_sync_scheduler: bool = True
+
+    # 网格交易信号配置
+    grid_trading_enable_order_submit: bool = False
+    qmt_account_id: str = ""
+    qmt_account_type: str = "STOCK"
+    qmt_trader_path: str = ""
 
     # API 配置
     api_prefix: str = "/api"

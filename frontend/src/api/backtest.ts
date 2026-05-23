@@ -41,12 +41,23 @@ export interface BacktestTrade {
   symbol?: string
   direction?: string
   price?: number
+  display_price?: number
+  entry_price?: number
+  exit_price?: number
   quantity?: number
   commission?: number
   pnl?: number | null
 }
 
 export interface BacktestResult {
+  rows?: Record<string, unknown>[]
+  count?: number
+  row_count?: number
+  metric?: string | string[]
+  sort_by?: string | string[]
+  ascending?: boolean | boolean[]
+  train_period?: number
+  test_period?: number
   total_return?: number
   annual_return?: number
   annual_volatility?: number
@@ -85,6 +96,7 @@ export interface BacktestCreate {
 }
 
 export interface BacktestReport {
+  id?: number
   backtest_id: number
   strategy_id: number
   strategy_name: string | null
@@ -190,6 +202,7 @@ export interface GridOptimizeRequest {
   end_date: string
   initial_capital?: number
   bar_type?: string
+  timer_times?: string[]
   commission_rate?: number
   slippage?: number
   stamp_tax_rate?: number
@@ -212,19 +225,63 @@ export interface WalkForwardOptimizeRequest extends GridOptimizeRequest {
   metric?: string | string[]
 }
 
-export const backtestV2Engines = {
-  list: () => request.get<EngineOption[]>('/v2/backtest/engines'),
-  capabilities: () => request.get<BacktestCapabilities>('/v2/backtest/capabilities'),
-  optimizeGrid: (data: GridOptimizeRequest) =>
-    request.post<{ task_id: string }>('/v2/backtest/optimize/grid', data),
-  optimizeWalkForward: (data: WalkForwardOptimizeRequest) =>
-    request.post<{ task_id: string }>('/v2/backtest/optimize/walk-forward', data),
-  strategyParamsSchema: (data: StrategyParamsSchemaRequest) =>
-    request.post<Record<string, unknown>>('/v2/backtest/strategy-params/schema', data),
-  validateStrategyParams: (data: StrategyParamsValidateRequest) =>
-    request.post<Record<string, unknown>>('/v2/backtest/strategy-params/validate', data),
-  report: (taskId: string) => request.get<string>(`/v2/backtest/report/${taskId}`),
+export interface BacktestDataCoverageFactorItem {
+  factor_name: string
+  total_rows: number
+  symbol_count: number
+  date_count: number
+  min_date: string | null
+  max_date: string | null
+  coverage_ratio: number
+  required: boolean
 }
+
+export interface BacktestDataCoverage {
+  start_date: string
+  end_date: string
+  bar_type: string
+  index_symbol?: string | null
+  symbol_count: number
+  ok: boolean
+  warnings: string[]
+  market: {
+    dataset: string
+    total_rows: number
+    requested_symbol_count: number
+    covered_symbol_count: number
+    missing_symbol_count: number
+    coverage_ratio: number
+    date_range?: string | null
+    missing_symbols_sample?: string[]
+    symbols_covered_sample?: string[]
+  }
+  factor?: {
+    strategy: string
+    min_required_symbol_coverage: number
+    warning: boolean
+    items: BacktestDataCoverageFactorItem[]
+  } | null
+}
+
+export const backtestEngines = {
+  list: () => request.get<EngineOption[]>('/backtest/engines'),
+  capabilities: () => request.get<BacktestCapabilities>('/backtest/capabilities'),
+  dataCoverage: (data: Record<string, unknown>) =>
+    request.post<BacktestDataCoverage>('/backtest/data-coverage', data),
+  optimizeGrid: (data: GridOptimizeRequest) =>
+    request.post<{ task_id: string }>('/backtest/optimize/grid', data),
+  optimizeWalkForward: (data: WalkForwardOptimizeRequest) =>
+    request.post<{ task_id: string }>('/backtest/optimize/walk-forward', data),
+  strategyParamsSchema: (data: StrategyParamsSchemaRequest) =>
+    request.post<Record<string, unknown>>('/backtest/strategy-params/schema', data),
+  validateStrategyParams: (data: StrategyParamsValidateRequest) =>
+    request.post<Record<string, unknown>>('/backtest/strategy-params/validate', data),
+  report: (taskId: string) => request.get<string>(`/backtest/report/${taskId}`),
+  dualStockGridPreset: () => request.get<Record<string, unknown>>('/backtest/presets/dual-stock-grid'),
+  createDualStockGridStrategy: () => request.post<Strategy>('/backtest/presets/dual-stock-grid/strategy', {}),
+  createMultiFactorStrategy: () => request.post<Strategy>('/backtest/presets/multi-factor/strategy', {}),
+}
+
 
 export interface BacktestResultData {
   total_return?: number
@@ -252,6 +309,9 @@ export interface BacktestResultData {
     symbol?: string
     direction?: string
     price?: number
+    display_price?: number
+    entry_price?: number
+    exit_price?: number
     quantity?: number
     commission?: number
     pnl?: number | null

@@ -20,7 +20,6 @@
             <el-dropdown-menu>
               <el-dropdown-item command="script">新建脚本策略</el-dropdown-item>
               <el-dropdown-item command="expression">新建表达式策略</el-dropdown-item>
-              <el-dropdown-item command="builtin">新建内置策略(深度价值)</el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -101,7 +100,7 @@
 
       <el-tab-pane label="回测运行" name="backtestRunner">
         <div v-if="!activeStrategy" class="empty-runner">
-          <p>请先在"策略列表"中选择一个策略，然后点击"回测"按钮进入回测运行界面</p>
+          <p>请先在“策略列表”中选择一个策略，然后点击“回测”按钮进入回测运行界面</p>
         </div>
         <div v-else class="split-layout">
           <div class="editor-panel">
@@ -124,9 +123,9 @@
             <!-- akquant Python 代码编辑器 -->
             <div class="code-editor" v-if="editorTab === 'akquant-code'">
               <div class="expression-hint" style="margin-bottom:4px">
-                <span>akquant Strategy: class MyStrategy(aq.Strategy) → def on_bar(self, bar)</span>
+                <span>akquant 策略：class MyStrategy(aq.Strategy) -> def on_bar(self, bar)</span>
               </div>
-              <textarea v-model="btCode" class="editor-textarea" spellcheck="false" :placeholder="codePlaceholder" />
+              <CodeEditor v-model="btCode" language="python" :min-height="'100%'" :placeholder="codePlaceholder" />
             </div>
 
             <!-- RQAlpha Python 代码编辑器 -->
@@ -134,21 +133,26 @@
               <div class="expression-hint" style="margin-bottom:4px">
                 <span>RQAlpha 语法: def init(context) + def handle_bar(context, bar_dict)</span>
               </div>
-              <textarea v-model="btCode" class="editor-textarea" spellcheck="false" :placeholder="codePlaceholder" />
+              <CodeEditor v-model="btCode" language="python" :min-height="'100%'" :placeholder="codePlaceholder" />
             </div>
 
             <!-- 表达式输入 -->
             <div class="expression-panel" v-if="editorTab === 'expression'">
               <div class="expression-input-row">
-                <el-input v-model="btExpression" size="default" class="expression-input"
-                  placeholder="输入因子表达式，如: close/MA(close, 20) - 1" clearable />
+                <CodeEditor
+                  v-model="btExpression"
+                  language="expression"
+                  class="expression-code-input"
+                  :min-height="132"
+                  placeholder="输入因子表达式，例如 close/MA(close, 20) - 1"
+                />
                 <el-select v-model="selectedFactorId" size="default" placeholder="从因子研究选择"
                   clearable class="factor-select" @change="handleFactorSelect">
                   <el-option v-for="f in savedFactors" :key="f.id" :label="f.name" :value="f.id" />
                 </el-select>
               </div>
               <div class="expression-hint">
-                <span>向量化回测：表达式按日计算因子值 → 分层买入 → 计算分组收益</span>
+                <span>向量化回测：表达式按日计算因子值 -> 分层买入 -> 计算分组收益</span>
                 <span class="hint-examples">示例: close/MA(close,20)-1 | RSI(close,14) | MACD(close)[0]</span>
               </div>
               <div class="expression-params">
@@ -162,32 +166,6 @@
               <LLMStrategyPanel :engine="btEngine" @code-generated="onLLMCodeGenerated" />
             </div>
 
-            <!-- 内置策略面板 -->
-            <div class="builtin-panel" v-if="editorTab === 'builtin' && builtinType === 'deep_value'">
-              <div class="builtin-params-bar">
-                <span class="param-label">选股池</span>
-                <el-select v-model="dvPool" size="small" style="width:120px">
-                  <el-option label="全量A股" value="all" />
-                  <el-option label="Top100" value="top100" />
-                  <el-option label="Top300" value="top300" />
-                  <el-option label="Top500" value="top500" />
-                </el-select>
-                <span class="param-label">PE</span>
-                <el-input-number v-model="dvPeMin" :min="0" :max="100" size="small" style="width:60px" />—
-                <el-input-number v-model="dvPeMax" :min="0" :max="1000" size="small" style="width:60px" />
-                <span class="param-label">股息&gt;</span>
-                <el-input-number v-model="dvDivMin" :min="0" :max="20" :step="0.5" size="small" style="width:70px" />%
-                <span class="param-label">价/MA&lt;</span>
-                <el-input-number v-model="dvPriceMA" :min="0.1" :max="1.0" :step="0.05" size="small" style="width:70px" />
-                <span class="param-label">持仓</span>
-                <el-input-number v-model="dvMaxPos" :min="1" :max="20" size="small" style="width:60px" />
-                <span class="param-label">仓位</span>
-                <el-input-number v-model="dvSinglePct" :min="5" :max="50" :step="5" size="small" style="width:60px" />%
-              </div>
-              <div class="code-editor">
-                <textarea v-model="builtinCode" class="editor-textarea" spellcheck="false" readonly />
-              </div>
-            </div>
           </div>
           <div class="right-panel">
             <div class="bt-config-bar">
@@ -214,37 +192,118 @@
               <el-select v-model="btEngine" size="small" style="width:100px" @change="onEngineChange">
                 <el-option v-for="e in engineOptions" :key="e.value" :label="e.label" :value="e.value" />
               </el-select>
+              <el-button size="small" @click="checkBacktestCoverage" :loading="coverageChecking">检查数据</el-button>
               <el-button type="primary" size="small" @click="runBacktestTask" :loading="btRunning">运行回测</el-button>
+              <el-button
+                v-if="btTaskId && (btRunning || optimizationRunning)"
+                type="danger"
+                size="small"
+                plain
+                @click="stopCurrentTask"
+              >
+                停止
+              </el-button>
+              <el-switch
+                v-if="btEngine === 'akquant'"
+                v-model="showOptimizationPanel"
+                size="small"
+                active-text="参数优化"
+              />
             </div>
-            <div class="smallcap-params-bar" v-if="isSmallCapStrategy">
-              <span>持仓</span>
-              <el-input-number v-model="scStockNum" :min="1" :max="20" size="small" style="width:70px" />
-              <span>现金</span>
-              <el-input-number v-model="scCashBufferPct" :min="0" :max="10" :step="0.1" size="small" style="width:78px" />%
-              <el-checkbox v-model="scEnableIndicator" size="small">指标</el-checkbox>
-              <el-checkbox v-model="scEnableIndicatorExit" size="small">指标卖出</el-checkbox>
-              <el-checkbox v-model="scEnableIndustryFilter" size="small">行业</el-checkbox>
-              <span>行业上限</span>
-              <el-input-number v-model="scMaxIndustryWeightPct" :min="10" :max="100" :step="5" size="small" style="width:78px" />%
-              <el-checkbox v-model="scHVControl" size="small">放量</el-checkbox>
-              <span>Vol x</span>
-              <el-input-number v-model="scDailyVolumeToShareMultiplier" :min="1" :max="1000" :step="1" size="small" style="width:88px" />
-              <el-checkbox v-model="scRunStoploss" size="small">止损</el-checkbox>
-              <el-checkbox v-model="scPassApril" size="small">空仓月</el-checkbox>
-              <span>指标模式</span>
-              <el-select v-model="scIndicatorMode" size="small" style="width:112px">
-                <el-option label="稳健" value="robust" />
-                <el-option label="JQ兼容" value="jq_fallback" />
-              </el-select>
-              <span>行业模式</span>
-              <el-select v-model="scIndustryMode" size="small" style="width:104px">
-                <el-option label="本地" value="local" />
-                <el-option label="JQ未知" value="jq_unknown" />
-              </el-select>
+            <div class="bt-run-progress" v-if="btRunning || btTaskId">
+              <div class="bt-run-progress__head">
+                <strong>{{ backtestProgressTitle }}</strong>
+                <span>{{ Math.round(btProgress * 100) }}%</span>
+              </div>
+              <el-progress :percentage="Math.round(btProgress * 100)" :stroke-width="8" />
+              <div class="bt-run-progress__meta">
+                <span v-if="btTaskId">任务 {{ btTaskId }}</span>
+                <span v-if="btLiveData?.current_date">日期 {{ btLiveData.current_date }}</span>
+                <span>{{ backtestProgressMessage }}</span>
+              </div>
+            </div>
+            <div class="akquant-opt-panel" v-if="btEngine === 'akquant' && showOptimizationPanel">
+              <div class="opt-row">
+                <span>参数网格</span>
+                <el-input
+                  v-model="optParamGridText"
+                  type="textarea"
+                  :rows="2"
+                  class="opt-grid-input"
+                  placeholder='{"param_name":[1,2,3]}'
+                />
+              </div>
+              <div class="opt-row">
+                <span>排序指标</span>
+                <el-select v-model="optMetric" size="small" class="opt-metric-select">
+                  <el-option
+                    v-for="metric in optimizationMetricOptions"
+                    :key="metric.value"
+                    :label="metric.label"
+                    :value="metric.value"
+                  />
+                </el-select>
+                <span>训练/测试</span>
+                <el-input-number v-model="optTrainPeriod" :min="20" size="small" class="opt-number" />
+                <el-input-number v-model="optTestPeriod" :min="5" size="small" class="opt-number" />
+                <span>并行</span>
+                <el-input-number v-model="optMaxWorkers" :min="1" :max="maxWorkerLimit" size="small" class="opt-number" />
+                <span class="opt-period-hint">{{ optPeriodHint }}</span>
+                <el-button size="small" @click="runOptimizationTask('grid')" :loading="btRunning">Grid Search</el-button>
+                <el-button size="small" @click="runOptimizationTask('walk_forward')" :loading="btRunning">Walk-forward</el-button>
+              </div>
+              <div class="opt-progress" v-if="optimizationRunning || optimizationProgress > 0">
+                <div class="opt-progress-label">
+                  <span>{{ optimizationLabel }}</span>
+                  <span>{{ Math.round(optimizationProgress * 100) }}%</span>
+                </div>
+                <el-progress
+                  :percentage="Math.round(optimizationProgress * 100)"
+                  :status="optimizationRunning ? undefined : 'success'"
+                  :stroke-width="6"
+                />
+                <el-button
+                  v-if="btTaskId && optimizationRunning"
+                  class="opt-stop-btn"
+                  type="danger"
+                  size="small"
+                  plain
+                  @click="stopCurrentTask"
+                >
+                  停止优化
+                </el-button>
+              </div>
+              <el-table
+                v-if="optimizationRows.length"
+                :data="optimizationRows"
+                size="small"
+                stripe
+                max-height="180"
+                class="opt-result-table"
+              >
+                <el-table-column
+                  v-for="col in optimizationColumns"
+                  :key="col"
+                  :label="col"
+                  min-width="110"
+                  show-overflow-tooltip
+                >
+                  <template #default="{ row }">{{ formatOptimizationCell(row, col) }}</template>
+                </el-table-column>
+              </el-table>
+              <el-button
+                v-if="optimizationBacktestId"
+                size="small"
+                type="primary"
+                link
+                @click="openOptimizationReport"
+              >
+                查看完整优化报告
+              </el-button>
             </div>
             <div class="bt-pool-bar">
               <span class="pool-label">股票池</span>
-              <!-- 池/自选组：单标签 -->
+              <!-- 自选组标签 -->
               <template v-if="poolSource">
                 <el-tag size="small" type="success" closable @close="clearAllStocks">
                   {{ poolSource.label }} ({{ poolSource.count }} 只)
@@ -279,6 +338,12 @@
                 clearable
               >
                 <el-option label="中小综指" value="index:399101.SZ" />
+                <el-option
+                  v-for="item in indexPoolOptions.filter(option => option.symbol !== '399101.SZ')"
+                  :key="item.symbol"
+                  :label="item.display_name"
+                  :value="`index:${item.symbol}`"
+                />
                 <el-option label="沪深Top100" value="top100" />
                 <el-option label="沪深Top300" value="top300" />
                 <el-option label="沪深Top500" value="top500" />
@@ -321,132 +386,29 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
 import { strategyApi, type Strategy, type LiveData, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
-import { watchlistApi, type WatchlistGroup } from '@/api/data'
+import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
 import BacktestList from './BacktestList.vue'
 import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
 import LLMStrategyPanel from './LLMStrategyPanel.vue'
+import CodeEditor from '@/components/CodeEditor.vue'
 import { formatDateTime } from '@/utils/format'
+import { formatPercentValue, metricDisplayName, summarizeWalkForwardRows, valueToString } from '@/utils/optimizationReport'
 
+const route = useRoute()
+const router = useRouter()
 
 const SAMPLE_EXPRESSION = 'close / MA(close, 20) - 1'
 
-const DEEP_VALUE_CODE = `def init(context):
-    # 深度价值策略参数 (年度调仓)
-    context.price_to_ma_max = 0.9      # 股价 < 250周线 * 0.9
-    context.dividend_yield_min = 3.5   # 股息率 > 3.5%
-    context.pe_min = 0                 # PE > 0 (排除亏损)
-    context.pe_max = 40                # PE < 40
-    context.max_positions = 10         # 最多持仓数
-    context.single_position_pct = 0.10 # 单票10%仓位
-    context.rebalance_month = 5        # 每年5月调仓 (Q1财报季结束后)
-
-    # 运行状态
-    context.positions = {}             # {symbol: {"entry_price": x, "entry_year": y}}
-    context.last_rebalance_year = None # 上次调仓年份
-
-    log("深度价值策略(年度): 股价<250周线{:.0%} 股息率>{}% 0<PE<{} 每年5月调仓".format(
-        context.price_to_ma_max, context.dividend_yield_min, context.pe_max
-    ))
-
-def handle_bar(context, bar_dict):
-    today = context.now.date()
-
-    # ── 年度调仓判断：仅5月的第一个交易日触发 ──
-    if today.month < context.rebalance_month:
-        return
-    if context.last_rebalance_year == today.year:
-        return
-    context.last_rebalance_year = today.year
-    log("=" * 40)
-    log(f"[{today}] 年度调仓开始")
-
-    # ── 到期平仓：上一年度的所有持仓全部清仓 ──
-    expired = list(context.positions.keys())
-    for sym in expired:
-        p = context.portfolio.get_position(sym)
-        if p and p.total_shares > 0:
-            order_shares(sym, -p.total_shares)
-            log(f"到期平仓 {sym}")
-        del context.positions[sym]
-
-    # ── 筛选候选 (全量A股, 非ST非退市) ──
-    candidates = []
-    all_symbols = context.get_all_symbols()
-    for sym in all_symbols:
-        try:
-            close = context.get_daily_close(sym, today)
-            if not close or close <= 0:
-                continue
-
-            ma250w = context.get_weekly_ma(sym, 250, today)
-            if not ma250w or ma250w <= 0:
-                continue
-
-            # 条件1: 价格 < 250周线 * 0.9
-            ratio = close / ma250w
-            if ratio >= context.price_to_ma_max:
-                continue
-
-            # 条件2: PE > 0 and PE < 40
-            pe = context.get_indicator(sym, "pe_ttm", today)
-            if pe is None or pe <= context.pe_min or pe >= context.pe_max:
-                continue
-
-            # 条件3: 股息率 > 3.5%
-            div_yield = context.get_indicator(sym, "dividend_yield", today)
-            if div_yield is None or div_yield <= context.dividend_yield_min:
-                continue
-
-            # 评分: 折价维度(0~50) + 股息维度(0~50)
-            discount_score = min((1 - ratio) / 0.5, 1.0) * 50
-            yield_score = min(div_yield / 15.0, 1.0) * 50
-            score = discount_score + yield_score
-            candidates.append((sym, close, score, ma250w, pe, div_yield))
-        except Exception:
-            continue
-
-    if not candidates:
-        log("无符合条件的标的")
-        return
-
-    # 按评分排序
-    candidates.sort(key=lambda x: -x[2])
-    candidates = candidates[:context.max_positions]
-
-    # 计算每只股票买入金额 (基于总资产的固定比例)
-    total_value = context.stock_account.total_value
-    target_cash_per_stock = total_value * context.single_position_pct
-    available_cash = context.stock_account.cash
-
-    bought = 0
-    for sym, price, score, ma_val, pe_val, div_val in candidates:
-        if sym in context.positions:
-            continue
-        if bought >= context.max_positions:
-            break
-        if target_cash_per_stock > available_cash:
-            break
-        shares = int(target_cash_per_stock / price / 100) * 100
-        if shares < 100:
-            continue
-        order_shares(sym, shares)
-        context.positions[sym] = {"entry_price": price, "entry_year": today.year}
-        available_cash -= shares * price
-        bought += 1
-        log(f"买入 {sym} @ {price:.2f} 折价{(1-price/ma_val)*100:.1f}% PE={pe_val:.1f} 股息率={div_val:.1f}% score={score:.1f}")
-
-    log(f"========== [{today}] 年度调仓完成: 平仓{len(expired)} 买入{bought} ==========")
-`
-
 const TREND_CAPITAL_CODE = `def init(context):
     # 趋势资金识别参数
-    context.lookback = 5       # k: 回看天数
-    context.vol_pct = 0.90     # m: 成交量分位数阈值
+    context.lookback = 5       # 回看天数
+    context.vol_pct = 0.90     # 成交量分位阈值
     context.min_trend_minutes = 3  # 最少趋势分钟数
 
     # 信号融合参数
@@ -467,7 +429,7 @@ const TREND_CAPITAL_CODE = `def init(context):
 
     log(f"趋势资金策略: 查{context.lookback}日 阈值{context.vol_pct} 持{context.portfolio_size}只 {context.hold_days}日")
 
-# ── 信号计算辅助函数 ──
+# 信号计算辅助函数
 def compute_daily_signal(context, symbol, today):
     # 获取过去 lookback 天的分钟数据，计算成交量阈值
     hist = context.get_intraday_history(symbol, context.lookback, today)
@@ -524,101 +486,10 @@ def compute_daily_signal(context, symbol, today):
         "trend_count": trend_count,
     }
 
-def before_trading(context):
-    today = context.now.date()
-    signals = {}
-    for symbol in list(context.universe):
-        try:
-            sig = compute_daily_signal(context, symbol, today)
-            if sig is not None:
-                signals[symbol] = sig
-        except Exception:
-            continue
-    if signals:
-        context.signal_history[today] = signals
-    from datetime import timedelta
-    cutoff = today - timedelta(days=10)
-    for d in list(context.signal_history.keys()):
-        if d < cutoff:
-            del context.signal_history[d]
 
-def handle_bar(context, bar_dict):
-    context.day_count += 1
-    now = context.now.date()
-
-    # 到期平仓
-    remaining = []
-    for basket in context.baskets:
-        held = context.day_count - basket["entry_idx"]
-        if held >= context.hold_days:
-            for item in basket["stocks"]:
-                pos = context.portfolio.get_position(item["symbol"])
-                if pos and pos.total_shares > 0:
-                    order_shares(item["symbol"], -pos.total_shares)
-        else:
-            remaining.append(basket)
-    context.baskets = remaining
-
-    # 调仓判断
-    if context.day_count - context.last_rebalance < context.rebalance_every:
-        return
-    if context.baskets:
-        return
-    context.last_rebalance = context.day_count
-
-    dates = sorted(context.signal_history.keys())
-    if len(dates) < context.fusion_window:
-        return
-
-    # 信号融合评分
-    window_dates = dates[-context.fusion_window:]
-    candidates = {}
-    all_syms = set()
-    for d in window_dates:
-        all_syms.update(context.signal_history.get(d, {}).keys())
-
-    for sym in all_syms:
-        b_days = 0
-        c_days = 0
-        for d in window_dates:
-            sig = context.signal_history.get(d, {}).get(sym, {})
-            if sig.get("sig_b_ok"):
-                b_days += 1
-            if sig.get("sig_c_ok"):
-                c_days += 1
-        if b_days < context.fusion_min_days or c_days < context.fusion_min_days:
-            continue
-        latest = context.signal_history.get(window_dates[-1], {}).get(sym, {})
-        b_score = -latest.get("sig_b", 0) * 100
-        c_score = latest.get("sig_c", 0) / 1e6
-        candidates[sym] = b_score + c_score
-
-    if not candidates:
-        return
-
-    # 选前N买入
-    ranked = sorted(candidates.items(), key=lambda x: -x[1])[:context.portfolio_size]
-    total_value = context.portfolio.total_value
-    per_stock = total_value * 0.9 / context.portfolio_size
-
-    basket_stocks = []
-    for sym, _ in ranked:
-        bar = bar_dict[sym] if sym in bar_dict else None
-        if bar is None or bar.suspended:
-            continue
-        context.order_value(sym, per_stock, bar.close)
-        basket_stocks.append({"symbol": sym, "entry_price": bar.close})
-        context.trailing_highs[sym] = bar.close
-
-    if basket_stocks:
-        context.baskets.append({
-            "entry_idx": context.day_count,
-            "stocks": basket_stocks,
-        })
-        log(f"[{now}] 建仓 {len(basket_stocks)} 只")
 `
 
-// ── State ──
+// State
 const activeTab = ref('strategyList')
 const loading = ref(false)
 const strategyList = ref<Strategy[]>([])
@@ -628,7 +499,7 @@ const pageSize = ref(20)
 const saving = ref(false)
 
 
-// ── Strategy list ──
+// Strategy list
 const loadStrategies = async () => {
   loading.value = true
   try {
@@ -644,22 +515,18 @@ const loadStrategies = async () => {
 
 const handleCreate = async (type: string) => {
   let name, code, desc
-  if (type === 'builtin') {
-    name = '深度价值策略'
-    code = BUILTIN_CODE
-    desc = '低估值+高股息+深度折价：每年5月调仓，独立引擎批量查询'
-  } else if (type === 'expression') {
-    name = '新建表达式'
+  if (type === 'expression') {
+    name = 'New Expression Strategy'
     code = SAMPLE_EXPRESSION
-    desc = '因子表达式策略'
+    desc = 'Factor expression strategy'
   } else {
-    name = '新建策略'
+    name = 'New Strategy'
     code = AKQUANT_TEMPLATE
-    desc = 'akquant Strategy 示例'
+    desc = 'AKQuant Strategy example'
   }
   try {
     const result = await strategyApi.create({ name, code, description: desc })
-    ElMessage.success('策略已创建')
+    ElMessage.success('Strategy created')
     await loadStrategies()
     activeStrategy.value = {
       id: result.id,
@@ -670,12 +537,7 @@ const handleCreate = async (type: string) => {
       created_at: result.created_at,
       updated_at: result.updated_at,
     }
-    if (type === 'builtin') {
-      builtinType.value = 'deep_value'
-      builtinCode.value = BUILTIN_CODE
-      editorTab.value = 'builtin'
-      btMode.value = 'builtin'
-    } else if (type === 'expression') {
+    if (type === 'expression') {
       editorTab.value = 'expression'
       btMode.value = 'expression'
       btExpression.value = result.code || SAMPLE_EXPRESSION
@@ -697,7 +559,7 @@ const handleCreate = async (type: string) => {
 
 const handleDelete = async (row: Strategy) => {
   try {
-    await ElMessageBox.confirm(`确定要删除策略"${row.name}"吗？`, '确认删除', {
+    await ElMessageBox.confirm(`确定要删除策略“${row.name}”吗？`, '确认删除', {
       confirmButtonText: '确定',
       cancelButtonText: '取消',
       type: 'warning',
@@ -706,7 +568,6 @@ const handleDelete = async (row: Strategy) => {
     ElMessage.success('删除成功')
     if (activeStrategy.value?.id === row.id) {
       activeStrategy.value = null
-      builtinType.value = null
       activeTab.value = 'strategyList'
     }
     loadStrategies()
@@ -728,27 +589,24 @@ const handleSizeChange = (size: number) => {
   loadStrategies()
 }
 
-// ── Backtest runner state ──
+// Backtest runner state
 const activeStrategy = ref<Strategy | null>(null)
-const btMode = ref<'script' | 'expression' | 'builtin'>('script')  // kept for backend compat
+const btMode = ref<'script' | 'expression'>('script')
 const btEngine = ref('akquant')
 const engineOptions = ref<{ value: string; label: string; modes: string[] }[]>([])
 
-// ── Editor tabs driven by engine ──
+// Editor tabs driven by engine
 const editorTab = ref('akquant-code')
 const editorTabs = computed(() => {
-  if (builtinType.value) {
-    return [{ key: 'builtin', label: '内置策略' }]
-  }
   if (btEngine.value === 'akquant') {
     return [
-      { key: 'akquant-code', label: 'Python代码（AKQuant）' },
-      { key: 'llm', label: 'LLM策略生成' },
+      { key: 'akquant-code', label: 'Python Code (AKQuant)' },
+      { key: 'llm', label: 'LLM Strategy' },
     ]
   }
   return [
-    { key: 'rqalpha-code', label: 'Python代码（RQAlpha）' },
-    { key: 'expression', label: '表达式' },
+    { key: 'rqalpha-code', label: 'Python Code (RQAlpha)' },
+    { key: 'expression', label: 'Expression' },
   ]
 })
 
@@ -760,170 +618,13 @@ class MyStrategy(aq.Strategy):
         self.set_history_depth(300)
 
     def on_bar(self, bar):
-        """每个 bar 调用一次"""
+        # Called on each bar
         pos = self.get_position(bar.symbol)
         if bar.close > bar.open and pos == 0:
             self.buy(bar.symbol, 100)
         elif bar.close < bar.open and pos > 0:
             self.close_position(bar.symbol)
 `
-
-const BUILTIN_CODE = `"""
-深度价值策略 — 年度调仓，独立引擎，批量 ClickHouse 查询
-每年5月筛选，等权买入，持有至次年5月。收益含股价变动+现金分红。
-"""
-from app.db.clickhouse import get_ch_client
-import numpy as np
-from datetime import date
-from dataclasses import dataclass
-
-@dataclass
-class Basket:
-    entry_date: date
-    stocks: list[dict]
-
-class DeepValueStrategy:
-    PRICE_TO_MA_MAX = 0.9
-    DIVIDEND_YIELD_MIN = 3.5
-    PE_MIN = 0
-    PE_MAX = 40
-    MAX_POSITIONS = 10
-    SINGLE_PCT = 0.10
-
-    def __init__(self, pool_symbols=None):
-        self.ch = get_ch_client()
-        self.pool_symbols = pool_symbols
-
-    def _get_pool(self):
-        if self.pool_symbols: return self.pool_symbols
-        from sqlalchemy import create_engine, select
-        from app.db.models.stock import Stock
-        from app.core.config import settings
-        url = settings.database_url.replace('+aiosqlite', '')
-        engine = create_engine(url)
-        with engine.connect() as conn:
-            rows = conn.execute(select(Stock.symbol)
-                .where(Stock.is_st==0, Stock.is_delist==0)).all()
-        engine.dispose()
-        return [r[0] for r in rows]
-
-    def _get_may_dates(self, start, end):
-        rows = self.ch.execute(
-            'SELECT DISTINCT trade_date FROM klines_daily '
-            'WHERE trade_date>=%(s)s AND trade_date<=%(e)s ORDER BY trade_date',
-            {'s':start, 'e':end})
-        return [r[0] for r in rows if r[0].month==5
-                and (not may or may[-1].year!=r[0].year)]
-
-    def screen(self, as_of_date, pool):
-        # 批量查询：close + 250周MA + PE + 股息率
-        close_map = {r[0]:float(r[1]) for r in self.ch.execute(
-            'SELECT symbol, close FROM klines_daily WHERE symbol IN %(s)s '
-            'AND trade_date=(SELECT max(trade_date) FROM klines_daily '
-            'WHERE trade_date<=%(d)s AND symbol=klines_daily.symbol)',
-            {'s':tuple(pool), 'd':as_of_date})}
-        ma_map = {r[0]:float(r[1]) for r in self.ch.execute(
-            'SELECT symbol, avg(close) FROM (SELECT symbol, close, '
-            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
-            'FROM klines_weekly WHERE symbol IN %(s)s AND trade_date<=%(d)s) '
-            'WHERE rn<=250 GROUP BY symbol',
-            {'s':tuple(pool), 'd':as_of_date}) if r[1]}
-        pe_map = {r[0]:float(r[1]) for r in self.ch.execute(
-            'SELECT symbol, value FROM (SELECT symbol, value, '
-            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
-            'FROM stock_indicators WHERE symbol IN %(s)s AND indicator_name=%(n)s '
-            'AND trade_date<=%(d)s) WHERE rn=1',
-            {'s':tuple(pool), 'd':as_of_date, 'n':'pe_ttm'}) if r[1] and float(r[1])>0}
-        dy_map = {r[0]:float(r[1]) for r in self.ch.execute(
-            'SELECT symbol, value FROM (SELECT symbol, value, '
-            'row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) AS rn '
-            'FROM stock_indicators WHERE symbol IN %(s)s AND indicator_name=%(n)s '
-            'AND trade_date<=%(d)s) WHERE rn=1',
-            {'s':tuple(pool), 'd':as_of_date, 'n':'dividend_yield'}) if r[1] and float(r[1])>0}
-        # 评分筛选
-        result = []
-        for sym, close in close_map.items():
-            if close<=0: continue
-            ma=ma_map.get(sym); pe=pe_map.get(sym); dy=dy_map.get(sym)
-            if not ma or ma<=0: continue
-            ratio=close/ma
-            if ratio>=self.PRICE_TO_MA_MAX: continue
-            if pe is None or pe<=self.PE_MIN or pe>=self.PE_MAX: continue
-            if dy is None or dy<=self.DIVIDEND_YIELD_MIN: continue
-            score = min((1-ratio)/0.5,1)*50 + min(dy/15,1)*50
-            result.append({'symbol':sym,'close':close,'ratio':round(ratio,4),
-                'pe':pe,'dividend_yield':dy,'score':round(score,4)})
-        result.sort(key=lambda x:-x['score'])
-        return result[:self.MAX_POSITIONS]
-
-    def run(self, start_date, end_date, initial_capital=1_000_000):
-        pool = self._get_pool()
-        may_dates = self._get_may_dates(start_date, end_date)
-        baskets, all_trades = [], []
-        for d in may_dates:
-            # 平仓
-            for b in list(baskets):
-                for item in b.stocks:
-                    p = self._get_price(item['symbol'], d)
-                    if p:
-                        div = self._get_dividends(item['symbol'], b.entry_date, d)
-                        all_trades.append({'symbol':item['symbol'],'direction':'sell',
-                            'trade_date':d.isoformat(),'price':round(p,2),
-                            'dividend':round(div,4),'pnl_pct':round(((p+div)/item['entry_price']-1)*100,2)})
-                baskets.remove(b)
-            # 买入
-            candidates = self.screen(d, pool)
-            if not candidates: continue
-            invest = initial_capital * self.SINGLE_PCT
-            stocks = []
-            for c in candidates:
-                shares = int(invest/c['close']/100)*100
-                if shares<100: continue
-                stocks.append({'symbol':c['symbol'],'entry_price':c['close'],'shares':shares})
-                all_trades.append({'symbol':c['symbol'],'direction':'buy',
-                    'trade_date':d.isoformat(),'price':round(c['close'],2),'shares':shares})
-            if stocks: baskets.append(Basket(d, stocks))
-        # 强制平仓
-        for b in baskets:
-            for item in b.stocks:
-                p=self._get_price(item['symbol'],end_date) or item['entry_price']
-                div=self._get_dividends(item['symbol'],b.entry_date,end_date)
-                all_trades.append({'symbol':item['symbol'],'direction':'sell',
-                    'trade_date':end_date.isoformat(),'price':round(p,2),
-                    'dividend':round(div,4),'pnl_pct':round(((p+div)/item['entry_price']-1)*100,2)})
-        # 统计
-        sells = [t for t in all_trades if 'pnl_pct' in t]
-        pnls = [t['pnl_pct'] for t in sells]
-        win = [p for p in pnls if p>0]
-        groups = {}
-        for t in sells: groups.setdefault(t.get('trade_date','?'),[]).append(t['pnl_pct'])
-        basket_ret = [float(np.mean(v)) for v in groups.values()]
-        total = float(np.prod([1+r/100 for r in basket_ret])-1)*100 if basket_ret else 0
-        return {
-            'total_return': round(total/100,4),
-            'total_trades': len(sells), 'win_trades': len(win),
-            'loss_trades': len(pnls)-len(win),
-            'win_rate': round(len(win)/len(pnls),4) if pnls else 0,
-            'trades': sorted(all_trades, key=lambda x:x.get('trade_date','')),
-            'basket_returns': [round(r,2) for r in basket_ret],
-        }
-
-    def _get_price(self, symbol, as_of):
-        r = self.ch.execute('SELECT close FROM klines_daily '
-            'WHERE symbol=%(s)s AND trade_date<=%(d)s ORDER BY trade_date DESC LIMIT 1',
-            {'s':symbol,'d':as_of})
-        return float(r[0][0]) if r and r[0] and r[0][0] else None
-
-    def _get_dividends(self, symbol, start, end):
-        r = self.ch.execute('SELECT sum(value) FROM stock_indicators '
-            'WHERE symbol=%(s)s AND indicator_name=%(n)s AND trade_date>%(a)s AND trade_date<=%(b)s',
-            {'s':symbol,'n':'dividend_cash','a':start,'b':end})
-        return float(r[0][0] or 0) if r and r[0] else 0.0
-`
-
-// 内置策略类型
-const builtinType = ref<string | null>(null)
-const builtinCode = ref('')
 
 // 研报上传
 const showUploadDialog = ref(false)
@@ -932,14 +633,6 @@ const fileInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
 const uploadResult = ref<{ strategy_type: string; name: string; code: string; summary: string; conditions: string[]; frequency: string } | null>(null)
 
-// 深度价值策略参数
-const dvPool = ref('all')
-const dvPeMin = ref(0)
-const dvPeMax = ref(40)
-const dvDivMin = ref(3.5)
-const dvPriceMA = ref(0.9)
-const dvMaxPos = ref(10)
-const dvSinglePct = ref(10)
 const btCode = ref('')
 const btExpression = ref(SAMPLE_EXPRESSION)
 
@@ -973,20 +666,12 @@ interface BtSettings {
   frequency?: string
   barType?: string
   engine?: string
-  smallCap?: {
-    stockNum?: number
-    cashBufferPct?: number
-    enableIndicator?: boolean
-    enableIndicatorExit?: boolean
-    enableIndustryFilter?: boolean
-    maxIndustryWeightPct?: number
-    hvControl?: boolean
-    dailyVolumeToShareMultiplier?: number
-    runStoploss?: boolean
-    passApril?: boolean
-    indicatorMode?: string
-    industryMode?: string
-  }
+  showOptimizationPanel?: boolean
+  optParamGridText?: string
+  optMetric?: string
+  optTrainPeriod?: number
+  optTestPeriod?: number
+  optMaxWorkers?: number
 }
 
 const loadBtSettings = (): BtSettings => {
@@ -996,8 +681,7 @@ const loadBtSettings = (): BtSettings => {
   } catch { return {} }
 }
 
-const saveBtSettings = () => {
-  const s: BtSettings = {
+const collectBtSettings = (): BtSettings => ({
     symbols: btSymbols.value.length > 0 ? btSymbols.value : undefined,
     poolSource: poolSource.value ?? undefined,
     startDate: btStartDate.value,
@@ -1006,21 +690,16 @@ const saveBtSettings = () => {
     frequency: btFrequency.value,
     barType: btBarType.value,
     engine: btEngine.value,
-    smallCap: {
-      stockNum: scStockNum.value,
-      cashBufferPct: scCashBufferPct.value,
-      enableIndicator: scEnableIndicator.value,
-      enableIndicatorExit: scEnableIndicatorExit.value,
-      enableIndustryFilter: scEnableIndustryFilter.value,
-      maxIndustryWeightPct: scMaxIndustryWeightPct.value,
-      hvControl: scHVControl.value,
-      dailyVolumeToShareMultiplier: scDailyVolumeToShareMultiplier.value,
-      runStoploss: scRunStoploss.value,
-      passApril: scPassApril.value,
-      indicatorMode: scIndicatorMode.value,
-      industryMode: scIndustryMode.value,
-    },
-  }
+    showOptimizationPanel: showOptimizationPanel.value,
+    optParamGridText: optParamGridText.value,
+    optMetric: optMetric.value,
+    optTrainPeriod: optTrainPeriod.value,
+    optTestPeriod: optTestPeriod.value,
+    optMaxWorkers: optMaxWorkers.value,
+})
+
+const saveBtSettings = () => {
+  const s = collectBtSettings()
   try { localStorage.setItem(BTSET_KEY, JSON.stringify(s)) } catch { /* quota exceeded */ }
 }
 
@@ -1031,19 +710,8 @@ const btEndDate = ref(saved.endDate || getDefaultEndDate())
 const btCapital = ref(saved.capital ?? 1_000_000)
 const btFrequency = ref(saved.frequency || 'monthly')
 const btBarType = ref(saved.barType || 'daily')
+const showOptimizationPanel = ref(Boolean(saved.showOptimizationPanel))
 const btSymbols = ref<string[]>(saved.symbols || [])
-const scStockNum = ref(saved.smallCap?.stockNum ?? 5)
-const scCashBufferPct = ref(saved.smallCap?.cashBufferPct ?? 1.0)
-const scEnableIndicator = ref(saved.smallCap?.enableIndicator ?? true)
-const scEnableIndicatorExit = ref(saved.smallCap?.enableIndicatorExit ?? true)
-const scEnableIndustryFilter = ref(saved.smallCap?.enableIndustryFilter ?? true)
-const scMaxIndustryWeightPct = ref(saved.smallCap?.maxIndustryWeightPct ?? 30)
-const scHVControl = ref(saved.smallCap?.hvControl ?? true)
-const scDailyVolumeToShareMultiplier = ref(saved.smallCap?.dailyVolumeToShareMultiplier ?? 100)
-const scRunStoploss = ref(saved.smallCap?.runStoploss ?? true)
-const scPassApril = ref(saved.smallCap?.passApril ?? true)
-const scIndicatorMode = ref(saved.smallCap?.indicatorMode ?? 'robust')
-const scIndustryMode = ref(saved.smallCap?.industryMode ?? 'local')
 const isAllStocks = ref(false)
 const poolSource = ref<{ type: string; label: string; count: number; symbols: string[]; indexSymbol?: string } | null>(saved.poolSource || null)
 const allStocksCount = ref(0)
@@ -1052,6 +720,8 @@ const showWatchlistPicker = ref(false)
 const selectedPool = ref<string | null>(null)
 const watchlistGroups = ref<WatchlistGroup[]>([])
 const selectedWatchlistGroup = ref<number | null>(null)
+const indexCatalog = ref<IndexCatalogItem[]>([])
+const indexPoolOptions = computed(() => indexCatalog.value.filter(item => item.pool_enabled))
 
 // 最终提交用的 symbol 列表
 const effectiveSymbols = computed(() => {
@@ -1071,8 +741,8 @@ const refreshSmallCapTimerStartDate = async () => {
     const { default: request } = await import('@/api/request')
     const indexSymbol = selectedIndexSymbol.value || '399101.SZ'
     const res = await request.get<any>(
-      `/v2/backtest/timer-coverage?index_symbol=${indexSymbol}&start_date=${SMALL_CAP_MINUTE_START_DATE}&end_date=${btEndDate.value}&times=10:00,10:30,14:30,14:50`,
-      { timeout: 120000 }
+      `/backtest/timer-coverage?index_symbol=${indexSymbol}&start_date=${SMALL_CAP_MINUTE_START_DATE}&end_date=${btEndDate.value}&times=10:00,10:30,14:30,14:50`,
+      {}
     )
     const start = res?.earliest_date
     if (start && btStartDate.value < start) {
@@ -1089,25 +759,13 @@ watch(isSmallCapStrategy, enabled => {
   if (enabled && !saved.startDate && btStartDate.value < SMALL_CAP_MINUTE_START_DATE) {
     btStartDate.value = SMALL_CAP_MINUTE_START_DATE
   }
+  if (enabled && !saved.barType) {
+    btBarType.value = 'minute_timer'
+  }
   if (enabled) {
     refreshSmallCapTimerStartDate()
   }
 }, { immediate: true })
-const smallCapStrategyParams = computed(() => isSmallCapStrategy.value ? {
-  timer_times: ['09:15', '10:00', '10:30', '14:30', '14:50', '15:10'],
-  stock_num: scStockNum.value,
-  cash_buffer_rate: scCashBufferPct.value / 100,
-  enable_indicator: scEnableIndicator.value,
-  enable_indicator_exit: scEnableIndicatorExit.value,
-  enable_industry_filter: scEnableIndustryFilter.value,
-  max_industry_weight: scMaxIndustryWeightPct.value / 100,
-  HV_control: scHVControl.value,
-  daily_volume_to_share_multiplier: scDailyVolumeToShareMultiplier.value,
-  run_stoploss: scRunStoploss.value,
-  pass_april: scPassApril.value,
-  v4_indicator_mode: scIndicatorMode.value,
-  industry_mode: scIndustryMode.value,
-} : undefined)
 
 const addSymbol = () => {
   const s = newSymbolInput.value.trim().toUpperCase()
@@ -1127,6 +785,14 @@ const loadWatchlistGroups = async () => {
   try {
     watchlistGroups.value = await watchlistApi.getGroups()
   } catch { /* non-critical */ }
+}
+
+const loadIndexCatalog = async () => {
+  try {
+    indexCatalog.value = await indexCatalogApi.list()
+  } catch {
+    indexCatalog.value = []
+  }
 }
 
 const useWatchlistGroup = async () => {
@@ -1159,7 +825,7 @@ const loadPoolSymbols = async (poolName: string | null) => {
   if (!poolName) return
   try {
     const { default: request } = await import('@/api/request')
-    const res = await request.get<any>(`/v2/backtest/pools/${poolName}`, { timeout: 120000 })
+    const res = await request.get<any>(`/backtest/pools/${poolName}`)
     if (res?.symbols?.length) {
       const labelMap: Record<string, string> = {
         top100: '沪深Top100', top300: '沪深Top300', top500: '沪深Top500', all: '全量A股',
@@ -1187,12 +853,19 @@ const loadIndexPool = async (indexSymbol: string | null) => {
   try {
     const { default: request } = await import('@/api/request')
     const res = await request.get<any>(
-      `/v2/backtest/index-pools/${indexSymbol}?start_date=${btStartDate.value}&end_date=${btEndDate.value}`,
-      { timeout: 120000 }
+      `/backtest/index-pools/${indexSymbol}?start_date=${btStartDate.value}&end_date=${btEndDate.value}`,
+      {}
     )
+    if (res?.pool_enabled === false) {
+      const reason = res?.reason === 'market_only_index' ? '该指数当前只提供行情基准，不提供严格历史股票池' : '缺少严格历史成分快照'
+      ElMessage.warning(reason)
+      selectedPool.value = null
+      return
+    }
+    const catalogItem = indexCatalog.value.find(item => item.symbol === (res?.index_symbol || indexSymbol))
     poolSource.value = {
       type: 'index',
-      label: res?.index_symbol === '399101.SZ' ? '中小综指' : (res?.index_symbol || indexSymbol),
+      label: catalogItem?.display_name || res?.display_name || res?.index_symbol || indexSymbol,
       count: res?.symbol_count || 0,
       symbols: res?.symbols || [],
       indexSymbol: res?.index_symbol || indexSymbol,
@@ -1231,7 +904,141 @@ const showReport = ref(false)
 const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
 const btErrors = ref<string[]>([])
+const coverageChecking = ref(false)
+const backtestProgressTitle = computed(() => {
+  if (btFullResult.value && !btRunning.value) return '回测完成'
+  if (btTaskId.value) return '回测运行中'
+  return '准备提交回测'
+})
+const backtestProgressMessage = computed(() => {
+  const metadata = (btLiveData.value as any)?.metadata || {}
+  return metadata.progress_message || (btTaskId.value ? '正在轮询回测任务状态' : '等待任务号返回')
+})
 let lastLiveLogKey = ''
+const optParamGridText = ref('{"param_name":[1,2,3]}')
+const optMetric = ref('sharpe_ratio')
+const optimizationMetricOptions = [
+  { value: 'calmar_ratio', label: '卡尔玛比率 Calmar' },
+  { value: 'sharpe_ratio', label: '夏普比率 Sharpe' },
+  { value: 'total_return', label: '总收益率' },
+  { value: 'annual_return', label: '年化收益率' },
+  { value: 'max_drawdown', label: '最大回撤' },
+  { value: 'sortino_ratio', label: 'Sortino 比率' },
+  { value: 'win_rate', label: '胜率' },
+  { value: 'total_trades', label: '交易次数' },
+]
+const optTrainPeriod = ref(252)
+const optTestPeriod = ref(63)
+const maxWorkerLimit = Math.max(1, Number(window.navigator?.hardwareConcurrency || 4))
+const defaultOptMaxWorkers = Math.max(1, maxWorkerLimit - 2)
+const optMaxWorkers = ref(defaultOptMaxWorkers)
+if (saved.optParamGridText) optParamGridText.value = saved.optParamGridText
+if (saved.optMetric) optMetric.value = saved.optMetric
+if (saved.optTrainPeriod) optTrainPeriod.value = saved.optTrainPeriod
+if (saved.optTestPeriod) optTestPeriod.value = saved.optTestPeriod
+if (saved.optMaxWorkers) optMaxWorkers.value = saved.optMaxWorkers
+const optimizationRunning = ref(false)
+const optimizationProgress = ref(0)
+const optimizationLabel = ref('')
+const optPeriodHint = computed(() => {
+  if (btBarType.value === 'daily') {
+    return '单位: bar（日线=交易日）'
+  }
+  const trainDays = Math.max(1, Math.round(Number(optTrainPeriod.value || 0) / 240))
+  const testDays = Math.max(1, Math.round(Number(optTestPeriod.value || 0) / 240))
+  return `单位: bar，约 ${trainDays}/${testDays} 个交易日`
+})
+
+const applyBtSettings = (settings?: BtSettings | null) => {
+  if (!settings) return
+  if (settings.engine) btEngine.value = settings.engine
+  if (settings.startDate) btStartDate.value = settings.startDate
+  if (settings.endDate) btEndDate.value = settings.endDate
+  if (typeof settings.capital === 'number') btCapital.value = settings.capital
+  if (settings.frequency) btFrequency.value = settings.frequency
+  if (settings.barType) btBarType.value = settings.barType
+  if (typeof settings.showOptimizationPanel === 'boolean') showOptimizationPanel.value = settings.showOptimizationPanel
+  if (typeof settings.optParamGridText === 'string') optParamGridText.value = settings.optParamGridText
+  if (typeof settings.optMetric === 'string') optMetric.value = settings.optMetric
+  if (typeof settings.optTrainPeriod === 'number') optTrainPeriod.value = settings.optTrainPeriod
+  if (typeof settings.optTestPeriod === 'number') optTestPeriod.value = settings.optTestPeriod
+  if (typeof settings.optMaxWorkers === 'number') optMaxWorkers.value = settings.optMaxWorkers
+  if (settings.poolSource) {
+    poolSource.value = settings.poolSource
+    btSymbols.value = []
+    isAllStocks.value = false
+  } else if (Array.isArray(settings.symbols)) {
+    poolSource.value = null
+    btSymbols.value = settings.symbols
+    isAllStocks.value = false
+  }
+}
+
+const currentStrategyParameters = () => ({
+  ...((activeStrategy.value?.parameters || {}) as Record<string, unknown>),
+  backtest_settings: collectBtSettings(),
+})
+
+const persistActiveStrategyRunSettings = async () => {
+  if (!activeStrategy.value?.id) {
+    saveBtSettings()
+    return
+  }
+  const parameters = currentStrategyParameters()
+  const updated = await strategyApi.update(activeStrategy.value.id, { parameters })
+  activeStrategy.value = {
+    ...activeStrategy.value,
+    parameters: updated.parameters,
+    updated_at: updated.updated_at,
+  }
+  const idx = strategyList.value.findIndex(s => s.id === activeStrategy.value?.id)
+  if (idx >= 0) {
+    strategyList.value[idx] = { ...strategyList.value[idx], parameters: updated.parameters, updated_at: updated.updated_at }
+  }
+  saveBtSettings()
+}
+const optimizationRows = ref<Record<string, unknown>[]>([])
+const optimizationBacktestId = ref<number | null>(null)
+const optimizationColumns = computed(() => {
+  const keys = new Set<string>()
+  optimizationRows.value.slice(0, 20).forEach(row => Object.keys(row).forEach(key => keys.add(key)))
+  return Array.from(keys).slice(0, 12)
+})
+
+const formatOptimizationCell = (row: Record<string, unknown>, col: string) => {
+  const params = row.params as Record<string, unknown> | undefined
+  const value = params?.[col] ?? row[col]
+  if (['return_pct', 'max_drawdown'].includes(col)) {
+    return formatPercentValue(typeof value === 'number' ? value : null)
+  }
+  return valueToString(value)
+}
+
+const compactOptimizationRows = (data: any, label: string): Record<string, unknown>[] => {
+  const rows = Array.isArray(data?.rows) ? data.rows : []
+  if (label === 'Walk-forward') {
+    const metric = data?.metric || optMetric.value || 'calmar_ratio'
+    return summarizeWalkForwardRows(rows, metric).map(row => ({
+      window: row.window,
+      train_start: row.train_start,
+      train_end: row.train_end,
+      rows: row.row_count,
+      return_pct: row.return_pct,
+      max_drawdown: row.max_drawdown,
+      objective_value: row.objective_value,
+      objective: metricDisplayName(metric),
+      params: row.params,
+      ...row.params,
+    }))
+  }
+  return rows.slice(0, 50)
+}
+
+const openOptimizationReport = () => {
+  if (optimizationBacktestId.value) {
+    router.push(`/backtest/optimization/${optimizationBacktestId.value}`)
+  }
+}
 
 const appendBtLog = (message: string) => {
   if (!message) return
@@ -1263,10 +1070,225 @@ const syncLiveLogs = (live: LiveData | null, progress = 0) => {
   lastLiveLogKey = logKey
 
   if (chunkIndex && chunkTotal) {
-    appendBtLog(`分段 ${chunkIndex}/${chunkTotal} | 日期 ${currentDate} | 进度 ${Math.round(progress * 100)}% | ${eventMessage || '运行中'}`)
+    appendBtLog(`Segment ${chunkIndex}/${chunkTotal} | Date ${currentDate} | Progress ${Math.round(progress * 100)}% | ${eventMessage || 'Running'}`)
     return
   }
-  appendBtLog(`日期 ${currentDate} | 进度 ${Math.round(progress * 100)}% | ${eventMessage || '运行中'}`)
+  appendBtLog(`Date ${currentDate} | Progress ${Math.round(progress * 100)}% | ${eventMessage || 'Running'}`)
+}
+
+const parseOptimizationGrid = () => {
+  try {
+    const parsed = JSON.parse(optParamGridText.value || '{}')
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('参数网格必须是 JSON object')
+    }
+    for (const [key, value] of Object.entries(parsed)) {
+      if (!Array.isArray(value) || value.length === 0) {
+        throw new Error(`${key} must be a non-empty array`)
+      }
+    }
+    return parsed as Record<string, unknown[]>
+  } catch (e: any) {
+    ElMessage.error(`参数网格格式错误: ${e?.message || e}`)
+    return null
+  }
+}
+
+const buildBacktestPayload = () => {
+  const isExpression = editorTab.value === 'expression'
+  const code = isExpression ? btExpression.value : btCode.value
+  const engine = btEngine.value
+  return {
+    engine,
+    mode: isExpression ? 'vectorized' : 'event_driven',
+    factor_expression: isExpression ? code : undefined,
+    strategy_code: !isExpression && engine === 'akquant' ? code : undefined,
+    strategy_id: activeStrategy.value?.id || undefined,
+    buy_condition: !isExpression && engine === 'builtin' ? code : undefined,
+    symbols: effectiveSymbols.value,
+    universe_mode: selectedIndexSymbol.value ? 'index' : 'symbols',
+    index_symbol: selectedIndexSymbol.value,
+    start_date: btStartDate.value,
+    end_date: btEndDate.value,
+    initial_capital: btCapital.value,
+    rebalance_freq: btFrequency.value,
+    n_groups: isExpression ? btNGroups.value : 5,
+    bar_type: btBarType.value,
+  }
+}
+
+const formatCoveragePct = (value?: number | null) => `${Math.round(Number(value || 0) * 100)}%`
+
+const coverageSummaryLines = (coverage: any) => {
+  const lines = [
+    `行情 ${coverage?.market?.dataset || btBarType.value}: ${coverage?.market?.covered_symbol_count || 0}/${coverage?.market?.requested_symbol_count || 0} 只，覆盖率 ${formatCoveragePct(coverage?.market?.coverage_ratio)}`,
+  ]
+  if (coverage?.factor?.items?.length) {
+    const required = coverage.factor.items
+      .filter((item: any) => item.required)
+      .map((item: any) => `${item.factor_name} ${formatCoveragePct(item.coverage_ratio)} (${item.min_date || '-'} ~ ${item.max_date || '-'})`)
+    if (required.length) {
+      lines.push(`必需因子: ${required.join('；')}`)
+    }
+  }
+  if (coverage?.market?.missing_symbols_sample?.length) {
+    lines.push(`缺行情样本: ${coverage.market.missing_symbols_sample.slice(0, 8).join(', ')}`)
+  }
+  return lines
+}
+
+const requestBacktestCoverage = async () => {
+  const { backtestEngines } = await import('@/api/backtest')
+  return backtestEngines.dataCoverage(buildBacktestPayload() as any)
+}
+
+const checkBacktestCoverage = async () => {
+  coverageChecking.value = true
+  try {
+    const coverage = await requestBacktestCoverage()
+    coverageSummaryLines(coverage).forEach(line => appendBtLog(line))
+    if (coverage.ok) {
+      ElMessage.success('数据覆盖检查通过')
+    } else {
+      ElMessage.warning(`数据覆盖可能不足: ${(coverage.warnings || []).join('；')}`)
+    }
+    return coverage
+  } catch (e: any) {
+    ElMessage.error(e?.message || '数据覆盖检查失败')
+    return null
+  } finally {
+    coverageChecking.value = false
+  }
+}
+
+const confirmCoverageBeforeRun = async () => {
+  const coverage = await checkBacktestCoverage()
+  if (!coverage || coverage.ok) return true
+  const lines = coverageSummaryLines(coverage)
+  try {
+    await ElMessageBox.confirm(
+      `${lines.join('\n')}\n\n覆盖不足时可能出现 0 交易。是否继续运行？`,
+      '数据覆盖确认',
+      {
+        type: 'warning',
+        confirmButtonText: '继续运行',
+        cancelButtonText: '取消',
+      }
+    )
+    return true
+  } catch {
+    appendBtLog('已取消回测：数据覆盖不足')
+    return false
+  }
+}
+
+const pollBacktestTask = async (request: any, taskId: string, label = 'Backtest') => {
+  btTaskId.value = taskId
+  appendBtLog(`${label} task submitted (${taskId}), polling status`)
+  const isOptimization = label === 'Grid Search' || label === 'Walk-forward'
+  if (isOptimization) {
+    optimizationRunning.value = true
+    optimizationLabel.value = `${label} 已提交`
+    optimizationProgress.value = 0
+  }
+  let terminal = false
+  while (!terminal) {
+    const statusData = await request.get(`/backtest/status/${taskId}`)
+    btProgress.value = statusData?.progress ?? 0
+    if (isOptimization) {
+      optimizationProgress.value = btProgress.value
+      optimizationLabel.value = statusData?.live?.metadata?.progress_message || `${label} 运行中`
+    }
+    if (statusData?.live) {
+      btLiveData.value = statusData.live
+      syncLiveLogs(statusData.live, btProgress.value)
+    }
+
+    if (statusData?.status === 'done') {
+      const data = await request.get(`/backtest/result/${taskId}`)
+      if (data) {
+        btFullResult.value = data as BacktestResultData
+        if (Array.isArray(data.rows)) {
+          optimizationRows.value = compactOptimizationRows(data, label)
+          optimizationBacktestId.value = Number(data.backtest_id || 0) || null
+          appendBtLog(`${label} completed, ${data.count ?? data.rows.length} results`)
+        } else {
+          appendBtLog(`${label}完成`)
+        }
+        if (isOptimization) {
+          optimizationProgress.value = 1
+          optimizationLabel.value = `${label} 完成`
+          optimizationRunning.value = false
+        }
+        saveBtSettings()
+      }
+      terminal = true
+    } else if (statusData?.status === 'failed') {
+      const errData = await request.get(`/backtest/result/${taskId}`)
+      btErrors.value = [errData?.error || `${label}失败`]
+      appendBtLog(`${label}失败: ${btErrors.value[0]}`)
+      if (isOptimization) {
+        optimizationProgress.value = 1
+        optimizationLabel.value = `${label} 失败`
+        optimizationRunning.value = false
+      }
+      terminal = true
+    } else if (statusData?.status === 'cancelled') {
+      const errData = await request.get(`/backtest/result/${taskId}`).catch(() => null)
+      btErrors.value = [errData?.error || `${label}已停止`]
+      appendBtLog(`${label}已停止`)
+      if (isOptimization) {
+        optimizationProgress.value = 1
+        optimizationLabel.value = `${label} 已停止`
+        optimizationRunning.value = false
+      }
+      terminal = true
+    } else {
+      await new Promise(r => setTimeout(r, 2000))
+    }
+  }
+}
+
+const stopCurrentTask = async () => {
+  if (!btTaskId.value) return
+  try {
+    const { default: request } = await import('@/api/request')
+    await request.post(`/backtest/cancel/${btTaskId.value}`, {}, {})
+    appendBtLog(`已发送停止请求: ${btTaskId.value}`)
+    btRunning.value = false
+    btProgress.value = 1
+    if (optimizationRunning.value) {
+      optimizationRunning.value = false
+      optimizationProgress.value = 1
+      optimizationLabel.value = '任务已停止'
+    }
+    ElMessage.success('已停止当前任务')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '停止失败')
+  }
+}
+
+const loadBacktestTaskResult = async (taskId: string) => {
+  try {
+    const { default: request } = await import('@/api/request')
+    const statusData = await request.get<any>(`/backtest/status/${taskId}`)
+    btTaskId.value = taskId
+    btProgress.value = statusData?.progress ?? 1
+    if (statusData?.live) {
+      btLiveData.value = statusData.live
+    }
+    if (statusData?.status === 'done' || statusData?.status === 'failed' || statusData?.status === 'cancelled') {
+      const data = await request.get<any>(`/backtest/result/${taskId}`)
+      if (statusData?.status === 'failed' || statusData?.status === 'cancelled') {
+        btErrors.value = [data?.error || (statusData?.status === 'cancelled' ? '任务已停止' : '任务失败')]
+      } else if (data) {
+        btFullResult.value = data as BacktestResultData
+      }
+      activeTab.value = 'backtestRunner'
+    }
+  } catch (e: any) {
+    ElMessage.warning(e?.message || '任务结果加载失败')
+  }
 }
 
 
@@ -1274,7 +1296,7 @@ const openDocs = () => {
   window.open('/docs', '_blank')
 }
 
-// ── Factor selection ──
+// Factor selection
 const loadSavedFactors = async () => {
   try {
     const data = await factorApi.getList()
@@ -1300,8 +1322,11 @@ const handleSaveStrategy = async () => {
     await strategyApi.update(activeStrategy.value.id, {
       name: activeStrategy.value.name,
       code,
+      parameters: currentStrategyParameters(),
       description: activeStrategy.value.description || undefined,
     })
+    activeStrategy.value.parameters = currentStrategyParameters()
+    saveBtSettings()
     ElMessage.success('保存成功')
   } catch {
     ElMessage.error('保存失败')
@@ -1314,35 +1339,32 @@ const handleBacktest = async (row: Strategy) => {
   try {
     activeStrategy.value = { ...row }
     const code = row.code || ''
-    // Auto-detect mode: builtin > script > expression
-    if (row.name === '深度价值策略' || row.id === 12) {
-      builtinType.value = 'deep_value'
-      builtinCode.value = BUILTIN_CODE
-      editorTab.value = 'builtin'
-      btMode.value = 'builtin'
+    if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
+      editorTab.value = 'rqalpha-code'
+      btMode.value = 'script'
+      btCode.value = code
+    } else if (code.includes('aq.Strategy') && code.includes('def on_bar')) {
+      editorTab.value = 'akquant-code'
+      btMode.value = 'script'
       btCode.value = code
     } else {
-      builtinType.value = null
-      if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
-        editorTab.value = 'rqalpha-code'
-        btMode.value = 'script'
-        btCode.value = code
-      } else if (code.includes('aq.Strategy') && code.includes('def on_bar')) {
-        editorTab.value = 'akquant-code'
-        btMode.value = 'script'
-        btCode.value = code
-      } else {
-        editorTab.value = 'expression'
-        btMode.value = 'expression'
-        btExpression.value = code || SAMPLE_EXPRESSION
-        btCode.value = code
-      }
+      editorTab.value = 'expression'
+      btMode.value = 'expression'
+      btExpression.value = code || SAMPLE_EXPRESSION
+      btCode.value = code
     }
     // Auto-detect bar_type from code content
-    btBarType.value = (code.includes('get_intraday') || code.includes('compute_daily_signal'))
-      ? 'minute' : 'daily'
+    const savedRunSettings = (row.parameters as any)?.backtest_settings as BtSettings | undefined
+    if (savedRunSettings) {
+      applyBtSettings(savedRunSettings)
+    } else {
+      btBarType.value = (code.includes('get_intraday') || code.includes('compute_daily_signal'))
+        ? 'minute' : 'daily'
+    }
     btLiveData.value = null
     btFullResult.value = null
+    optimizationBacktestId.value = null
+    optimizationRows.value = []
     btMetrics.value = []
     btLogs.value = []
     btErrors.value = []
@@ -1367,7 +1389,7 @@ const runBacktestTask = async () => {
   if (btSymbols.value.length === 0 && !isAllStocks.value && !poolSource.value) {
     try {
       const { default: request } = await import('@/api/request')
-      const data = await request.get<{ symbols: string[] }>('/v2/backtest/pools/top100')
+      const data = await request.get<{ symbols: string[] }>('/backtest/pools/top100')
       if (data?.symbols?.length) {
         btSymbols.value = data.symbols.slice(0, 10).filter(Boolean)
         ElMessage.success(`已自动加载 ${btSymbols.value.length} 只默认股票`)
@@ -1381,6 +1403,8 @@ const runBacktestTask = async () => {
   btRunning.value = true
   btLiveData.value = null
   btFullResult.value = null
+  optimizationBacktestId.value = null
+  optimizationRows.value = []
   btMetrics.value = []
   btLogs.value = []
   btErrors.value = []
@@ -1389,40 +1413,15 @@ const runBacktestTask = async () => {
   lastLiveLogKey = ''
   appendBtLog('开始回测')
 
-  const isExpression = editorTab.value === 'expression'
-  const code = isExpression ? btExpression.value : btCode.value
-  const mode = isExpression ? 'vectorized' : 'event_driven'
-  const engine = btEngine.value
-
   try {
+    await persistActiveStrategyRunSettings()
+    const coverageOk = await confirmCoverageBeforeRun()
+    if (!coverageOk) return
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>(
-      '/v2/backtest/run',
-      {
-        engine,
-        mode,
-        factor_expression: isExpression ? code : undefined,
-        strategy_code: !isExpression && engine === 'akquant' ? code : undefined,
-        strategy_id: activeStrategy.value?.id || undefined,
-        buy_condition: !isExpression && engine === 'builtin' ? code : undefined,
-        symbols: effectiveSymbols.value,
-        universe_mode: selectedIndexSymbol.value ? 'index' : 'symbols',
-        index_symbol: selectedIndexSymbol.value,
-        start_date: btStartDate.value,
-        end_date: btEndDate.value,
-        initial_capital: btCapital.value,
-        rebalance_freq: btFrequency.value,
-        n_groups: isExpression ? btNGroups.value : 5,
-        bar_type: isSmallCapStrategy.value ? 'minute_timer' : btBarType.value,
-        max_positions: isSmallCapStrategy.value ? scStockNum.value : undefined,
-        commission_rate: isSmallCapStrategy.value ? 0.00025 : undefined,
-        stamp_tax_rate: isSmallCapStrategy.value ? 0.001 : undefined,
-        transfer_fee_rate: isSmallCapStrategy.value ? 0.00001 : undefined,
-        min_commission: isSmallCapStrategy.value ? 5 : undefined,
-        lot_size: isSmallCapStrategy.value ? 100 : undefined,
-        strategy_params: smallCapStrategyParams.value,
-      },
-      { timeout: 30000 }
+      '/backtest/run',
+      buildBacktestPayload(),
+      {}
     )
 
     const taskId = (res as any)?.task_id
@@ -1435,64 +1434,82 @@ const runBacktestTask = async () => {
       return
     }
 
-    btTaskId.value = taskId
-    appendBtLog(`任务已提交 (${taskId})，开始轮询状态`)
-
-    let terminal = false
-    while (!terminal) {
-      await new Promise(r => setTimeout(r, 2000))
-      const statusData = await request.get<any>(`/v2/backtest/status/${taskId}`)
-      btProgress.value = statusData?.progress ?? 0
-      if (statusData?.live) {
-        btLiveData.value = statusData.live
-        syncLiveLogs(statusData.live, btProgress.value)
-      }
-
-      if (statusData?.status === 'done') {
-        const data = await request.get<any>(`/v2/backtest/result/${taskId}`)
-        if (data) {
-          btFullResult.value = data as BacktestResultData
-          appendBtLog('回测完成')
-          saveBtSettings()
-        }
-        terminal = true
-      } else if (statusData?.status === 'failed') {
-        const errData = await request.get<any>(`/v2/backtest/result/${taskId}`)
-        btErrors.value = [errData?.error || '回测失败']
-        appendBtLog(`回测失败: ${btErrors.value[0]}`)
-        terminal = true
-      }
-    }
+    await pollBacktestTask(request, taskId, 'Backtest')
   } catch (e: any) {
-    btErrors.value = [e?.message || '回测失败']
-    appendBtLog(`回测执行失败: ${btErrors.value[0]}`)
+    btErrors.value = [e?.message || 'Backtest failed']
+    appendBtLog(`Backtest failed: ${btErrors.value[0]}`)
   } finally {
     btRunning.value = false
   }
 }
 
-const seedDeepValueStrategy = async () => {
+const runOptimizationTask = async (type: 'grid' | 'walk_forward') => {
+  if (btEngine.value !== 'akquant') {
+    ElMessage.warning('参数优化目前只支持 AKQuant 引擎')
+    return
+  }
+  const grid = parseOptimizationGrid()
+  if (!grid) return
+  const code = editorTab.value === 'expression' ? btExpression.value : btCode.value
+  if (!code.trim()) {
+    ElMessage.warning('请先填写 AKQuant 策略代码')
+    return
+  }
+
+  btRunning.value = true
+  btLiveData.value = null
+  btFullResult.value = null
+  optimizationBacktestId.value = null
+  optimizationRows.value = []
+  btMetrics.value = []
+  btLogs.value = []
+  btErrors.value = []
+  btProgress.value = 0
+  btTaskId.value = null
+  optimizationRunning.value = true
+  optimizationProgress.value = 0
+  optimizationLabel.value = type === 'grid' ? 'Grid Search 准备中' : 'Walk-forward 准备中'
+  lastLiveLogKey = ''
+  appendBtLog(type === 'grid' ? '开始 Grid Search' : '开始 Walk-forward')
+
   try {
-    const existing = await strategyApi.list(1, 100)
-    const found = existing.items.find((s: Strategy) => s.name === '深度价值策略')
-    const description = '低估值+高股息+深度折价：股价<250周线10%+，股息率>3.5%，0<PE<40，每年5月调仓持有1年'
-    if (found) {
-      // Update if code is not the annual rebalance version
-      if (!found.code?.includes('last_rebalance_year')) {
-        await strategyApi.update(found.id, { code: DEEP_VALUE_CODE, description })
-        await loadStrategies()
-      }
-    } else {
-      await strategyApi.create({ name: '深度价值策略', code: DEEP_VALUE_CODE, description })
-      await loadStrategies()
+    await persistActiveStrategyRunSettings()
+    const { default: request } = await import('@/api/request')
+    const payload = {
+      ...buildBacktestPayload(),
+      engine: 'akquant',
+      mode: 'event_driven',
+      param_grid: grid,
+      sort_by: optMetric.value || 'sharpe_ratio',
+      metric: optMetric.value || 'sharpe_ratio',
+      ascending: false,
+      train_period: optTrainPeriod.value,
+      test_period: optTestPeriod.value,
+      max_workers: optMaxWorkers.value,
     }
-  } catch {
-    // non-critical
+    const url = type === 'grid'
+      ? '/backtest/optimize/grid'
+      : '/backtest/optimize/walk-forward'
+    const res = await request.post<any>(url, payload, {})
+    const taskId = (res as any)?.task_id
+    if (!taskId) {
+      ElMessage.warning('优化任务未返回 task_id')
+      return
+    }
+    await pollBacktestTask(request, taskId, type === 'grid' ? 'Grid Search' : 'Walk-forward')
+  } catch (e: any) {
+    btErrors.value = [e?.message || 'Optimization failed']
+    appendBtLog(`Optimization failed: ${btErrors.value[0]}`)
+    optimizationRunning.value = false
+    optimizationLabel.value = '优化失败'
+    optimizationProgress.value = 1
+  } finally {
+    btRunning.value = false
   }
 }
 
 const seedTrendCapitalStrategy = async () => {
-  // Skip if already seeded (check by name)
+  // 如果已存在则跳过
   if (strategyList.value.some(s => s.name === '趋势资金策略')) return
   try {
     const existing = await strategyApi.list(1, 100)
@@ -1504,15 +1521,26 @@ const seedTrendCapitalStrategy = async () => {
     })
     await loadStrategies()
   } catch {
-    // non-critical — strategy can be created manually
+    // non-critical: strategy can be created manually
   }
 }
 
-// ── Engine ──
+// Engine
+const seedMultiFactorStrategy = async () => {
+  if (strategyList.value.some(s => s.name === '通用多因子模型')) return
+  try {
+    const { backtestEngines } = await import('@/api/backtest')
+    await backtestEngines.createMultiFactorStrategy()
+    await loadStrategies()
+  } catch {
+    // non-critical: built-in template can still be created manually
+  }
+}
+
 const loadEngines = async () => {
   try {
-    const { backtestV2Engines } = await import('@/api/backtest')
-    const data = await backtestV2Engines.list()
+    const { backtestEngines } = await import('@/api/backtest')
+    const data = await backtestEngines.list()
     engineOptions.value = (data as any)?.map((e: any) => ({
       value: e.name,
       label: e.label,
@@ -1550,14 +1578,14 @@ const onLLMCodeGenerated = (code: string) => {
   editorTab.value = 'akquant-code'
 }
 
-// ── Report viewer for akquant ──
+// Report viewer for akquant
 watch(activeTab, (tab) => {
   if (tab !== 'backtestRunner') {
     showReport.value = false
   }
 })
 
-// ── 研报上传 ──
+// 研报上传
 const handleFileSelect = (e: Event) => {
   const target = e.target as HTMLInputElement
   if (target.files?.length) uploadFile.value = target.files[0]
@@ -1576,7 +1604,6 @@ const handleUploadReport = async () => {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>('/strategy/from-report', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000,
     })
     uploadResult.value = res
   } catch (e: any) {
@@ -1601,11 +1628,7 @@ const applyUploadResult = () => {
       parameters: result.parameters,
       created_at: result.created_at, updated_at: result.updated_at,
     }
-    if (r.strategy_type === 'builtin') {
-      builtinType.value = 'deep_value'
-      builtinCode.value = r.code
-      btMode.value = 'builtin'
-    } else if (r.strategy_type === 'expression') {
+    if (r.strategy_type === 'expression') {
       btMode.value = 'expression'
       btExpression.value = r.code
     } else {
@@ -1622,9 +1645,7 @@ const applyUploadResult = () => {
   }).catch(() => {
     // Still fill editor even if DB save fails
     activeStrategy.value = { id: 0, name: r.name || '研报策略', code: r.code || '', description: r.summary || '', parameters: null, created_at: null, updated_at: null }
-    if (r.strategy_type === 'builtin') {
-      builtinType.value = 'deep_value'; builtinCode.value = r.code; btMode.value = 'builtin'
-    } else if (r.strategy_type === 'expression') {
+    if (r.strategy_type === 'expression') {
       btMode.value = 'expression'; btExpression.value = r.code
     } else {
       btMode.value = 'script'; btCode.value = r.code
@@ -1632,17 +1653,22 @@ const applyUploadResult = () => {
     showUploadDialog.value = false
     uploadFile.value = null; uploadResult.value = null
     activeTab.value = 'backtestRunner'
-    ElMessage.success('策略已填充到编辑器')
+    ElMessage.success('Strategy filled into editor')
   })
 }
 
 onMounted(async () => {
   await loadStrategies()
   await seedTrendCapitalStrategy()
-  await seedDeepValueStrategy()
+  await seedMultiFactorStrategy()
   await loadEngines()
+  await loadIndexCatalog()
   loadSavedFactors()
   loadWatchlistGroups()
+  const queryTaskId = typeof route.query.task_id === 'string' ? route.query.task_id : ''
+  if (queryTaskId) {
+    await loadBacktestTaskResult(queryTaskId)
+  }
 })
 </script>
 
@@ -1731,22 +1757,20 @@ onMounted(async () => {
   gap: 6px;
   flex-shrink: 0;
 }
-.code-editor { flex: 1; background: #1e1e1e; }
-.editor-textarea {
-  width: 100%;
-  height: 100%;
-  border: none;
-  padding: 12px;
-  font-family: 'JetBrains Mono', 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.6;
-  color: #d4d4d4;
+.code-editor {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  padding: 8px;
   background: #1e1e1e;
-  resize: none;
-  outline: none;
-  tab-size: 4;
 }
-.editor-textarea::placeholder { color: #6e6e6e; }
+
+.code-editor :deep(.code-editor-shell) {
+  flex: 1;
+  min-height: 0;
+}
 .right-panel { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
 
 .upload-area {
@@ -1816,24 +1840,85 @@ onMounted(async () => {
   background: #141418;
   box-shadow: none;
 }
-.smallcap-params-bar {
+.akquant-opt-panel {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
-  padding: 6px 12px;
-  background: #16161d;
+  padding: 8px 12px;
+  background: #15151d;
   border: 1px solid #2a2a35;
   border-radius: 8px;
-  flex-wrap: wrap;
   color: #9aa0aa;
   font-size: 12px;
 }
-.smallcap-params-bar :deep(.el-checkbox) {
-  margin-right: 0;
+.opt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
-.smallcap-params-bar :deep(.el-input__wrapper) {
-  background: #141418;
-  box-shadow: none;
+.opt-grid-input {
+  flex: 1;
+  min-width: 280px;
+}
+.opt-short-input {
+  width: 130px;
+}
+.opt-metric-select {
+  width: 170px;
+}
+.opt-number {
+  width: 96px;
+}
+.opt-period-hint {
+  color: #767b88;
+  font-size: 11px;
+}
+.opt-progress {
+  padding: 4px 0;
+}
+.opt-progress-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+  color: #c0c0cc;
+  font-size: 12px;
+}
+
+.bt-run-progress {
+  margin: 8px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(96, 165, 250, 0.24);
+  border-radius: 8px;
+  background: rgba(15, 23, 42, 0.38);
+}
+
+.bt-run-progress__head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--text-bright);
+  font-size: 12px;
+}
+
+.bt-run-progress__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-data, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+.opt-result-table {
+  border: 1px solid #2a2a35;
+  border-radius: 6px;
+}
+.opt-result-table :deep(.el-table__body-wrapper) {
+  max-height: 260px;
 }
 .bt-metrics-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
 .bt-metric-card {
@@ -1860,7 +1945,7 @@ onMounted(async () => {
 .bt-error { color: #e5484d; }
 .bt-log-empty { color: #8888a0; font-style: italic; }
 
-/* ── Mode switch ── */
+/* Mode switch */
 .mode-switch { flex-shrink: 0; }
 .mode-switch :deep(.el-radio-button__inner) {
   background: #2d2d2d;
@@ -1875,7 +1960,7 @@ onMounted(async () => {
   color: #fff;
 }
 
-/* ── Expression panel ── */
+/* Expression panel */
 .expression-panel {
   flex: 1;
   background: #1e1e1e;
@@ -1886,18 +1971,13 @@ onMounted(async () => {
 }
 .expression-input-row {
   display: flex;
+  align-items: flex-start;
   gap: 10px;
 }
-.expression-input {
+
+.expression-code-input {
   flex: 1;
-}
-.expression-input :deep(.el-input__inner) {
-  background: #2d2d2d;
-  border-color: #404040;
-  color: #d4d4d4;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 14px;
-  height: 40px;
+  min-width: 0;
 }
 .factor-select {
   width: 200px;
@@ -1929,26 +2009,6 @@ onMounted(async () => {
   color: #aaa;
 }
 
-.builtin-panel {
-  flex: 1;
-  background: #1e1e1e;
-  display: flex;
-  flex-direction: column;
-}
-.builtin-params-bar {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 12px;
-  background: #252530;
-  border-bottom: 1px solid #333;
-  flex-wrap: wrap;
-}
-.builtin-params-bar .param-label {
-  font-size: 11px;
-  color: #888;
-  margin-left: 4px;
-}
 .empty-runner {
   display: flex;
   align-items: center;

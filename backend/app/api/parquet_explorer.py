@@ -15,8 +15,8 @@ _DATASETS = [
     "klines_minute_timer",
     "klines_minute_cum_timer",
     "factor_cache",
+    "factor_values",
     "stock_indicators",
-    "feature_values",
     "indicator_timeseries",
 ]
 

@@ -234,7 +234,7 @@ curl -sS 'http://127.0.0.1:3000/api/skill/kline/daily/000001.SZ?start_date=2026-
 ### 回测股票池
 
 ```bash
-curl -sS http://127.0.0.1:3000/api/v2/backtest/pools/top100
+curl -sS http://127.0.0.1:3000/api/backtest/pools/top100
 ```
 
 期望返回 `symbols` 列表。
@@ -242,7 +242,7 @@ curl -sS http://127.0.0.1:3000/api/v2/backtest/pools/top100
 ### 指数池
 
 ```bash
-curl -sS 'http://127.0.0.1:3000/api/v2/backtest/index-pools/399101.SZ?start_date=2026-05-01&end_date=2026-05-15'
+curl -sS 'http://127.0.0.1:3000/api/backtest/index-pools/399101.SZ?start_date=2026-05-01&end_date=2026-05-15'
 ```
 
 期望：
@@ -262,7 +262,7 @@ curl -sS 'http://127.0.0.1:3000/api/v2/backtest/index-pools/399101.SZ?start_date
 ### Timer 分钟覆盖率
 
 ```bash
-curl -sS 'http://127.0.0.1:3000/api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2026-05-01&end_date=2026-05-15&times=10:00,10:30,14:30,14:50'
+curl -sS 'http://127.0.0.1:3000/api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2026-05-01&end_date=2026-05-15&times=10:00,10:30,14:30,14:50'
 ```
 
 期望 `earliest_date` 有值，并且 coverage 中各交易日 `point_coverage=1.0`。
@@ -270,7 +270,7 @@ curl -sS 'http://127.0.0.1:3000/api/v2/backtest/timer-coverage?index_symbol=3991
 ### 最小回测
 
 ```bash
-SYMS=$(curl -sS http://127.0.0.1:3000/api/v2/backtest/pools/top100 \
+SYMS=$(curl -sS http://127.0.0.1:3000/api/backtest/pools/top100 \
   | backend/.venv/bin/python -c 'import sys,json; data=json.load(sys.stdin); print(",".join(data["data"]["symbols"][:20]))')
 
 TASK=$(backend/.venv/bin/python - <<'PY' "$SYMS"
@@ -290,7 +290,7 @@ payload = {
     "bar_type": "daily",
 }
 req = urllib.request.Request(
-    "http://127.0.0.1:3000/api/v2/backtest/run",
+    "http://127.0.0.1:3000/api/backtest/run",
     data=json.dumps(payload).encode(),
     headers={"Content-Type": "application/json"},
 )
@@ -300,7 +300,7 @@ PY
 )
 
 sleep 1
-curl -sS "http://127.0.0.1:3000/api/v2/backtest/result/$TASK"
+curl -sS "http://127.0.0.1:3000/api/backtest/result/$TASK"
 ```
 
 期望：
@@ -410,7 +410,7 @@ sqlite3 /Users/albert/MyProjects/Data/GSdata/gaoshou.db \
 如果本地库有 `399101.SZ` 快照，重启后端后再验证：
 
 ```bash
-curl -sS 'http://127.0.0.1:3000/api/v2/backtest/index-pools/399101.SZ?start_date=2026-05-01&end_date=2026-05-15'
+curl -sS 'http://127.0.0.1:3000/api/backtest/index-pools/399101.SZ?start_date=2026-05-01&end_date=2026-05-15'
 ```
 
 ### 数据浏览器加载慢

@@ -95,23 +95,23 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
 覆盖率检查：
 
 ```text
-GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
+GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
 ```
 
 ## 5. AKQuant 回测
 
-前端回测页选择 AKQuant 引擎后，后端走 `/api/v2/backtest/*`。
+前端回测页选择 AKQuant 引擎后，后端走 `/api/backtest/*`。
 
 常用接口：
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/v2/backtest/capabilities` | AKQuant 能力探测 |
-| `POST /api/v2/backtest/run` | 运行回测 |
-| `POST /api/v2/backtest/optimize/grid` | Grid Search |
-| `POST /api/v2/backtest/optimize/walk-forward` | Walk-forward Validation |
-| `POST /api/v2/backtest/strategy-params/schema` | 获取策略参数 schema |
-| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 |
+| `GET /api/backtest/capabilities` | AKQuant 能力探测 |
+| `POST /api/backtest/run` | 运行回测 |
+| `POST /api/backtest/optimize/grid` | Grid Search |
+| `POST /api/backtest/optimize/walk-forward` | Walk-forward Validation |
+| `POST /api/backtest/strategy-params/schema` | 获取策略参数 schema |
+| `POST /api/backtest/strategy-params/validate` | 校验策略参数 |
 
 参数原则：
 

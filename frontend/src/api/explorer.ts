@@ -3,6 +3,8 @@ import request from './request'
 export interface TableInfo {
   name: string
   row_count: number
+  min_date?: string | null
+  max_date?: string | null
 }
 
 export interface ColumnInfo {
@@ -19,6 +21,38 @@ export interface PreviewResult {
   page: number
   page_size: number
   total_pages: number
+  generated_sql?: string
+}
+
+export type ExplorerFilterOp =
+  | '='
+  | '!='
+  | 'contains'
+  | 'in'
+  | 'between'
+  | '>'
+  | '>='
+  | '<'
+  | '<='
+  | 'is null'
+  | 'not null'
+
+export interface ExplorerFilter {
+  column: string
+  op: ExplorerFilterOp
+  value?: unknown
+  value_to?: unknown
+  values?: unknown[]
+}
+
+export interface ExplorerSearchRequest {
+  page?: number
+  page_size?: number
+  order_by?: string
+  order_dir?: 'ASC' | 'DESC'
+  columns?: string[]
+  filters?: ExplorerFilter[]
+  quick_search?: Record<string, unknown>
 }
 
 export function getTables() {
@@ -42,9 +76,13 @@ export function previewTable(
   return request.get<PreviewResult>(`/explorer/tables/${tableName}/preview`, { params })
 }
 
-export function getDistinctValues(tableName: string, column: string, limit?: number) {
+export function searchTable(tableName: string, data: ExplorerSearchRequest) {
+  return request.post<PreviewResult>(`/explorer/tables/${tableName}/search`, data)
+}
+
+export function getDistinctValues(tableName: string, column: string, limit?: number, q?: string) {
   return request.get<any[]>(`/explorer/tables/${tableName}/distinct`, {
-    params: { column, limit }
+    params: { column, limit, q }
   })
 }
 

@@ -46,10 +46,7 @@
         </el-form-item>
         <el-form-item label="分类" prop="category">
           <el-select v-model="formData.category" placeholder="选择分类" clearable>
-            <el-option label="技术因子" value="技术因子" />
-            <el-option label="基本面因子" value="基本面因子" />
-            <el-option label="情绪因子" value="情绪因子" />
-            <el-option label="其他" value="其他" />
+            <el-option label="自定义因子库" value="custom" />
           </el-select>
         </el-form-item>
         <el-form-item label="来源" prop="source">
@@ -59,20 +56,21 @@
           </el-select>
         </el-form-item>
         <el-form-item label="因子代码" prop="code">
-          <el-input
-            v-model="formData.code"
-            type="textarea"
-            :rows="5"
+          <CodeEditor
+            v-model="factorCode"
+            language="expression"
+            :min-height="180"
             placeholder="请输入因子计算代码"
           />
         </el-form-item>
         <el-form-item label="参数配置" prop="parameters">
-          <el-input
+          <CodeEditor
             v-model="parametersJson"
-            type="textarea"
-            :rows="3"
+            language="json"
+            :min-height="130"
             placeholder='{"normalize_window": 5, "factor_window": 20}'
           />
+          <div v-if="parametersJsonError" class="json-error">{{ parametersJsonError }}</div>
         </el-form-item>
         <el-form-item label="描述" prop="description">
           <el-input
@@ -135,6 +133,7 @@ import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { factorApi, type Factor, type FactorCreateRequest } from '@/api/factor'
+import CodeEditor from '@/components/CodeEditor.vue'
 
 const router = useRouter()
 
@@ -145,6 +144,7 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const editingFactor = ref<Factor | null>(null)
 const formRef = ref<FormInstance>()
+const parametersJsonError = ref('')
 
 // 表单数据
 const formData = ref<FactorCreateRequest>({
@@ -161,9 +161,17 @@ const parametersJson = computed({
   set: (val: string) => {
     try {
       formData.value.parameters = JSON.parse(val)
+      parametersJsonError.value = ''
     } catch {
-      // 忽略解析错误
+      parametersJsonError.value = 'JSON 格式错误，修正后才能保存'
     }
+  },
+})
+
+const factorCode = computed({
+  get: () => formData.value.code || '',
+  set: (val: string) => {
+    formData.value.code = val
   },
 })
 
@@ -235,6 +243,10 @@ const handleSubmit = async () => {
 
   await formRef.value.validate(async (valid) => {
     if (!valid) return
+    if (parametersJsonError.value) {
+      ElMessage.warning(parametersJsonError.value)
+      return
+    }
 
     submitting.value = true
     try {
@@ -335,5 +347,12 @@ onMounted(() => {
 
 .header {
   margin-bottom: 20px;
+}
+
+.json-error {
+  margin-top: 6px;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>

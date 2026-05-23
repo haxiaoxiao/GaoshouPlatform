@@ -50,7 +50,7 @@
 | `docs/data-source-cheatsheet.md` | 数据源小抄，记录 miniQMT/Tushare/AKShare 的优势、限制和使用场景 |
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口小抄，记录历史分钟、集合竞价、财务、公告、指数等验证结果 |
 | `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 |
-| `docs/feature-store.md` | 因子研究 Feature Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
+| `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
 | `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：当前参数、数据口径、已对齐节点和剩余差异 |
 
 当前 AKQuant 重点能力：
@@ -383,18 +383,18 @@ def handle_bar(context, bar):
 | 运行器 | `runner.py` | BacktestRunner |
 | 策略加载 | `strategy_loader.py` | 动态加载 UserScript |
 
-### AKQuant V2 回测 API
+### AKQuant 回测 API
 
 | 路径 | 说明 |
 |---|---|
-| `GET /api/v2/backtest/capabilities` | 查询 AKQuant 可用性、版本、功能和 TA-Lib 函数数 |
-| `POST /api/v2/backtest/run` | 运行 V2 回测，`engine="akquant"` 走 AKQuant |
-| `POST /api/v2/backtest/optimize/grid` | AKQuant Grid Search |
-| `POST /api/v2/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
-| `POST /api/v2/backtest/strategy-params/schema` | 获取策略参数 schema |
-| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 payload |
-| `GET /api/v2/backtest/index-pools/{index_symbol}` | 查询指数池成分覆盖 |
-| `GET /api/v2/backtest/timer-coverage` | 查询稀疏分钟 timer 覆盖 |
+| `GET /api/backtest/capabilities` | 查询 AKQuant 可用性、版本、功能和 TA-Lib 函数数 |
+| `POST /api/backtest/run` | 运行统一回测，`engine="akquant"` 走 AKQuant |
+| `POST /api/backtest/optimize/grid` | AKQuant Grid Search |
+| `POST /api/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
+| `POST /api/backtest/strategy-params/schema` | 获取策略参数 schema |
+| `POST /api/backtest/strategy-params/validate` | 校验策略参数 payload |
+| `GET /api/backtest/index-pools/{index_symbol}` | 查询指数池成分覆盖 |
+| `GET /api/backtest/timer-coverage` | 查询稀疏分钟 timer 覆盖 |
 
 ### ID=43 小市值策略约束
 
@@ -475,7 +475,7 @@ def handle_bar(context, bar):
 - **SQLite 操作** — 使用 `get_async_session()` 依赖注入，`insert().on_conflict_do_update()` 做 upsert。
 - **SQLite 同步引擎** — 指标调度器中需创建同步引擎：`create_engine(settings.database_url.replace("+aiosqlite", ""))`。
 - **指数成分** — 使用 `backend/app/services/index_components.py`，按 `trade_date <= as_of` 最近快照取成分。
-- **timer 覆盖率** — 使用 `backend/app/services/timer_minute_sync.py` 和 `/api/v2/backtest/timer-coverage`。
+- **timer 覆盖率** — 使用 `backend/app/services/timer_minute_sync.py` 和 `/api/backtest/timer-coverage`。
 
 ### 代码修改注意事项
 
@@ -502,6 +502,16 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 cd E:\Projects\GaoshouPlatform\frontend
 npm run dev
 ```
+
+### 桌面启动/关闭脚本维护规则
+
+- 桌面脚本位置：
+  - `C:\Users\Albert\Desktop\启动GaoshouPlatform.bat`
+  - `C:\Users\Albert\Desktop\关闭GaoshouPlatform.bat`
+- 每次新增后端服务、前端 dev server、Docker 容器、外部依赖健康检查、常驻任务或实盘接口，都必须同步更新这两个脚本。
+- 启动脚本应包含：必要配置读取、依赖启动或检查、健康检查、失败提示、最终访问地址。
+- 关闭脚本应包含：平台自管进程停止、可选 Docker 容器停止、端口校验；外部客户端如 miniQMT 只提示状态，不由脚本强杀。
+- miniQMT 实盘桥接是可选外部依赖，启动脚本只提示配置和检查入口，不得因为 miniQMT 未打开而阻塞平台启动。账户配置来自 `.env.local` 的 `QMT_ACCOUNT_ID`、`QMT_ACCOUNT_TYPE`、`QMT_TRADER_PATH`，状态可在 `/api/grid-trading/status` 检查，真实下单默认保持 `GRID_TRADING_ENABLE_ORDER_SUBMIT=false`。
 
 ---
 

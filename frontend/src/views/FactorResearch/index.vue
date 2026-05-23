@@ -1,43 +1,228 @@
 <template>
   <div class="factor-research">
-    <el-tabs v-model="activeTab" class="factor-tabs">
-      <el-tab-pane label="因子看板" name="board">
-        <FactorBoard />
-      </el-tab-pane>
-      <el-tab-pane label="Feature Store / 数据仓库" name="features">
-        <FeatureStore />
-      </el-tab-pane>
-    </el-tabs>
-    <router-view />
+    <section v-if="isShellVisible" class="factor-shell">
+      <header class="factor-header">
+        <div class="factor-title">
+          <span class="factor-title__eyebrow">FACTOR LAB / RESEARCH WORKBENCH</span>
+          <h2>因子研究</h2>
+          <p>管理因子缓存、检查覆盖率、预计算特征，并查看因子表现。</p>
+        </div>
+        <div class="factor-status">
+          <div>
+            <span>当前视图</span>
+            <strong>{{ activeTabLabel }}</strong>
+          </div>
+          <div>
+            <span>数据口径</span>
+            <strong>Point-in-time</strong>
+          </div>
+          <div>
+            <span>默认窗口</span>
+            <strong>过去一年</strong>
+          </div>
+        </div>
+      </header>
+
+      <el-tabs v-model="activeTab" class="factor-tabs">
+        <el-tab-pane label="因子缓存" name="factor-values" lazy>
+          <FactorValueStore v-if="activeTab === 'factor-values'" />
+        </el-tab-pane>
+        <el-tab-pane label="因子看板" name="board" lazy>
+          <FactorBoard v-if="activeTab === 'board'" />
+        </el-tab-pane>
+      </el-tabs>
+    </section>
+    <router-view v-if="!isShellVisible" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import FactorBoard from './FactorBoard.vue'
-import FeatureStore from './FeatureStore.vue'
+import FactorValueStore from './FactorValueStore.vue'
 
-const activeTab = ref('board')
+const route = useRoute()
+const activeTab = ref('factor-values')
+const isShellVisible = computed(() => route.name === 'FactorResearch')
+const activeTabLabel = computed(() => activeTab.value === 'board' ? '因子看板' : '因子缓存')
+
+watch(
+  () => route.query.tab,
+  (tab) => {
+    if (tab === 'board' || tab === 'factor-values') activeTab.value = tab
+  },
+  { immediate: true },
+)
 </script>
 
 <style scoped>
 .factor-research {
   height: 100%;
+  min-height: 0;
+  padding: 14px;
+  color: var(--text-primary);
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.045), transparent 26%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 42%);
+}
+
+.factor-shell {
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
+  gap: 12px;
+}
+
+.factor-header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background:
+    linear-gradient(135deg, rgba(56, 189, 248, 0.12), transparent 36%),
+    linear-gradient(90deg, rgba(251, 191, 36, 0.05), transparent 24%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    var(--bg-elevated);
+  box-shadow: var(--shadow-card);
+  position: relative;
+  overflow: hidden;
+}
+
+.factor-header::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(56, 189, 248, 0.55), transparent);
+}
+
+.factor-title {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.factor-title__eyebrow {
+  font-family: var(--font-data);
+  font-size: 11px;
+  color: var(--accent-primary);
+  letter-spacing: 0;
+}
+
+.factor-title h2 {
+  margin: 0;
+  font-size: 20px;
+  letter-spacing: 0;
+}
+
+.factor-title p {
+  margin: 0;
+  max-width: 620px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.factor-status {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(110px, 1fr));
+  gap: 8px;
+  min-width: 420px;
+}
+
+.factor-status > div {
+  padding: 9px 11px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
+  background: rgba(10, 10, 12, 0.48);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.factor-status span {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.factor-status strong {
+  font-family: var(--font-data);
+  color: var(--text-bright);
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .factor-tabs {
   min-height: 0;
   flex: 1;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: rgba(15, 15, 19, 0.76);
+  overflow: hidden;
+}
+
+:deep(.el-tabs__header) {
+  margin: 0;
+  padding: 9px 12px 0;
+  background: rgba(10, 10, 12, 0.36);
+}
+
+:deep(.el-tabs__nav-wrap::after) {
+  height: 1px;
+  background: var(--border-subtle);
+}
+
+:deep(.el-tabs__item) {
+  height: 34px;
+  padding: 0 16px;
+  color: var(--text-secondary);
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+:deep(.el-tabs__item.is-active) {
+  color: var(--accent-primary);
+}
+
+:deep(.el-tabs__active-bar) {
+  height: 2px;
+  background: var(--accent-primary);
+  box-shadow: 0 0 10px rgba(56, 189, 248, 0.45);
 }
 
 :deep(.el-tabs__content) {
-  height: calc(100% - 48px);
+  flex: 1;
+  min-height: 0;
+  height: auto;
+  padding: 12px;
   overflow: auto;
 }
 
 :deep(.el-tab-pane) {
   height: 100%;
+}
+
+@media (max-width: 900px) {
+  .factor-research {
+    padding: 10px;
+  }
+
+  .factor-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .factor-status {
+    min-width: 0;
+    grid-template-columns: 1fr;
+  }
 }
 </style>

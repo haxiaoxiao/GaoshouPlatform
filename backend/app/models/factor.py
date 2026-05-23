@@ -57,7 +57,7 @@ class PortfolioType(str, Enum):
 class FactorConfig(BaseModel):
     """Single config reused across compute, evaluation, and backtest layers."""
     expression: str = Field(..., description="Factor expression, e.g. '(1/PE_TTM) + ROE'")
-    stock_pool: StockPool = Field(..., description="Stock universe")
+    stock_pool: str = Field(..., description="Stock universe")
     start_date: datetime.date
     end_date: datetime.date
     benchmark: str = Field("000300.SH", description="Benchmark symbol")
@@ -156,7 +156,8 @@ class BacktestReport(BaseModel):
 class BoardQuery(BaseModel):
     """Query parameters for factor board."""
     categories: list[str] | None = None  # None = all
-    stock_pool: StockPool = StockPool.ZZ500
+    factor_groups: list[str] | None = None
+    stock_pool: str = StockPool.ZZ500.value
     period: Literal["3m", "1y", "3y", "10y"] = "3y"
     portfolio_type: PortfolioType = PortfolioType.LONG_ONLY
     fee_config: Literal["none", "commission_stamp", "commission_stamp_slippage"] = "none"
@@ -170,7 +171,25 @@ class BoardQuery(BaseModel):
 class BoardRow(BaseModel):
     """Single row in factor board table."""
     factor_name: str
+    display_name: str | None = None
+    description: str | None = None
+    source: str | None = None
+    factor_group: str | None = None
+    factor_group_display_name: str | None = None
     category: str
+    coverage_min_date: str | None = None
+    coverage_max_date: str | None = None
+    coverage_total_rows: int = 0
+    coverage_symbol_count: int = 0
+    coverage_date_count: int = 0
+    coverage_status: Literal["covered", "partial", "empty", "unknown"] = "unknown"
+    latest_run_id: str | None = None
+    latest_run_at: str | None = None
+    latest_ic_mean: float | None = None
+    latest_icir: float | None = None
+    latest_long_short_return: float | None = None
+    latest_max_drawdown: float | None = None
+    latest_turnover: float | None = None
     min_quantile_excess_return: float
     max_quantile_excess_return: float
     min_quantile_turnover: float

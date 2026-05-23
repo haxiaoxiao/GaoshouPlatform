@@ -13,6 +13,7 @@
         <el-form :model="syncConfig" label-width="100px" class="config-form">
           <el-form-item label="同步类型">
             <el-checkbox-group v-model="syncConfig.syncTypes">
+              <el-checkbox value="index_daily">指数日线</el-checkbox>
               <el-checkbox value="stock_info">股票信息</el-checkbox>
               <el-checkbox value="stock_full">股票完整信息</el-checkbox>
               <el-checkbox value="financial_data">财务数据(按季度)</el-checkbox>
@@ -27,18 +28,35 @@
           </el-form-item>
 
           <el-form-item label="日期范围">
-            <el-date-picker
-              v-model="syncConfig.dateRange"
-              type="daterange"
-              range-separator="至"
-              start-placeholder="开始日期"
-              end-placeholder="结束日期"
-              format="YYYY-MM-DD"
-              value-format="YYYY-MM-DD"
-              :disabled="isDateRangeDisabled"
-              :shortcuts="dateShortcuts"
-              style="width: 100%"
-            />
+            <div class="date-range-fields">
+              <el-date-picker
+                v-model="syncConfig.startDate"
+                type="date"
+                placeholder="开始日期"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                :disabled="isDateRangeDisabled"
+              />
+              <span class="date-separator">至</span>
+              <el-date-picker
+                v-model="syncConfig.endDate"
+                type="date"
+                placeholder="结束日期"
+                format="YYYY-MM-DD"
+                value-format="YYYY-MM-DD"
+                :disabled="isDateRangeDisabled"
+              />
+            </div>
+            <div class="date-shortcuts" v-if="!isDateRangeDisabled">
+              <el-button
+                v-for="shortcut in dateShortcuts"
+                :key="shortcut.text"
+                size="small"
+                @click="applyDateShortcut(shortcut.days)"
+              >
+                {{ shortcut.text }}
+              </el-button>
+            </div>
             <div class="form-tip">
               {{ isDateRangeDisabled ? '股票信息和市值同步不需要选择日期范围' : 'K线数据同步需要选择日期范围' }}
             </div>
@@ -163,6 +181,26 @@
             show-icon
             class="error-alert"
           />
+
+          <el-alert
+            v-if="syncBlockedReason"
+            :title="syncBlockedReason"
+            type="warning"
+            :closable="false"
+            show-icon
+            class="error-alert"
+          />
+
+          <div v-if="failedSymbolSummaries.length || skippedSymbolCount" class="sync-detail-panel">
+            <div v-if="failedSymbolSummaries.length" class="sync-detail-row">
+              <span class="sync-detail-label">失败明细</span>
+              <span class="sync-detail-value">{{ failedSymbolSummaries.join('；') }}</span>
+            </div>
+            <div v-if="skippedSymbolCount" class="sync-detail-row">
+              <span class="sync-detail-label">跳过数量</span>
+              <span class="sync-detail-value">{{ skippedSymbolCount }} 个指数等待下次重试</span>
+            </div>
+          </div>
         </div>
       </el-card>
     </div>
@@ -247,7 +285,8 @@ import { syncApi, type SyncStatus, type SyncLog } from '@/api/sync'
 // 同步配置
 const syncConfig = ref({
   syncTypes: [] as string[],
-  dateRange: null as [string, string] | null,
+  startDate: '',
+  endDate: '',
   stockScope: 'all',
   failureStrategy: 'skip',
   customSymbols: '',
@@ -258,41 +297,31 @@ const syncConfig = ref({
 const dateShortcuts = [
   {
     text: '最近一周',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setTime(start.getTime() - 3600 * 1000 * 24 * 7)
-      return [start, end]
-    },
+    days: 7,
   },
   {
     text: '最近一个月',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setTime(start.getTime() - 3600 * 1000 * 24 * 30)
-      return [start, end]
-    },
+    days: 30,
   },
   {
     text: '最近三个月',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setTime(start.getTime() - 3600 * 1000 * 24 * 90)
-      return [start, end]
-    },
+    days: 90,
   },
   {
     text: '最近一年',
-    value: () => {
-      const end = new Date()
-      const start = new Date()
-      start.setTime(start.getTime() - 3600 * 1000 * 24 * 365)
-      return [start, end]
-    },
+    days: 365,
   },
 ]
+
+const formatDate = (date: Date): string => date.toISOString().slice(0, 10)
+
+const applyDateShortcut = (days: number) => {
+  const end = new Date()
+  const start = new Date()
+  start.setTime(start.getTime() - 3600 * 1000 * 24 * days)
+  syncConfig.value.startDate = formatDate(start)
+  syncConfig.value.endDate = formatDate(end)
+}
 
 // 同步状态
 const syncStatus = ref<SyncStatus>({
@@ -317,6 +346,34 @@ const currentSymbol = computed(() => {
   return null
 })
 
+const detailArray = (details: Record<string, unknown> | null | undefined, key: string): unknown[] => {
+  const value = details?.[key]
+  return Array.isArray(value) ? value : []
+}
+
+const failedSymbolSummaries = computed(() => {
+  const details = syncStatus.value.details
+  const failedSymbols = detailArray(details, 'failed_symbols')
+  const failedStocks = detailArray(details, 'failed_stocks')
+  const failedItems = [...failedSymbols, ...failedStocks]
+  return failedItems
+    .slice(0, 3)
+    .map((item) => {
+      if (!item || typeof item !== 'object') return ''
+      const symbol = String((item as Record<string, unknown>).symbol || '')
+      const error = String((item as Record<string, unknown>).error || '')
+      return symbol && error ? `${symbol}: ${error}` : symbol || error
+    })
+    .filter(Boolean)
+})
+
+const skippedSymbolCount = computed(() => detailArray(syncStatus.value.details, 'skipped_symbols').length)
+
+const syncBlockedReason = computed(() => {
+  const value = syncStatus.value.details?.blocked_reason
+  return typeof value === 'string' && value ? value : null
+})
+
 // 同步日志
 const syncLogs = ref<SyncLog[]>([])
 const logsLoading = ref(false)
@@ -327,7 +384,7 @@ const isSyncing = computed(() => syncStatus.value.status === 'running')
 // 是否禁用日期范围选择
 // 只有当选中的同步类型都不需要日期范围时才禁用
 const isDateRangeDisabled = computed(() => {
-  const needsDateTypes = ['kline_daily', 'kline_minute', 'dividends']
+  const needsDateTypes = ['kline_daily', 'index_daily', 'kline_minute', 'dividends']
   // 如果选中的类型中有需要日期的，则不禁用
   const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
   // 如果没有选中任何需要日期的类型，则禁用
@@ -379,9 +436,11 @@ const syncTypeLabel = (type: string): string => {
     stock_full: '股票完整信息',
     financial_data: '财务数据',
     kline_daily: '日K线',
+    index_daily: '指数日线',
     kline_minute: '分钟K线',
     realtime_mv: '实时市值',
     dividends: '分红送股',
+    factor_dependency: '因子依赖数据',
   }
   return labels[type] || type
 }
@@ -424,6 +483,41 @@ const formatTime = (time: string | null): string => {
 
 const isSubmitting = ref(false)
 
+const loadSyncStatus = async () => {
+  const response = await syncApi.getStatus()
+  syncStatus.value = response
+}
+
+const extractRetrySymbols = (details: Record<string, unknown> | null | undefined): string[] => {
+  const values = new Set<string>()
+  for (const key of ['failed_symbols', 'failed_stocks']) {
+    for (const item of detailArray(details, key)) {
+      if (item && typeof item === 'object') {
+        const symbol = String((item as Record<string, unknown>).symbol || '').trim()
+        if (symbol) values.add(symbol)
+      }
+    }
+  }
+  for (const item of detailArray(details, 'skipped_symbols')) {
+    const symbol = String(item || '').trim()
+    if (symbol) values.add(symbol)
+  }
+  return [...values]
+}
+
+const latestRetrySymbolsFor = (syncType: string): string[] => {
+  if (syncStatus.value.sync_type === syncType && syncStatus.value.status !== 'running') {
+    const fromStatus = extractRetrySymbols(syncStatus.value.details)
+    if (fromStatus.length) return fromStatus
+  }
+  for (const log of syncLogs.value) {
+    if (log.sync_type !== syncType || !log.details) continue
+    const symbols = extractRetrySymbols(log.details || {})
+    if (symbols.length) return symbols
+  }
+  return []
+}
+
 const handleStartSync = async () => {
   if (syncConfig.value.syncTypes.length === 0) {
     ElMessage.warning('请至少选择一个同步类型')
@@ -431,10 +525,10 @@ const handleStartSync = async () => {
   }
 
   // 提前校验：K线类型需要日期范围
-  const needsDateTypes = ['kline_daily', 'kline_minute', 'dividends']
+  const needsDateTypes = ['kline_daily', 'index_daily', 'kline_minute', 'dividends']
   const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
   if (hasNeedDate) {
-    if (!syncConfig.value.dateRange || !syncConfig.value.dateRange[0] || !syncConfig.value.dateRange[1]) {
+    if (!syncConfig.value.startDate || !syncConfig.value.endDate) {
       ElMessage.warning('K线数据同步需要选择日期范围')
       return
     }
@@ -447,20 +541,21 @@ const handleStartSync = async () => {
   }
 
   isSubmitting.value = true
+  const symbolRetryTypes = new Set(['stock_info', 'stock_full', 'kline_daily', 'kline_minute', 'realtime_mv', 'dividends'])
 
   // 按顺序同步选中的类型
   for (const syncType of syncConfig.value.syncTypes) {
     try {
       const params: Parameters<typeof syncApi.trigger>[0] = {
-        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv' | 'dividends',
+        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'index_daily' | 'kline_minute' | 'realtime_mv' | 'dividends',
         failure_strategy: syncConfig.value.failureStrategy as 'skip' | 'retry' | 'stop',
         full_sync: syncConfig.value.fullSync,  // 传递全量更新标记
       }
 
       // 只有 K 线数据才需要日期范围
-      if (['kline_daily', 'kline_minute'].includes(syncType)) {
-        params.start_date = syncConfig.value.dateRange![0]
-        params.end_date = syncConfig.value.dateRange![1]
+      if (['kline_daily', 'index_daily', 'kline_minute'].includes(syncType)) {
+        params.start_date = syncConfig.value.startDate
+        params.end_date = syncConfig.value.endDate
       }
 
       // 全量同步标记
@@ -474,11 +569,25 @@ const handleStartSync = async () => {
           .split(',')
           .map(s => s.trim())
           .filter(Boolean)
+      } else {
+        const retrySymbols = latestRetrySymbolsFor(syncType)
+        if (retrySymbols.length) {
+          if (syncType === 'index_daily') {
+            params.index_symbols = retrySymbols
+          } else if (symbolRetryTypes.has(syncType)) {
+            params.symbols = retrySymbols
+          }
+        }
       }
 
       const response = await syncApi.trigger(params)
       syncStatus.value = response
-      ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
+      const retriedCount = (params.index_symbols?.length || params.symbols?.length || 0)
+      if (retriedCount > 0 && syncConfig.value.stockScope !== 'custom') {
+        ElMessage.success(`${syncTypeLabel(syncType)} 已启动，优先重试 ${retriedCount} 个失败项`)
+      } else {
+        ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
+      }
     } catch (error) {
       console.error('Sync error:', error)
       ElMessage.error('启动同步失败')
@@ -490,9 +599,20 @@ const handleStartSync = async () => {
   isSubmitting.value = false
 }
 
-// 停止同步（目前后端不支持取消，仅作为 UI 提示）
-const handleStopSync = () => {
-  ElMessage.warning('同步任务正在运行，请等待完成')
+// 停止同步
+const handleStopSync = async () => {
+  try {
+    const response = await syncApi.cancel()
+    if (response?.cancelled) {
+      ElMessage.success('同步已取消')
+    } else {
+      ElMessage.info('当前没有正在运行的同步任务')
+    }
+    await loadSyncStatus()
+  } catch (error) {
+    console.error('Cancel sync error:', error)
+    ElMessage.error('取消同步失败')
+  }
 }
 
 // 开始轮询状态
@@ -502,8 +622,7 @@ const startPolling = () => {
   }
   pollingTimer = setInterval(async () => {
     try {
-      const response = await syncApi.getStatus()
-      syncStatus.value = response
+      await loadSyncStatus()
 
       // 如果同步完成或失败，停止轮询
       if (syncStatus.value.status !== 'running') {
@@ -541,8 +660,7 @@ const loadLogs = async () => {
 onMounted(async () => {
   // 获取初始状态
   try {
-    const response = await syncApi.getStatus()
-    syncStatus.value = response
+    await loadSyncStatus()
     // 如果正在同步，开始轮询
     if (syncStatus.value.status === 'running') {
       startPolling()
@@ -611,6 +729,22 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.date-range-fields,
+.date-shortcuts {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.date-shortcuts {
+  margin-top: 8px;
+}
+
+.date-separator {
+  color: var(--text-secondary, #909399);
+}
+
 .status-content {
   display: flex;
   flex-direction: column;
@@ -639,6 +773,35 @@ onUnmounted(() => {
   font-size: 12px;
   color: #909399;
   margin-top: 4px;
+}
+
+.sync-detail-panel {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid rgba(64, 158, 255, 0.16);
+  border-radius: 8px;
+  background: rgba(64, 158, 255, 0.06);
+}
+
+.sync-detail-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.sync-detail-row + .sync-detail-row {
+  margin-top: 6px;
+}
+
+.sync-detail-label {
+  min-width: 64px;
+  color: #909399;
+}
+
+.sync-detail-value {
+  color: #dce6f9;
+  word-break: break-all;
 }
 
 .status-desc {

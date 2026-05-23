@@ -228,34 +228,34 @@ def _append_catalog_dependency_check(
     if dep.startswith("klines_daily") or dep == "klines_daily":
         checks.setdefault("klines_daily", {
             "dependency": "klines_daily",
-            "label": "鏃ョ嚎琛屾儏",
+            "label": "日线行情",
             "latest_date": _latest_market_date("klines_daily"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "kline_daily",
-            "reason": f"{factor_name} 闇€瑕佹棩绾胯鎯呮暟鎹€?",
+            "reason": f"{factor_name} 需要日线行情数据",
         })
         return
     if dep.startswith("financial_data") or dep == "financial_data":
         checks.setdefault("financial_data", {
             "dependency": "financial_data",
-            "label": "璐㈠姟鏁版嵁",
+            "label": "财务数据",
             "latest_date": _latest_sqlite_date("financial_data", "report_date"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "financial_data",
-            "reason": f"{factor_name} 闇€瑕佽储鍔℃姤琛ㄦ暟鎹€?",
+            "reason": f"{factor_name} 需要财务报表数据",
         })
         return
     if dep.startswith("stock_daily_basic") or dep == "stock_daily_basic":
         checks.setdefault("stock_daily_basic", {
             "dependency": "stock_daily_basic",
-            "label": "姣忔棩鍩虹鎸囨爣/甯傚€?",
+            "label": "每日基础指标/市值",
             "latest_date": _latest_sqlite_date("stock_daily_basic", "trade_date"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "tushare_daily",
-            "reason": f"{factor_name} 闇€瑕?stock_daily_basic 鏁版嵁",
+            "reason": f"{factor_name} 需要 stock_daily_basic 数据",
         })
 
 

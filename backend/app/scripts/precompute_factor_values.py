@@ -1,4 +1,4 @@
-"""Precompute factor research features into Parquet feature_values."""
+"""Precompute factor research values into Parquet factor_values."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services.feature_precompute import precompute_high_volume_features, precompute_small_cap_core_features
+from app.services.factor_precompute import precompute_high_volume_features, precompute_small_cap_core_features
 
 
 def _symbols(text: str | None) -> list[str] | None:
@@ -20,8 +20,8 @@ def _symbols(text: str | None) -> list[str] | None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Precompute generic feature values.")
-    parser.add_argument("--feature", default="high_volume_signal")
+    parser = argparse.ArgumentParser(description="Precompute generic factor values.")
+    parser.add_argument("--factor", default="high_volume_signal")
     parser.add_argument("--group", choices=["small_cap_v4_core"])
     parser.add_argument("--start", required=True)
     parser.add_argument("--end", required=True)
@@ -47,21 +47,21 @@ def main() -> None:
 
     supported = {
         "cum_volume_at_time",
-        "max_volume_nd",
+        "rolling_max_volume",
         "high_volume_ratio",
         "high_volume_signal",
-        "smallcap_market_cap",
-        "smallcap_market_cap_rank",
-        "smallcap_is_st",
-        "smallcap_is_paused",
-        "smallcap_is_limit_up",
-        "smallcap_is_limit_down",
-        "smallcap_yesterday_limit_up",
+        "market_cap",
+        "market_cap_rank",
+        "is_st",
+        "is_paused",
+        "is_limit_up",
+        "is_limit_down",
+        "yesterday_limit_up",
     }
-    if args.feature not in supported:
-        raise SystemExit(f"Unsupported feature: {args.feature}. Supported: {sorted(supported)}")
+    if args.factor not in supported:
+        raise SystemExit(f"Unsupported factor: {args.factor}. Supported: {sorted(supported)}")
 
-    if args.feature in {"cum_volume_at_time", "max_volume_nd", "high_volume_ratio", "high_volume_signal"}:
+    if args.factor in {"cum_volume_at_time", "rolling_max_volume", "high_volume_ratio", "high_volume_signal"}:
         result = precompute_high_volume_features(
             start_date=args.start,
             end_date=args.end,

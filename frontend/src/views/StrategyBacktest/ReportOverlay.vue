@@ -19,7 +19,7 @@
         </div>
       </section>
 
-      <!-- Section 2: Charts — NAV + Drawdown + Daily Returns -->
+      <!-- Section 2: Charts - NAV + Drawdown + Daily Returns -->
       <section class="report-section">
         <h3>净值曲线</h3>
         <div class="charts-row">
@@ -52,12 +52,15 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="price" label="价格" width="80">
-            <template #default="{ row }">{{ row.price?.toFixed(2) }}</template>
+          <el-table-column label="开仓价" width="80">
+            <template #default="{ row }">{{ formatTradePrice(row.entry_price ?? row.price) }}</template>
+          </el-table-column>
+          <el-table-column label="平仓价" width="80">
+            <template #default="{ row }">{{ formatTradePrice(row.exit_price ?? row.display_price) }}</template>
           </el-table-column>
           <el-table-column prop="quantity" label="数量" width="80" />
           <el-table-column label="金额" width="110">
-            <template #default="{ row }">{{ Math.round((row.price || 0) * (row.quantity || 0)).toLocaleString() }}</template>
+            <template #default="{ row }">{{ Math.round((tradeDisplayPrice(row) || 0) * (row.quantity || 0)).toLocaleString() }}</template>
           </el-table-column>
           <el-table-column prop="commission" label="手续费" width="80">
             <template #default="{ row }">{{ (row.commission || 0).toFixed(2) }}</template>
@@ -67,7 +70,7 @@
               <span v-if="row.pnl != null" :style="{ color: pnlColor(row), fontWeight: 600 }">
                 {{ row.pnl >= 0 ? '+' : '' }}{{ row.pnl.toFixed(2) }}
               </span>
-              <span v-else style="color:#888">—</span>
+              <span v-else style="color:#888">-</span>
             </template>
           </el-table-column>
         </el-table>
@@ -116,10 +119,10 @@
             </template>
           </el-table-column>
           <el-table-column label="买均价" width="90" sortable prop="avg_buy_price">
-            <template #default="{ row }">{{ row.avg_buy_price?.toFixed(2) || '—' }}</template>
+            <template #default="{ row }">{{ row.avg_buy_price?.toFixed(2) || '-' }}</template>
           </el-table-column>
           <el-table-column label="卖均价" width="90" sortable prop="avg_sell_price">
-            <template #default="{ row }">{{ row.avg_sell_price?.toFixed(2) || '—' }}</template>
+            <template #default="{ row }">{{ row.avg_sell_price?.toFixed(2) || '-' }}</template>
           </el-table-column>
           <el-table-column prop="buy_count" label="买入次数" width="80" sortable />
           <el-table-column prop="sell_count" label="卖出次数" width="80" sortable />
@@ -135,7 +138,7 @@
         <div class="summary-grid">
           <div class="summary-item">
             <span class="summary-label">回测区间</span>
-            <span class="summary-value">{{ result.start_date }} → {{ result.end_date }}</span>
+            <span class="summary-value">{{ result.start_date }} 鈫?{{ result.end_date }}</span>
           </div>
           <div class="summary-item">
             <span class="summary-label">交易天数</span>
@@ -155,17 +158,17 @@
           </div>
           <div class="summary-item">
             <span class="summary-label">年化波动率</span>
-            <span class="summary-value">{{ result.annual_volatility ? (result.annual_volatility * 100).toFixed(2) + '%' : '—' }}</span>
+            <span class="summary-value">{{ result.annual_volatility ? (result.annual_volatility * 100).toFixed(2) + '%' : '-' }}</span>
           </div>
           <div class="summary-item">
             <span class="summary-label">平均单笔收益</span>
             <span class="summary-value" :style="{ color: (result.avg_return || 0) >= 0 ? '#d93026' : '#137333' }">
-              {{ result.avg_return != null ? (result.avg_return >= 0 ? '+¥' : '-¥') + Math.abs(result.avg_return).toFixed(2) : '—' }}
+              {{ result.avg_return != null ? (result.avg_return >= 0 ? '+¥' : '-¥') + Math.abs(result.avg_return).toFixed(2) : '-' }}
             </span>
           </div>
           <div class="summary-item">
             <span class="summary-label">日均换手率</span>
-            <span class="summary-value">{{ result.turnover_rate ? (result.turnover_rate * 100).toFixed(2) + '%' : '—' }}</span>
+            <span class="summary-value">{{ result.turnover_rate ? (result.turnover_rate * 100).toFixed(2) + '%' : '-' }}</span>
           </div>
         </div>
       </section>
@@ -206,6 +209,9 @@ interface Trade {
   symbol?: string
   direction?: string
   price?: number
+  display_price?: number
+  entry_price?: number
+  exit_price?: number
   quantity?: number
   commission?: number
   pnl?: number | null
@@ -275,9 +281,9 @@ const returnChartRef = ref<HTMLElement | null>(null)
 let navChart: echarts.ECharts | null = null
 let returnChart: echarts.ECharts | null = null
 
-// ── QuantStats report ──
+// QuantStats report
 const showInlineReport = ref(false)
-const reportUrl = computed(() => `/api/v2/backtest/report/${props.taskId}`)
+const reportUrl = computed(() => `/api/backtest/report/${props.taskId}`)
 
 const openReport = () => {
   window.open(reportUrl.value, '_blank')
@@ -287,7 +293,7 @@ const viewInlineReport = () => {
   showInlineReport.value = !showInlineReport.value
 }
 
-// ── Stock names ──
+// Stock names
 const stockNameMap = ref<Record<string, string>>({})
 
 async function fetchStockNames(symbols: string[]) {
@@ -297,7 +303,7 @@ async function fetchStockNames(symbols: string[]) {
   try {
     const { default: request } = await import('@/api/request')
     const data = await request.get<Record<string, string>>(
-      `/v2/backtest/stock-names?symbols=${unique.join(',')}`
+      `/backtest/stock-names?symbols=${unique.join(',')}`
     )
     if (data) {
       stockNameMap.value = { ...stockNameMap.value, ...data }
@@ -305,19 +311,19 @@ async function fetchStockNames(symbols: string[]) {
   } catch { /* non-critical */ }
 }
 
-// ── CSV download ──
+// CSV download
 function downloadTradesCSV() {
   const trades = props.result?.trades || []
   if (!trades.length) return
-  const header = '日期,代码,名称,方向,价格,数量,金额,手续费,盈亏'
+  const header = '日期,代码,名称,方向,开仓价,平仓价,数量,金额,手续费,盈亏'
   const rows = trades.map(t => {
     const name = stockNameMap.value[t.symbol || ''] || ''
-    const amount = ((t.price || 0) * (t.quantity || 0)).toFixed(0)
+    const amount = ((tradeDisplayPrice(t) || 0) * (t.quantity || 0)).toFixed(0)
     const dir = t.direction === 'buy' ? '买' : '卖'
     const pnl = t.pnl != null ? t.pnl.toFixed(2) : ''
-    return `${t.trade_date || ''},${t.symbol || ''},${name},${dir},${t.price?.toFixed(2) || ''},${t.quantity || ''},${amount},${(t.commission || 0).toFixed(2)},${pnl}`
+    return `${t.trade_date || ''},${t.symbol || ''},${name},${dir},${formatTradePrice(t.entry_price ?? t.price)},${formatTradePrice(t.exit_price ?? t.display_price)},${t.quantity || ''},${amount},${(t.commission || 0).toFixed(2)},${pnl}`
   })
-  const BOM = '﻿'
+  const BOM = '\ufeff'
   const csv = BOM + header + '\n' + rows.join('\n')
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
@@ -328,8 +334,16 @@ function downloadTradesCSV() {
   URL.revokeObjectURL(url)
 }
 
+function tradeDisplayPrice(row: Trade): number | null {
+  return row.display_price ?? row.exit_price ?? row.price ?? row.entry_price ?? null
+}
+
+function formatTradePrice(value: number | null | undefined): string {
+  return value == null ? '-' : value.toFixed(2)
+}
+
 function fmtPct(v: number | null | undefined): string {
-  if (v == null) return '—'
+  if (v == null) return '-'
   return (v * 100).toFixed(2) + '%'
 }
 
@@ -349,17 +363,17 @@ const allMetrics = computed(() => {
   return [
     { label: '总收益率', value: fmtPct(r.total_return), color: colorPct(r.total_return) },
     { label: '年化收益', value: fmtPct(r.annual_return), color: colorPct(r.annual_return) },
-    { label: 'Sharpe', value: (r.sharpe ?? r.sharpe_ratio)?.toFixed(2) || '—', color: '#e2e2ea' },
-    { label: 'Sortino', value: (r.sortino ?? r.sortino_ratio)?.toFixed(2) || '—', color: '#e2e2ea' },
+    { label: 'Sharpe', value: (r.sharpe ?? r.sharpe_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
+    { label: 'Sortino', value: (r.sortino ?? r.sortino_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
     { label: '最大回撤', value: fmtPct(r.max_drawdown), color: '#137333' },
-    { label: 'Calmar', value: (r.calmar ?? r.calmar_ratio)?.toFixed(2) || '—', color: '#e2e2ea' },
-    { label: 'Alpha', value: r.alpha?.toFixed(4) || '—', color: colorPct(r.alpha) },
-    { label: 'Beta', value: r.beta?.toFixed(4) || '—', color: '#e2e2ea' },
-    { label: '信息比率', value: r.information_ratio?.toFixed(2) || '—', color: '#e2e2ea' },
-    { label: '胜率', value: r.win_rate != null ? (r.win_rate * 100).toFixed(1) + '%' : '—', color: '#e2e2ea' },
-    { label: '总成交', value: r.total_trades != null ? String(r.total_trades) : '—', color: '#e2e2ea' },
-    { label: '开仓标的', value: r.total_positions != null ? String(r.total_positions) : '—', color: '#a78bfa' },
-    { label: '最终资金', value: r.final_capital ? '¥' + (r.final_capital / 10000).toFixed(2) + '万' : '—', color: '#a78bfa' },
+    { label: 'Calmar', value: (r.calmar ?? r.calmar_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
+    { label: 'Alpha', value: r.alpha?.toFixed(4) || '-', color: colorPct(r.alpha) },
+    { label: 'Beta', value: r.beta?.toFixed(4) || '-', color: '#e2e2ea' },
+    { label: '信息比率', value: r.information_ratio?.toFixed(2) || '-', color: '#e2e2ea' },
+    { label: '胜率', value: r.win_rate != null ? (r.win_rate * 100).toFixed(1) + '%' : '-', color: '#e2e2ea' },
+    { label: '总成交', value: r.total_trades != null ? String(r.total_trades) : '-', color: '#e2e2ea' },
+    { label: '开仓标的', value: r.total_positions != null ? String(r.total_positions) : '-', color: '#a78bfa' },
+    { label: '最终资金', value: r.final_capital ? '¥' + (r.final_capital / 10000).toFixed(2) + '万' : '-', color: '#a78bfa' },
   ]
 })
 
@@ -383,8 +397,8 @@ const symbolPnls = computed<SymbolPnl[]>(() => {
   const results: SymbolPnl[] = []
   for (const [sym, { buys, sells }] of map) {
     const total_pnl = sells.reduce((sum, t) => sum + (t.pnl || 0), 0)
-    const avg_buy = buys.length > 0 ? buys.reduce((s, t) => s + (t.price || 0), 0) / buys.length : null
-    const avg_sell = sells.length > 0 ? sells.reduce((s, t) => s + (t.price || 0), 0) / sells.length : null
+    const avg_buy = buys.length > 0 ? buys.reduce((s, t) => s + (t.entry_price ?? t.price ?? 0), 0) / buys.length : null
+    const avg_sell = sells.length > 0 ? sells.reduce((s, t) => s + (t.exit_price ?? t.display_price ?? t.price ?? 0), 0) / sells.length : null
     const win_sells = sells.filter(t => (t.pnl || 0) > 0).length
     results.push({
       symbol: sym,
@@ -402,7 +416,7 @@ const symbolPnls = computed<SymbolPnl[]>(() => {
 
 const totalSymbolPnl = computed(() => symbolPnls.value.reduce((s, x) => s + x.total_pnl, 0))
 
-// ── Charts ──
+// Charts
 function disposeCharts() {
   if (navChart) { navChart.dispose(); navChart = null }
   if (returnChart) { returnChart.dispose(); returnChart = null }
@@ -450,12 +464,12 @@ function renderCharts() {
       tooltip: {
         trigger: 'axis',
         formatter: (ps: any) => {
-          const pt = ps.find((p: any) => p.seriesName === '净值')
+          const pt = ps.find((p: any) => p.seriesName === 'NAV')
           const ddPt = ps.find((p: any) => p.seriesName === '回撤')
-          return `${ps[0].axisValue}<br/>净值: ${pt?.data?.toFixed(4) || '—'}<br/>回撤: ${ddPt?.data?.toFixed(2) || '—'}%`
+          return `${ps[0].axisValue}<br/>NAV: ${pt?.data?.toFixed(4) || '-'}<br/>Drawdown: ${ddPt?.data?.toFixed(2) || '-'}%`
         },
       },
-      legend: { data: ['净值', '回撤'], textStyle: { color: '#8888a0', fontSize: 11 }, top: 0 },
+      legend: { data: ['NAV', 'Drawdown'], textStyle: { color: '#8888a0', fontSize: 11 }, top: 0 },
       grid: { left: 60, right: 60, top: 30, bottom: 30 },
       xAxis: {
         type: 'category', data: navData.map(d => d.date),
@@ -464,7 +478,7 @@ function renderCharts() {
       },
       yAxis: [
         {
-          type: 'value', name: '净值', nameTextStyle: { color: '#8888a0', fontSize: 10 },
+          type: 'value', name: 'NAV', nameTextStyle: { color: '#8888a0', fontSize: 10 },
           axisLabel: { color: '#8888a0', fontSize: 10 },
           splitLine: { lineStyle: { color: '#1a1a25' } },
         },
@@ -476,7 +490,7 @@ function renderCharts() {
       ],
       series: [
         {
-          name: '净值', type: 'line', yAxisIndex: 0, data: nvs,
+          name: 'NAV', type: 'line', yAxisIndex: 0, data: nvs,
           lineStyle: { color: '#38bdf8', width: 1.5 },
           areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
             { offset: 0, color: 'rgba(56,189,248,0.15)' },
@@ -499,7 +513,7 @@ function renderCharts() {
     returnChart = echarts.init(returnChartRef.value)
     const returns = retData.map(d => d.return * 100)
     returnChart.setOption({
-      tooltip: { trigger: 'axis', formatter: (ps: any) => `${ps[0].axisValue}<br/>日收益: ${ps[0].data?.toFixed(4)}%` },
+      tooltip: { trigger: 'axis', formatter: (ps: any) => `${ps[0].axisValue}<br/>日收益 ${ps[0].data?.toFixed(4)}%` },
       grid: { left: 50, right: 20, top: 30, bottom: 30 },
       xAxis: {
         type: 'category', data: retData.map(d => d.date),
@@ -507,12 +521,12 @@ function renderCharts() {
         axisLine: { lineStyle: { color: '#2a2a35' } },
       },
       yAxis: {
-        type: 'value', name: '日收益 %', nameTextStyle: { color: '#8888a0', fontSize: 10 },
+        type: 'value', name: '日收益%', nameTextStyle: { color: '#8888a0', fontSize: 10 },
         axisLabel: { color: '#8888a0', fontSize: 10, formatter: '{value}%' },
         splitLine: { lineStyle: { color: '#1a1a25' } },
       },
       series: [{
-        name: '日收益', type: 'bar', data: returns,
+        name: 'Daily Return', type: 'bar', data: returns,
         itemStyle: {
           color: (p: any) => p.data >= 0 ? '#d93026' : '#137333',
           borderRadius: [0, 0, 0, 0],
