@@ -175,7 +175,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
 import { factorValueApi, type FactorValueDefinition } from '@/api/factorValues'
 import { factorResearchRunApi, type FactorResearchRunDetail } from '@/api/factorResearchRuns'

@@ -202,7 +202,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue'
 import { Download, Document } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 
 interface Trade {
   trade_date?: string

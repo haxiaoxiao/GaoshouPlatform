@@ -146,7 +146,7 @@
 import { ref, watch, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { backtestApi, type BacktestReport as BacktestReportType } from '@/api/backtest'
 import { formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
 

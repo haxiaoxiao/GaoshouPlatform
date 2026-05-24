@@ -1,8 +1,10 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { VueQueryPlugin, QueryClient } from '@tanstack/vue-query'
-import ElementPlus from 'element-plus'
-import 'element-plus/dist/index.css'
+import { ElLoading } from 'element-plus'
+import 'element-plus/theme-chalk/el-message.css'
+import 'element-plus/theme-chalk/el-message-box.css'
+import 'element-plus/theme-chalk/el-loading.css'
 
 import App from './App.vue'
 import router from './router'
@@ -24,7 +26,7 @@ const queryClient = new QueryClient({
 app.use(createPinia())
 app.use(VueQueryPlugin, { queryClient })
 app.use(router)
-app.use(ElementPlus)
+app.use(ElLoading)
 
 // 全局错误处理，防止错误导致 Vue 响应式系统失效
 app.config.errorHandler = (err, _instance, info) => {

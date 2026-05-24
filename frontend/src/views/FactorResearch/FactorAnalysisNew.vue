@@ -56,7 +56,7 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { evaluationApi } from '@/api/factorResearch'
 import type { FactorReport, StockPool } from '@/types/factor'
 

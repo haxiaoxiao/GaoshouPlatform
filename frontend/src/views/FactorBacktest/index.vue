@@ -61,7 +61,7 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { factorBacktestApi } from '@/api/v2'
 import type { BacktestReport, BtConfig } from '@/types/factor'
 

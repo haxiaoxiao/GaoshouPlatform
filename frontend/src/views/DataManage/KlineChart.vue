@@ -35,8 +35,19 @@ const sortedData = computed(() =>
 )
 
 const toChartTime = (value: string): Time => {
-  const normalized = value.includes('T') ? value.slice(0, 10) : value.split(' ')[0]
-  return normalized as Time
+  const text = String(value || '').trim()
+  if (!text) return '' as Time
+
+  const hasClock = text.includes('T') || /\d{2}:\d{2}/.test(text)
+  if (!hasClock) {
+    return text.slice(0, 10) as Time
+  }
+
+  const timestamp = Date.parse(text.includes('T') ? text : text.replace(' ', 'T'))
+  if (Number.isNaN(timestamp)) {
+    return text.slice(0, 10) as Time
+  }
+  return Math.floor(timestamp / 1000) as Time
 }
 
 const candleData = computed<CandlestickData[]>(() =>
@@ -57,6 +68,10 @@ const volumeData = computed<HistogramData[]>(() =>
   }))
 )
 
+const hasIntradayData = computed(() =>
+  sortedData.value.some((item) => /\d{2}:\d{2}/.test(String(item.datetime)))
+)
+
 const resizeChart = () => {
   if (!chart.value || !chartRef.value) return
   const rect = chartRef.value.getBoundingClientRect()
@@ -65,6 +80,12 @@ const resizeChart = () => {
 
 const updateSeries = () => {
   if (!candleSeries.value || !volumeSeries.value) return
+  chart.value?.applyOptions({
+    timeScale: {
+      timeVisible: hasIntradayData.value,
+      secondsVisible: false,
+    },
+  })
   candleSeries.value.setData(candleData.value)
   volumeSeries.value.setData(volumeData.value)
   chart.value?.timeScale().fitContent()
@@ -92,7 +113,7 @@ const initChart = () => {
     },
     timeScale: {
       borderColor: 'rgba(148, 163, 184, 0.18)',
-      timeVisible: false,
+      timeVisible: hasIntradayData.value,
       secondsVisible: false,
     },
   })

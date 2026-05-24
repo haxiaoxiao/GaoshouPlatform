@@ -111,7 +111,7 @@
 import { ref, onMounted, nextTick, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { factorApi, type FactorAnalysis } from '@/api/factor'
 
 const route = useRoute()
