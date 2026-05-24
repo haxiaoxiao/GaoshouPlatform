@@ -53,25 +53,49 @@ class FactorResearchRunService:
 
     async def prepare(self, payload: dict[str, Any]) -> dict[str, Any]:
         params = self._normalized_params(payload)
+        start_date = date.fromisoformat(str(payload["start_date"]))
+        end_date = date.fromisoformat(str(payload["end_date"]))
+        stock_pool_value = str(payload["stock_pool_value"])
+        symbols: list[str] = []
+        pool_error: str | None = None
+        try:
+            symbols = await self._resolve_symbols(stock_pool_value, start_date, end_date)
+        except Exception as exc:
+            pool_error = str(exc)
         existing = await self.find_latest(
             factor_name=str(payload["factor_name"]),
-            stock_pool_value=str(payload["stock_pool_value"]),
+            stock_pool_value=stock_pool_value,
             params_hash=research_params_hash(params),
         )
         coverage = get_factor_value_store().coverage(
             str(payload["factor_name"]),
-            start_date=date.fromisoformat(str(payload["start_date"])),
-            end_date=date.fromisoformat(str(payload["end_date"])),
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbols or None,
         )
         is_custom_factor = await self._is_custom_factor(str(payload["factor_name"]))
-        has_cached_values = bool(coverage.get("total_rows"))
+        max_cached_date = str(coverage.get("max_date") or "")
+        covers_requested_end = bool(max_cached_date) and max_cached_date >= end_date.isoformat()
+        has_cached_values = bool(coverage.get("total_rows")) and bool(symbols) and covers_requested_end
+        if pool_error:
+            message = pool_error
+        elif has_cached_values or is_custom_factor:
+            message = None
+        else:
+            message = (
+                "内置因子缺少当前股票池/区间的缓存。"
+                f"股票池 {stock_pool_value} 解析到 {len(symbols)} 只，"
+                f"当前覆盖 {int(coverage.get('symbol_count') or 0)} 只，"
+                f"缓存日期至 {max_cached_date or '无'}，目标至 {end_date.isoformat()}；"
+                "请先在因子缓存页完成预计算。"
+            )
         return {
             "cache_hit": existing is not None,
             "latest_run": self._summary_from_model(existing) if existing else None,
             "params_hash": research_params_hash(params),
             "coverage": coverage,
             "can_run": has_cached_values or is_custom_factor,
-            "message": None if has_cached_values or is_custom_factor else "内置因子缺少缓存，请先在因子缓存页完成预计算。",
+            "message": message,
         }
 
     async def run(self, payload: dict[str, Any], *, force: bool = False) -> dict[str, Any]:

@@ -14,6 +14,7 @@ export interface FactorValueDefinition {
   lookback_days: number
   point_in_time_safe: boolean
   source: string
+  formula?: string
   version?: string
   data_policy?: Record<string, unknown>
 }

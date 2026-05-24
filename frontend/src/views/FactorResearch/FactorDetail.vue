@@ -186,6 +186,12 @@ const todayText = new Date().toISOString().slice(0, 10)
 const defaultStart = new Date()
 defaultStart.setFullYear(defaultStart.getFullYear() - 3)
 
+function queryDate(key: 'start_date' | 'end_date', fallback: string) {
+  const value = route.query[key]
+  if (typeof value !== 'string') return fallback
+  return /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : fallback
+}
+
 const loading = ref(false)
 const running = ref(false)
 const prepareMessage = ref('')
@@ -197,8 +203,8 @@ const poolEnabledIndexes = computed(() => indexCatalog.value.filter(item => item
 
 const form = reactive({
   stock_pool_value: String(route.query.stock_pool || 'zz500'),
-  start_date: defaultStart.toISOString().slice(0, 10),
-  end_date: todayText,
+  start_date: queryDate('start_date', defaultStart.toISOString().slice(0, 10)),
+  end_date: queryDate('end_date', todayText),
   portfolio_type: String(route.query.portfolio_type || 'long_only') as 'long_only' | 'long_short_i' | 'long_short_ii',
   rebalance_period: 'monthly' as 'daily' | 'weekly' | 'monthly',
   fee_rate: feeRateFromQuery(),
@@ -251,6 +257,8 @@ function feeRateFromQuery() {
 }
 
 function inferLogic(item: FactorValueDefinition | null, factor: string) {
+  const alphaLogic = inferAlpha101Logic(factor)
+  if (alphaLogic) return alphaLogic
   if (item?.description) return item.description
   if (factor.startsWith('ta_')) return '技术分析因子，基于日线 OHLCV 序列按 TA-Lib 同名函数计算。'
   if (factor.startsWith('alpha101_')) return 'WorldQuant Alpha101 横截面/时序公式因子，本地实现使用 A 股日线面板数据计算。'
@@ -269,9 +277,17 @@ function inferFormula(item: (FactorValueDefinition & { formula?: string; express
   if (researchFormula) return researchFormula
   if (factor.startsWith('alpha101_')) {
     const id = factor.slice(-3)
-    return `Alpha101 #${id}: 调用 backend/app/services/alpha101_calculator.py 中 alpha${id} 对应公式；输入为 open/high/low/close/volume/vwap/returns/cap 面板，算子包括 rank、delta、correlation、decay_linear、ts_rank 等。`
+    return `Alpha101 #${id}: 调用 backend/app/services/alpha101_calculator.py 中 alpha_${Number(id)} 对应公式；输入为 open/high/low/close/volume/vwap/return/market_value 面板，算子包括 rank、delta、correlation、decay_linear、ts_rank 等。`
   }
   return item?.description || '未登记公式；如为自定义因子，公式来自 factors.code / parameters.expression。'
+}
+
+function inferAlpha101Logic(factor: string) {
+  if (!factor.startsWith('alpha101_')) return ''
+  if (factor === 'alpha101_002') {
+    return 'Alpha101 #002 衡量“成交量变化”和“日内价格强弱”之间的 6 日滚动相关性，并取负值。具体做法是：先计算 log(volume) 的 2 日变化并做当日横截面排名，再计算 (close - open) / open 代表日内收益并做横截面排名，最后对每只股票滚动计算两者 6 日相关系数并乘以 -1。值越高通常表示量能变化与日内强弱越负相关，属于短周期价量背离/反转类信号。'
+  }
+  return 'Alpha101 因子通常把“横截面排序 rank”和“单只股票滚动时序算子”组合起来。你可以按公式从内向外读：先构造价格、成交量、收益率等基础序列，再在每个交易日做横截面 rank，或在每只股票内部做 rolling correlation/delta/ts_rank，最后得到每日每只股票的截面分值。'
 }
 
 const builtInFormulaMap: Record<string, string> = {

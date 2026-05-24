@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.services.factor_value_store import (
@@ -228,7 +229,7 @@ async def precompute(request: FactorPrecomputeRequest = Body(...)) -> dict[str, 
         meta={"rows_written": result.get("rows_written") if isinstance(result, dict) else None},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
             factor_names=request.factor_names,
             start_date=request.start_date,
@@ -278,7 +279,7 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         meta={"rows_written": result.get("rows_written") if isinstance(result, dict) else None},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
             factor_names=group.get("factor_names") or [],
             start_date=request.start_date,
@@ -394,7 +395,7 @@ async def _execute_group_precompute(
         params=request.params or {},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
             factor_names=group.get("factor_names") or [],
             start_date=request.start_date,
@@ -533,7 +534,7 @@ async def _run_single_precompute_task(task_id: str, request: FactorPrecomputeReq
     try:
         result = await _execute_single_precompute(task_id, request)
         if isinstance(result, dict):
-            _attach_result_coverage(
+            _safe_attach_result_coverage(
                 result,
                 factor_names=request.factor_names,
                 start_date=request.start_date,
@@ -605,6 +606,25 @@ def _attach_result_coverage(
             "is_complete_to_end": data.get("max_date") == end_date.isoformat(),
         })
     result["coverage_ranges"] = ranges
+
+
+def _safe_attach_result_coverage(
+    result: dict[str, Any],
+    *,
+    factor_names: list[str],
+    start_date: date,
+    end_date: date,
+) -> None:
+    try:
+        _attach_result_coverage(
+            result,
+            factor_names=factor_names,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning("Attach factor precompute coverage failed after write: {}", exc)
+        result["coverage_warning"] = str(exc)
 
 
 @router.post("/query")

@@ -48,6 +48,13 @@ def test_catalog_groups_are_exposed() -> None:
     assert get_factor_definition("research_low_beta")["source"] == "catalog.research"
 
 
+def test_alpha101_definition_exposes_formula() -> None:
+    definition = get_factor_definition("alpha101_002")
+    assert definition["formula"].startswith("Alpha#2:")
+    assert "correlation" in definition["formula"]
+    assert "klines_daily.close" in definition["dependencies"]
+
+
 def test_alpha101_binary_formulas_do_not_raise() -> None:
     calculator = Alphas(_alpha_input_frame())
     factor_methods = [

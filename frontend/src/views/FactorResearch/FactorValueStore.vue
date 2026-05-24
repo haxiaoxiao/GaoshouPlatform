@@ -687,12 +687,47 @@ const pollPrecomputeTask = async (taskId: string): Promise<RuntimeTask> => {
     activeTask.value = task
     if (['done', 'completed'].includes(String(task.status))) return task
     if (task.status === 'failed') {
+      const recovered = await recoverCompletedPrecompute(task)
+      if (recovered) return task
       throw new Error(task.error || '因子预计算失败')
     }
     await new Promise(resolve => {
       precomputePollTimer = window.setTimeout(resolve, 1000)
     })
   }
+}
+
+const recoverCompletedPrecompute = async (task: RuntimeTask) => {
+  const result = task.meta?.result as FactorValuePrecomputeResult | undefined
+  if (result && Number(result.rows_written || 0) > 0) return true
+  const coverage = await factorValueApi.coverage({
+    ...buildQueryParams(),
+    full_range: false,
+  })
+  if (Number(coverage.total_rows || 0) <= 0) return false
+  lastResult.value = {
+    task_id: task.task_id,
+    symbols: Number(coverage.symbol_count || coverage.requested_symbol_count || 0),
+    start_date: form.startDate,
+    end_date: form.endDate,
+    as_of_time: String(buildFactorParams().time || ''),
+    window: Number(buildFactorParams().window || 0),
+    threshold: Number(buildFactorParams().threshold || 0),
+    factor_names: [form.factorName],
+    rows: { [form.factorName]: Number(coverage.total_rows || 0) },
+    rows_written: Number(coverage.total_rows || 0),
+    coverage_ranges: [{
+      factor_name: form.factorName,
+      total_rows: Number(coverage.total_rows || 0),
+      symbol_count: Number(coverage.symbol_count || 0),
+      date_count: Number(coverage.date_count || 0),
+      min_date: coverage.min_date,
+      max_date: coverage.max_date,
+      is_complete_to_end: coverage.max_date === form.endDate,
+    }],
+  }
+  ElMessage.warning('任务状态返回失败，但已检测到因子缓存写入，已按完成处理并刷新覆盖率。')
+  return true
 }
 
 const resultFromTask = (task: RuntimeTask, fallback: FactorValuePrecomputeResult) => {

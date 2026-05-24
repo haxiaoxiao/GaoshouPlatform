@@ -332,6 +332,19 @@ const batchForm = reactive({
   standardize: false,
 })
 
+function resolveDateRangeFromPeriod(period: string) {
+  const end = new Date()
+  const start = new Date(end)
+  if (period === '3m') start.setMonth(start.getMonth() - 3)
+  else if (period === '1y') start.setFullYear(start.getFullYear() - 1)
+  else if (period === '3y') start.setFullYear(start.getFullYear() - 3)
+  else if (period === '10y') start.setFullYear(start.getFullYear() - 10)
+  return {
+    start_date: start.toISOString().slice(0, 10),
+    end_date: end.toISOString().slice(0, 10),
+  }
+}
+
 async function loadWatchlistGroups() {
   try {
     watchlistGroups.value = await watchlistApi.getGroups()
@@ -388,11 +401,14 @@ function handleSortChange({ prop, order }: { prop: string; order: string | null 
 }
 
 function goToDetail(row: BoardRow) {
+  const { start_date, end_date } = resolveDateRangeFromPeriod(filters.period || '3y')
   router.push({
     path: `/factor/detail/${row.factor_name}`,
     query: {
       stock_pool: filters.stock_pool,
       period: filters.period,
+      start_date,
+      end_date,
       portfolio_type: filters.portfolio_type,
       fee_config: filters.fee_config,
       filter_limit_up: String(filters.filter_limit_up),

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+import re
 from typing import Any
 
 
@@ -18,8 +20,9 @@ def _definition(
     lookback_days: int = 0,
     source: str = "catalog",
     data_policy: dict[str, Any] | None = None,
+    formula: str | None = None,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "name": name,
         "display_name": display_name,
         "factor_type": factor_type,
@@ -36,6 +39,27 @@ def _definition(
         "version": "v1",
         "data_policy": data_policy or {},
     }
+    if formula:
+        payload["formula"] = formula
+    return payload
+
+
+def _alpha101_formula(index: int) -> str:
+    from app.services.alpha101_calculator import Alphas
+
+    method = getattr(Alphas, f"alpha_{index}", None)
+    doc = inspect.getdoc(method) if method else None
+    if not doc:
+        return f"Alpha#{index}: formula is implemented in Alphas.alpha_{index}."
+    return re.sub(r"\s+", " ", doc).strip()
+
+
+def _alpha101_description(index: int, formula: str) -> str:
+    return (
+        f"WorldQuant Alpha101 #{index:03d}. "
+        "It combines cross-sectional ranks with per-symbol rolling time-series operators. "
+        f"{formula}"
+    )
 
 
 TA_FACTOR_SPECS: dict[str, dict[str, Any]] = {
@@ -176,14 +200,31 @@ def list_catalog_definitions() -> list[dict[str, Any]]:
             source="catalog.ta_lib",
         ))
     for i in range(1, 102):
+        formula = _alpha101_formula(i)
         definitions.append(_definition(
             f"alpha101_{i:03d}",
             f"Alpha101 #{i:03d}",
             category="alpha101",
-            description="WorldQuant 101 Formulaic Alphas local-compatible implementation.",
-            lookback_days=260,
+            description=_alpha101_description(i, formula),
+            lookback_days=370,
             source="catalog.alpha101",
-            data_policy={"requires_panel": True, "industry_neutralization": "stocks.industry when available"},
+            dependencies=[
+                "klines_daily.open",
+                "klines_daily.high",
+                "klines_daily.low",
+                "klines_daily.close",
+                "klines_daily.volume",
+                "klines_daily.amount",
+                "stocks.total_mv",
+                "stocks.industry",
+            ],
+            data_policy={
+                "requires_panel": True,
+                "lookback_days": 370,
+                "rank_scope": "selected universe per trade_date",
+                "industry_neutralization": "stocks.industry when formula requires IndNeutralize",
+            },
+            formula=formula,
         ))
     for name, spec in RESEARCH_FACTOR_SPECS.items():
         definitions.append(_definition(
