@@ -277,7 +277,8 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import { syncApi, type SyncStatus, type SyncLog } from '@/api/sync'
@@ -323,8 +324,7 @@ const applyDateShortcut = (days: number) => {
   syncConfig.value.endDate = formatDate(end)
 }
 
-// 同步状态
-const syncStatus = ref<SyncStatus>({
+const defaultSyncStatus = (): SyncStatus => ({
   sync_type: null,
   status: 'idle',
   total: 0,
@@ -337,6 +337,53 @@ const syncStatus = ref<SyncStatus>({
   error_message: null,
   details: {},
 })
+
+const queryClient = useQueryClient()
+const syncStatusQuery = useQuery({
+  queryKey: ['sync-status'],
+  queryFn: syncApi.getStatus,
+  initialData: defaultSyncStatus,
+  refetchInterval: (query) => (query.state.data?.status === 'running' ? 2000 : false),
+})
+const syncLogsQuery = useQuery({
+  queryKey: ['sync-logs'],
+  queryFn: () => syncApi.getLogs({ limit: 20 }),
+  initialData: [] as SyncLog[],
+})
+const startSyncMutation = useMutation({
+  mutationFn: syncApi.trigger,
+  onSuccess: async (status) => {
+    syncStatus.value = status
+    await queryClient.invalidateQueries({ queryKey: ['sync-status'] })
+  },
+})
+const cancelSyncMutation = useMutation({
+  mutationFn: () => syncApi.cancel(),
+  onSuccess: async () => {
+    await queryClient.invalidateQueries({ queryKey: ['sync-status'] })
+    await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
+  },
+})
+
+// 同步状态
+const syncStatus = ref<SyncStatus>(defaultSyncStatus())
+
+watch(
+  () => syncStatusQuery.data.value,
+  (status) => {
+    if (status) syncStatus.value = status
+  },
+  { immediate: true }
+)
+
+watch(
+  () => syncStatus.value.status,
+  async (status, previous) => {
+    if (previous === 'running' && status !== 'running') {
+      await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
+    }
+  }
+)
 
 // 当前同步的股票代码
 const currentSymbol = computed(() => {
@@ -375,8 +422,8 @@ const syncBlockedReason = computed(() => {
 })
 
 // 同步日志
-const syncLogs = ref<SyncLog[]>([])
-const logsLoading = ref(false)
+const syncLogs = computed(() => syncLogsQuery.data.value || [])
+const logsLoading = computed(() => syncLogsQuery.isFetching.value)
 
 // 是否正在同步
 const isSyncing = computed(() => syncStatus.value.status === 'running')
@@ -390,9 +437,6 @@ const isDateRangeDisabled = computed(() => {
   // 如果没有选中任何需要日期的类型，则禁用
   return !hasNeedDate
 })
-
-// 状态轮询定时器
-let pollingTimer: ReturnType<typeof setInterval> | null = null
 
 // 状态标签类型
 const statusTagType = computed(() => {
@@ -484,7 +528,10 @@ const formatTime = (time: string | null): string => {
 const isSubmitting = ref(false)
 
 const loadSyncStatus = async () => {
-  const response = await syncApi.getStatus()
+  const response = await queryClient.fetchQuery({
+    queryKey: ['sync-status'],
+    queryFn: syncApi.getStatus,
+  })
   syncStatus.value = response
 }
 
@@ -580,7 +627,7 @@ const handleStartSync = async () => {
         }
       }
 
-      const response = await syncApi.trigger(params)
+      const response = await startSyncMutation.mutateAsync(params)
       syncStatus.value = response
       const retriedCount = (params.index_symbols?.length || params.symbols?.length || 0)
       if (retriedCount > 0 && syncConfig.value.stockScope !== 'custom') {
@@ -595,14 +642,13 @@ const handleStartSync = async () => {
     }
   }
 
-  startPolling()
   isSubmitting.value = false
 }
 
 // 停止同步
 const handleStopSync = async () => {
   try {
-    const response = await syncApi.cancel()
+    const response = await cancelSyncMutation.mutateAsync()
     if (response?.cancelled) {
       ElMessage.success('同步已取消')
     } else {
@@ -615,67 +661,24 @@ const handleStopSync = async () => {
   }
 }
 
-// 开始轮询状态
-const startPolling = () => {
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-  }
-  pollingTimer = setInterval(async () => {
-    try {
-      await loadSyncStatus()
-
-      // 如果同步完成或失败，停止轮询
-      if (syncStatus.value.status !== 'running') {
-        stopPolling()
-        await loadLogs()
-      }
-    } catch (error) {
-      console.error('Poll status error:', error)
-    }
-  }, 2000)
-}
-
-// 停止轮询
-const stopPolling = () => {
-  if (pollingTimer) {
-    clearInterval(pollingTimer)
-    pollingTimer = null
-  }
-}
-
 // 加载同步日志
 const loadLogs = async () => {
-  logsLoading.value = true
   try {
-    const response = await syncApi.getLogs({ limit: 20 })
-    syncLogs.value = response
+    await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
   } catch (error) {
     console.error('Load logs error:', error)
-  } finally {
-    logsLoading.value = false
   }
 }
 
 // 初始化
 onMounted(async () => {
-  // 获取初始状态
   try {
     await loadSyncStatus()
-    // 如果正在同步，开始轮询
-    if (syncStatus.value.status === 'running') {
-      startPolling()
-    }
   } catch (error) {
     console.error('Get initial status error:', error)
   }
 
-  // 加载日志
   await loadLogs()
-})
-
-// 清理
-onUnmounted(() => {
-  stopPolling()
 })
 </script>
 

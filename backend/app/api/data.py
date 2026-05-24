@@ -546,19 +546,6 @@ async def remove_from_watchlist(
 # ============== Sync Endpoints ==============
 
 
-@router.get("/sync/logs", include_in_schema=False)
-async def proxy_sync_logs(
-    sync_type: str | None = Query(default=None),
-    task_id: int | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-) -> dict[str, Any]:
-    return await proxy_sync_request(
-        "GET",
-        "/api/data/sync/logs",
-        params={"sync_type": sync_type, "task_id": task_id, "limit": limit},
-    )
-
-
 async def _run_sync_task(
     task_id: str,
     sync_type: str,
@@ -839,6 +826,15 @@ async def get_sync_logs(
     """
     获取同步日志列表
     """
+    try:
+        return await proxy_sync_request(
+            "GET",
+            "/api/data/sync/logs",
+            params={"sync_type": sync_type, "task_id": task_id, "limit": limit},
+        )
+    except HTTPException as exc:
+        logger.warning("Sync service logs proxy failed: {}", exc.detail)
+
     service = SyncService(session)
     logs = await service.get_sync_logs(
         sync_type=sync_type, task_id=task_id, limit=limit
