@@ -15,34 +15,29 @@
       </div>
       <el-form :inline="true" :model="form" label-width="76px" class="control-form">
         <el-form-item label="分组">
-          <el-select v-model="form.groupName" filterable class="factor-select">
-            <el-option
-              v-for="group in groups"
-              :key="group.name"
-              :label="group.display_name"
-              :value="group.name"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="form.groupName"
+            :options="groupOptions"
+            filterable
+            class="factor-select"
+          />
         </el-form-item>
         <el-form-item label="因子">
-          <el-select v-model="form.factorName" filterable class="factor-select">
-            <el-option
-              v-for="item in filteredDefinitions"
-              :key="item.name"
-              :label="item.display_name"
-              :value="item.name"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="form.factorName"
+            :options="factorOptions"
+            filterable
+            class="factor-select"
+          />
         </el-form-item>
         <el-form-item label="股票池">
-          <el-select v-model="form.indexSymbol" filterable clearable class="factor-select">
-            <el-option
-              v-for="item in indexOptions"
-              :key="item.value || 'all'"
-              :label="item.label"
-              :value="item.value"
-            />
-          </el-select>
+          <el-select-v2
+            v-model="form.indexSymbol"
+            :options="indexOptions"
+            filterable
+            clearable
+            class="factor-select"
+          />
         </el-form-item>
         <el-form-item label="查询日期">
           <div class="date-control">
@@ -443,6 +438,14 @@ const filteredDefinitions = computed(() => {
   const selectedNames = new Set(factorNames)
   return definitions.value.filter(item => selectedNames.has(item.name))
 })
+const groupOptions = computed(() => groups.value.map(group => ({
+  label: group.display_name,
+  value: group.name,
+})))
+const factorOptions = computed(() => filteredDefinitions.value.map(item => ({
+  label: `${item.display_name} (${item.name})`,
+  value: item.name,
+})))
 const previewTradeDate = computed(() => coverage.value?.max_date || form.endDate)
 const hasPreviewDateFallback = computed(() => Boolean(coverage.value?.max_date && coverage.value.max_date !== form.endDate))
 const actualCoverageRange = computed(() => {

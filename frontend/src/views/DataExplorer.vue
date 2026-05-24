@@ -7,7 +7,9 @@
           <strong>数据表</strong>
         </div>
         <el-input v-model="tableSearch" placeholder="搜索表名" clearable size="small" />
-        <div class="table-list">
+        <div v-if="tablesLoading" class="side-state">正在加载数据表...</div>
+        <div v-else-if="!filteredTables.length" class="side-state">暂无数据表</div>
+        <div v-else class="table-list">
           <button
             v-for="table in filteredTables"
             :key="table.name"
@@ -197,42 +199,50 @@
         <div v-else-if="error" class="state-box state-box--error">{{ error }}</div>
         <div v-else-if="!selectedTable" class="state-box">从左侧选择一个数据表开始查询。</div>
         <div v-else-if="!result.rows.length" class="state-box">没有匹配数据。</div>
-        <div v-else class="table-scroll">
-          <table class="data-table">
-            <thead>
-              <tr>
-                <th class="row-num">#</th>
-                <th
-                  v-for="column in visibleColumns"
-                  :key="column"
-                  class="data-th"
-                  :class="{ 'th-sorted': orderBy === column }"
-                  @click="toggleSort(column)"
-                >
-                  {{ column }}
-                  <span v-if="orderBy === column">{{ orderDir === 'ASC' ? '↑' : '↓' }}</span>
-                </th>
-                <th class="actions-col">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="(row, rowIndex) in result.rows" :key="rowIndex">
-                <td class="row-num">{{ (result.page - 1) * result.page_size + rowIndex + 1 }}</td>
-                <td
-                  v-for="column in visibleColumns"
-                  :key="column"
-                  class="data-td"
-                  :title="formatCell(row[column])"
-                  @click="copyText(formatCell(row[column]), '单元格已复制')"
-                >
-                  {{ formatCell(row[column]) }}
-                </td>
-                <td class="actions-col">
-                  <el-button text size="small" @click="copyText(JSON.stringify(row, null, 2), '行 JSON 已复制')">复制行</el-button>
-                </td>
-              </tr>
-            </tbody>
-          </table>
+        <div v-else class="table-virtual">
+          <el-auto-resizer>
+            <template #default="{ height, width }">
+              <el-table-v2
+                :columns="tableColumns"
+                :data="tableRows"
+                :width="width"
+                :height="height"
+                :row-height="34"
+                :header-height="36"
+                :sort-by="tableSortBy"
+                :on-column-sort="handleVirtualSort"
+                row-key="__rowKey"
+                fixed
+                scrollbar-always-on
+                class="explorer-table-v2"
+              >
+                <template #cell="{ column, rowData }">
+                  <span
+                    v-if="column.key === '__rowNumber'"
+                    class="cell-text cell-text--muted cell-text--right"
+                  >
+                    {{ rowData.__rowNumber }}
+                  </span>
+                  <el-button
+                    v-else-if="column.key === '__actions'"
+                    text
+                    size="small"
+                    @click="copyText(JSON.stringify(rowData.__raw, null, 2), '行 JSON 已复制')"
+                  >
+                    复制行
+                  </el-button>
+                  <span
+                    v-else
+                    class="cell-text"
+                    :title="formatCell(rowData[column.dataKey])"
+                    @click="copyText(formatCell(rowData[column.dataKey]), '单元格已复制')"
+                  >
+                    {{ formatCell(rowData[column.dataKey]) }}
+                  </span>
+                </template>
+              </el-table-v2>
+            </template>
+          </el-auto-resizer>
         </div>
 
         <div v-if="result.total_pages > 1" class="pagination">
@@ -255,7 +265,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, TableV2FixedDir, TableV2SortOrder, type Column, type SortBy } from 'element-plus'
 import {
   getDistinctValues,
   getTableSchema,
@@ -277,6 +287,12 @@ type FilterRow = {
   value_to: string
 }
 
+type ExplorerRow = Record<string, unknown> & {
+  __raw: Record<string, unknown>
+  __rowKey: string
+  __rowNumber: number
+}
+
 const tables = ref<TableInfo[]>([])
 const selectedTable = ref('')
 const schema = ref<ColumnInfo[]>([])
@@ -290,6 +306,7 @@ const pageSize = ref(50)
 const hiddenColumns = ref(new Set<string>())
 const filters = ref<FilterRow[]>([])
 const showSql = ref(false)
+const tablesLoading = ref(false)
 const loading = ref(false)
 const error = ref('')
 const suggestions = reactive<Record<string, string[]>>({})
@@ -334,6 +351,46 @@ const keyColumns = computed(() => new Set(['symbol', 'trade_date', 'datetime', '
 const suggestibleColumns = computed(() => new Set(['symbol', 'factor_name', 'indicator_name', 'source', 'as_of_time']))
 const dateColumn = computed(() => schema.value.find(column => ['trade_date', 'datetime', 'date'].includes(column.name))?.name || '')
 const visibleColumns = computed(() => result.value.columns.filter(column => !hiddenColumns.value.has(column)))
+const tableRows = computed<ExplorerRow[]>(() => result.value.rows.map((row, rowIndex) => ({
+  ...row,
+  __raw: row,
+  __rowKey: `${result.value.page}-${rowIndex}`,
+  __rowNumber: (result.value.page - 1) * result.value.page_size + rowIndex + 1,
+})))
+const tableColumns = computed<Column<unknown>[]>(() => [
+  {
+    key: '__rowNumber',
+    dataKey: '__rowNumber',
+    title: '#',
+    width: 72,
+    align: 'right',
+    fixed: TableV2FixedDir.LEFT,
+  },
+  ...visibleColumns.value.map(column => ({
+    key: column,
+    dataKey: column,
+    title: column,
+    width: getColumnWidth(column),
+    minWidth: 120,
+    sortable: true,
+    class: 'explorer-table-v2__cell',
+    headerClass: orderBy.value === column ? 'explorer-table-v2__header explorer-table-v2__header--sorted' : 'explorer-table-v2__header',
+  })),
+  {
+    key: '__actions',
+    dataKey: '__actions',
+    title: '操作',
+    width: 92,
+    fixed: TableV2FixedDir.RIGHT,
+  },
+])
+const tableSortBy = computed<SortBy | undefined>(() => {
+  if (!orderBy.value) return undefined
+  return {
+    key: orderBy.value,
+    order: orderDir.value === 'ASC' ? TableV2SortOrder.ASC : TableV2SortOrder.DESC,
+  }
+})
 const filteredSchema = computed(() => {
   const keyword = fieldSearch.value.trim().toLowerCase()
   return keyword ? schema.value.filter(column => column.name.toLowerCase().includes(keyword)) : schema.value
@@ -356,6 +413,14 @@ function formatCell(value: unknown): string {
   }
   const text = String(value)
   return text.length > 80 ? `${text.slice(0, 77)}...` : text
+}
+
+function getColumnWidth(column: string) {
+  const type = schema.value.find(item => item.name === column)?.type?.toLowerCase() || ''
+  if (['symbol', 'trade_date', 'datetime'].includes(column)) return column === 'datetime' ? 180 : 132
+  if (type.includes('int') || type.includes('float') || type.includes('double') || type.includes('decimal')) return 132
+  if (column.includes('name')) return 160
+  return 180
 }
 
 async function selectTable(tableName: string) {
@@ -487,6 +552,11 @@ function toggleSort(column: string) {
   loadData()
 }
 
+function handleVirtualSort({ key }: { key: string | number | symbol }) {
+  const column = String(key)
+  if (visibleColumns.value.includes(column)) toggleSort(column)
+}
+
 function toggleColumnVisibility(column: string) {
   const next = new Set(hiddenColumns.value)
   if (next.has(column)) next.delete(column)
@@ -544,6 +614,7 @@ function exportCsv() {
 }
 
 onMounted(async () => {
+  tablesLoading.value = true
   try {
     tables.value = await getTables()
     if (tables.value.length) {
@@ -551,6 +622,8 @@ onMounted(async () => {
     }
   } catch (err: any) {
     error.value = err?.message || '加载数据表失败'
+  } finally {
+    tablesLoading.value = false
   }
 })
 </script>
@@ -635,6 +708,14 @@ onMounted(async () => {
   gap: 6px;
   overflow: auto;
   padding-right: 2px;
+}
+
+.side-state {
+  border: 1px dashed var(--border-subtle);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  padding: 10px;
 }
 
 .table-item,
@@ -815,61 +896,54 @@ onMounted(async () => {
   color: var(--accent-danger);
 }
 
-.table-scroll {
+.table-virtual {
   flex: 1;
-  overflow: auto;
+  min-height: 240px;
+  overflow: hidden;
 }
 
-.data-table {
-  width: 100%;
-  border-collapse: collapse;
+.explorer-table-v2 {
+  --el-table-header-bg-color: rgba(10, 10, 12, 0.95);
+  --el-table-border-color: var(--border-subtle);
+  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.06);
+  background: transparent;
   font-size: 12px;
 }
 
-.data-th {
-  position: sticky;
-  top: 0;
-  z-index: 1;
-  background: rgba(10, 10, 12, 0.95);
-  border-bottom: 1px solid var(--border-default);
+.explorer-table-v2 :deep(.el-table-v2__header-cell) {
   color: var(--text-secondary);
-  cursor: pointer;
   font-weight: 600;
-  padding: 8px 10px;
-  text-align: left;
-  white-space: nowrap;
 }
 
-.data-th:hover,
-.th-sorted {
+.explorer-table-v2 :deep(.explorer-table-v2__header--sorted),
+.explorer-table-v2 :deep(.el-table-v2__header-cell:hover) {
   color: var(--accent-primary);
 }
 
-.data-td {
+.explorer-table-v2 :deep(.el-table-v2__row-cell) {
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.cell-text {
   color: var(--text-primary);
-  max-width: 320px;
+  display: block;
   overflow: hidden;
-  padding: 7px 10px;
   text-overflow: ellipsis;
   white-space: nowrap;
+  width: 100%;
 }
 
-.data-td:hover {
-  background: rgba(56, 189, 248, 0.06);
+.cell-text:hover {
   color: var(--text-bright);
+  cursor: copy;
 }
 
-.row-num,
-.actions-col {
+.cell-text--muted {
   color: var(--text-secondary);
-  padding: 7px 10px;
-  text-align: right;
-  white-space: nowrap;
 }
 
-.actions-col {
-  text-align: left;
+.cell-text--right {
+  text-align: right;
 }
 
 .pagination {
