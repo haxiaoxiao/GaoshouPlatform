@@ -754,14 +754,14 @@ async def trigger_sync(
 
 
 @router.get("/sync/catalog", summary="获取同步任务目录")
-async def get_sync_catalog() -> dict[str, Any]:
+async def get_sync_catalog(refresh: bool = Query(default=False)) -> dict[str, Any]:
     try:
-        return await proxy_sync_request("GET", "/api/data/sync/catalog")
+        return await proxy_sync_request("GET", "/api/data/sync/catalog", params={"refresh": refresh})
     except HTTPException as exc:
         logger.warning("Sync service catalog proxy failed: {}", exc.detail)
         from app.services.tushare_relay_sync import build_sync_catalog
 
-        return {"code": 0, "message": "success", "data": build_sync_catalog()}
+        return {"code": 0, "message": "success", "data": build_sync_catalog(refresh=refresh)}
 
 
 @router.get("/sync/status", summary="获取同步状态")

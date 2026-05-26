@@ -6,7 +6,7 @@
         <h2>数据同步任务</h2>
       </div>
       <div class="sync-actions">
-        <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog">刷新目录</el-button>
+        <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
         <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
         <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0" :loading="executing" @click="executeQueue">
           执行队列
@@ -163,9 +163,12 @@
         <el-table-column prop="source" label="来源" width="150" />
         <el-table-column label="覆盖度" min-width="190">
           <template #default="{ row }">
-            <span v-if="row.coverage && row.coverage.row_count">
-              {{ formatNumber(row.coverage.row_count) }} 行
+            <span v-if="hasCoverageRows(row.coverage)">
+              {{ formatNumber(coverageRows(row.coverage)) }} 行
               <small>{{ row.coverage.max_date || '-' }}</small>
+            </span>
+            <span v-else-if="row.coverage?.max_date">
+              <small>{{ row.coverage.max_date }}{{ row.coverage.estimated ? ' · 快速估算' : '' }}</small>
             </span>
             <span v-else>-</span>
           </template>
@@ -263,7 +266,11 @@ const stockScopeOptions = [
   { label: '自定义', value: 'custom' },
   { label: '全市场', value: 'all' },
 ]
+const CATALOG_CACHE_MS = 5 * 60 * 1000
+const LOG_REFRESH_INTERVAL_MS = 15 * 1000
+let catalogCache: { value: SyncCatalog; expiresAt: number } | null = null
 let pollTimer: number | undefined
+let lastLogRefreshAt = 0
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
 const filteredDatasets = computed(() => {
@@ -276,7 +283,7 @@ const filteredDatasets = computed(() => {
 })
 
 onMounted(async () => {
-  await Promise.all([loadCatalog(), refreshStatus(), loadLogs()])
+  await Promise.all([loadCatalog(false), refreshStatus(), loadLogs()])
   startPolling()
 })
 
@@ -284,10 +291,17 @@ onBeforeUnmount(() => {
   if (pollTimer) window.clearInterval(pollTimer)
 })
 
-async function loadCatalog() {
+async function loadCatalog(force = false) {
+  const now = Date.now()
+  if (!force && catalogCache && now < catalogCache.expiresAt) {
+    catalog.value = catalogCache.value
+    return
+  }
   catalogLoading.value = true
   try {
-    catalog.value = await syncApi.getCatalog()
+    const next = await syncApi.getCatalog({ refresh: force })
+    catalog.value = next
+    catalogCache = { value: next, expiresAt: Date.now() + CATALOG_CACHE_MS }
   } finally {
     catalogLoading.value = false
   }
@@ -299,12 +313,24 @@ async function refreshStatus() {
 
 async function loadLogs() {
   logs.value = await syncApi.getLogs({ limit: 20 })
+  lastLogRefreshAt = Date.now()
+}
+
+function hasCoverageRows(coverage: SyncCatalogItem['coverage']) {
+  return typeof coverage?.row_count === 'number' && coverage.row_count > 0
+}
+
+function coverageRows(coverage: SyncCatalogItem['coverage']) {
+  return typeof coverage?.row_count === 'number' ? coverage.row_count : 0
 }
 
 function startPolling() {
   pollTimer = window.setInterval(async () => {
+    const wasRunning = isRunning.value
     await refreshStatus()
-    if (!isRunning.value) await loadLogs()
+    const shouldRefreshLogs =
+      (wasRunning && !isRunning.value) || Date.now() - lastLogRefreshAt >= LOG_REFRESH_INTERVAL_MS
+    if (shouldRefreshLogs) await loadLogs()
   }, 2500)
 }
 
@@ -379,7 +405,7 @@ async function executeQueue() {
       await waitUntilIdle()
     }
     queue.value = []
-    await Promise.all([refreshStatus(), loadLogs(), loadCatalog()])
+    await Promise.all([refreshStatus(), loadLogs(), loadCatalog(true)])
   } catch (error: any) {
     ElMessage.error(error?.message || '同步任务提交失败')
   } finally {

@@ -61,17 +61,17 @@
       <!-- Tab Content -->
       <div class="tab-content">
         <!-- Stock List -->
-        <div v-show="activeTab === 'stockList'" class="panel panel--stock-list">
+        <div v-if="mountedTabs.stockList" v-show="activeTab === 'stockList'" class="panel panel--stock-list">
           <StockList />
         </div>
 
         <!-- K-Line Query -->
-        <div v-show="activeTab === 'klineQuery'" class="panel">
+        <div v-if="mountedTabs.klineQuery" v-show="activeTab === 'klineQuery'" class="panel">
           <KlineQuery />
         </div>
 
         <!-- Sync Panel -->
-        <div v-show="activeTab === 'sync'" class="panel">
+        <div v-if="mountedTabs.sync" v-show="activeTab === 'sync'" class="panel">
           <SyncPanel />
         </div>
       </div>
@@ -80,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import StockList from './StockList.vue'
@@ -101,7 +101,12 @@ const icons = {
 
 // State
 const activeTab = ref('sync')
+const mountedTabs = ref<Record<string, boolean>>({ sync: true })
 const oneClickSyncing = ref(false)
+
+watch(activeTab, (tab) => {
+  mountedTabs.value[tab] = true
+}, { immediate: true })
 
 // Hero metrics
 const heroMetrics = ref([

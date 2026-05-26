@@ -263,10 +263,10 @@ async def trigger_sync(
 
 
 @router.get("/sync/catalog")
-async def get_sync_catalog() -> dict[str, Any]:
+async def get_sync_catalog(refresh: bool = Query(default=False)) -> dict[str, Any]:
     from app.services.tushare_relay_sync import build_sync_catalog
 
-    return {"code": 0, "message": "success", "data": build_sync_catalog()}
+    return {"code": 0, "message": "success", "data": build_sync_catalog(refresh=refresh)}
 
 
 @router.get("/sync/status")

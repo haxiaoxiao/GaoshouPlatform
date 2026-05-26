@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import calendar
+import copy
 import math
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterable
 
 import pandas as pd
@@ -16,6 +20,13 @@ from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
 from app.db.models import Stock
 from app.services.tushare_relay import TushareRelayClient, TushareRelayError, TushareRelayMeta
+
+
+CATALOG_CACHE_TTL_SECONDS = 300
+COVERAGE_CACHE_TTL_SECONDS = 300
+_CATALOG_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": None}
+_COVERAGE_CACHE: dict[tuple[str, str, bool], tuple[float, dict[str, Any]]] = {}
+_FAST_COVERAGE_DATASETS = {"klines_daily", "klines_minute", "factor_values"}
 
 
 STRUCTURED_RELAY_DATASETS = (
@@ -345,7 +356,11 @@ CORE_SYNC_CATALOG = [
 ]
 
 
-def build_sync_catalog() -> dict[str, Any]:
+def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
+    now = time.monotonic()
+    if not refresh and _CATALOG_CACHE["value"] is not None and now < float(_CATALOG_CACHE["expires_at"]):
+        return copy.deepcopy(_CATALOG_CACHE["value"])
+
     relay_items = [
         {
             "name": spec.name,
@@ -374,7 +389,7 @@ def build_sync_catalog() -> dict[str, Any]:
         date_col = entry.get("date_col")
         entry["coverage"] = dataset_coverage(str(dataset), str(date_col)) if dataset and date_col else None
         core_items.append(entry)
-    return {
+    payload = {
         "presets": [
             {
                 "name": "daily",
@@ -422,13 +437,30 @@ def build_sync_catalog() -> dict[str, Any]:
             "structured_default_rps": 1,
             "dividend": "Relay dividend is intentionally excluded because QMT dividend sync already exists.",
         },
+        "cache": {
+            "generated_at": datetime.now().isoformat(),
+            "ttl_seconds": CATALOG_CACHE_TTL_SECONDS,
+        },
     }
+    _CATALOG_CACHE["value"] = copy.deepcopy(payload)
+    _CATALOG_CACHE["expires_at"] = now + CATALOG_CACHE_TTL_SECONDS
+    return payload
 
 
-def dataset_coverage(dataset: str, date_col: str) -> dict[str, Any]:
+def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dict[str, Any]:
+    cache_key = (dataset, date_col, exact)
+    now = time.monotonic()
+    cached = _COVERAGE_CACHE.get(cache_key)
+    if cached and now < cached[0]:
+        return copy.deepcopy(cached[1])
+
     store = ParquetMarketDataStore(settings.parquet_data_dir)
     if not dataset or not store._exists(dataset):
         return {"row_count": 0, "min_date": None, "max_date": None}
+    fast = _fast_dataset_coverage(dataset, date_col)
+    if not exact and (dataset in _FAST_COVERAGE_DATASETS or int(fast.get("partition_count") or 0) > 24):
+        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, fast)
+        return copy.deepcopy(fast)
     try:
         pattern = store._glob_pattern(dataset)
         row = get_duckdb().execute(
@@ -438,14 +470,53 @@ def dataset_coverage(dataset: str, date_col: str) -> dict[str, Any]:
             """,
             [pattern],
         ).fetchone()
-        return {
+        result = {
             "row_count": int(row[0] or 0) if row else 0,
             "min_date": str(row[1]) if row and row[1] is not None else None,
             "max_date": str(row[2]) if row and row[2] is not None else None,
+            "estimated": False,
         }
+        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        return copy.deepcopy(result)
     except Exception as exc:
         logger.warning("Failed to read coverage for relay dataset {}: {}", dataset, exc)
-        return {"row_count": 0, "min_date": None, "max_date": None, "error": str(exc)}
+        result = {**fast, "error": str(exc)}
+        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        return copy.deepcopy(result)
+
+
+def _fast_dataset_coverage(dataset: str, date_col: str) -> dict[str, Any]:
+    root = Path(settings.parquet_data_dir) / dataset
+    partitions: list[tuple[int, int]] = []
+    for year_dir in root.glob("year=*"):
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for month_dir in year_dir.glob("month=*"):
+            try:
+                month = int(month_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            partitions.append((year, month))
+    if not partitions:
+        return {"row_count": None, "min_date": None, "max_date": None, "estimated": True, "partition_count": 0}
+
+    min_year, min_month = min(partitions)
+    max_year, max_month = max(partitions)
+    last_day = calendar.monthrange(max_year, max_month)[1]
+    min_date = f"{min_year:04d}-{min_month:02d}-01"
+    max_date = f"{max_year:04d}-{max_month:02d}-{last_day:02d}"
+    if date_col == "datetime":
+        min_date = f"{min_date} 00:00:00"
+        max_date = f"{max_date} 23:59:59"
+    return {
+        "row_count": None,
+        "min_date": min_date,
+        "max_date": max_date,
+        "estimated": True,
+        "partition_count": len(partitions),
+    }
 
 
 async def run_tushare_relay_sync(

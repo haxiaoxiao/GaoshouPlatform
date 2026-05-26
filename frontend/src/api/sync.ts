@@ -72,9 +72,11 @@ export interface SyncCatalogItem {
   symbol_scoped?: boolean
   default_params?: Record<string, unknown>
   coverage?: {
-    row_count: number
+    row_count: number | null
     min_date: string | null
     max_date: string | null
+    estimated?: boolean
+    partition_count?: number
     error?: string
   } | null
 }
@@ -116,8 +118,8 @@ export const syncApi = {
   cancel: () =>
     request.post<{ cancelled: boolean }>('/data/sync/cancel', {}),
 
-  getCatalog: () =>
-    request.get<SyncCatalog>('/data/sync/catalog'),
+  getCatalog: (params?: { refresh?: boolean }) =>
+    request.get<SyncCatalog>('/data/sync/catalog', { params }),
 
   getLogs: (params?: SyncLogsParams) =>
     request.get<SyncLog[]>('/data/sync/logs', { params }),
