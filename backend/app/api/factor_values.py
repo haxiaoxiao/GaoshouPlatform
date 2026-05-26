@@ -18,7 +18,7 @@ from app.services.factor_value_store import (
     list_factor_definitions,
     list_factor_groups,
 )
-from app.services.factor_catalog import RESEARCH_FACTOR_SPECS, TA_FACTOR_SPECS, is_catalog_factor
+from app.services.factor_catalog import RELAY_FACTOR_SPECS, RESEARCH_FACTOR_SPECS, TA_FACTOR_SPECS, is_catalog_factor
 from app.services.alpha101_calculator import precompute_alpha101_factors
 from app.services.factor_precompute import (
     precompute_high_volume_features,
@@ -29,6 +29,7 @@ from app.services.index_components import load_index_symbols
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
 from app.services.ta_factor_calculator import precompute_ta_factors
+from app.services.tushare_relay_factor_calculator import precompute_relay_factors
 
 router = APIRouter(tags=["factor-values"])
 
@@ -111,7 +112,8 @@ _HIGH_VOLUME_FACTORS = {
 _ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
 _TA_FACTORS = set(TA_FACTOR_SPECS)
 _RESEARCH_FACTORS = set(RESEARCH_FACTOR_SPECS)
-_CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS
+_RELAY_FACTORS = set(RELAY_FACTOR_SPECS)
+_CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS | _RELAY_FACTORS
 _SUPPORTED_PRECOMPUTE_FACTORS = _CORE_FACTORS | _HIGH_VOLUME_FACTORS | _CATALOG_FACTORS
 
 
@@ -264,7 +266,7 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
     )
     if request.async_task:
         asyncio.create_task(_run_group_precompute_task(task_id, request, group))
-        return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request)}
+        return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request, group)}
 
     try:
         result = await _execute_group_precompute(task_id, request, group)
@@ -292,7 +294,9 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
 def _task_started_payload(
     task_id: str,
     request: FactorPrecomputeRequest | FactorGroupPrecomputeRequest,
+    group: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    factor_names = list(getattr(request, "factor_names", []) or (group or {}).get("factor_names") or [])
     return {
         "task_id": task_id,
         "symbols": len(request.symbols or []),
@@ -301,8 +305,10 @@ def _task_started_payload(
         "as_of_time": str((request.params or {}).get("time") or (request.params or {}).get("as_of_time") or ""),
         "window": int((request.params or {}).get("window") or 0),
         "threshold": float((request.params or {}).get("threshold") or 0.0),
+        "factor_names": factor_names,
         "rows": {},
         "rows_written": 0,
+        "requested_factor_count": len(factor_names),
         "status": "running",
     }
 
@@ -425,13 +431,14 @@ async def _execute_factor_bundle(
     ta_names = [name for name in names if name in _TA_FACTORS]
     alpha_names = [name for name in names if name in _ALPHA101_FACTORS]
     research_names = [name for name in names if name in _RESEARCH_FACTORS]
+    relay_names = [name for name in names if name in _RELAY_FACTORS]
     unknown = [name for name in names if name not in _SUPPORTED_PRECOMPUTE_FACTORS]
     if unknown:
         raise ValueError(f"Unsupported precompute factors: {unknown}")
 
     results: list[dict[str, Any]] = []
     updater = _progress_updater(task_id)
-    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names]) or 1
+    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names, relay_names]) or 1
     current_step = 0
 
     def wrap_progress(offset: int):
@@ -497,6 +504,16 @@ async def _execute_factor_bundle(
             symbols=symbol_list,
             progress_callback=wrap_progress(current_step - 1),
         ))
+    if relay_names:
+        current_step += 1
+        results.append(await run_in_thread(
+            precompute_relay_factors,
+            factor_names=relay_names,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            progress_callback=wrap_progress(current_step - 1),
+        ))
     return _merge_precompute_results(symbol_list, start_date, end_date, names, results)
 
 
@@ -510,10 +527,18 @@ def _merge_precompute_results(
     requested_factor_names = list(dict.fromkeys(str(name) for name in factor_names if str(name)))
     merged_rows: dict[str, int] = {name: 0 for name in requested_factor_names}
     total_written = 0
+    merged_errors: dict[str, str] = {}
+    failed_factor_names: list[str] = []
     for result in results:
         total_written += int(result.get("rows_written") or 0)
         for factor_name, count in (result.get("rows") or {}).items():
             merged_rows[str(factor_name)] = merged_rows.get(str(factor_name), 0) + int(count or 0)
+        for factor_name, error in (result.get("errors") or {}).items():
+            merged_errors[str(factor_name)] = str(error)
+        for factor_name in result.get("failed_factor_names") or []:
+            name = str(factor_name)
+            if name not in failed_factor_names:
+                failed_factor_names.append(name)
     written_factor_names = [name for name, count in merged_rows.items() if count > 0]
     zero_row_factor_names = [name for name, count in merged_rows.items() if count <= 0]
     return {
@@ -527,6 +552,8 @@ def _merge_precompute_results(
         "written_factor_count": len(written_factor_names),
         "zero_row_factor_count": len(zero_row_factor_names),
         "zero_row_factor_names": zero_row_factor_names,
+        "failed_factor_names": failed_factor_names,
+        "errors": merged_errors,
     }
 
 
@@ -560,6 +587,12 @@ async def _run_group_precompute_task(
     try:
         result = await _execute_group_precompute(task_id, request, group)
         if isinstance(result, dict):
+            _safe_attach_result_coverage(
+                result,
+                factor_names=group.get("factor_names") or [],
+                start_date=request.start_date,
+                end_date=request.end_date,
+            )
             result["task_id"] = task_id
         update_task(
             task_id,
@@ -580,6 +613,25 @@ def _attach_result_coverage(
     end_date: date,
 ) -> None:
     store = get_factor_value_store()
+    if len(factor_names) > 1 and all(str(name).startswith("alpha101_") for name in factor_names):
+        coverage_by_name = store.coverage_many(
+            factor_names,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        result["coverage_ranges"] = [
+            {
+                "factor_name": factor_name,
+                "total_rows": coverage_by_name.get(factor_name, {}).get("total_rows", 0),
+                "symbol_count": coverage_by_name.get(factor_name, {}).get("symbol_count", 0),
+                "date_count": coverage_by_name.get(factor_name, {}).get("date_count", 0),
+                "min_date": coverage_by_name.get(factor_name, {}).get("min_date"),
+                "max_date": coverage_by_name.get(factor_name, {}).get("max_date"),
+                "is_complete_to_end": coverage_by_name.get(factor_name, {}).get("max_date") == end_date.isoformat(),
+            }
+            for factor_name in factor_names
+        ]
+        return
     ranges: list[dict[str, Any]] = []
     for factor_name in factor_names:
         params = _build_params(

@@ -1,8 +1,14 @@
 # Indevs Tushare Pro Replay 接口小抄
 
-Last updated: 2026-05-16.
+Last updated: 2026-05-25.
+
+Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"` 和 `/api/data/sync/catalog`。第一批结构化数据落到 Parquet：`adj_factors`、`moneyflow`、`block_moneyflow`、`auction_replay`、`ths_index`、`ths_member`。新闻公告类接口保留为受限补充源，默认不做全量抓取。落地细节见 `docs/tushare-relay-ingestion.md`。
 
 本文记录 `https://ai-tool.indevs.in/quant/tushare-pro-catalog/` 下的新 Tushare Pro Replay / 聚合接口能力，以及在本项目里后续接入时应采用的调用方式、适用场景和已验证结果。
+
+当前定位：Indevs/Tushare Replay 是历史补缺和独立校验来源，不是策略运行时的主数据读取路径。平台回测和因子研究应优先读取本地 SQLite + Parquet/DuckDB，只有在同步、补缺或排查口径时调用外部接口。
+
+2026-05-25 的全量只读探查报告已归档到 `docs/archive/research/tushare-relay-probe-2026-05-25.md`。日常使用以本文的接口取舍和接入原则为准。
 
 ## 1. 基本调用规则
 

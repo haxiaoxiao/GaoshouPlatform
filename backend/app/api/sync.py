@@ -29,6 +29,8 @@ class SyncRequest(BaseModel):
     failure_strategy: str = "skip"
     full_sync: bool = False
     factor_sync_plan: dict[str, Any] | None = None
+    relay_datasets: list[str] | None = None
+    relay_options: dict[str, Any] | None = None
 
 
 VALID_SYNC_TYPES = (
@@ -43,6 +45,7 @@ VALID_SYNC_TYPES = (
     "realtime_mv",
     "dividends",
     "factor_dependency",
+    "tushare_relay",
 )
 
 
@@ -184,6 +187,16 @@ async def _run_sync_task(
                     run_id=run_id,
                     failure_strategy=request.failure_strategy,
                 )
+            elif request.sync_type == "tushare_relay":
+                progress = await service.sync_tushare_relay(
+                    relay_datasets=request.relay_datasets,
+                    symbols=request.symbols,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    relay_options=request.relay_options,
+                    failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
 
             if progress is not None:
                 await service.persist_sync_progress(progress, run_id=run_id)
@@ -247,6 +260,13 @@ async def trigger_sync(
         details={"run_id": run_id},
     )
     return {"code": 0, "message": "success", "data": {**initial_progress.to_dict(), "task_id": run_id, "run_id": run_id}}
+
+
+@router.get("/sync/catalog")
+async def get_sync_catalog() -> dict[str, Any]:
+    from app.services.tushare_relay_sync import build_sync_catalog
+
+    return {"code": 0, "message": "success", "data": build_sync_catalog()}
 
 
 @router.get("/sync/status")

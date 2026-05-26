@@ -340,9 +340,12 @@ const syncTypeLabel = (type: string): string => {
     stock_full: '股票完整信息',
     financial_data: '财务数据',
     kline_daily: '日线',
+    index_daily: '指数日线',
     kline_minute: '分钟线',
     realtime_mv: '实时市值',
+    dividends: 'QMT 分红',
     factor_dependency: '因子依赖',
+    tushare_relay: 'Tushare Relay',
   }
   return labels[type] || type
 }

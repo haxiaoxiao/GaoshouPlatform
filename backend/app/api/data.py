@@ -106,6 +106,8 @@ class SyncRequest(BaseModel):
     failure_strategy: str = Field(default="skip", description="失败策略: skip/retry/stop")
     full_sync: bool = Field(default=False, description="全量同步标记")
     factor_sync_plan: dict[str, Any] | None = Field(default=None, description="因子依赖同步计划")
+    relay_datasets: list[str] | None = Field(default=None, description="Tushare Relay dataset names")
+    relay_options: dict[str, Any] | None = Field(default=None, description="Tushare Relay sync options")
 
 
     index_symbols: list[str] | None = Field(default=None, description="指数代码列表")
@@ -683,7 +685,7 @@ async def trigger_sync(
     - realtime_mv: 实时市值更新
     - dividends: 分红送股数据(需QMT在线)
     """
-    valid_types = ("datasync", "stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends")
+    valid_types = ("datasync", "stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends", "tushare_relay")
     if request.sync_type not in valid_types:
         raise HTTPException(
             status_code=400,
@@ -749,6 +751,17 @@ async def trigger_sync(
         "message": "success",
         "data": {**initial_progress.to_dict(), "task_id": task_id},
     }
+
+
+@router.get("/sync/catalog", summary="获取同步任务目录")
+async def get_sync_catalog() -> dict[str, Any]:
+    try:
+        return await proxy_sync_request("GET", "/api/data/sync/catalog")
+    except HTTPException as exc:
+        logger.warning("Sync service catalog proxy failed: {}", exc.detail)
+        from app.services.tushare_relay_sync import build_sync_catalog
+
+        return {"code": 0, "message": "success", "data": build_sync_catalog()}
 
 
 @router.get("/sync/status", summary="获取同步状态")

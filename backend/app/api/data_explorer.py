@@ -20,6 +20,15 @@ _PARQUET_DATASETS = [
     "factor_values",
     "stock_indicators",
     "indicator_timeseries",
+    "adj_factors",
+    "moneyflow",
+    "block_moneyflow",
+    "auction_replay",
+    "ths_index",
+    "ths_member",
+    "announcements",
+    "research_reports",
+    "market_news",
 ]
 
 _ALLOWED_FILTER_OPS = {
@@ -147,7 +156,7 @@ def _quick_filters(quick_search: dict[str, Any], columns: list[str]) -> list[Exp
         symbols = [item.strip().upper() for item in symbol_value.replace("，", ",").split(",") if item.strip()]
         filters.append(ExplorerFilter(column="symbol", op="in" if len(symbols) > 1 else "=", value=symbols[0] if len(symbols) == 1 else None, values=symbols if len(symbols) > 1 else None))
 
-    date_col = next((col for col in ("trade_date", "datetime", "date") if col in columns), None)
+    date_col = next((col for col in ("trade_date", "datetime", "date", "snapshot_date", "ann_date", "report_date", "publish_time") if col in columns), None)
     start_date = str(quick_search.get("start_date") or "").strip()
     end_date = str(quick_search.get("end_date") or "").strip()
     if date_col and start_date and end_date:
@@ -228,7 +237,7 @@ def list_tables():
                 continue
             pattern = store._glob_pattern(name)
             columns = [column["name"] for column in _parquet_schema(name)]
-            date_col = next((column for column in ("trade_date", "datetime", "date") if column in columns), None)
+            date_col = next((column for column in ("trade_date", "datetime", "date", "snapshot_date", "ann_date", "report_date", "publish_time") if column in columns), None)
             if date_col:
                 row = db.execute(
                     f"""

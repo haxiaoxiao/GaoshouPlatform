@@ -2,7 +2,11 @@
 
 本文记录 ID=43 小市值策略对齐聚宽过程中验证过的数据源经验。平台默认仍以 miniQMT/xtquant 为主数据源；Tushare 和 AKShare 用作补历史缺口、指数成分和退市股数据的兜底。
 
-Last updated: 2026-05-16.
+Last updated: 2026-05-25.
+
+Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。第一批接入 `adj_factor`、`moneyflow`、`ths_index`、`ths_member`、`block_moneyflow`、`stk_auction_replay`，统一落到本地 Parquet；新闻、公告、研报保留为受限补充源，默认不做全量抓取。
+
+当前默认运行方式是 `MARKET_DATA_BACKEND=parquet`：同步和补数仍以 miniQMT/xtquant、Tushare、Indevs/Tushare Replay 等数据源为入口，但回测、因子研究和 DataSkill 应优先读取本地 SQLite + Parquet/DuckDB。策略运行时不要反复访问外部数据源。
 
 ## 总体优先级
 
@@ -17,6 +21,7 @@ Last updated: 2026-05-16.
 | 财务/股本/历史市值 | Tushare `daily_basic` | miniQMT 财务缓存 / AKShare 个股信息 | 退市股股本和市值用 Tushare 更完整。 |
 | 固定时间点分钟线 | Parquet/DuckDB 或 ClickHouse 已落库分钟线 | miniQMT 本地缓存 | 回测只读本地列式库；不要在策略运行时反复打 QMT。 |
 | 完整历史 1 分钟线 | 本地 JQ 分钟文件 → Parquet `klines_minute` | miniQMT/Indevs 补缺口 | 已导入 2005-01-04 至 2026-05-15 全 A 分钟线，适合回测和 timer 抽点。 |
+| 因子值缓存 | Parquet `factor_values` | 重新预计算 | 当前因子研究、Alpha101、TA-Lib 和小市值因子统一写入 Factor Value Store。 |
 
 ## miniQMT / xtquant
 

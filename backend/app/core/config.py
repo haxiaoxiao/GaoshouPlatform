@@ -64,6 +64,14 @@ class Settings(BaseSettings):
     sync_service_url: str = "http://127.0.0.1:8810"
     sync_service_port: int = 8810
     enable_sync_scheduler: bool = True
+    indevs_tushare_api_key: str = ""
+    indevs_tushare_base_urls: str = (
+        "http://127.0.0.1:8000/tushare/pro,"
+        "https://ai-tool.indevs.in/tushare/pro,"
+        "https://tushare.indevs.in/tushare/pro"
+    )
+    indevs_tushare_rps: float = 1.0
+    indevs_tushare_timeout_seconds: int = 30
 
     # 网格交易信号配置
     grid_trading_enable_order_submit: bool = False

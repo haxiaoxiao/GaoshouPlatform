@@ -1,852 +1,753 @@
 <template>
-  <div class="sync-panel">
-    <!-- 上部：配置和状态区域 -->
-    <div class="sync-main">
-      <!-- 左侧：同步配置 -->
-      <el-card class="config-card" shadow="never">
-        <template #header>
-          <div class="card-header">
-            <span>同步配置</span>
-          </div>
-        </template>
-
-        <el-form :model="syncConfig" label-width="100px" class="config-form">
-          <el-form-item label="同步类型">
-            <el-checkbox-group v-model="syncConfig.syncTypes">
-              <el-checkbox value="index_daily">指数日线</el-checkbox>
-              <el-checkbox value="stock_info">股票信息</el-checkbox>
-              <el-checkbox value="stock_full">股票完整信息</el-checkbox>
-              <el-checkbox value="financial_data">财务数据(按季度)</el-checkbox>
-              <el-checkbox value="kline_daily">日K线</el-checkbox>
-              <el-checkbox value="kline_minute">分钟K线</el-checkbox>
-              <el-checkbox value="realtime_mv">实时市值</el-checkbox>
-              <el-checkbox value="dividends">分红送股</el-checkbox>
-            </el-checkbox-group>
-            <div class="form-tip">
-              股票信息=基础字段+市值；股票完整信息=含市值等；财务数据=从QMT下载季度财报(耗时较长)；实时市值=仅更新市值；分红送股=从QMT获取分红数据并计算股息率
-            </div>
-          </el-form-item>
-
-          <el-form-item label="日期范围">
-            <div class="date-range-fields">
-              <el-date-picker
-                v-model="syncConfig.startDate"
-                type="date"
-                placeholder="开始日期"
-                format="YYYY-MM-DD"
-                value-format="YYYY-MM-DD"
-                :disabled="isDateRangeDisabled"
-              />
-              <span class="date-separator">至</span>
-              <el-date-picker
-                v-model="syncConfig.endDate"
-                type="date"
-                placeholder="结束日期"
-                format="YYYY-MM-DD"
-                value-format="YYYY-MM-DD"
-                :disabled="isDateRangeDisabled"
-              />
-            </div>
-            <div class="date-shortcuts" v-if="!isDateRangeDisabled">
-              <el-button
-                v-for="shortcut in dateShortcuts"
-                :key="shortcut.text"
-                size="small"
-                @click="applyDateShortcut(shortcut.days)"
-              >
-                {{ shortcut.text }}
-              </el-button>
-            </div>
-            <div class="form-tip">
-              {{ isDateRangeDisabled ? '股票信息和市值同步不需要选择日期范围' : 'K线数据同步需要选择日期范围' }}
-            </div>
-          </el-form-item>
-
-          <el-form-item label="股票范围">
-            <el-radio-group v-model="syncConfig.stockScope">
-              <el-radio label="all">全部股票</el-radio>
-              <el-radio label="watchlist">自选股</el-radio>
-              <el-radio label="custom">自定义</el-radio>
-            </el-radio-group>
-            <el-input
-              v-if="syncConfig.stockScope === 'custom'"
-              v-model="syncConfig.customSymbols"
-              type="textarea"
-              :rows="3"
-              placeholder="输入股票代码，逗号分隔，如: 000001.SZ, 600000.SH"
-              style="margin-top: 8px"
-            />
-          </el-form-item>
-
-          <el-form-item label="失败策略">
-            <el-select v-model="syncConfig.failureStrategy" style="width: 100%">
-              <el-option label="跳过并继续" value="skip" />
-              <el-option label="重试一次" value="retry" />
-              <el-option label="停止同步" value="stop" />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item label="更新模式">
-            <el-checkbox v-model="syncConfig.fullSync">
-              全量更新（覆盖已有数据）
-            </el-checkbox>
-            <div class="form-tip">
-              默认为增量更新，仅追加新数据；勾选后先删除已有数据再重新同步
-            </div>
-          </el-form-item>
-
-          <el-form-item>
-            <el-button
-              type="primary"
-              :loading="isSyncing || isSubmitting"
-              :disabled="syncConfig.syncTypes.length === 0 || isSubmitting"
-              @click="handleStartSync"
-            >
-              {{ isSubmitting ? '提交中...' : isSyncing ? '同步中...' : '开始同步' }}
-            </el-button>
-            <el-button
-              v-if="isSyncing"
-              type="danger"
-              @click="handleStopSync"
-            >
-              停止同步
-            </el-button>
-          </el-form-item>
-        </el-form>
-      </el-card>
-
-      <!-- 右侧：同步状态 -->
-      <el-card class="status-card" shadow="never">
-        <template #header>
-          <div class="card-header">
-            <span>同步状态</span>
-            <el-tag :type="statusTagType" size="small">
-              {{ statusText }}
-            </el-tag>
-          </div>
-        </template>
-
-        <div class="status-content">
-          <!-- 进度条 -->
-          <div class="progress-section">
-            <div class="progress-header">
-              <span>同步进度</span>
-              <span class="progress-percent">{{ syncStatus.progress_percent.toFixed(1) }}%</span>
-            </div>
-            <el-progress
-              :percentage="syncStatus.progress_percent"
-              :status="progressStatus"
-              :stroke-width="20"
-              :show-text="false"
-            />
-            <div class="progress-detail">
-              <span>{{ syncStatus.current }} / {{ syncStatus.total }}</span>
-            </div>
-          </div>
-
-          <!-- 当前状态 -->
-          <el-descriptions :column="2" border size="small" class="status-desc">
-            <el-descriptions-item label="同步类型">
-              <el-tag size="small" v-if="syncStatus.sync_type">
-                {{ syncTypeLabel(syncStatus.sync_type) }}
-              </el-tag>
-              <span v-else class="text-muted">-</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="当前股票">
-              <span v-if="currentSymbol">{{ currentSymbol }}</span>
-              <span v-else class="text-muted">-</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="成功数量">
-              <span class="text-success">{{ syncStatus.success_count }}</span>
-            </el-descriptions-item>
-            <el-descriptions-item label="失败数量">
-              <span :class="{ 'text-danger': syncStatus.failed_count > 0 }">
-                {{ syncStatus.failed_count }}
-              </span>
-            </el-descriptions-item>
-            <el-descriptions-item label="开始时间">
-              {{ syncStatus.start_time ? formatTime(syncStatus.start_time) : '-' }}
-            </el-descriptions-item>
-            <el-descriptions-item label="结束时间">
-              {{ syncStatus.end_time ? formatTime(syncStatus.end_time) : '-' }}
-            </el-descriptions-item>
-          </el-descriptions>
-
-          <!-- 错误信息 -->
-          <el-alert
-            v-if="syncStatus.error_message"
-            :title="syncStatus.error_message"
-            type="error"
-            :closable="false"
-            show-icon
-            class="error-alert"
-          />
-
-          <el-alert
-            v-if="syncBlockedReason"
-            :title="syncBlockedReason"
-            type="warning"
-            :closable="false"
-            show-icon
-            class="error-alert"
-          />
-
-          <div v-if="failedSymbolSummaries.length || skippedSymbolCount" class="sync-detail-panel">
-            <div v-if="failedSymbolSummaries.length" class="sync-detail-row">
-              <span class="sync-detail-label">失败明细</span>
-              <span class="sync-detail-value">{{ failedSymbolSummaries.join('；') }}</span>
-            </div>
-            <div v-if="skippedSymbolCount" class="sync-detail-row">
-              <span class="sync-detail-label">跳过数量</span>
-              <span class="sync-detail-value">{{ skippedSymbolCount }} 个指数等待下次重试</span>
-            </div>
-          </div>
-        </div>
-      </el-card>
+  <section class="sync-workbench">
+    <div class="sync-head">
+      <div>
+        <div class="eyebrow">DATA SYNC</div>
+        <h2>数据同步任务</h2>
+      </div>
+      <div class="sync-actions">
+        <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog">刷新目录</el-button>
+        <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
+        <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0" :loading="executing" @click="executeQueue">
+          执行队列
+        </el-button>
+      </div>
     </div>
 
-    <!-- 下部：同步日志 -->
-    <el-card class="logs-card" shadow="never">
-      <template #header>
-        <div class="card-header">
-          <span>同步历史</span>
-          <el-button type="primary" link @click="loadLogs">
-            <el-icon><Refresh /></el-icon>
-            刷新
-          </el-button>
-        </div>
-      </template>
+    <div class="status-strip">
+      <div class="status-card">
+        <span>当前状态</span>
+        <strong>{{ statusLabel(syncStatus.status) }}</strong>
+      </div>
+      <div class="status-card">
+        <span>当前任务</span>
+        <strong>{{ syncStatus.sync_type ? syncTypeLabel(syncStatus.sync_type) : '-' }}</strong>
+      </div>
+      <div class="status-card">
+        <span>进度</span>
+        <strong>{{ syncStatus.progress_percent.toFixed(1) }}%</strong>
+      </div>
+      <div class="status-card relay-state" :class="{ missing: catalog && !catalog.relay.configured }">
+        <span>Relay Key</span>
+        <strong>{{ catalog?.relay.configured ? '已配置' : '未配置' }}</strong>
+      </div>
+    </div>
 
-      <el-table
-        v-loading="logsLoading"
-        :data="syncLogs"
-        stripe
-        size="small"
-        max-height="300"
-      >
-        <el-table-column prop="sync_type" label="类型" width="100">
+    <el-progress
+      class="sync-progress"
+      :percentage="Math.min(100, Math.max(0, syncStatus.progress_percent || 0))"
+      :status="syncStatus.status === 'failed' ? 'exception' : syncStatus.status === 'completed' ? 'success' : undefined"
+      :stroke-width="10"
+    />
+
+    <div class="layout-grid">
+      <section class="panel presets-panel">
+        <div class="panel-title">
+          <h3>预设方案</h3>
+          <span>{{ catalog?.presets.length || 0 }} 个</span>
+        </div>
+        <div class="preset-list">
+          <button
+            v-for="preset in catalog?.presets || []"
+            :key="preset.name"
+            class="preset"
+            :class="{ noisy: preset.name === 'relay_text' }"
+            type="button"
+            @click="addPreset(preset)"
+          >
+            <span>{{ preset.display_name }}</span>
+            <small>{{ preset.description }}</small>
+          </button>
+        </div>
+      </section>
+
+      <section class="panel controls-panel">
+        <div class="panel-title">
+          <h3>执行参数</h3>
+          <el-tag size="small" effect="dark">1 req/s 默认</el-tag>
+        </div>
+        <div class="control-grid">
+          <label>
+            <span>日期范围</span>
+            <el-date-picker
+              v-model="dateRange"
+              type="daterange"
+              value-format="YYYY-MM-DD"
+              start-placeholder="开始日期"
+              end-placeholder="结束日期"
+              unlink-panels
+            />
+          </label>
+          <label>
+            <span>股票范围</span>
+            <el-segmented v-model="stockScope" :options="stockScopeOptions" />
+          </label>
+          <label class="wide">
+            <span>自定义股票</span>
+            <el-input
+              v-model="symbolText"
+              type="textarea"
+              :rows="2"
+              placeholder="000001.SZ, 600000.SH"
+              :disabled="stockScope === 'all'"
+            />
+          </label>
+          <label>
+            <span>失败策略</span>
+            <el-select v-model="failureStrategy">
+              <el-option label="跳过失败项" value="skip" />
+              <el-option label="失败即停止" value="stop" />
+              <el-option label="重试后跳过" value="retry" />
+            </el-select>
+          </label>
+          <label>
+            <span>Relay 每日限量</span>
+            <el-input-number v-model="relayDailyLimit" :min="1" :max="500" :step="20" controls-position="right" />
+          </label>
+          <label>
+            <span>THS 成分上限</span>
+            <el-input-number v-model="thsMemberLimit" :min="1" :max="500" :step="10" controls-position="right" />
+          </label>
+          <label>
+            <span>板块资金流 limit</span>
+            <el-input-number v-model="blockLimit" :min="1" :max="100" controls-position="right" />
+          </label>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h3>待执行队列</h3>
+        <div class="panel-tools">
+          <el-button size="small" :icon="Delete" @click="clearQueue">清空</el-button>
+        </div>
+      </div>
+      <el-empty v-if="queue.length === 0" description="队列为空" :image-size="80" />
+      <div v-else class="queue-list">
+        <div v-for="item in queue" :key="item.id" class="queue-item">
+          <div>
+            <strong>{{ item.display_name }}</strong>
+            <span>{{ item.kind === 'relay' ? 'Tushare Relay' : syncTypeLabel(item.name) }}</span>
+          </div>
+          <el-tag size="small" :type="riskType(item.risk_level)" effect="dark">{{ riskLabel(item.risk_level) }}</el-tag>
+          <el-button text :icon="Delete" @click="removeQueueItem(item.id)" />
+        </div>
+      </div>
+    </section>
+
+    <section class="panel catalog-panel">
+      <div class="panel-title">
+        <h3>数据任务目录</h3>
+        <div class="panel-tools">
+          <el-input v-model="keyword" clearable placeholder="搜索数据集" />
+          <el-select v-model="categoryFilter" placeholder="分类">
+            <el-option label="全部" value="all" />
+            <el-option label="核心" value="core" />
+            <el-option label="行情" value="market" />
+            <el-option label="Relay 结构化" value="relay_structured" />
+            <el-option label="新闻公告" value="relay_text" />
+          </el-select>
+        </div>
+      </div>
+
+      <el-table :data="filteredDatasets" height="420" class="dark-table" row-key="name">
+        <el-table-column label="任务" min-width="220">
           <template #default="{ row }">
-            <el-tag size="small">{{ syncTypeLabel(row.sync_type) }}</el-tag>
+            <div class="dataset-name">
+              <strong>{{ row.display_name }}</strong>
+              <span>{{ row.name }}</span>
+            </div>
           </template>
         </el-table-column>
-        <el-table-column prop="status" label="状态" width="100">
+        <el-table-column prop="source" label="来源" width="150" />
+        <el-table-column label="覆盖度" min-width="190">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)" size="small">
-              {{ getStatusLabel(row.status) }}
+            <span v-if="row.coverage && row.coverage.row_count">
+              {{ formatNumber(row.coverage.row_count) }} 行
+              <small>{{ row.coverage.max_date || '-' }}</small>
+            </span>
+            <span v-else>-</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="频率" width="110">
+          <template #default="{ row }">{{ frequencyLabel(row.recommended_frequency) }}</template>
+        </el-table-column>
+        <el-table-column label="依赖" width="150">
+          <template #default="{ row }">
+            <el-tag v-if="row.requires_qmt" size="small" effect="dark">QMT</el-tag>
+            <el-tag v-if="row.requires_relay_key" size="small" effect="dark" type="success">Relay</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="风险" width="110">
+          <template #default="{ row }">
+            <el-tag :type="riskType(row.risk_level)" effect="dark" size="small">
+              {{ riskLabel(row.risk_level) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="success_count" label="成功" width="80">
+        <el-table-column prop="description" label="说明" min-width="320" show-overflow-tooltip />
+        <el-table-column label="" width="100" fixed="right">
           <template #default="{ row }">
-            <span class="text-success">{{ row.success_count ?? '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="failed_count" label="失败" width="80">
-          <template #default="{ row }">
-            <span :class="{ 'text-danger': row.failed_count && row.failed_count > 0 }">
-              {{ row.failed_count ?? '-' }}
-            </span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="total_count" label="总数" width="80">
-          <template #default="{ row }">
-            {{ row.total_count ?? '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="start_time" label="开始时间" width="160">
-          <template #default="{ row }">
-            {{ formatTime(row.start_time) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="end_time" label="结束时间" width="160">
-          <template #default="{ row }">
-            {{ row.end_time ? formatTime(row.end_time) : '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="error_message" label="错误信息" min-width="200">
-          <template #default="{ row }">
-            <span v-if="row.error_message" class="text-danger">
-              {{ row.error_message }}
-            </span>
-            <span v-else class="text-muted">-</span>
+            <el-button size="small" :icon="Plus" @click="addTask(row)">加入</el-button>
           </template>
         </el-table-column>
       </el-table>
-    </el-card>
-  </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-title">
+        <h3>最近记录</h3>
+        <el-button size="small" :icon="Refresh" @click="loadLogs">刷新</el-button>
+      </div>
+      <el-table :data="logs" class="dark-table" height="220">
+        <el-table-column label="类型" width="150">
+          <template #default="{ row }">{{ syncTypeLabel(row.sync_type) }}</template>
+        </el-table-column>
+        <el-table-column prop="status" label="状态" width="110" />
+        <el-table-column label="成功/失败" width="130">
+          <template #default="{ row }">{{ row.success_count ?? 0 }} / {{ row.failed_count ?? 0 }}</template>
+        </el-table-column>
+        <el-table-column prop="start_time" label="开始时间" width="190" />
+        <el-table-column prop="error_message" label="错误" show-overflow-tooltip />
+      </el-table>
+    </section>
+
+    <el-alert
+      v-if="catalog && !catalog.relay.configured"
+      class="relay-warning"
+      type="warning"
+      :closable="false"
+      show-icon
+    >
+      <template #title>未检测到 INDEVS_TUSHARE_API_KEY，Relay 任务会被后端拒绝。</template>
+    </el-alert>
+  </section>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Refresh } from '@element-plus/icons-vue'
-import { syncApi, type SyncStatus, type SyncLog } from '@/api/sync'
+import { Delete, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { syncApi, type SyncCatalog, type SyncCatalogItem, type SyncLog, type SyncPreset, type SyncStatus } from '@/api/sync'
 
-// 同步配置
-const syncConfig = ref({
-  syncTypes: [] as string[],
-  startDate: '',
-  endDate: '',
-  stockScope: 'all',
-  failureStrategy: 'skip',
-  customSymbols: '',
-  fullSync: false,  // 全量更新标记
-})
+interface QueueItem {
+  id: string
+  name: string
+  display_name: string
+  kind: 'core' | 'relay'
+  risk_level: string
+  text_source?: boolean
+}
 
-// 日期快捷选项
-const dateShortcuts = [
-  {
-    text: '最近一周',
-    days: 7,
-  },
-  {
-    text: '最近一个月',
-    days: 30,
-  },
-  {
-    text: '最近三个月',
-    days: 90,
-  },
-  {
-    text: '最近一年',
-    days: 365,
-  },
+const today = new Date()
+const weekAgo = new Date(today)
+weekAgo.setDate(today.getDate() - 7)
+
+const catalog = ref<SyncCatalog | null>(null)
+const logs = ref<SyncLog[]>([])
+const queue = ref<QueueItem[]>([])
+const keyword = ref('')
+const categoryFilter = ref('all')
+const catalogLoading = ref(false)
+const executing = ref(false)
+const stockScope = ref<'custom' | 'all'>('custom')
+const symbolText = ref('000001.SZ')
+const dateRange = ref<[string, string]>([formatDate(weekAgo), formatDate(today)])
+const failureStrategy = ref<'skip' | 'retry' | 'stop'>('skip')
+const relayDailyLimit = ref(200)
+const thsMemberLimit = ref(50)
+const blockLimit = ref(5)
+const syncStatus = ref<SyncStatus>(idleStatus())
+const stockScopeOptions = [
+  { label: '自定义', value: 'custom' },
+  { label: '全市场', value: 'all' },
 ]
+let pollTimer: number | undefined
 
-const formatDate = (date: Date): string => date.toISOString().slice(0, 10)
+const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
+const filteredDatasets = computed(() => {
+  const term = keyword.value.trim().toLowerCase()
+  return (catalog.value?.datasets || []).filter((item) => {
+    const matchesCategory = categoryFilter.value === 'all' || item.category === categoryFilter.value
+    const text = `${item.name} ${item.display_name} ${item.description}`.toLowerCase()
+    return matchesCategory && (!term || text.includes(term))
+  })
+})
 
-const applyDateShortcut = (days: number) => {
-  const end = new Date()
-  const start = new Date()
-  start.setTime(start.getTime() - 3600 * 1000 * 24 * days)
-  syncConfig.value.startDate = formatDate(start)
-  syncConfig.value.endDate = formatDate(end)
+onMounted(async () => {
+  await Promise.all([loadCatalog(), refreshStatus(), loadLogs()])
+  startPolling()
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer) window.clearInterval(pollTimer)
+})
+
+async function loadCatalog() {
+  catalogLoading.value = true
+  try {
+    catalog.value = await syncApi.getCatalog()
+  } finally {
+    catalogLoading.value = false
+  }
 }
 
-const defaultSyncStatus = (): SyncStatus => ({
-  sync_type: null,
-  status: 'idle',
-  total: 0,
-  current: 0,
-  success_count: 0,
-  failed_count: 0,
-  progress_percent: 0,
-  start_time: null,
-  end_time: null,
-  error_message: null,
-  details: {},
-})
-
-const queryClient = useQueryClient()
-const syncStatusQuery = useQuery({
-  queryKey: ['sync-status'],
-  queryFn: syncApi.getStatus,
-  initialData: defaultSyncStatus,
-  refetchInterval: (query) => (query.state.data?.status === 'running' ? 2000 : false),
-})
-const syncLogsQuery = useQuery({
-  queryKey: ['sync-logs'],
-  queryFn: () => syncApi.getLogs({ limit: 20 }),
-  initialData: [] as SyncLog[],
-})
-const startSyncMutation = useMutation({
-  mutationFn: syncApi.trigger,
-  onSuccess: async (status) => {
-    syncStatus.value = status
-    await queryClient.invalidateQueries({ queryKey: ['sync-status'] })
-  },
-})
-const cancelSyncMutation = useMutation({
-  mutationFn: () => syncApi.cancel(),
-  onSuccess: async () => {
-    await queryClient.invalidateQueries({ queryKey: ['sync-status'] })
-    await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
-  },
-})
-
-// 同步状态
-const syncStatus = ref<SyncStatus>(defaultSyncStatus())
-
-watch(
-  () => syncStatusQuery.data.value,
-  (status) => {
-    if (status) syncStatus.value = status
-  },
-  { immediate: true }
-)
-
-watch(
-  () => syncStatus.value.status,
-  async (status, previous) => {
-    if (previous === 'running' && status !== 'running') {
-      await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
-    }
-  }
-)
-
-// 当前同步的股票代码
-const currentSymbol = computed(() => {
-  if (syncStatus.value.details?.current_symbol) {
-    return syncStatus.value.details.current_symbol as string
-  }
-  return null
-})
-
-const detailArray = (details: Record<string, unknown> | null | undefined, key: string): unknown[] => {
-  const value = details?.[key]
-  return Array.isArray(value) ? value : []
+async function refreshStatus() {
+  syncStatus.value = await syncApi.getStatus()
 }
 
-const failedSymbolSummaries = computed(() => {
-  const details = syncStatus.value.details
-  const failedSymbols = detailArray(details, 'failed_symbols')
-  const failedStocks = detailArray(details, 'failed_stocks')
-  const failedItems = [...failedSymbols, ...failedStocks]
-  return failedItems
-    .slice(0, 3)
-    .map((item) => {
-      if (!item || typeof item !== 'object') return ''
-      const symbol = String((item as Record<string, unknown>).symbol || '')
-      const error = String((item as Record<string, unknown>).error || '')
-      return symbol && error ? `${symbol}: ${error}` : symbol || error
-    })
-    .filter(Boolean)
-})
-
-const skippedSymbolCount = computed(() => detailArray(syncStatus.value.details, 'skipped_symbols').length)
-
-const syncBlockedReason = computed(() => {
-  const value = syncStatus.value.details?.blocked_reason
-  return typeof value === 'string' && value ? value : null
-})
-
-// 同步日志
-const syncLogs = computed(() => syncLogsQuery.data.value || [])
-const logsLoading = computed(() => syncLogsQuery.isFetching.value)
-
-// 是否正在同步
-const isSyncing = computed(() => syncStatus.value.status === 'running')
-
-// 是否禁用日期范围选择
-// 只有当选中的同步类型都不需要日期范围时才禁用
-const isDateRangeDisabled = computed(() => {
-  const needsDateTypes = ['kline_daily', 'index_daily', 'kline_minute', 'dividends']
-  // 如果选中的类型中有需要日期的，则不禁用
-  const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
-  // 如果没有选中任何需要日期的类型，则禁用
-  return !hasNeedDate
-})
-
-// 状态标签类型
-const statusTagType = computed(() => {
-  switch (syncStatus.value.status) {
-    case 'running':
-      return 'warning'
-    case 'completed':
-      return 'success'
-    case 'failed':
-      return 'danger'
-    default:
-      return 'info'
-  }
-})
-
-// 状态文本
-const statusText = computed(() => {
-  switch (syncStatus.value.status) {
-    case 'running':
-      return '同步中'
-    case 'completed':
-      return '已完成'
-    case 'failed':
-      return '失败'
-    default:
-      return '空闲'
-  }
-})
-
-// 进度条状态
-const progressStatus = computed(() => {
-  if (syncStatus.value.status === 'completed') return 'success'
-  if (syncStatus.value.status === 'failed') return 'exception'
-  return undefined
-})
-
-// 同步类型标签
-const syncTypeLabel = (type: string): string => {
-  const labels: Record<string, string> = {
-    stock_info: '股票信息',
-    stock_full: '股票完整信息',
-    financial_data: '财务数据',
-    kline_daily: '日K线',
-    index_daily: '指数日线',
-    kline_minute: '分钟K线',
-    realtime_mv: '实时市值',
-    dividends: '分红送股',
-    factor_dependency: '因子依赖数据',
-  }
-  return labels[type] || type
+async function loadLogs() {
+  logs.value = await syncApi.getLogs({ limit: 20 })
 }
 
-// 状态类型
-const getStatusType = (status: string): 'success' | 'warning' | 'danger' | 'info' => {
-  const types: Record<string, 'success' | 'warning' | 'danger' | 'info'> = {
-    completed: 'success',
-    running: 'warning',
-    failed: 'danger',
-    idle: 'info',
-  }
-  return types[status] || 'info'
+function startPolling() {
+  pollTimer = window.setInterval(async () => {
+    await refreshStatus()
+    if (!isRunning.value) await loadLogs()
+  }, 2500)
 }
 
-// 状态标签
-const getStatusLabel = (status: string): string => {
-  const labels: Record<string, string> = {
-    completed: '完成',
-    running: '进行中',
-    failed: '失败',
-    idle: '空闲',
+function addPreset(preset: SyncPreset) {
+  const datasets = catalog.value?.datasets || []
+  for (const type of preset.sync_types) {
+    const item = datasets.find((entry) => entry.name === type)
+    if (item) addTask(item, false)
   }
-  return labels[status] || status
+  for (const name of preset.relay_datasets) {
+    const item = datasets.find((entry) => entry.name === name)
+    if (item) addTask(item, false)
+  }
+  dedupeQueue()
 }
 
-// 格式化时间
-const formatTime = (time: string | null): string => {
-  if (!time) return '-'
-  const date = new Date(time)
-  return date.toLocaleString('zh-CN', {
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
+function addTask(item: SyncCatalogItem, dedupe = true) {
+  const kind = item.requires_relay_key || item.category.startsWith('relay') ? 'relay' : 'core'
+  queue.value.push({
+    id: `${kind}:${item.name}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
+    name: item.name,
+    display_name: item.display_name,
+    kind,
+    risk_level: item.risk_level,
+    text_source: item.text_source,
+  })
+  if (dedupe) dedupeQueue()
+}
+
+function dedupeQueue() {
+  const seen = new Set<string>()
+  queue.value = queue.value.filter((item) => {
+    const key = `${item.kind}:${item.name}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
   })
 }
 
-const isSubmitting = ref(false)
-
-const loadSyncStatus = async () => {
-  const response = await queryClient.fetchQuery({
-    queryKey: ['sync-status'],
-    queryFn: syncApi.getStatus,
-  })
-  syncStatus.value = response
+function removeQueueItem(id: string) {
+  queue.value = queue.value.filter((item) => item.id !== id)
 }
 
-const extractRetrySymbols = (details: Record<string, unknown> | null | undefined): string[] => {
-  const values = new Set<string>()
-  for (const key of ['failed_symbols', 'failed_stocks']) {
-    for (const item of detailArray(details, key)) {
-      if (item && typeof item === 'object') {
-        const symbol = String((item as Record<string, unknown>).symbol || '').trim()
-        if (symbol) values.add(symbol)
+function clearQueue() {
+  queue.value = []
+}
+
+async function executeQueue() {
+  if (queue.value.length === 0 || executing.value) return
+  executing.value = true
+  try {
+    const coreItems = queue.value.filter((item) => item.kind === 'core')
+    const relayItems = queue.value.filter((item) => item.kind === 'relay')
+    for (const item of coreItems) {
+      if (item.name === 'factor_dependency') {
+        ElMessage.warning('因子依赖同步请从因子看板的预计算流程触发')
+        continue
       }
+      await syncApi.trigger({
+        sync_type: item.name as any,
+        ...basePayload(),
+      })
+      await waitUntilIdle()
     }
+    if (relayItems.length) {
+      await syncApi.trigger({
+        sync_type: 'tushare_relay',
+        ...basePayload(),
+        relay_datasets: relayItems.map((item) => item.name),
+        relay_options: relayOptions(relayItems),
+      })
+      await waitUntilIdle()
+    }
+    queue.value = []
+    await Promise.all([refreshStatus(), loadLogs(), loadCatalog()])
+  } catch (error: any) {
+    ElMessage.error(error?.message || '同步任务提交失败')
+  } finally {
+    executing.value = false
   }
-  for (const item of detailArray(details, 'skipped_symbols')) {
-    const symbol = String(item || '').trim()
-    if (symbol) values.add(symbol)
-  }
-  return [...values]
 }
 
-const latestRetrySymbolsFor = (syncType: string): string[] => {
-  if (syncStatus.value.sync_type === syncType && syncStatus.value.status !== 'running') {
-    const fromStatus = extractRetrySymbols(syncStatus.value.details)
-    if (fromStatus.length) return fromStatus
+function basePayload() {
+  const [start, end] = dateRange.value
+  return {
+    start_date: start,
+    end_date: end,
+    symbols: stockScope.value === 'custom' ? parseSymbols(symbolText.value) : undefined,
+    failure_strategy: failureStrategy.value,
+    full_sync: false,
   }
-  for (const log of syncLogs.value) {
-    if (log.sync_type !== syncType || !log.details) continue
-    const symbols = extractRetrySymbols(log.details || {})
-    if (symbols.length) return symbols
-  }
-  return []
 }
 
-const handleStartSync = async () => {
-  if (syncConfig.value.syncTypes.length === 0) {
-    ElMessage.warning('请至少选择一个同步类型')
-    return
+function relayOptions(items: QueueItem[]) {
+  return {
+    allow_all_symbols: stockScope.value === 'all',
+    allow_text_sources: items.some((item) => item.text_source),
+    daily_limit: relayDailyLimit.value,
+    block_moneyflow_limit: blockLimit.value,
+    ths_member_limit: thsMemberLimit.value,
+    rps: catalog.value?.relay.rps || 1,
+    timeout_seconds: catalog.value?.relay.timeout_seconds || 30,
   }
+}
 
-  // 提前校验：K线类型需要日期范围
-  const needsDateTypes = ['kline_daily', 'index_daily', 'kline_minute', 'dividends']
-  const hasNeedDate = syncConfig.value.syncTypes.some(t => needsDateTypes.includes(t))
-  if (hasNeedDate) {
-    if (!syncConfig.value.startDate || !syncConfig.value.endDate) {
-      ElMessage.warning('K线数据同步需要选择日期范围')
+async function waitUntilIdle() {
+  for (let i = 0; i < 720; i += 1) {
+    await sleep(2500)
+    await refreshStatus()
+    if (!isRunning.value) {
+      if (syncStatus.value.status === 'failed') throw new Error(syncStatus.value.error_message || '同步失败')
       return
     }
   }
-
-  // 校验自定义股票范围
-  if (syncConfig.value.stockScope === 'custom' && !syncConfig.value.customSymbols.trim()) {
-    ElMessage.warning('请输入自定义股票代码')
-    return
-  }
-
-  isSubmitting.value = true
-  const symbolRetryTypes = new Set(['stock_info', 'stock_full', 'kline_daily', 'kline_minute', 'realtime_mv', 'dividends'])
-
-  // 按顺序同步选中的类型
-  for (const syncType of syncConfig.value.syncTypes) {
-    try {
-      const params: Parameters<typeof syncApi.trigger>[0] = {
-        sync_type: syncType as 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'index_daily' | 'kline_minute' | 'realtime_mv' | 'dividends',
-        failure_strategy: syncConfig.value.failureStrategy as 'skip' | 'retry' | 'stop',
-        full_sync: syncConfig.value.fullSync,  // 传递全量更新标记
-      }
-
-      // 只有 K 线数据才需要日期范围
-      if (['kline_daily', 'index_daily', 'kline_minute'].includes(syncType)) {
-        params.start_date = syncConfig.value.startDate
-        params.end_date = syncConfig.value.endDate
-      }
-
-      // 全量同步标记
-      if (syncType === 'stock_full' || syncType === 'financial_data') {
-        params.full_sync = true
-      }
-
-      // 股票范围
-      if (syncConfig.value.stockScope === 'custom') {
-        params.symbols = syncConfig.value.customSymbols
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean)
-      } else {
-        const retrySymbols = latestRetrySymbolsFor(syncType)
-        if (retrySymbols.length) {
-          if (syncType === 'index_daily') {
-            params.index_symbols = retrySymbols
-          } else if (symbolRetryTypes.has(syncType)) {
-            params.symbols = retrySymbols
-          }
-        }
-      }
-
-      const response = await startSyncMutation.mutateAsync(params)
-      syncStatus.value = response
-      const retriedCount = (params.index_symbols?.length || params.symbols?.length || 0)
-      if (retriedCount > 0 && syncConfig.value.stockScope !== 'custom') {
-        ElMessage.success(`${syncTypeLabel(syncType)} 已启动，优先重试 ${retriedCount} 个失败项`)
-      } else {
-        ElMessage.success(`${syncTypeLabel(syncType)} 同步已启动`)
-      }
-    } catch (error) {
-      console.error('Sync error:', error)
-      ElMessage.error('启动同步失败')
-      break
-    }
-  }
-
-  isSubmitting.value = false
+  throw new Error('同步任务等待超时')
 }
 
-// 停止同步
-const handleStopSync = async () => {
-  try {
-    const response = await cancelSyncMutation.mutateAsync()
-    if (response?.cancelled) {
-      ElMessage.success('同步已取消')
-    } else {
-      ElMessage.info('当前没有正在运行的同步任务')
-    }
-    await loadSyncStatus()
-  } catch (error) {
-    console.error('Cancel sync error:', error)
-    ElMessage.error('取消同步失败')
+async function cancelSync() {
+  await syncApi.cancel()
+  await refreshStatus()
+}
+
+function parseSymbols(text: string) {
+  return text
+    .split(/[\s,，;；]+/)
+    .map((item) => item.trim().toUpperCase())
+    .filter(Boolean)
+}
+
+function syncTypeLabel(type: string) {
+  const map: Record<string, string> = {
+    datasync: '一键同步',
+    stock_info: '股票基础',
+    stock_full: '股票完整',
+    financial_data: '财务数据',
+    kline_daily: '日 K',
+    index_daily: '指数日线',
+    kline_minute: '分钟 K',
+    realtime_mv: '实时市值',
+    dividends: 'QMT 分红',
+    factor_dependency: '因子依赖',
+    tushare_relay: 'Tushare Relay',
+  }
+  return map[type] || type
+}
+
+function statusLabel(status: string) {
+  const map: Record<string, string> = {
+    idle: '空闲',
+    queued: '排队',
+    running: '运行中',
+    completed: '完成',
+    failed: '失败',
+    cancelled: '已取消',
+  }
+  return map[status] || status
+}
+
+function frequencyLabel(value: string) {
+  const map: Record<string, string> = {
+    daily: '每日',
+    weekly: '每周',
+    manual: '手动',
+    on_demand: '按需',
+  }
+  return map[value] || value
+}
+
+function riskLabel(value: string) {
+  const map: Record<string, string> = {
+    low: '低风险',
+    medium: '中风险',
+    high: '高噪声',
+  }
+  return map[value] || value
+}
+
+function riskType(value: string) {
+  if (value === 'high') return 'danger'
+  if (value === 'medium') return 'warning'
+  return 'success'
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN').format(value || 0)
+}
+
+function formatDate(value: Date) {
+  const year = value.getFullYear()
+  const month = `${value.getMonth() + 1}`.padStart(2, '0')
+  const day = `${value.getDate()}`.padStart(2, '0')
+  return `${year}-${month}-${day}`
+}
+
+function idleStatus(): SyncStatus {
+  return {
+    sync_type: null,
+    status: 'idle',
+    total: 0,
+    current: 0,
+    success_count: 0,
+    failed_count: 0,
+    progress_percent: 0,
+    start_time: null,
+    end_time: null,
+    error_message: null,
+    details: {},
   }
 }
 
-// 加载同步日志
-const loadLogs = async () => {
-  try {
-    await queryClient.invalidateQueries({ queryKey: ['sync-logs'] })
-  } catch (error) {
-    console.error('Load logs error:', error)
-  }
+function sleep(ms: number) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms))
 }
-
-// 初始化
-onMounted(async () => {
-  try {
-    await loadSyncStatus()
-  } catch (error) {
-    console.error('Get initial status error:', error)
-  }
-
-  await loadLogs()
-})
 </script>
 
 <style scoped>
-.sync-panel {
+.sync-workbench {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  height: 100%;
+  gap: 14px;
+  color: var(--el-text-color-primary);
 }
 
-.sync-main {
+.sync-head,
+.panel-title,
+.status-strip,
+.queue-item {
   display: flex;
-  gap: 16px;
-  flex: 0 0 auto;
-}
-
-.config-card,
-.status-card {
-  flex: 1;
-  min-width: 0;
-}
-
-.card-header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
-.config-form {
-  padding-right: 16px;
-}
-
-/* 确保checkbox文字正常显示 */
-.config-form :deep(.el-checkbox__label) {
-  font-family: var(--font-ui, "PingFang SC", "Microsoft YaHei", sans-serif);
-  font-size: 14px;
-  color: var(--text-primary, #303133);
-}
-
-.config-form :deep(.el-checkbox-group) {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 12px 20px;
-}
-
-.form-tip {
+.eyebrow {
+  color: #22c7f4;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
   font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
-  line-height: 1.5;
+  letter-spacing: 0;
 }
 
-.date-range-fields,
-.date-shortcuts {
+h2,
+h3 {
+  margin: 0;
+}
+
+h2 {
+  font-size: 22px;
+}
+
+h3 {
+  font-size: 15px;
+}
+
+.sync-actions,
+.panel-tools {
   display: flex;
   align-items: center;
   gap: 8px;
-  flex-wrap: wrap;
 }
 
-.date-shortcuts {
+.status-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.status-card,
+.panel {
+  border: 1px solid rgba(87, 111, 138, 0.42);
+  background: linear-gradient(180deg, rgba(22, 29, 40, 0.96), rgba(12, 16, 24, 0.96));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.status-card {
+  min-height: 68px;
+  padding: 12px 14px;
+  border-radius: 6px;
+}
+
+.status-card span,
+.queue-item span,
+.dataset-name span,
+.panel-title > span,
+.preset small,
+label > span,
+small {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+
+.status-card strong {
+  display: block;
   margin-top: 8px;
+  color: #f3f7fb;
+  font-size: 17px;
 }
 
-.date-separator {
-  color: var(--text-secondary, #909399);
+.relay-state.missing strong {
+  color: #ffd166;
 }
 
-.status-content {
+.sync-progress {
+  --el-fill-color-light: rgba(255, 255, 255, 0.08);
+}
+
+.layout-grid {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  gap: 14px;
+}
+
+.panel {
+  padding: 14px;
+  border-radius: 8px;
+}
+
+.preset-list,
+.queue-list {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-}
-
-.progress-section {
-  padding: 0 8px;
-}
-
-.progress-header {
-  display: flex;
-  justify-content: space-between;
-  margin-bottom: 8px;
-  font-size: 14px;
-  color: #606266;
-}
-
-.progress-percent {
-  font-weight: 600;
-  color: #409eff;
-}
-
-.progress-detail {
-  text-align: right;
-  font-size: 12px;
-  color: #909399;
-  margin-top: 4px;
-}
-
-.sync-detail-panel {
+  gap: 8px;
   margin-top: 12px;
-  padding: 10px 12px;
-  border: 1px solid rgba(64, 158, 255, 0.16);
-  border-radius: 8px;
-  background: rgba(64, 158, 255, 0.06);
 }
 
-.sync-detail-row {
+.preset {
   display: flex;
-  gap: 10px;
-  font-size: 12px;
-  line-height: 1.6;
+  min-height: 70px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid rgba(72, 98, 124, 0.55);
+  border-radius: 6px;
+  color: #eef5fb;
+  background: rgba(10, 16, 24, 0.72);
+  cursor: pointer;
+  text-align: left;
 }
 
-.sync-detail-row + .sync-detail-row {
-  margin-top: 6px;
+.preset:hover {
+  border-color: rgba(34, 199, 244, 0.78);
+  background: rgba(20, 40, 54, 0.78);
 }
 
-.sync-detail-label {
-  min-width: 64px;
-  color: #909399;
+.preset.noisy {
+  border-color: rgba(214, 143, 47, 0.58);
 }
 
-.sync-detail-value {
-  color: #dce6f9;
-  word-break: break-all;
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 12px;
 }
 
-.status-desc {
-  width: 100%;
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
 }
 
-.error-alert {
-  margin-top: 8px;
+label.wide {
+  grid-column: span 2;
 }
 
-.logs-card {
-  flex: 1;
-  min-height: 0;
+.queue-item {
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid rgba(74, 99, 126, 0.5);
+  border-radius: 6px;
+  background: rgba(10, 16, 24, 0.78);
 }
 
-.logs-card :deep(.el-card__body) {
-  height: calc(100% - 56px);
-  overflow: auto;
+.queue-item > div:first-child,
+.dataset-name {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.text-success {
-  color: #67c23a;
-  font-weight: 500;
+.catalog-panel {
+  padding-bottom: 8px;
 }
 
-.text-danger {
-  color: #f56c6c;
-  font-weight: 500;
+.panel-tools .el-input {
+  width: 220px;
 }
 
-.text-muted {
-  color: #909399;
+.panel-tools .el-select {
+  width: 150px;
 }
 
-@media (max-width: 900px) {
-  .sync-main {
-    flex-direction: column;
+.relay-warning {
+  border-radius: 6px;
+}
+
+:deep(.el-table.dark-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: rgba(10, 16, 24, 0.78);
+  --el-table-header-bg-color: rgba(9, 14, 22, 0.98);
+  --el-table-row-hover-bg-color: rgba(24, 54, 72, 0.9);
+  --el-table-border-color: rgba(75, 96, 120, 0.42);
+  --el-table-text-color: #d9e3ee;
+  --el-table-header-text-color: #aebbd0;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+:deep(.el-table__inner-wrapper::before),
+:deep(.el-table__border-left-patch) {
+  background: rgba(75, 96, 120, 0.42);
+}
+
+:deep(.el-empty__description p) {
+  color: var(--el-text-color-secondary);
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-textarea__inner),
+:deep(.el-select__wrapper),
+:deep(.el-input-number__decrease),
+:deep(.el-input-number__increase) {
+  background: rgba(8, 13, 20, 0.86);
+  border-color: rgba(72, 98, 124, 0.5);
+  box-shadow: 0 0 0 1px rgba(72, 98, 124, 0.5) inset;
+}
+
+:deep(.el-input__inner),
+:deep(.el-textarea__inner) {
+  color: #edf3fa;
+}
+
+@media (max-width: 1180px) {
+  .layout-grid,
+  .status-strip,
+  .control-grid {
+    grid-template-columns: 1fr;
   }
 
-  .config-card,
-  .status-card {
-    width: 100%;
+  label.wide {
+    grid-column: auto;
   }
 }
 </style>

@@ -17,6 +17,18 @@ from app.db.duckdb import get_duckdb
 
 _DAILY_COLS = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
 _MINUTE_COLS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+_DATASET_KEY_COLS = {
+    "factor_cache": ["symbol", "trade_date", "expr_hash"],
+    "adj_factors": ["symbol", "trade_date"],
+    "moneyflow": ["symbol", "trade_date"],
+    "block_moneyflow": ["block_code", "trade_date"],
+    "auction_replay": ["symbol", "datetime", "mode"],
+    "ths_index": ["ths_code", "snapshot_date"],
+    "ths_member": ["ths_code", "symbol", "snapshot_date"],
+    "announcements": ["symbol", "ann_date", "title_hash"],
+    "research_reports": ["symbol", "report_date", "title_hash"],
+    "market_news": ["source_api", "publish_time", "title_hash"],
+}
 
 
 def _list_param(values: Sequence) -> str:
@@ -430,8 +442,8 @@ class ParquetMarketDataStore(MarketDataStore):
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        if dataset == "factor_cache":
-            key_cols = ["symbol", "trade_date", "expr_hash"]
+        if dataset in _DATASET_KEY_COLS:
+            key_cols = _DATASET_KEY_COLS[dataset]
         elif date_col == "trade_date":
             key_cols = ["symbol", "trade_date"]
         else:
@@ -464,6 +476,10 @@ class ParquetMarketDataStore(MarketDataStore):
                 shutil.rmtree(partition_dir)
             tmp_dir.replace(partition_dir)
         return len(df)
+
+    def write_dataset(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:
+        """Write a generic partitioned Parquet dataset with dataset-specific dedupe keys."""
+        return self._write_partitioned(df, dataset=dataset, date_col=date_col)
 
     # ------------------------------------------------------------------
     # 覆盖摘要

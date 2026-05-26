@@ -2422,6 +2422,79 @@ class SyncService:
 
         return progress
 
+    async def sync_tushare_relay(
+        self,
+        relay_datasets: list[str] | None = None,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        relay_options: dict[str, Any] | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        """Sync structured Indevs Tushare Relay datasets into local Parquet."""
+        from app.services.tushare_relay_sync import run_tushare_relay_sync
+
+        global _current_sync
+        progress = SyncProgress(
+            sync_type="tushare_relay",
+            status="running",
+            start_time=datetime.now(),
+            details={"run_id": run_id} if run_id else {},
+        )
+        _current_sync = progress
+
+        try:
+            await run_tushare_relay_sync(
+                self.session,
+                progress,
+                relay_datasets=relay_datasets,
+                symbols=symbols,
+                start_date=start_date,
+                end_date=end_date,
+                relay_options=relay_options,
+                failure_strategy=failure_strategy,
+            )
+            await self.create_sync_log(
+                sync_type="tushare_relay",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            logger.opt(exception=True).error(f"sync_tushare_relay failed: {e}")
+            await self.create_sync_log(
+                sync_type="tushare_relay",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
     async def get_sync_logs(
         self,
         sync_type: str | None = None,
