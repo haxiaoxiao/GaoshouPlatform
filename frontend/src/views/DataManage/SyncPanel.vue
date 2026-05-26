@@ -6,6 +6,7 @@
         <h2>数据同步任务</h2>
       </div>
       <div class="sync-actions">
+        <span class="queue-summary" :class="{ active: queue.length > 0 }">待执行 {{ queue.length }} 项</span>
         <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
         <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
         <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0" :loading="executing" @click="executeQueue">
@@ -51,11 +52,15 @@
             v-for="preset in catalog?.presets || []"
             :key="preset.name"
             class="preset"
-            :class="{ noisy: preset.name === 'relay_text' }"
+            :class="{ noisy: preset.name === 'relay_text', active: isPresetQueued(preset) }"
             type="button"
             @click="addPreset(preset)"
           >
-            <span>{{ preset.display_name }}</span>
+            <span class="preset-title-row">
+              <span>{{ preset.display_name }}</span>
+              <strong v-if="presetQueueCount(preset) > 0">{{ presetQueueCount(preset) }}/{{ presetItemCount(preset) }} 已加入</strong>
+              <strong v-else>{{ presetItemCount(preset) }} 项</strong>
+            </span>
             <small>{{ preset.description }}</small>
           </button>
         </div>
@@ -130,7 +135,9 @@
             <strong>{{ item.display_name }}</strong>
             <span>{{ item.kind === 'relay' ? 'Tushare Relay' : syncTypeLabel(item.name) }}</span>
           </div>
-          <el-tag size="small" :type="riskType(item.risk_level)" effect="dark">{{ riskLabel(item.risk_level) }}</el-tag>
+          <el-tag size="small" :type="riskType(item.risk_level)" effect="dark" class="risk-tag" :class="`risk-tag--${item.risk_level}`">
+            {{ riskLabel(item.risk_level) }}
+          </el-tag>
           <el-button text :icon="Delete" @click="removeQueueItem(item.id)" />
         </div>
       </div>
@@ -160,8 +167,8 @@
             </div>
           </template>
         </el-table-column>
-        <el-table-column prop="source" label="来源" width="150" />
-        <el-table-column label="覆盖度" min-width="190">
+        <el-table-column prop="source" label="来源" width="150" show-overflow-tooltip />
+        <el-table-column label="覆盖度" min-width="170">
           <template #default="{ row }">
             <span v-if="hasCoverageRows(row.coverage)">
               {{ formatNumber(coverageRows(row.coverage)) }} 行
@@ -173,28 +180,28 @@
             <span v-else>-</span>
           </template>
         </el-table-column>
-        <el-table-column label="频率" width="110">
+        <el-table-column label="频率" width="100">
           <template #default="{ row }">{{ frequencyLabel(row.recommended_frequency) }}</template>
         </el-table-column>
-        <el-table-column label="依赖" width="150">
+        <el-table-column label="依赖" width="120">
           <template #default="{ row }">
             <el-tag v-if="row.requires_qmt" size="small" effect="dark">QMT</el-tag>
             <el-tag v-if="row.requires_relay_key" size="small" effect="dark" type="success">Relay</el-tag>
           </template>
         </el-table-column>
-        <el-table-column label="风险" width="110">
+        <el-table-column label="风险" width="132">
           <template #default="{ row }">
-            <el-tag :type="riskType(row.risk_level)" effect="dark" size="small">
+            <el-tag :type="riskType(row.risk_level)" effect="dark" size="small" class="risk-tag" :class="`risk-tag--${row.risk_level}`">
               {{ riskLabel(row.risk_level) }}
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="description" label="说明" min-width="320" show-overflow-tooltip />
-        <el-table-column label="" width="100" fixed="right">
+        <el-table-column label="" width="96">
           <template #default="{ row }">
             <el-button size="small" :icon="Plus" @click="addTask(row)">加入</el-button>
           </template>
         </el-table-column>
+        <el-table-column prop="description" label="说明" min-width="240" show-overflow-tooltip />
       </el-table>
     </section>
 
@@ -273,6 +280,7 @@ let pollTimer: number | undefined
 let lastLogRefreshAt = 0
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
+const queuedNames = computed(() => new Set(queue.value.map((item) => item.name)))
 const filteredDatasets = computed(() => {
   const term = keyword.value.trim().toLowerCase()
   return (catalog.value?.datasets || []).filter((item) => {
@@ -335,6 +343,7 @@ function startPolling() {
 }
 
 function addPreset(preset: SyncPreset) {
+  const beforeCount = queue.value.length
   const datasets = catalog.value?.datasets || []
   for (const type of preset.sync_types) {
     const item = datasets.find((entry) => entry.name === type)
@@ -345,6 +354,29 @@ function addPreset(preset: SyncPreset) {
     if (item) addTask(item, false)
   }
   dedupeQueue()
+  const addedCount = queue.value.length - beforeCount
+  if (addedCount > 0) {
+    ElMessage.success(`已加入 ${addedCount} 个任务，当前队列 ${queue.value.length} 项`)
+  } else {
+    ElMessage.info('该预设的任务已经在待执行队列中')
+  }
+}
+
+function presetNames(preset: SyncPreset) {
+  return [...preset.sync_types, ...preset.relay_datasets]
+}
+
+function presetItemCount(preset: SyncPreset) {
+  return presetNames(preset).length
+}
+
+function presetQueueCount(preset: SyncPreset) {
+  return presetNames(preset).filter((name) => queuedNames.value.has(name)).length
+}
+
+function isPresetQueued(preset: SyncPreset) {
+  const total = presetItemCount(preset)
+  return total > 0 && presetQueueCount(preset) === total
 }
 
 function addTask(item: SyncCatalogItem, dedupe = true) {
@@ -591,6 +623,25 @@ h3 {
   gap: 8px;
 }
 
+.queue-summary {
+  min-width: 94px;
+  padding: 7px 10px;
+  border: 1px solid rgba(132, 154, 184, 0.34);
+  border-radius: 6px;
+  color: #b8c4d6;
+  background: rgba(7, 12, 19, 0.74);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.queue-summary.active {
+  border-color: rgba(57, 197, 255, 0.86);
+  color: #07111c;
+  background: #44c8ff;
+  box-shadow: 0 0 18px rgba(68, 200, 255, 0.2);
+}
+
 .status-strip {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -679,9 +730,45 @@ small {
   text-align: left;
 }
 
+.preset-title-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.preset-title-row > span {
+  color: #f7fbff;
+  font-weight: 800;
+}
+
+.preset-title-row > strong {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(132, 154, 184, 0.35);
+  border-radius: 999px;
+  color: #c7d3e4;
+  background: rgba(16, 23, 32, 0.9);
+  font-size: 11px;
+  font-weight: 800;
+}
+
 .preset:hover {
   border-color: rgba(72, 205, 248, 0.9);
   background: rgba(18, 43, 59, 0.92);
+}
+
+.preset.active {
+  border-color: rgba(68, 200, 255, 0.98);
+  background: linear-gradient(180deg, rgba(21, 62, 83, 0.96), rgba(10, 27, 40, 0.96));
+  box-shadow: inset 3px 0 0 #44c8ff, 0 0 20px rgba(68, 200, 255, 0.12);
+}
+
+.preset.active .preset-title-row > strong {
+  border-color: rgba(68, 200, 255, 0.95);
+  color: #07111c;
+  background: #44c8ff;
 }
 
 .preset.noisy {
@@ -749,6 +836,51 @@ label.wide {
   background: #0b1018;
   border-radius: 6px;
   overflow: hidden;
+}
+
+:deep(.el-table.dark-table .el-table__cell) {
+  color: #f2f7fd;
+}
+
+:deep(.el-table.dark-table th.el-table__cell) {
+  color: #dbe7f5;
+  background: #152130 !important;
+}
+
+:deep(.el-table.dark-table .dataset-name strong) {
+  color: #ffffff;
+  font-weight: 800;
+}
+
+:deep(.el-table.dark-table .dataset-name span),
+:deep(.el-table.dark-table small) {
+  color: #b9c7d8;
+}
+
+.risk-tag {
+  min-width: 72px;
+  justify-content: center;
+  border-radius: 4px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.risk-tag--low {
+  border-color: #54d66a !important;
+  color: #e8ffec !important;
+  background: #176326 !important;
+}
+
+.risk-tag--medium {
+  border-color: #ffbc42 !important;
+  color: #fff1c2 !important;
+  background: #8a590e !important;
+}
+
+.risk-tag--high {
+  border-color: #ff6b7a !important;
+  color: #ffe6e9 !important;
+  background: #7a1f2a !important;
 }
 
 :deep(.el-table__inner-wrapper::before),
