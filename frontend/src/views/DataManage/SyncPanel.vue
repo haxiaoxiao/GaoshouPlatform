@@ -598,9 +598,9 @@ h3 {
 
 .status-card,
 .panel {
-  border: 1px solid rgba(87, 111, 138, 0.42);
-  background: linear-gradient(180deg, rgba(22, 29, 40, 0.96), rgba(12, 16, 24, 0.96));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(126, 151, 181, 0.42);
+  background: linear-gradient(180deg, rgba(17, 27, 39, 0.98), rgba(8, 13, 20, 0.98));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
 }
 
 .status-card {
@@ -635,6 +635,15 @@ small {
   --el-fill-color-light: rgba(255, 255, 255, 0.08);
 }
 
+:deep(.sync-progress .el-progress-bar__outer) {
+  background: #101720 !important;
+  border-color: rgba(126, 151, 181, 0.36);
+}
+
+:deep(.el-segmented) {
+  width: 100%;
+}
+
 .layout-grid {
   display: grid;
   grid-template-columns: 340px minmax(0, 1fr);
@@ -662,17 +671,17 @@ small {
   justify-content: center;
   gap: 6px;
   padding: 12px;
-  border: 1px solid rgba(72, 98, 124, 0.55);
+  border: 1px solid rgba(110, 139, 170, 0.58);
   border-radius: 6px;
-  color: #eef5fb;
-  background: rgba(10, 16, 24, 0.72);
+  color: #f5f8fc;
+  background: rgba(9, 16, 25, 0.9);
   cursor: pointer;
   text-align: left;
 }
 
 .preset:hover {
-  border-color: rgba(34, 199, 244, 0.78);
-  background: rgba(20, 40, 54, 0.78);
+  border-color: rgba(72, 205, 248, 0.9);
+  background: rgba(18, 43, 59, 0.92);
 }
 
 .preset.noisy {
@@ -700,9 +709,9 @@ label.wide {
 .queue-item {
   min-height: 54px;
   padding: 10px 12px;
-  border: 1px solid rgba(74, 99, 126, 0.5);
+  border: 1px solid rgba(110, 139, 170, 0.54);
   border-radius: 6px;
-  background: rgba(10, 16, 24, 0.78);
+  background: rgba(9, 16, 25, 0.9);
 }
 
 .queue-item > div:first-child,
@@ -730,20 +739,21 @@ label.wide {
 }
 
 :deep(.el-table.dark-table) {
-  --el-table-bg-color: transparent;
-  --el-table-tr-bg-color: rgba(10, 16, 24, 0.78);
-  --el-table-header-bg-color: rgba(9, 14, 22, 0.98);
-  --el-table-row-hover-bg-color: rgba(24, 54, 72, 0.9);
-  --el-table-border-color: rgba(75, 96, 120, 0.42);
-  --el-table-text-color: #d9e3ee;
-  --el-table-header-text-color: #aebbd0;
+  --el-table-bg-color: #0b1018;
+  --el-table-tr-bg-color: #0f1823;
+  --el-table-header-bg-color: #121d2a;
+  --el-table-row-hover-bg-color: #1b3142;
+  --el-table-border-color: rgba(119, 146, 176, 0.46);
+  --el-table-text-color: #edf3fa;
+  --el-table-header-text-color: #c9d5e6;
+  background: #0b1018;
   border-radius: 6px;
   overflow: hidden;
 }
 
 :deep(.el-table__inner-wrapper::before),
 :deep(.el-table__border-left-patch) {
-  background: rgba(75, 96, 120, 0.42);
+  background: rgba(119, 146, 176, 0.46);
 }
 
 :deep(.el-empty__description p) {
@@ -756,8 +766,8 @@ label.wide {
 :deep(.el-input-number__decrease),
 :deep(.el-input-number__increase) {
   background: rgba(8, 13, 20, 0.86);
-  border-color: rgba(72, 98, 124, 0.5);
-  box-shadow: 0 0 0 1px rgba(72, 98, 124, 0.5) inset;
+  border-color: rgba(118, 145, 176, 0.6);
+  box-shadow: 0 0 0 1px rgba(118, 145, 176, 0.6) inset;
 }
 
 :deep(.el-input__inner),

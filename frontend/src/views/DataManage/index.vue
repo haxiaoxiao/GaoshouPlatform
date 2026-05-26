@@ -417,8 +417,8 @@ onMounted(() => {
 
 .metric-card {
   position: relative;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, #131b25 0%, #0f151e 100%);
+  border: 1px solid rgba(136, 160, 190, 0.28);
   border-radius: var(--radius-lg);
   overflow: hidden;
   animation: slideUp var(--duration-slow) var(--ease-out) backwards;
@@ -503,7 +503,7 @@ onMounted(() => {
 
 .metric-card__label {
   font-size: var(--text-sm);
-  color: var(--text-muted);
+  color: var(--text-secondary);
 }
 
 .metric-card__hint {
@@ -524,8 +524,8 @@ onMounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: #0e151f;
+  border: 1px solid rgba(136, 160, 190, 0.24);
   border-radius: var(--radius-lg);
   overflow: hidden;
 }
@@ -536,8 +536,8 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(136, 160, 190, 0.22);
+  background: #101923;
 }
 
 .tab-navigation__tabs {
@@ -560,7 +560,7 @@ onMounted(() => {
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  color: var(--text-secondary);
+  color: #c0cbda;
   font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
@@ -574,7 +574,8 @@ onMounted(() => {
 
 .tab-btn--active {
   background: var(--accent-primary);
-  color: var(--bg-void);
+  color: #07111c;
+  font-weight: 700;
 }
 
 .tab-btn__icon {

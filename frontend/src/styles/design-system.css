@@ -24,12 +24,12 @@
   --bg-noise: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
 
   /* Text hierarchy */
-  --text-bright: #f0f0f5;
-  --text-primary: #e2e2ea;
-  --text-secondary: #8888a0;
-  --text-muted: #6e6e85;
-  --text-label: #b0b0c0;            /* 卡片标题专用 */
-  --text-ghost: #4e4e63;
+  --text-bright: #f7f9fc;
+  --text-primary: #e7edf6;
+  --text-secondary: #a8b3c7;
+  --text-muted: #8b96aa;
+  --text-label: #c3ccd8;            /* 卡片标题专用 */
+  --text-ghost: #657086;
 
   /* Accent colors - Electric palette, A-share convention: red up, green down */
   --accent-primary: #38bdf8;        /* Electric cyan — unchanged */
@@ -45,8 +45,8 @@
   --color-neutral: #8888a0;
 
   /* Border & Divider */
-  --border-subtle: rgba(255, 255, 255, 0.04);
-  --border-default: rgba(255, 255, 255, 0.08);
+  --border-subtle: rgba(172, 190, 214, 0.12);
+  --border-default: rgba(172, 190, 214, 0.2);
   --border-accent: rgba(56, 189, 248, 0.3);
 
   /* Shadows - Layered for depth */
@@ -356,10 +356,43 @@ h4 { font-size: var(--text-lg); }
 
 /* Buttons */
 .el-button {
+  --el-button-bg-color: #101720;
+  --el-button-text-color: var(--text-primary);
+  --el-button-border-color: var(--border-default);
+  --el-button-hover-bg-color: #182637;
+  --el-button-hover-text-color: var(--text-bright);
+  --el-button-hover-border-color: var(--border-accent);
+  --el-button-active-bg-color: #1d3145;
+  --el-button-active-text-color: var(--text-bright);
+  --el-button-active-border-color: var(--accent-primary);
   font-family: var(--font-ui);
   font-weight: 500;
   border-radius: var(--radius-md);
   transition: all var(--duration-normal) var(--ease-out);
+}
+
+.el-button.is-text {
+  --el-button-bg-color: transparent;
+  --el-button-border-color: transparent;
+}
+
+.el-button.is-disabled,
+.el-button.is-disabled:hover {
+  --el-button-disabled-bg-color: #111821;
+  --el-button-disabled-text-color: var(--text-muted);
+  --el-button-disabled-border-color: rgba(172, 190, 214, 0.14);
+}
+
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--danger):not(.is-text) {
+  background: #101720 !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-primary) !important;
+}
+
+.el-button:not(.el-button--primary):not(.el-button--success):not(.el-button--danger):not(.is-text):hover {
+  background: #182637 !important;
+  border-color: var(--border-accent) !important;
+  color: var(--text-bright) !important;
 }
 
 .el-button--primary {
@@ -388,7 +421,7 @@ h4 { font-size: var(--text-lg); }
 .el-input__wrapper,
 .el-select__wrapper,
 .el-textarea__inner {
-  background: var(--bg-elevated) !important;
+  background: #101720 !important;
   border: 1px solid var(--border-default) !important;
   border-radius: var(--radius-md) !important;
   box-shadow: none !important;
@@ -442,18 +475,19 @@ h4 { font-size: var(--text-lg); }
 
 /* Tables */
 .el-table {
-  background: transparent !important;
-  --el-table-bg-color: transparent;
-  --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: var(--bg-elevated);
-  --el-table-row-hover-bg-color: var(--bg-hover);
+  background: #0b1018 !important;
+  --el-table-bg-color: #0b1018;
+  --el-table-tr-bg-color: #0e1620;
+  --el-table-header-bg-color: #111a25;
+  --el-table-row-hover-bg-color: #182637;
   --el-table-border-color: var(--border-subtle);
   --el-table-text-color: var(--text-primary);
-  --el-table-header-text-color: var(--text-secondary);
+  --el-table-header-text-color: #c6d1e1;
+  color: var(--text-primary);
 }
 
 .el-table th.el-table__cell {
-  background: var(--bg-elevated) !important;
+  background: #111a25 !important;
   font-weight: 600;
   letter-spacing: var(--tracking-wide);
   text-transform: uppercase;
@@ -461,7 +495,7 @@ h4 { font-size: var(--text-lg); }
 }
 
 .el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell {
-  background: rgba(255, 255, 255, 0.01);
+  background: #111923;
 }
 
 /* Cards */
@@ -570,6 +604,12 @@ h4 { font-size: var(--text-lg); }
   color: var(--text-secondary);
 }
 
+.el-tag--warning {
+  background: rgba(251, 191, 36, 0.16);
+  border-color: rgba(251, 191, 36, 0.36);
+  color: #ffd766;
+}
+
 /* Pagination */
 .el-pagination {
   --el-pagination-bg-color: var(--bg-surface);
@@ -587,6 +627,36 @@ h4 { font-size: var(--text-lg); }
 .el-pager li.is-active {
   background: var(--accent-primary) !important;
   color: var(--bg-void) !important;
+}
+
+/* Progress and segmented controls */
+.el-progress-bar__outer {
+  background: #101720 !important;
+  border: 1px solid rgba(172, 190, 214, 0.18);
+}
+
+.el-progress-bar__inner {
+  background: linear-gradient(90deg, var(--accent-primary), #0ea5e9) !important;
+}
+
+.el-segmented {
+  --el-segmented-bg-color: #101720;
+  --el-segmented-item-selected-bg-color: var(--accent-primary);
+  --el-segmented-item-selected-color: #07111c;
+  --el-segmented-item-hover-bg-color: #182637;
+  --el-segmented-item-hover-color: var(--text-bright);
+  background: #101720 !important;
+  border: 1px solid var(--border-default);
+  box-shadow: none;
+}
+
+.el-segmented__item {
+  color: var(--text-secondary) !important;
+}
+
+.el-segmented__item.is-selected {
+  color: #07111c !important;
+  font-weight: 700;
 }
 
 /* Menu */
@@ -622,7 +692,7 @@ h4 { font-size: var(--text-lg); }
 
 /* Select dropdown */
 .el-select-dropdown {
-  background: var(--bg-elevated);
+  background: #101720;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-lg);
@@ -634,12 +704,20 @@ h4 { font-size: var(--text-lg); }
 
 .el-select-dropdown__item.hover,
 .el-select-dropdown__item:hover {
-  background: var(--bg-hover);
+  background: #1b3142;
+  color: var(--text-bright);
 }
 
 .el-select-dropdown__item.selected {
-  color: var(--accent-primary);
+  color: #7dd8ff;
   font-weight: 600;
+}
+
+.el-popper.is-light,
+.el-popper.is-light > .el-popper__arrow::before {
+  background: #101720 !important;
+  border-color: var(--border-default) !important;
+  color: var(--text-primary) !important;
 }
 
 /* Message box */
@@ -652,6 +730,11 @@ h4 { font-size: var(--text-lg); }
 /* Date picker */
 .el-date-editor {
   --el-input-bg-color: var(--bg-elevated);
+}
+
+.el-date-editor .el-range-input,
+.el-date-editor .el-range-separator {
+  color: var(--text-primary);
 }
 
 .el-picker-panel {

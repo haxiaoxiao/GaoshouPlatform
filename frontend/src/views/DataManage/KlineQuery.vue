@@ -421,8 +421,9 @@ useResizeObserver(tableCardRef, ([entry]) => {
 
 .query-form {
   padding: 16px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #121b26 0%, #0c141d 100%);
+  border: 1px solid rgba(136, 160, 190, 0.28);
+  border-radius: 8px;
   flex-shrink: 0;
 }
 
@@ -434,7 +435,54 @@ useResizeObserver(tableCardRef, ([entry]) => {
 
 .date-separator {
   margin: 0 8px;
-  color: #606266;
+  color: var(--text-secondary);
+}
+
+.chart-card,
+.table-card {
+  border-color: rgba(136, 160, 190, 0.24);
+  background: #0d141e;
+}
+
+:deep(.el-form-item__label) {
+  color: var(--text-label);
+}
+
+:deep(.el-card__header) {
+  color: var(--text-bright);
+  background: #101923;
+  border-bottom-color: rgba(136, 160, 190, 0.22);
+}
+
+:deep(.el-table-v2) {
+  --el-table-v2-row-hover-bg-color: #1b3142;
+  --el-table-v2-row-bg-color: #0f1823;
+  --el-table-v2-header-bg-color: #121d2a;
+  --el-table-v2-header-text-color: #c9d5e6;
+  --el-table-v2-border-color: rgba(119, 146, 176, 0.46);
+  color: #edf3fa;
+  background: #0b1018;
+}
+
+:deep(.el-table-v2__main),
+:deep(.el-table-v2__left),
+:deep(.el-table-v2__right),
+:deep(.el-table-v2__header),
+:deep(.el-table-v2__body),
+:deep(.el-table-v2__row),
+:deep(.el-table-v2__row-cell) {
+  background: transparent;
+  color: #edf3fa;
+}
+
+:deep(.el-table-v2__header-cell) {
+  color: #c9d5e6;
+  background: #121d2a;
+  font-weight: 700;
+}
+
+:deep(.el-table-v2__row:hover .el-table-v2__row-cell) {
+  background: #1b3142;
 }
 
 .chart-card {
