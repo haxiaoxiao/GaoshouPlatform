@@ -101,7 +101,7 @@ const handleConvert = async () => {
   try {
     const res = await axios.post('/api/strategy/convert-to-akquant', {
       source_code: convertInput.value,
-    }, { timeout: 900000 })
+    })
     const payload = res.data
     if (payload?.code === 0 && payload?.data?.code) {
       convertResult.value = payload.data.code
@@ -140,7 +140,6 @@ const handleCreateSession = async () => {
     form.append('file', uploadFile.value)
     const res = await request.post<any>('/strategy/chat-session', form, {
       headers: { 'Content-Type': 'multipart/form-data' },
-      timeout: 120000,
     })
     chatSessionId.value = res?.session_id || res?.data?.session_id || ''
     const reply = res?.reply || res?.data?.reply || '分析完成'
@@ -164,7 +163,7 @@ const handleChatSend = async () => {
     const { default: request } = await import('@/api/request')
     const res = await request.post<any>(`/strategy/chat-session/${chatSessionId.value}/send`, {
       message: msg,
-    }, { timeout: 300000 })  // 5 min for LLM
+    })  // 无超时限制
     const reply = res?.reply || res?.data?.reply || ''
     chatMessages.value.push({ role: 'assistant', content: reply })
     const code = res?.code || res?.data?.code || ''

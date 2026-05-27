@@ -20,11 +20,19 @@ auto_discover()
 
 
 class EvaluateRequest(BaseModel):
-    expression: str = Field(..., description="因子表达式，如 Mean($close, 5)")
+    expression: str = Field(..., description="因子表达式，如 ts_mean($close, 5)")
     symbols: list[str] = Field(..., description="股票代码列表")
     start_date: date = Field(..., description="开始日期")
     end_date: date = Field(..., description="结束日期")
     use_cache: bool = Field(default=True, description="是否使用缓存")
+    engine: str = Field(default="builtin", description="builtin or akquant")
+
+
+class PrecomputeExpressionsRequest(BaseModel):
+    expressions: list[str] = Field(..., description="Factor expressions to precompute")
+    symbols: list[str] = Field(..., description="Stock symbols")
+    start_date: date
+    end_date: date
     engine: str = Field(default="builtin", description="builtin or akquant")
 
 
@@ -143,6 +151,24 @@ async def evaluate(req: EvaluateRequest):
             "compute_time_ms": round(elapsed, 1),
         },
     }
+
+
+@router.post("/precompute")
+async def precompute_expressions(req: PrecomputeExpressionsRequest):
+    """Precompute factor expressions into persistent factor_cache."""
+    try:
+        from app.services.factor_expression_precompute import precompute_factor_expressions
+
+        result = await precompute_factor_expressions(
+            expressions=req.expressions,
+            symbols=req.symbols,
+            start_date=req.start_date,
+            end_date=req.end_date,
+            engine=req.engine,
+        )
+        return {"code": 0, "message": "success", "data": result}
+    except Exception as exc:
+        return {"code": 1, "message": f"{type(exc).__name__}: {exc}", "data": None}
 
 
 @router.post("/screen")

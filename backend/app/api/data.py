@@ -1,5 +1,6 @@
 # backend/app/api/data.py
 """数据相关 API 接口"""
+import uuid
 from datetime import date, datetime
 from typing import Any
 
@@ -10,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.sqlite import get_async_session
 from app.services import DataService, SyncService
+from app.services.cache_invalidation import invalidate_after_sync
+from app.services.index_catalog import list_index_catalog
+from app.services.runtime_tasks import register_task, update_task
+from app.services.sync_proxy import proxy_sync_request
 
 router = APIRouter()
 
@@ -98,8 +103,15 @@ class SyncRequest(BaseModel):
     symbols: list[str] | None = Field(default=None, description="股票代码列表")
     start_date: date | None = Field(default=None, description="开始日期")
     end_date: date | None = Field(default=None, description="结束日期")
+    sync_mode: str = Field(default="range", description="sync mode: incremental/range/full")
     failure_strategy: str = Field(default="skip", description="失败策略: skip/retry/stop")
     full_sync: bool = Field(default=False, description="全量同步标记")
+    factor_sync_plan: dict[str, Any] | None = Field(default=None, description="因子依赖同步计划")
+    relay_datasets: list[str] | None = Field(default=None, description="Tushare Relay dataset names")
+    relay_options: dict[str, Any] | None = Field(default=None, description="Tushare Relay sync options")
+
+
+    index_symbols: list[str] | None = Field(default=None, description="指数代码列表")
 
 
 class SyncProgressResponse(BaseModel):
@@ -288,6 +300,15 @@ async def get_industries(
             {"name": item.name, "count": item.stock_count}
             for item in industries
         ],
+    }
+
+
+@router.get("/index-catalog", summary="获取指数目录")
+async def get_index_catalog() -> dict[str, Any]:
+    return {
+        "code": 0,
+        "message": "success",
+        "data": list_index_catalog(),
     }
 
 
@@ -529,6 +550,7 @@ async def remove_from_watchlist(
 
 
 async def _run_sync_task(
+    task_id: str,
     sync_type: str,
     symbols: list[str] | None,
     start_date: date | None,
@@ -546,38 +568,57 @@ async def _run_sync_task(
     engine = create_async_engine(settings.database_url)
     async_session = async_sessionmaker(engine, expire_on_commit=False)
 
+    # 快速检查 QMT 连接
+    from app.engines.qmt_gateway import qmt_gateway as gw
+    if not await gw.check_connection():
+        update_task(task_id, status="failed", progress=1.0, result_ref="/data",
+                    error="QMT (miniQMT) 未连接，请先启动华泰 miniQMT 客户端后再同步")
+        await engine.dispose()
+        return
+
     async with async_session() as session:
         service = SyncService(session)
         try:
+            update_task(task_id, status="running", progress=0)
             logger.info(f"symbols={symbols}, start_date={start_date}, end_date={end_date}")
-            if sync_type == "stock_info":
-                await service.sync_stock_info(
+            progress = None
+            if sync_type == "datasync":
+                progress = await service.sync_datasync(
+                    symbols=symbols,
+                    end_date=end_date,
+                    failure_strategy=failure_strategy,
+                    full_sync=full_sync,
+                )
+            elif sync_type == "stock_info":
+                progress = await service.sync_stock_info(
                     failure_strategy=failure_strategy,
                     full_sync=full_sync,
                 )
             elif sync_type == "stock_full":
-                await service.sync_stock_full(
+                progress = await service.sync_stock_full(
                     failure_strategy=failure_strategy,
+                    run_id=task_id,
                 )
             elif sync_type == "financial_data":
-                await service.sync_financial_data(
+                progress = await service.sync_financial_data(
                     failure_strategy=failure_strategy,
                 )
             elif sync_type == "realtime_mv":
-                await service.sync_realtime_mv(
+                progress = await service.sync_realtime_mv(
                     symbols=symbols,
                     failure_strategy=failure_strategy,
                 )
             elif sync_type == "kline_daily":
-                await service.sync_kline_daily(
+                progress = await service.sync_kline_daily(
                     symbols=symbols,
                     start_date=start_date,
                     end_date=end_date,
                     failure_strategy=failure_strategy,
                     full_sync=full_sync,
+                    run_id=task_id,
                 )
             elif sync_type == "kline_weekly":
-                await service.sync_kline_weekly(
+                progress = await service.sync_kline_weekly(
                     symbols=symbols,
                     start_date=start_date,
                     end_date=end_date,
@@ -585,23 +626,39 @@ async def _run_sync_task(
                     full_sync=full_sync,
                 )
             elif sync_type == "dividends":
-                await service.sync_dividends(
+                progress = await service.sync_dividends(
                     symbols=symbols,
                     start_date=start_date,
                     end_date=end_date,
                     failure_strategy=failure_strategy,
                 )
             elif sync_type == "kline_minute":
-                await service.sync_kline_minute(
+                progress = await service.sync_kline_minute(
                     symbols=symbols,
                     start_date=start_date,
                     end_date=end_date,
                     failure_strategy=failure_strategy,
                     full_sync=full_sync,
                 )
+            if getattr(progress, "status", None) == "failed":
+                update_task(
+                    task_id,
+                    status="failed",
+                    progress=1.0,
+                    result_ref="/data",
+                    error=getattr(progress, "error_message", None) or "Data sync failed",
+                )
+            else:
+                update_task(task_id, status="done", progress=1.0, result_ref="/data")
         except Exception as e:
             logger.opt(exception=True).error(f"Sync task {sync_type} failed: {e}")
+            update_task(task_id, status="failed", progress=1.0, result_ref="/data", error=str(e))
         finally:
+            try:
+                invalidated = invalidate_after_sync(sync_type)
+                logger.info("Cache invalidated after {} sync: {}", sync_type, invalidated)
+            except Exception as exc:
+                logger.warning("Cache invalidation after {} sync failed: {}", sync_type, exc)
             await engine.dispose()
 
 
@@ -611,6 +668,11 @@ async def trigger_sync(
     request: SyncRequest = Body(description="同步参数"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
+    return await proxy_sync_request(
+        "POST",
+        "/api/data/sync",
+        json_body=request.model_dump(mode="json"),
+    )
     """
     触发数据同步任务
 
@@ -624,7 +686,7 @@ async def trigger_sync(
     - realtime_mv: 实时市值更新
     - dividends: 分红送股数据(需QMT在线)
     """
-    valid_types = ("stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends")
+    valid_types = ("datasync", "stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends", "tushare_relay")
     if request.sync_type not in valid_types:
         raise HTTPException(
             status_code=400,
@@ -638,14 +700,36 @@ async def trigger_sync(
 
     service = SyncService(session)
 
+    # 检查 QMT 是否在线（所有同步类型都需要）
+    from app.engines.qmt_gateway import qmt_gateway as _gw
+    if not await _gw.check_connection():
+        raise HTTPException(status_code=503, detail="QMT (miniQMT) 未连接，请先启动华泰 miniQMT 客户端后再同步")
+
     # 检查是否有正在进行的同步任务
     current_status = service.get_sync_status()
     if current_status and current_status.status == "running":
         raise HTTPException(status_code=409, detail="已有同步任务正在进行中")
 
+    task_id = f"sync-{str(uuid.uuid4())[:8]}"
+    register_task(
+        task_id=task_id,
+        kind="data_sync",
+        title=f"数据同步 {request.sync_type}",
+        status="queued",
+        progress=0,
+        result_ref="/data",
+        meta={
+            "sync_type": request.sync_type,
+            "start_date": request.start_date.isoformat() if request.start_date else None,
+            "end_date": request.end_date.isoformat() if request.end_date else None,
+            "symbol_count": len(request.symbols or []),
+        },
+    )
+
     # 启动后台同步任务
     background_tasks.add_task(
         _run_sync_task,
+        task_id,
         request.sync_type,
         request.symbols,
         request.start_date,
@@ -666,14 +750,54 @@ async def trigger_sync(
     return {
         "code": 0,
         "message": "success",
-        "data": initial_progress.to_dict(),
+        "data": {**initial_progress.to_dict(), "task_id": task_id},
     }
+
+
+@router.get("/sync/catalog", summary="获取同步任务目录")
+async def get_sync_catalog(refresh: bool = Query(default=False)) -> dict[str, Any]:
+    try:
+        return await proxy_sync_request("GET", "/api/data/sync/catalog", params={"refresh": refresh})
+    except HTTPException as exc:
+        logger.warning("Sync service catalog proxy failed: {}", exc.detail)
+        from app.services.tushare_relay_sync import build_sync_catalog
+
+        return {"code": 0, "message": "success", "data": build_sync_catalog(refresh=refresh)}
 
 
 @router.get("/sync/status", summary="获取同步状态")
 async def get_sync_status(
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
+    service = SyncService(session)
+    persisted = await service.get_persisted_sync_status()
+    if persisted:
+        return {"code": 0, "message": "success", "data": persisted}
+
+    try:
+        return await proxy_sync_request("GET", "/api/data/sync/status")
+    except HTTPException as exc:
+        logger.warning("Sync service status proxy failed: {}", exc.detail)
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "sync_type": None,
+                "status": "idle",
+                "total": 0,
+                "current": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "progress_percent": 0.0,
+                "start_time": None,
+                "end_time": None,
+                "error_message": None,
+                "details": {
+                    "sync_service_unavailable": True,
+                    "proxy_error": str(exc.detail),
+                },
+            },
+        }
     """
     获取当前同步任务状态
     """
@@ -716,6 +840,15 @@ async def get_sync_logs(
     """
     获取同步日志列表
     """
+    try:
+        return await proxy_sync_request(
+            "GET",
+            "/api/data/sync/logs",
+            params={"sync_type": sync_type, "task_id": task_id, "limit": limit},
+        )
+    except HTTPException as exc:
+        logger.warning("Sync service logs proxy failed: {}", exc.detail)
+
     service = SyncService(session)
     logs = await service.get_sync_logs(
         sync_type=sync_type, task_id=task_id, limit=limit
@@ -750,6 +883,31 @@ async def get_sync_logs(
 async def cancel_sync(
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
+    try:
+        return await proxy_sync_request("POST", "/api/data/sync/cancel", json_body={})
+    except HTTPException as exc:
+        logger.warning("Sync service cancel proxy failed: {}", exc.detail)
+        from app.services.sync_run_store import upsert_sync_run
+
+        service = SyncService(session)
+        persisted = await service.get_persisted_sync_status()
+        if persisted and persisted.get("status") in {"queued", "running"}:
+            await upsert_sync_run(
+                session,
+                run_id=str(persisted.get("run_id") or persisted.get("task_id")),
+                sync_type=persisted.get("sync_type"),
+                status="cancelled",
+                total=persisted.get("total", 0),
+                current=persisted.get("current", 0),
+                success_count=persisted.get("success_count", 0),
+                failed_count=persisted.get("failed_count", 0),
+                progress_percent=persisted.get("progress_percent", 0.0),
+                end_time=datetime.now(),
+                error_message=f"Cancelled while sync service was unavailable: {exc.detail}",
+                details=persisted.get("details") or {},
+            )
+            return {"code": 0, "message": "success", "data": {"cancelled": True}}
+        return {"code": 0, "message": "success", "data": {"cancelled": False}}
     """取消当前正在运行的同步任务"""
     service = SyncService(session)
     cancelled = await service.cancel_sync()

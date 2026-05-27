@@ -39,7 +39,7 @@ DEMO_FACTORS = [
     {
         "name": "volume_anomaly_20d",
         "category": "情绪类因子",
-        "expression": "$volume / Mean($volume, 20) - 1",
+        "expression": "$volume / ts_mean($volume, 20) - 1",
         "stock_pool": "hs300",
         "description": (
             "20日成交量异常因子。当日成交量相对于过去20日均值的偏离度。\n"

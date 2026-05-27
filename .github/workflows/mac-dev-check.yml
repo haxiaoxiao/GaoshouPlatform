@@ -1,0 +1,63 @@
+name: Mac Dev Check
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: mac-dev-check
+  cancel-in-progress: true
+
+jobs:
+  mac-dev-check:
+    name: Mac dev compatibility
+    runs-on:
+      - self-hosted
+      - macOS
+      - gaoshou-mac-dev
+    env:
+      MARKET_DATA_BACKEND: parquet
+      CLICKHOUSE_ENABLED: "false"
+      DATABASE_URL: sqlite+aiosqlite:///./ci-gaoshou.db
+      PARQUET_DATA_DIR: ./data/parquet-ci
+      DUCKDB_PATH: ":memory:"
+      ENABLE_SYNC_SCHEDULER: "false"
+      DEBUG: "false"
+      GRID_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      PIP_INDEX_URL: https://pypi.org/simple
+      PIP_DEFAULT_TIMEOUT: "60"
+      PIP_RETRIES: "5"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Backend collect and lint
+        working-directory: backend
+        continue-on-error: true
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev]"
+          python -m ruff check app tests
+          python -m pytest tests --collect-only -q
+
+      - name: Backend collect-only gate
+        working-directory: backend
+        run: python -m pytest tests --collect-only -q
+
+      - name: Frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build

@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # 数据库配置
-    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH}"
+    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"
 
     # ClickHouse 配置
     clickhouse_host: str = "localhost"
@@ -55,12 +55,36 @@ class Settings(BaseSettings):
 
     # 行情数据存储配置
     market_data_backend: str = "parquet"  # parquet | clickhouse
-    parquet_data_dir: str = "E:/Projects/GaoshouPlatform/data/parquet"
+    parquet_data_dir: str = str(_DATA_DIR / "parquet")
     duckdb_path: str = ":memory:"
     clickhouse_enabled: bool = False
+    parquet_minute_append_only: bool = True
+    qmt_daily_clean_cache_after_sync: bool = False
+    qmt_daily_compute_indicators_after_sync: bool = False
+    qmt_minute_clean_cache_after_sync: bool = False
+    qmt_minute_compute_indicators_after_sync: bool = False
+    sync_service_url: str = "http://127.0.0.1:8810"
+    sync_service_port: int = 8810
+    enable_sync_scheduler: bool = True
+    indevs_tushare_api_key: str = ""
+    indevs_tushare_base_urls: str = (
+        "http://127.0.0.1:8000/tushare/pro,"
+        "https://ai-tool.indevs.in/tushare/pro,"
+        "https://tushare.indevs.in/tushare/pro"
+    )
+    indevs_tushare_rps: float = 1.0
+    indevs_tushare_timeout_seconds: int = 30
+
+    # 网格交易信号配置
+    grid_trading_enable_order_submit: bool = False
+    qmt_account_id: str = ""
+    qmt_account_type: str = "STOCK"
+    qmt_trader_path: str = ""
 
     # API 配置
     api_prefix: str = "/api"
+    backend_port: int = 8800
+    frontend_port: int = 3500
 
     @property
     def base_dir(self) -> Path:

@@ -22,6 +22,7 @@ from app.data_stores import get_market_data_store
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
+from app.services.security_symbols import normalize_security_symbol
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -35,14 +36,20 @@ class StockSnapshot:
     name: str
     exchange: str | None = None
     industry: str | None = None
+    industry2: str | None = None
+    industry3: str | None = None
     sector: str | None = None
+    concept: str | None = None
     list_date: date | None = None
+    delist_date: date | None = None
     is_st: int = 0
+    is_delist: int = 0
     is_suspend: int = 0
 
     total_shares: float | None = None
     float_shares: float | None = None
     a_float_shares: float | None = None
+    limit_sell_shares: float | None = None
 
     total_mv: float | None = None
     circ_mv: float | None = None
@@ -55,6 +62,9 @@ class StockSnapshot:
 
     revenue: float | None = None
     net_profit: float | None = None
+    revenue_yoy: float | None = None
+    profit_yoy: float | None = None
+    gross_margin: float | None = None
 
     total_assets: float | None = None
     total_liability: float | None = None
@@ -62,6 +72,16 @@ class StockSnapshot:
 
     report_date: date | None = None
     report_type: str | None = None
+
+    company_name: str | None = None
+    province: str | None = None
+    city: str | None = None
+    business_scope: str | None = None
+    main_business: str | None = None
+    website: str | None = None
+    employees: int | None = None
+    security_type: str | None = None
+    product_class: str | None = None
 
 
 @dataclass
@@ -150,6 +170,7 @@ class DataSkill:
         Returns:
             StockSnapshot 或 None
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         db_stock = await self._get_db_stock(symbol)
         if db_stock and db_stock.total_mv:
             return self._stock_to_snapshot(db_stock)
@@ -167,6 +188,7 @@ class DataSkill:
             {symbol: StockSnapshot} 字典，找不到的不会包含
         """
         result: dict[str, StockSnapshot] = {}
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
 
         if not symbols:
             return result
@@ -261,6 +283,7 @@ class DataSkill:
             end_date: 结束日期
             limit: 最大条数
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         bars = self._query_market_klines(symbol, start_date, end_date, limit)
         if bars:
             return bars
@@ -281,6 +304,7 @@ class DataSkill:
         limit: int = 500,
     ) -> list[KlineBar]:
         """获取分钟K线数据（同上，ClickHouse 优先）"""
+        symbol = normalize_security_symbol(symbol) or symbol
         bars = self._query_market_klines_minute(symbol, start_date, end_date, limit)
         if bars:
             return bars
@@ -306,6 +330,7 @@ class DataSkill:
             symbol: 股票代码
             report_count: 获取最近 N 个季度
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         stmt = (
             select(FinancialData)
             .where(FinancialData.symbol == symbol)
@@ -331,6 +356,7 @@ class DataSkill:
             {symbol: [FinancialReport, ...]}
         """
         result: dict[str, list[FinancialReport]] = {}
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return result
 
@@ -369,11 +395,13 @@ class DataSkill:
 
     async def get_realtime_quote(self, symbol: str) -> dict[str, Any] | None:
         """获取单只股票实时行情"""
+        symbol = normalize_security_symbol(symbol) or symbol
         quotes = await qmt_gateway.get_realtime_quotes([symbol])
         return quotes[0] if quotes else None
 
     async def get_realtime_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         """批量获取实时行情"""
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         return await qmt_gateway.get_realtime_quotes(symbols)
 
     # ─── 行业统计 ──────────────────────────────────────────
@@ -404,6 +432,7 @@ class DataSkill:
             indicator_name: 指标名称
             trade_date: 交易日期，None 则取最新
         """
+        symbol = normalize_security_symbol(symbol) or symbol
         from app.data_stores import get_indicator_store
 
         store = get_indicator_store()
@@ -449,6 +478,7 @@ class DataSkill:
         Returns:
             [{symbol, indicator_name, value, trade_date}, ...]
         """
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return []
         from app.data_stores import get_indicator_store
@@ -526,13 +556,19 @@ class DataSkill:
             name=s.name or "",
             exchange=s.exchange,
             industry=s.industry,
+            industry2=s.industry2,
+            industry3=s.industry3,
             sector=s.sector,
+            concept=s.concept,
             list_date=s.list_date,
+            delist_date=s.delist_date,
             is_st=s.is_st or 0,
+            is_delist=s.is_delist or 0,
             is_suspend=s.is_suspend or 0,
             total_shares=s.total_shares,
             float_shares=s.float_shares,
             a_float_shares=s.a_float_shares,
+            limit_sell_shares=s.limit_sell_shares,
             total_mv=s.total_mv,
             circ_mv=s.circ_mv,
             eps=s.eps,
@@ -541,7 +577,19 @@ class DataSkill:
             pe_ttm=s.pe_ttm,
             pb=s.pb,
             revenue=s.revenue,
-net_profit=s.net_profit,
+            net_profit=s.net_profit,
+            total_assets=s.total_assets,
+            total_liability=s.total_liability,
+            total_equity=s.total_equity,
+            company_name=s.company_name,
+            province=s.province,
+            city=s.city,
+            business_scope=s.business_scope,
+            main_business=s.main_business,
+            website=s.website,
+            employees=s.employees,
+            security_type=s.security_type,
+            product_class=s.product_class,
         )
 
     @staticmethod
@@ -551,28 +599,28 @@ net_profit=s.net_profit,
             name=info.name or "",
             exchange=info.exchange,
             industry=info.industry,
-            sector=info.sector,
-            list_date=info.list_date,
-            is_st=info.is_st or 0,
-            is_suspend=info.is_suspend or 0,
-            total_shares=info.total_shares,
-            float_shares=info.float_shares,
-            a_float_shares=info.a_float_shares,
-            total_mv=info.total_mv,
-            circ_mv=info.circ_mv,
-            eps=info.eps,
-            bvps=info.bvps,
-            roe=info.roe,
-            pe_ttm=info.pe_ttm,
-            pb=info.pb,
-            revenue=info.revenue,
-            net_profit=info.net_profit,
-            revenue_yoy=info.revenue_yoy,
-            profit_yoy=info.profit_yoy,
-            gross_margin=info.gross_margin,
-            total_assets=info.total_assets,
-            total_liability=info.total_liability,
-            total_equity=info.total_equity,
+            sector=getattr(info, "sector", None),
+            list_date=getattr(info, "list_date", None),
+            is_st=getattr(info, "is_st", 0) or 0,
+            is_suspend=getattr(info, "is_suspend", 0) or 0,
+            total_shares=getattr(info, "total_shares", None),
+            float_shares=getattr(info, "float_shares", None),
+            a_float_shares=getattr(info, "a_float_shares", None),
+            total_mv=getattr(info, "total_mv", None),
+            circ_mv=getattr(info, "circ_mv", None),
+            eps=getattr(info, "eps", None),
+            bvps=getattr(info, "bvps", None),
+            roe=getattr(info, "roe", None),
+            pe_ttm=getattr(info, "pe_ttm", None),
+            pb=getattr(info, "pb", None),
+            revenue=getattr(info, "revenue", None),
+            net_profit=getattr(info, "net_profit", None),
+            revenue_yoy=getattr(info, "revenue_yoy", None),
+            profit_yoy=getattr(info, "profit_yoy", None),
+            gross_margin=getattr(info, "gross_margin", None),
+            total_assets=getattr(info, "total_assets", None),
+            total_liability=getattr(info, "total_liability", None),
+            total_equity=getattr(info, "total_equity", None),
         )
 
     @staticmethod

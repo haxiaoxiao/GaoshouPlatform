@@ -92,6 +92,7 @@ class BacktestItem(BaseModel):
     start_date: date = Field(description="回测起始日期")
     end_date: date = Field(description="回测结束日期")
     initial_capital: Decimal | None = Field(default=None, description="初始资金")
+    parameters: dict[str, Any] | None = Field(default=None, description="回测参数")
     result: dict[str, Any] | None = Field(default=None, description="回测结果")
     created_at: str | None = Field(default=None, description="创建时间")
 
@@ -298,6 +299,18 @@ async def delete_strategy(
 # ============== Backtest Endpoints ==============
 
 
+def _list_result_summary(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a lightweight result payload for the backtest list page."""
+    if not isinstance(result, dict):
+        return result
+    rows = result.get("rows")
+    if isinstance(rows, list):
+        summary = {key: value for key, value in result.items() if key != "rows"}
+        summary["row_count"] = result.get("count", len(rows))
+        return summary
+    return result
+
+
 @router.get("/backtests", response_model=BacktestListResponse, summary="获取回测列表")
 async def get_backtests(
     strategy_id: int | None = Query(default=None, description="策略ID筛选"),
@@ -334,7 +347,7 @@ async def get_backtests(
             "end_date": backtest.end_date,
             "initial_capital": backtest.initial_capital,
             "parameters": backtest.parameters,
-            "result": backtest.result,
+            "result": _list_result_summary(backtest.result),
             "created_at": backtest.created_at.isoformat() if backtest.created_at else None,
         }
         for backtest in backtests

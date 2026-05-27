@@ -164,7 +164,7 @@ def main():
     parser.add_argument("--end", type=str, default=None)
     parser.add_argument("--symbols", type=str, default=None)
     parser.add_argument("--timer-times", type=str, default=None)
-    parser.add_argument("--parquet-dir", type=str, default="E:/Projects/GaoshouPlatform/data/parquet")
+    parser.add_argument("--parquet-dir", type=str, default=None, help="Parquet 目录（默认使用配置的 parquet_data_dir）")
     parser.add_argument("--sample-size", type=int, default=5)
     args = parser.parse_args()
 

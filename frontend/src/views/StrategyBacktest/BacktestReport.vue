@@ -55,7 +55,7 @@
           </div>
           <div class="stat-item">
             <span class="stat-label">开仓标的</span>
-            <span class="stat-value" style="color:#a78bfa">{{ report.result?.total_positions ?? '—' }}</span>
+            <span class="stat-value" style="color:#a78bfa">{{ report.result?.total_positions ?? '-' }}</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">胜率</span>
@@ -85,9 +85,10 @@
               </span>
             </template>
           </el-table-column>
-          <el-table-column prop="price" label="价格" width="80" :formatter="(r: any) => r.price?.toFixed(2)" />
+          <el-table-column label="开仓价" width="80" :formatter="(r: any) => formatTradePrice(r.entry_price ?? r.price)" />
+          <el-table-column label="平仓价" width="80" :formatter="(r: any) => formatTradePrice(r.exit_price ?? r.display_price)" />
           <el-table-column prop="quantity" label="数量" width="80" />
-          <el-table-column label="成交额" width="100" :formatter="(r: any) => formatMoney(r.price * r.quantity)" />
+          <el-table-column label="成交额" width="100" :formatter="(r: any) => formatMoney((tradeDisplayPrice(r) || 0) * r.quantity)" />
           <el-table-column label="盈亏" width="80">
             <template #default="{ row }">
               <span v-if="row.direction === 'sell' && row.pnl !== null" :style="{ color: pnlColor(row.pnl) }">
@@ -145,7 +146,7 @@
 import { ref, watch, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { backtestApi, type BacktestReport as BacktestReportType } from '@/api/backtest'
 import { formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
 
@@ -189,7 +190,7 @@ const fetchStockNames = async () => {
   if (!syms.length) return
   try {
     const { default: request } = await import('@/api/request')
-    const res = await request.get<Record<string, string>>(`/v2/backtest/stock-names?syms=${syms.join(',')}`)
+    const res = await request.get<Record<string, string>>(`/backtest/stock-names?syms=${syms.join(',')}`)
     stockNameMap.value = res || {}
   } catch { /* ignore */ }
 }
@@ -200,7 +201,13 @@ const paginatedTrades = computed(() => {
   return trades.slice(start, start + 50)
 })
 
-const formatMoney = (v: number) => v >= 10000 ? `${(v/10000).toFixed(1)}万` : v.toFixed(0)
+const formatMoney = (v: number) => v >= 10000 ? `${(v / 10000).toFixed(1)}万` : v.toFixed(0)
+
+const tradeDisplayPrice = (row: any): number | null =>
+  row.display_price ?? row.exit_price ?? row.price ?? row.entry_price ?? null
+
+const formatTradePrice = (value: number | null | undefined): string =>
+  value == null ? '-' : value.toFixed(2)
 
 const renderCharts = () => {
   const navData = report.value?.result?.nav_series || []
@@ -261,15 +268,15 @@ const formatNumber = (value: number | undefined, decimals: number): string =>
 const downloadTradesCSV = () => {
   const trades = report.value?.result?.trades || []
   if (!trades.length) return
-  const header = '日期,代码,名称,方向,价格,数量,金额,盈亏%'
+  const header = '日期,代码,名称,方向,开仓价,平仓价,数量,金额,盈亏%'
   const rows = trades.map(t => {
     const name = stockNameMap.value[t.symbol || ''] || t.symbol || ''
     const dir = t.direction === 'buy' ? '买' : '卖'
-    const amt = (t.price || 0) * (t.quantity || 0)
+    const amt = (tradeDisplayPrice(t) || 0) * (t.quantity || 0)
     const pnl = t.direction === 'sell' && t.pnl != null ? t.pnl.toFixed(2) : ''
-    return `${t.trade_date || ''},${t.symbol || ''},${name},${dir},${t.price?.toFixed(2) || ''},${t.quantity || ''},${amt.toFixed(0)},${pnl}`
+    return `${t.trade_date || ''},${t.symbol || ''},${name},${dir},${formatTradePrice(t.entry_price ?? t.price)},${formatTradePrice(t.exit_price ?? t.display_price)},${t.quantity || ''},${amt.toFixed(0)},${pnl}`
   }).join('\n')
-  const csv = '﻿' + header + '\n' + rows
+  const csv = '\ufeff' + header + '\n' + rows
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')

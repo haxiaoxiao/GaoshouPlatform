@@ -8,6 +8,7 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
+from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.services.factor_value_store import (
@@ -17,8 +18,21 @@ from app.services.factor_value_store import (
     list_factor_definitions,
     list_factor_groups,
 )
-from app.services.factor_catalog import RESEARCH_FACTOR_SPECS, TA_FACTOR_SPECS, is_catalog_factor
+from app.services.factor_catalog import (
+    CN_PAPER_FACTOR_SPECS,
+    RELAY_FACTOR_SPECS,
+    RESEARCH_FACTOR_SPECS,
+    TA_FACTOR_SPECS,
+    is_catalog_factor,
+    list_paper_implementation_manifest,
+)
 from app.services.alpha101_calculator import precompute_alpha101_factors
+from app.services.cn_paper_factor_calculator import precompute_cn_paper_factors
+from app.services.cn_paper_ml_experiment import (
+    build_factor_feature_snapshot,
+    list_cn_paper_experiment_specs,
+    summarize_feature_snapshot,
+)
 from app.services.factor_precompute import (
     precompute_high_volume_features,
     precompute_small_cap_core_features,
@@ -28,6 +42,7 @@ from app.services.index_components import load_index_symbols
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
 from app.services.ta_factor_calculator import precompute_ta_factors
+from app.services.tushare_relay_factor_calculator import precompute_relay_factors
 
 router = APIRouter(tags=["factor-values"])
 
@@ -64,6 +79,7 @@ class FactorPrecomputeRequest(BaseModel):
 
 class FactorGroupPrecomputeRequest(BaseModel):
     group_name: str = "small_cap_v4_core"
+    factor_names: list[str] = Field(default_factory=list)
     start_date: date
     end_date: date
     symbols: list[str] | None = None
@@ -92,6 +108,23 @@ class FactorQueryRequest(BaseModel):
     params: dict[str, Any] | None = None
 
 
+class FactorParamHashRequest(BaseModel):
+    factor_names: list[str] = Field(default_factory=list)
+    start_date: date | None = None
+    end_date: date | None = None
+    symbols: list[str] | None = None
+    index_symbol: str | None = None
+    limit_per_factor: int = Field(default=12, ge=1, le=50)
+
+
+class PaperExperimentSnapshotRequest(BaseModel):
+    factor_names: list[str] = Field(default_factory=list)
+    trade_dates: list[date] = Field(default_factory=list)
+    symbols: list[str] | None = None
+    min_feature_coverage: float = Field(default=0.0, ge=0.0, le=1.0)
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
 _CORE_FACTORS = {
     "market_cap",
     "market_cap_rank",
@@ -110,7 +143,9 @@ _HIGH_VOLUME_FACTORS = {
 _ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
 _TA_FACTORS = set(TA_FACTOR_SPECS)
 _RESEARCH_FACTORS = set(RESEARCH_FACTOR_SPECS)
-_CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS
+_RELAY_FACTORS = set(RELAY_FACTOR_SPECS)
+_CN_PAPER_FACTORS = set(CN_PAPER_FACTOR_SPECS)
+_CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS | _RELAY_FACTORS | _CN_PAPER_FACTORS
 _SUPPORTED_PRECOMPUTE_FACTORS = _CORE_FACTORS | _HIGH_VOLUME_FACTORS | _CATALOG_FACTORS
 
 
@@ -122,6 +157,72 @@ async def definitions() -> dict[str, Any]:
 @router.get("/groups")
 async def groups() -> dict[str, Any]:
     return {"code": 0, "message": "success", "data": list_factor_groups()}
+
+
+@router.post("/param-hashes")
+async def param_hashes(request: FactorParamHashRequest = Body(...)) -> dict[str, Any]:
+    factor_names = [str(name).strip() for name in request.factor_names if str(name).strip()]
+    if not factor_names:
+        return {"code": 0, "message": "success", "data": []}
+    if request.start_date and request.end_date and request.end_date < request.start_date:
+        raise HTTPException(status_code=400, detail="end_date must be greater than or equal to start_date")
+    unknown = [name for name in factor_names if get_factor_definition(name) is None]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown factors: {unknown}")
+    symbol_list = request.symbols
+    if symbol_list is None and request.index_symbol and request.start_date and request.end_date:
+        symbol_list = await load_index_symbols(request.index_symbol, request.start_date, request.end_date)
+    store = get_factor_value_store()
+    data = await run_in_thread(
+        store.list_param_hashes,
+        factor_names,
+        start_date=request.start_date,
+        end_date=request.end_date,
+        symbols=symbol_list,
+        limit_per_factor=request.limit_per_factor,
+    )
+    return {"code": 0, "message": "success", "data": data}
+
+
+@router.get("/paper-manifest")
+async def paper_manifest() -> dict[str, Any]:
+    return {"code": 0, "message": "success", "data": list_paper_implementation_manifest()}
+
+
+@router.get("/paper-experiments")
+async def paper_experiments() -> dict[str, Any]:
+    return {"code": 0, "message": "success", "data": list_cn_paper_experiment_specs()}
+
+
+@router.post("/paper-experiments/feature-snapshot")
+async def paper_experiment_feature_snapshot(request: PaperExperimentSnapshotRequest = Body(...)) -> dict[str, Any]:
+    try:
+        frame = await run_in_thread(
+            build_factor_feature_snapshot,
+            factor_names=request.factor_names,
+            trade_dates=request.trade_dates,
+            symbols=request.symbols,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if request.min_feature_coverage > 0:
+        frame = frame[frame["feature_coverage"] >= request.min_feature_coverage].copy()
+    summary = summarize_feature_snapshot(frame, request.factor_names)
+    limited = frame.head(request.limit).copy()
+    if "trade_date" in limited.columns:
+        limited["trade_date"] = limited["trade_date"].astype(str)
+    limited = limited.where(limited.notna(), None)
+    items = limited.to_dict(orient="records")
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "summary": summary,
+            "columns": list(frame.columns),
+            "items": items,
+            "limit": request.limit,
+        },
+    }
 
 
 @router.post("/precompute/prepare")
@@ -156,6 +257,7 @@ async def coverage(
     window: int | None = Query(default=None),
     threshold: float | None = Query(default=None),
     daily_volume_to_share_multiplier: float | None = Query(default=None),
+    full_range: bool = Query(default=False),
 ) -> dict[str, Any]:
     if get_factor_definition(factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Unknown factor: {factor_name}")
@@ -163,14 +265,24 @@ async def coverage(
     if symbol_list is None and index_symbol:
         symbol_list = await load_index_symbols(index_symbol, start_date, end_date)
     params = _build_params(factor_name, as_of_time, window, threshold, daily_volume_to_share_multiplier)
-    data = get_factor_value_store().coverage(
-        factor_name=factor_name,
-        start_date=start_date,
-        end_date=end_date,
-        symbols=symbol_list,
-        as_of_time=_effective_as_of_time(factor_name, as_of_time, params),
-        params=params,
-    )
+    store = get_factor_value_store()
+    effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
+    if full_range:
+        data = store.coverage_many(
+            [factor_name],
+            symbols=symbol_list,
+            as_of_time=effective_as_of_time,
+            params=params,
+        ).get(factor_name, store._empty_coverage(factor_name))
+    else:
+        data = store.coverage(
+            factor_name=factor_name,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            as_of_time=effective_as_of_time,
+            params=params,
+        )
     data["requested_symbol_count"] = len(symbol_list or [])
     return {"code": 0, "message": "success", "data": data}
 
@@ -217,7 +329,7 @@ async def precompute(request: FactorPrecomputeRequest = Body(...)) -> dict[str, 
         meta={"rows_written": result.get("rows_written") if isinstance(result, dict) else None},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
             factor_names=request.factor_names,
             start_date=request.start_date,
@@ -234,6 +346,7 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         raise HTTPException(status_code=404, detail=f"Unknown factor group: {request.group_name}")
     if not request.symbols and not request.index_symbol:
         raise HTTPException(status_code=400, detail="symbols or index_symbol is required")
+    group_factor_names = [str(name) for name in group.get("factor_names") or [] if str(name)]
     params = request.params or {}
     task_id = f"factor-group-{str(uuid.uuid4())[:8]}"
     register_task(
@@ -245,6 +358,8 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         result_ref="/factor",
         meta={
             "group_name": request.group_name,
+            "factor_names": group_factor_names,
+            "requested_factor_count": len(group_factor_names),
             "index_symbol": request.index_symbol,
             "start_date": request.start_date.isoformat(),
             "end_date": request.end_date.isoformat(),
@@ -252,7 +367,7 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
     )
     if request.async_task:
         asyncio.create_task(_run_group_precompute_task(task_id, request, group))
-        return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request)}
+        return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request, group)}
 
     try:
         result = await _execute_group_precompute(task_id, request, group)
@@ -267,9 +382,9 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         meta={"rows_written": result.get("rows_written") if isinstance(result, dict) else None},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
-            factor_names=group.get("factor_names") or [],
+            factor_names=group_factor_names,
             start_date=request.start_date,
             end_date=request.end_date,
         )
@@ -280,7 +395,9 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
 def _task_started_payload(
     task_id: str,
     request: FactorPrecomputeRequest | FactorGroupPrecomputeRequest,
+    group: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    factor_names = list((group or {}).get("factor_names") or getattr(request, "factor_names", []) or [])
     return {
         "task_id": task_id,
         "symbols": len(request.symbols or []),
@@ -289,8 +406,10 @@ def _task_started_payload(
         "as_of_time": str((request.params or {}).get("time") or (request.params or {}).get("as_of_time") or ""),
         "window": int((request.params or {}).get("window") or 0),
         "threshold": float((request.params or {}).get("threshold") or 0.0),
+        "factor_names": factor_names,
         "rows": {},
         "rows_written": 0,
+        "requested_factor_count": len(factor_names),
         "status": "running",
     }
 
@@ -373,9 +492,10 @@ async def _execute_group_precompute(
     request: FactorGroupPrecomputeRequest,
     group: dict[str, Any],
 ) -> dict[str, Any]:
+    group_factor_names = [str(name) for name in group.get("factor_names") or [] if str(name)]
     result = await _execute_factor_bundle(
         task_id=task_id,
-        factor_names=[str(name) for name in group.get("factor_names") or []],
+        factor_names=group_factor_names,
         start_date=request.start_date,
         end_date=request.end_date,
         symbols=request.symbols,
@@ -383,9 +503,9 @@ async def _execute_group_precompute(
         params=request.params or {},
     )
     if isinstance(result, dict):
-        _attach_result_coverage(
+        _safe_attach_result_coverage(
             result,
-            factor_names=group.get("factor_names") or [],
+            factor_names=group_factor_names,
             start_date=request.start_date,
             end_date=request.end_date,
         )
@@ -413,13 +533,15 @@ async def _execute_factor_bundle(
     ta_names = [name for name in names if name in _TA_FACTORS]
     alpha_names = [name for name in names if name in _ALPHA101_FACTORS]
     research_names = [name for name in names if name in _RESEARCH_FACTORS]
+    relay_names = [name for name in names if name in _RELAY_FACTORS]
+    cn_paper_names = [name for name in names if name in _CN_PAPER_FACTORS]
     unknown = [name for name in names if name not in _SUPPORTED_PRECOMPUTE_FACTORS]
     if unknown:
         raise ValueError(f"Unsupported precompute factors: {unknown}")
 
     results: list[dict[str, Any]] = []
     updater = _progress_updater(task_id)
-    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names]) or 1
+    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names, relay_names, cn_paper_names]) or 1
     current_step = 0
 
     def wrap_progress(offset: int):
@@ -485,6 +607,26 @@ async def _execute_factor_bundle(
             symbols=symbol_list,
             progress_callback=wrap_progress(current_step - 1),
         ))
+    if relay_names:
+        current_step += 1
+        results.append(await run_in_thread(
+            precompute_relay_factors,
+            factor_names=relay_names,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            progress_callback=wrap_progress(current_step - 1),
+        ))
+    if cn_paper_names:
+        current_step += 1
+        results.append(await run_in_thread(
+            precompute_cn_paper_factors,
+            factor_names=cn_paper_names,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            progress_callback=wrap_progress(current_step - 1),
+        ))
     return _merge_precompute_results(symbol_list, start_date, end_date, names, results)
 
 
@@ -495,19 +637,36 @@ def _merge_precompute_results(
     factor_names: list[str],
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    merged_rows: dict[str, int] = {}
+    requested_factor_names = list(dict.fromkeys(str(name) for name in factor_names if str(name)))
+    merged_rows: dict[str, int] = {name: 0 for name in requested_factor_names}
     total_written = 0
+    merged_errors: dict[str, str] = {}
+    failed_factor_names: list[str] = []
     for result in results:
         total_written += int(result.get("rows_written") or 0)
         for factor_name, count in (result.get("rows") or {}).items():
             merged_rows[str(factor_name)] = merged_rows.get(str(factor_name), 0) + int(count or 0)
+        for factor_name, error in (result.get("errors") or {}).items():
+            merged_errors[str(factor_name)] = str(error)
+        for factor_name in result.get("failed_factor_names") or []:
+            name = str(factor_name)
+            if name not in failed_factor_names:
+                failed_factor_names.append(name)
+    written_factor_names = [name for name, count in merged_rows.items() if count > 0]
+    zero_row_factor_names = [name for name, count in merged_rows.items() if count <= 0]
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "factor_names": factor_names,
+        "factor_names": requested_factor_names,
         "rows": merged_rows,
         "rows_written": total_written,
+        "requested_factor_count": len(requested_factor_names),
+        "written_factor_count": len(written_factor_names),
+        "zero_row_factor_count": len(zero_row_factor_names),
+        "zero_row_factor_names": zero_row_factor_names,
+        "failed_factor_names": failed_factor_names,
+        "errors": merged_errors,
     }
 
 
@@ -515,7 +674,7 @@ async def _run_single_precompute_task(task_id: str, request: FactorPrecomputeReq
     try:
         result = await _execute_single_precompute(task_id, request)
         if isinstance(result, dict):
-            _attach_result_coverage(
+            _safe_attach_result_coverage(
                 result,
                 factor_names=request.factor_names,
                 start_date=request.start_date,
@@ -541,6 +700,13 @@ async def _run_group_precompute_task(
     try:
         result = await _execute_group_precompute(task_id, request, group)
         if isinstance(result, dict):
+            group_factor_names = [str(name) for name in group.get("factor_names") or [] if str(name)]
+            _safe_attach_result_coverage(
+                result,
+                factor_names=group_factor_names,
+                start_date=request.start_date,
+                end_date=request.end_date,
+            )
             result["task_id"] = task_id
         update_task(
             task_id,
@@ -561,6 +727,25 @@ def _attach_result_coverage(
     end_date: date,
 ) -> None:
     store = get_factor_value_store()
+    if len(factor_names) > 1 and all(str(name).startswith("alpha101_") for name in factor_names):
+        coverage_by_name = store.coverage_many(
+            factor_names,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        result["coverage_ranges"] = [
+            {
+                "factor_name": factor_name,
+                "total_rows": coverage_by_name.get(factor_name, {}).get("total_rows", 0),
+                "symbol_count": coverage_by_name.get(factor_name, {}).get("symbol_count", 0),
+                "date_count": coverage_by_name.get(factor_name, {}).get("date_count", 0),
+                "min_date": coverage_by_name.get(factor_name, {}).get("min_date"),
+                "max_date": coverage_by_name.get(factor_name, {}).get("max_date"),
+                "is_complete_to_end": coverage_by_name.get(factor_name, {}).get("max_date") == end_date.isoformat(),
+            }
+            for factor_name in factor_names
+        ]
+        return
     ranges: list[dict[str, Any]] = []
     for factor_name in factor_names:
         params = _build_params(
@@ -587,6 +772,25 @@ def _attach_result_coverage(
             "is_complete_to_end": data.get("max_date") == end_date.isoformat(),
         })
     result["coverage_ranges"] = ranges
+
+
+def _safe_attach_result_coverage(
+    result: dict[str, Any],
+    *,
+    factor_names: list[str],
+    start_date: date,
+    end_date: date,
+) -> None:
+    try:
+        _attach_result_coverage(
+            result,
+            factor_names=factor_names,
+            start_date=start_date,
+            end_date=end_date,
+        )
+    except Exception as exc:
+        logger.warning("Attach factor precompute coverage failed after write: {}", exc)
+        result["coverage_warning"] = str(exc)
 
 
 @router.post("/query")

@@ -1,12 +1,35 @@
 import asyncio
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 from loguru import logger
+
+
+QMT_MINUTE_CALL_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_CALL_TIMEOUT_SECONDS", "45"))
+QMT_MINUTE_BATCH_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_BATCH_TIMEOUT_SECONDS", "300"))
+QMT_DAILY_BATCH_TIMEOUT_SECONDS = int(os.getenv("QMT_DAILY_BATCH_TIMEOUT_SECONDS", "45"))
+QMT_STOCK_LIST_TIMEOUT_SECONDS = int(os.getenv("QMT_STOCK_LIST_TIMEOUT_SECONDS", "30"))
+QMT_QUOTE_BATCH_TIMEOUT_SECONDS = int(os.getenv("QMT_QUOTE_BATCH_TIMEOUT_SECONDS", "20"))
+QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS = int(os.getenv("QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS", "3"))
+
+
+async def _run_blocking_with_timeout(func, timeout: int | float = QMT_MINUTE_CALL_TIMEOUT_SECONDS):
+    loop = asyncio.get_running_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(func)
+    try:
+        return await loop.run_in_executor(None, future.result, timeout)
+    except FutureTimeoutError as exc:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise TimeoutError(f"QMT call timed out after {timeout}s") from exc
+    finally:
+        if future.done():
+            executor.shutdown(wait=False)
 
 
 @dataclass
@@ -172,7 +195,10 @@ class QMTGateway:
         """检查连接状态"""
         try:
             xt = self._get_xt()
-            info = xt.get_instrument_detail("600051.SH", iscomplete=False)
+            info = await _run_blocking_with_timeout(
+                lambda: xt.get_instrument_detail("600051.SH", iscomplete=False),
+                timeout=10,
+            )
             self._connected = info is not None
             return self._connected
         except Exception:
@@ -702,6 +728,152 @@ class QMTGateway:
 
         return results
 
+    async def get_kline_daily_batch(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[KlineData]]:
+        """Batch fetch daily K-line data from miniQMT local cache/API."""
+        if not symbols:
+            return {}
+
+        xt = self._get_xt()
+        start_str = start_date.strftime("%Y%m%d000000")
+        end_str = end_date.strftime("%Y%m%d235959")
+        unique_symbols = list(dict.fromkeys(symbols))
+
+        try:
+            await _run_blocking_with_timeout(
+                lambda: xt.download_history_data2(
+                    unique_symbols,
+                    period="1d",
+                    start_time=start_str,
+                    end_time=end_str,
+                    callback=None,
+                    incrementally=False,
+                ),
+                timeout=QMT_DAILY_BATCH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(f"QMT batch daily download failed ({len(unique_symbols)} symbols): {exc}")
+
+        data: Any = {}
+        try:
+            data = await _run_blocking_with_timeout(
+                lambda: xt.get_local_data(
+                    field_list=[],
+                    stock_list=unique_symbols,
+                    period="1d",
+                    start_time=start_str,
+                    end_time=end_str,
+                    count=-1,
+                    dividend_type="none",
+                    fill_data=False,
+                ),
+                timeout=QMT_DAILY_BATCH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(f"QMT batch daily local read failed ({len(unique_symbols)} symbols): {exc}")
+
+        missing_symbols = [
+            symbol
+            for symbol in unique_symbols
+            if self._extract_xt_daily_frame(data, symbol).empty
+        ]
+        fallback_data: Any = {}
+        if missing_symbols:
+            try:
+                fallback_data = await _run_blocking_with_timeout(
+                    lambda: xt.get_market_data_ex(
+                        field_list=[],
+                        stock_list=missing_symbols,
+                        period="1d",
+                        start_time=start_str,
+                        end_time=end_str,
+                        count=-1,
+                        fill_data=False,
+                    ),
+                    timeout=QMT_DAILY_BATCH_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning(f"QMT batch daily fallback failed ({len(missing_symbols)} symbols): {exc}")
+
+        results: dict[str, list[KlineData]] = {}
+        for symbol in unique_symbols:
+            df = self._extract_xt_daily_frame(data, symbol)
+            if df.empty and fallback_data:
+                df = self._extract_xt_daily_frame(fallback_data, symbol)
+            if df.empty:
+                results[symbol] = []
+                continue
+
+            klines: list[KlineData] = []
+            for idx, row in df.iterrows():
+                try:
+                    if isinstance(idx, str):
+                        idx_str = idx.strip()
+                        trade_date = datetime.strptime(idx_str[:8], "%Y%m%d").date()
+                    elif isinstance(idx, (int, float)):
+                        idx_str = str(int(idx))
+                        if len(idx_str) >= 8 and idx_str.startswith(("19", "20")):
+                            trade_date = datetime.strptime(idx_str[:8], "%Y%m%d").date()
+                        else:
+                            trade_date = datetime.fromtimestamp(idx / 1000).date()
+                    elif hasattr(idx, "date"):
+                        trade_date = idx.date()
+                    else:
+                        trade_date = idx
+
+                    klines.append(
+                        KlineData(
+                            symbol=symbol,
+                            datetime=trade_date,
+                            open=float(row.get("open", 0)),
+                            high=float(row.get("high", 0)),
+                            low=float(row.get("low", 0)),
+                            close=float(row.get("close", 0)),
+                            volume=int(row.get("volume", 0)),
+                            amount=float(row.get("amount", 0)),
+                            turnover=float(row.get("turnover", 0)) if row.get("turnover") else None,
+                        )
+                    )
+                except Exception:
+                    continue
+            results[symbol] = klines
+
+        return results
+
+    @staticmethod
+    def _extract_xt_daily_frame(data: Any, symbol: str) -> pd.DataFrame:
+        """Normalize xtdata daily results across local/API return shapes."""
+        if not isinstance(data, dict) or not data:
+            return pd.DataFrame()
+        if symbol in data and hasattr(data[symbol], "iterrows"):
+            return data[symbol]
+
+        fields = ["time", "open", "high", "low", "close", "volume", "amount"]
+        if not all(field in data for field in fields):
+            return pd.DataFrame()
+        close_df = data.get("close")
+        if not hasattr(close_df, "index") or symbol not in close_df.index:
+            return pd.DataFrame()
+
+        rows = []
+        for timetag in close_df.columns:
+            row = {}
+            for field in fields:
+                frame = data.get(field)
+                if hasattr(frame, "loc"):
+                    row[field] = frame.loc[symbol, timetag]
+            turnover_frame = data.get("turnover")
+            if hasattr(turnover_frame, "loc"):
+                row["turnover"] = turnover_frame.loc[symbol, timetag]
+            rows.append((str(timetag), row))
+        if not rows:
+            return pd.DataFrame()
+        return pd.DataFrame([row for _, row in rows], index=[idx for idx, _ in rows])
+
     async def get_kline_minute(
         self,
         symbol: str,
@@ -714,13 +886,10 @@ class QMTGateway:
         start_str = start_date.strftime("%Y%m%d000000")
         end_str = end_date.strftime("%Y%m%d235959")
 
-        loop = asyncio.get_running_loop()
-
         # 先主动触发 miniQMT 下载。download_history_data2 会等待下载完成并返回进度；
         # 旧 download_history_data 在当前 miniQMT 环境下可能只触发、不落盘。
         try:
-            await loop.run_in_executor(
-                None,
+            await _run_blocking_with_timeout(
                 lambda: xt.download_history_data2(
                     [symbol],
                     period="1m",
@@ -728,26 +897,24 @@ class QMTGateway:
                     end_time=end_str,
                     callback=None,
                     incrementally=False,
-                ),
+                )
             )
         except Exception:
             try:
-                await loop.run_in_executor(
-                    None,
+                await _run_blocking_with_timeout(
                     lambda: xt.download_history_data(
                         symbol,
                         period="1m",
                         start_time=start_str,
                         end_time=end_str,
                         incrementally=False,
-                    ),
+                    )
                 )
             except Exception:
                 pass
 
         # 优先直接读取 MiniQMT 本地文件；GUI 批量下载完成后会落在 userdata_mini/datadir。
-        data = await loop.run_in_executor(
-            None,
+        data = await _run_blocking_with_timeout(
             lambda: xt.get_local_data(
                 field_list=[],
                 stock_list=[symbol],
@@ -757,13 +924,12 @@ class QMTGateway:
                 count=-1,
                 dividend_type="none",
                 fill_data=False,
-            ),
+            )
         )
         if not self._extract_xt_minute_frame(data, symbol).empty:
             pass
         else:
-            data = await loop.run_in_executor(
-                None,
+            data = await _run_blocking_with_timeout(
                 lambda: xt.get_market_data_ex(
                     field_list=[],
                     stock_list=[symbol],
@@ -772,7 +938,7 @@ class QMTGateway:
                     end_time=end_str,
                     count=-1,
                     fill_data=False,
-                ),
+                )
             )
 
         results = []
@@ -811,6 +977,118 @@ class QMTGateway:
                     results.append(kline)
                 except Exception:
                     continue
+
+        return results
+
+    async def get_kline_minute_batch(
+        self,
+        symbols: list[str],
+        start_date: date,
+        end_date: date,
+    ) -> dict[str, list[KlineData]]:
+        """Batch fetch 1-minute K-line data from miniQMT local cache/API."""
+        if not symbols:
+            return {}
+
+        xt = self._get_xt()
+        start_str = start_date.strftime("%Y%m%d000000")
+        end_str = end_date.strftime("%Y%m%d235959")
+        unique_symbols = list(dict.fromkeys(symbols))
+
+        try:
+            await _run_blocking_with_timeout(
+                lambda: xt.download_history_data2(
+                    unique_symbols,
+                    period="1m",
+                    start_time=start_str,
+                    end_time=end_str,
+                    callback=None,
+                    incrementally=False,
+                ),
+                timeout=QMT_MINUTE_BATCH_TIMEOUT_SECONDS,
+            )
+        except Exception as exc:
+            logger.warning(f"QMT batch minute download failed ({len(unique_symbols)} symbols): {exc}")
+
+        data = await _run_blocking_with_timeout(
+            lambda: xt.get_local_data(
+                field_list=[],
+                stock_list=unique_symbols,
+                period="1m",
+                start_time=start_str,
+                end_time=end_str,
+                count=-1,
+                dividend_type="none",
+                fill_data=False,
+            ),
+            timeout=QMT_MINUTE_BATCH_TIMEOUT_SECONDS,
+        )
+
+        missing_symbols = [
+            symbol
+            for symbol in unique_symbols
+            if self._extract_xt_minute_frame(data, symbol).empty
+        ]
+        fallback_data: Any = {}
+        if missing_symbols:
+            try:
+                fallback_data = await _run_blocking_with_timeout(
+                    lambda: xt.get_market_data_ex(
+                        field_list=[],
+                        stock_list=missing_symbols,
+                        period="1m",
+                        start_time=start_str,
+                        end_time=end_str,
+                        count=-1,
+                        fill_data=False,
+                    ),
+                    timeout=QMT_MINUTE_BATCH_TIMEOUT_SECONDS,
+                )
+            except Exception as exc:
+                logger.warning(f"QMT batch minute fallback failed ({len(missing_symbols)} symbols): {exc}")
+
+        results: dict[str, list[KlineData]] = {}
+        for symbol in unique_symbols:
+            df = self._extract_xt_minute_frame(data, symbol)
+            if df.empty and fallback_data:
+                df = self._extract_xt_minute_frame(fallback_data, symbol)
+            if df.empty:
+                results[symbol] = []
+                continue
+
+            klines: list[KlineData] = []
+            for idx, row in df.iterrows():
+                try:
+                    if isinstance(idx, str):
+                        idx = idx.strip()
+                        if len(idx) >= 12:
+                            trade_datetime = datetime.strptime(idx[:14], "%Y%m%d%H%M%S")
+                        else:
+                            continue
+                    elif isinstance(idx, (int, float)):
+                        trade_datetime = datetime.fromtimestamp(idx / 1000)
+                    elif hasattr(idx, "to_pydatetime"):
+                        trade_datetime = idx.to_pydatetime()
+                    elif hasattr(idx, "date"):
+                        trade_datetime = idx
+                    else:
+                        trade_datetime = idx
+
+                    klines.append(
+                        KlineData(
+                            symbol=symbol,
+                            datetime=trade_datetime,
+                            open=float(row.get("open", 0)),
+                            high=float(row.get("high", 0)),
+                            low=float(row.get("low", 0)),
+                            close=float(row.get("close", 0)),
+                            volume=int(row.get("volume", 0)),
+                            amount=float(row.get("amount", 0)),
+                        )
+                    )
+                except Exception:
+                    continue
+            results[symbol] = klines
 
         return results
 
@@ -910,16 +1188,18 @@ class QMTGateway:
         loop = asyncio.get_running_loop()
 
         try:
-            ticks = await loop.run_in_executor(
-                None, lambda: xt.get_full_tick(symbols)
+            ticks = await _run_blocking_with_timeout(
+                lambda: xt.get_full_tick(symbols),
+                timeout=QMT_QUOTE_BATCH_TIMEOUT_SECONDS,
             )
 
             # 获取股本数据用于计算市值
             details = {}
             for symbol in symbols:
                 try:
-                    detail = await loop.run_in_executor(
-                        None, lambda s: xt.get_instrument_detail(s), symbol
+                    detail = await _run_blocking_with_timeout(
+                        lambda s=symbol: xt.get_instrument_detail(s),
+                        timeout=QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS,
                     )
                     if detail:
                         details[symbol] = detail

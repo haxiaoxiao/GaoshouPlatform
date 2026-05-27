@@ -13,16 +13,17 @@
           <div class="metric-card__inner">
             <div class="metric-card__header">
               <span class="metric-card__icon" v-html="metric.icon"></span>
-              <span class="metric-card__trend" v-if="metric.trend" :class="metric.trendClass">
+              <span class="metric-card__trend" v-if="metric.badge" :class="metric.trendClass">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path v-if="metric.trend > 0" d="M7 17l5-5 5 5M7 12l5-5 5 5" />
+                  <path v-if="metric.trend >= 0" d="M7 17l5-5 5 5M7 12l5-5 5 5" />
                   <path v-else d="M7 7l5 5 5-5M7 12l5 5 5-5" />
                 </svg>
-                {{ Math.abs(metric.trend) }}%
+                {{ metric.badge }}
               </span>
             </div>
-            <div class="metric-card__value">{{ formatNumber(metric.value) }}</div>
+            <div class="metric-card__value">{{ metric.displayValue || formatNumber(metric.value) }}</div>
             <div class="metric-card__label">{{ metric.label }}</div>
+            <div class="metric-card__hint" v-if="metric.hint">{{ metric.hint }}</div>
           </div>
         </div>
       </div>
@@ -50,7 +51,7 @@
             size="small"
             :icon="Refresh"
             :loading="oneClickSyncing"
-            @click="handleOneClickSync"
+            @click="handleDataSync"
           >
             一键同步
           </el-button>
@@ -60,17 +61,17 @@
       <!-- Tab Content -->
       <div class="tab-content">
         <!-- Stock List -->
-        <div v-show="activeTab === 'stockList'" class="panel panel--stock-list">
+        <div v-if="mountedTabs.stockList" v-show="activeTab === 'stockList'" class="panel panel--stock-list">
           <StockList />
         </div>
 
         <!-- K-Line Query -->
-        <div v-show="activeTab === 'klineQuery'" class="panel">
+        <div v-if="mountedTabs.klineQuery" v-show="activeTab === 'klineQuery'" class="panel">
           <KlineQuery />
         </div>
 
         <!-- Sync Panel -->
-        <div v-show="activeTab === 'sync'" class="panel">
+        <div v-if="mountedTabs.sync" v-show="activeTab === 'sync'" class="panel">
           <SyncPanel />
         </div>
       </div>
@@ -79,7 +80,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Refresh } from '@element-plus/icons-vue'
 import StockList from './StockList.vue'
@@ -99,8 +100,13 @@ const icons = {
 }
 
 // State
-const activeTab = ref('stockList')
+const activeTab = ref('sync')
+const mountedTabs = ref<Record<string, boolean>>({ sync: true })
 const oneClickSyncing = ref(false)
+
+watch(activeTab, (tab) => {
+  mountedTabs.value[tab] = true
+}, { immediate: true })
 
 // Hero metrics
 const heroMetrics = ref([
@@ -108,36 +114,48 @@ const heroMetrics = ref([
     key: 'totalStocks',
     label: '股票总数',
     value: 0,
+    displayValue: '',
+    hint: 'SQLite stocks',
     icon: icons.database,
     trend: 0,
+    badge: '',
     trendClass: '',
     glowColor: 'radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, transparent 70%)'
   },
   {
     key: 'totalKlines',
-    label: 'K线数据量',
+    label: '日线覆盖',
     value: 0,
+    displayValue: '-',
+    hint: 'klines_daily 最新日期',
     icon: icons.chart,
-    trend: 12,
-    trendClass: 'trend--up',
+    trend: 0,
+    badge: '',
+    trendClass: '',
     glowColor: 'radial-gradient(circle, rgba(34, 197, 94, 0.15) 0%, transparent 70%)'
   },
   {
     key: 'todaySync',
-    label: '今日同步',
+    label: '分钟线覆盖',
     value: 0,
+    displayValue: '-',
+    hint: 'klines_minute 最新时间',
     icon: icons.refresh,
     trend: 0,
+    badge: '',
     trendClass: '',
     glowColor: 'radial-gradient(circle, rgba(167, 139, 250, 0.15) 0%, transparent 70%)'
   },
   {
     key: 'dataQuality',
-    label: '数据质量',
-    value: 99.8,
+    label: '最近同步',
+    value: 0,
+    displayValue: '-',
+    hint: '同步任务状态',
     icon: icons.activity,
-    trend: 0.2,
-    trendClass: 'trend--up',
+    trend: 0,
+    badge: '',
+    trendClass: '',
     glowColor: 'radial-gradient(circle, rgba(251, 191, 36, 0.15) 0%, transparent 70%)'
   }
 ])
@@ -154,11 +172,12 @@ const ONE_CLICK_TYPES: { type: SyncType; label: string; daysBack?: number }[] = 
   { type: 'stock_info', label: '股票信息' },
   { type: 'stock_full', label: '股票完整信息' },
   { type: 'kline_daily', label: '日K线', daysBack: 30 },
+  { type: 'index_daily', label: '指数日线', daysBack: 30 },
   { type: 'kline_minute', label: '分钟K线', daysBack: 7 },
   { type: 'realtime_mv', label: '实时市值' },
 ]
 
-type SyncType = 'stock_info' | 'stock_full' | 'kline_daily' | 'kline_minute' | 'realtime_mv'
+type SyncType = 'stock_info' | 'stock_full' | 'kline_daily' | 'index_daily' | 'kline_minute' | 'realtime_mv'
 
 const handleOneClickSync = async () => {
   oneClickSyncing.value = true
@@ -184,9 +203,15 @@ const handleOneClickSync = async () => {
       }
 
       await syncApi.trigger(params)
-    } catch (error) {
-      console.error(`One-click sync failed for ${item.type}:`, error)
-      ElMessage.warning(`${item.label} 同步失败，已跳过`)
+
+      // 等待当前同步完成再启动下一个
+      await waitForSyncComplete()
+    } catch (error: any) {
+      const detail = error?.response?.data?.detail || error?.message || String(error)
+      console.error(`One-click sync failed for ${item.type}:`, detail)
+      ElMessage.error(`${item.label} 同步失败: ${detail}`)
+      oneClickSyncing.value = false
+      return  // 失败则停止后续同步
     }
   }
 
@@ -194,7 +219,62 @@ const handleOneClickSync = async () => {
   ElMessage.success('一键同步完成')
 }
 
+const handleDataSync = async () => {
+  oneClickSyncing.value = true
+  activeTab.value = 'sync'
+
+  try {
+    ElMessage.info('正在启动一键数据同步...')
+    await syncApi.trigger({
+      sync_type: 'datasync',
+      failure_strategy: 'skip',
+      full_sync: false,
+    })
+    await waitForSyncComplete()
+    ElMessage.success('一键同步完成')
+  } catch (error: any) {
+    const detail = error?.response?.data?.detail || error?.message || String(error)
+    console.error('One-click datasync failed:', detail)
+    ElMessage.error(`一键同步失败: ${detail}`)
+  } finally {
+    oneClickSyncing.value = false
+  }
+}
+void handleOneClickSync
+
+const waitForSyncComplete = async (maxWaitMs = 600_000) => {
+  const start = Date.now()
+  while (Date.now() - start < maxWaitMs) {
+    await new Promise(r => setTimeout(r, 60_000))
+    try {
+      const res = await syncApi.getStatus()
+      const status = (res as any)?.data?.status || res?.status
+      if (status === 'idle' || status === 'completed') return
+      if (status === 'failed') {
+        const err = (res as any)?.data?.error_message || res?.error_message || '同步失败'
+        throw new Error(err)
+      }
+    } catch (e: any) {
+      if (e?.message && e.message !== '同步失败') throw e
+      // status endpoint error — keep waiting
+    }
+  }
+  throw new Error('同步超时')
+}
+
 // Methods
+type ExplorerTable = {
+  name: string
+  rows?: number
+  row_count?: number
+  count?: number
+  min_date?: string
+  max_date?: string
+  latest_date?: string
+  date_range?: string
+  latest_time?: string
+}
+
 const formatNumber = (num: number): string => {
   if (num >= 100000000) {
     return (num / 100000000).toFixed(1) + '亿'
@@ -207,16 +287,88 @@ const formatNumber = (num: number): string => {
 
 const loadMetrics = async () => {
   try {
-    // Load stock count
-    const stocksRes = await request.get<{ total: number }>('/data/stocks', { params: { page_size: 1 } })
-    heroMetrics.value[0].value = stocksRes.total || 0
+    const [stocksRes, tables, syncLogs] = await Promise.all([
+      request.get<{ total: number }>('/data/stocks', { params: { page_size: 1 } }),
+      request.get<ExplorerTable[]>('/explorer/tables').catch(() => []),
+      syncApi.getLogs({ limit: 1 }).catch(() => []),
+    ])
 
-    // For demo, set some placeholder values
-    heroMetrics.value[1].value = Math.floor(Math.random() * 5000000) + 1000000
-    heroMetrics.value[2].value = Math.floor(Math.random() * 500) + 100
+    heroMetrics.value[0].value = stocksRes.total || 0
+    heroMetrics.value[0].displayValue = ''
+    heroMetrics.value[0].hint = '当前股票基础信息记录数'
+
+    const daily = tables.find(item => item.name === 'klines_daily')
+    const minute = tables.find(item => item.name === 'klines_minute')
+    const dailyRows = Number(daily?.rows ?? daily?.row_count ?? daily?.count ?? 0)
+    const minuteRows = Number(minute?.rows ?? minute?.row_count ?? minute?.count ?? 0)
+    heroMetrics.value[1].value = dailyRows
+    heroMetrics.value[1].displayValue = latestLabel(daily)
+    heroMetrics.value[1].hint = `${formatNumber(dailyRows)} 行日线`
+    heroMetrics.value[1].badge = dailyRows > 0 ? '已接入' : '无数据'
+    heroMetrics.value[1].trend = dailyRows > 0 ? 1 : -1
+    heroMetrics.value[1].trendClass = dailyRows > 0 ? 'trend--up' : 'trend--down'
+
+    heroMetrics.value[2].value = minuteRows
+    heroMetrics.value[2].displayValue = latestLabel(minute)
+    heroMetrics.value[2].hint = `${formatNumber(minuteRows)} 行分钟线`
+    heroMetrics.value[2].badge = minuteRows > 0 ? '已接入' : '无数据'
+    heroMetrics.value[2].trend = minuteRows > 0 ? 1 : -1
+    heroMetrics.value[2].trendClass = minuteRows > 0 ? 'trend--up' : 'trend--down'
+
+    const latestSync = syncLogs[0]
+    heroMetrics.value[3].displayValue = latestSync ? syncTypeLabel(latestSync.sync_type) : '-'
+    heroMetrics.value[3].hint = latestSync ? `${syncStatusLabel(latestSync.status)} · ${formatDateTime(latestSync.end_time || latestSync.start_time)}` : '暂无同步记录'
+    heroMetrics.value[3].badge = latestSync ? syncStatusLabel(latestSync.status) : ''
+    heroMetrics.value[3].trend = latestSync?.status === 'failed' ? -1 : 1
+    heroMetrics.value[3].trendClass = latestSync?.status === 'failed' ? 'trend--down' : 'trend--up'
   } catch (e) {
     console.error('Failed to load metrics', e)
   }
+}
+
+const latestLabel = (table?: ExplorerTable): string => {
+  if (!table) return '-'
+  if (table.latest_time) return table.latest_time.slice(0, 16)
+  if (table.latest_date) return table.latest_date.slice(0, 10)
+  if (table.max_date) return table.max_date.slice(0, 10)
+  if (table.date_range) {
+    const parts = table.date_range.split('~').map(item => item.trim())
+    return parts[1] || parts[0] || '-'
+  }
+  return '-'
+}
+
+const syncTypeLabel = (type: string): string => {
+  const labels: Record<string, string> = {
+    datasync: '一键同步',
+    stock_info: '股票信息',
+    stock_full: '股票完整信息',
+    financial_data: '财务数据',
+    kline_daily: '日线',
+    index_daily: '指数日线',
+    kline_minute: '分钟线',
+    realtime_mv: '实时市值',
+    dividends: 'QMT 分红',
+    factor_dependency: '因子依赖',
+    tushare_relay: 'Tushare Relay',
+  }
+  return labels[type] || type
+}
+
+const syncStatusLabel = (status: string): string => {
+  const labels: Record<string, string> = {
+    completed: '完成',
+    running: '运行中',
+    queued: '排队',
+    failed: '失败',
+    cancelled: '取消',
+  }
+  return labels[status] || status
+}
+
+const formatDateTime = (value?: string | null): string => {
+  if (!value) return '-'
+  return value.replace('T', ' ').slice(0, 16)
 }
 
 onMounted(() => {
@@ -265,8 +417,8 @@ onMounted(() => {
 
 .metric-card {
   position: relative;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, #131b25 0%, #0f151e 100%);
+  border: 1px solid rgba(136, 160, 190, 0.28);
   border-radius: var(--radius-lg);
   overflow: hidden;
   animation: slideUp var(--duration-slow) var(--ease-out) backwards;
@@ -351,7 +503,16 @@ onMounted(() => {
 
 .metric-card__label {
   font-size: var(--text-sm);
-  color: var(--text-muted);
+  color: var(--text-secondary);
+}
+
+.metric-card__hint {
+  margin-top: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* ═══════════════════════════════════════════════════════════════
@@ -363,8 +524,8 @@ onMounted(() => {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
+  background: #0e151f;
+  border: 1px solid rgba(136, 160, 190, 0.24);
   border-radius: var(--radius-lg);
   overflow: hidden;
 }
@@ -375,8 +536,8 @@ onMounted(() => {
   align-items: center;
   justify-content: space-between;
   padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--border-subtle);
-  background: rgba(0, 0, 0, 0.2);
+  border-bottom: 1px solid rgba(136, 160, 190, 0.22);
+  background: #101923;
 }
 
 .tab-navigation__tabs {
@@ -399,7 +560,7 @@ onMounted(() => {
   background: transparent;
   border: none;
   border-radius: var(--radius-md);
-  color: var(--text-secondary);
+  color: #c0cbda;
   font-size: var(--text-sm);
   font-weight: 500;
   cursor: pointer;
@@ -413,7 +574,8 @@ onMounted(() => {
 
 .tab-btn--active {
   background: var(--accent-primary);
-  color: var(--bg-void);
+  color: #07111c;
+  font-weight: 700;
 }
 
 .tab-btn__icon {

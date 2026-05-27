@@ -156,11 +156,21 @@ class BacktestReport(BaseModel):
 class BoardQuery(BaseModel):
     """Query parameters for factor board."""
     categories: list[str] | None = None  # None = all
-    stock_pool: StockPool = StockPool.ZZ500
+    factor_groups: list[str] | None = None
+    factor_keyword: str | None = None
+    stock_pool: str = StockPool.ZZ500.value
     period: Literal["3m", "1y", "3y", "10y"] = "3y"
+    start_date: datetime.date | None = None
+    end_date: datetime.date | None = None
     portfolio_type: PortfolioType = PortfolioType.LONG_ONLY
     fee_config: Literal["none", "commission_stamp", "commission_stamp_slippage"] = "none"
+    fee_rate: float | None = Field(default=None, ge=0, le=0.05)
+    stamp_tax_rate: float | None = Field(default=None, ge=0, le=0.05)
+    transfer_fee_rate: float | None = Field(default=None, ge=0, le=0.05)
+    slippage: float | None = Field(default=None, ge=0, le=0.05)
     filter_limit_up: bool = True
+    pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
+    factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
     sort_by: str = "ic_mean"
     sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1)
@@ -170,7 +180,26 @@ class BoardQuery(BaseModel):
 class BoardRow(BaseModel):
     """Single row in factor board table."""
     factor_name: str
+    display_name: str | None = None
+    description: str | None = None
+    source: str | None = None
+    factor_group: str | None = None
+    factor_group_display_name: str | None = None
     category: str
+    coverage_min_date: str | None = None
+    coverage_max_date: str | None = None
+    coverage_total_rows: int = 0
+    coverage_symbol_count: int = 0
+    coverage_date_count: int = 0
+    coverage_status: Literal["covered", "partial", "empty", "unknown"] = "unknown"
+    latest_run_id: str | None = None
+    latest_run_at: str | None = None
+    latest_ic_mean: float | None = None
+    latest_icir: float | None = None
+    latest_long_short_return: float | None = None
+    latest_max_drawdown: float | None = None
+    latest_turnover: float | None = None
+    latest_active_symbol_count: int | None = None
     min_quantile_excess_return: float
     max_quantile_excess_return: float
     min_quantile_turnover: float

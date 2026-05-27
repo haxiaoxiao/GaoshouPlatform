@@ -4,7 +4,6 @@ from datetime import date, datetime
 from typing import Any
 
 from app.core.config import settings as app_settings
-from app.db.clickhouse import get_ch_client
 from app.indicators.base import IndicatorContext, IndicatorRegistry
 
 
@@ -17,10 +16,14 @@ class IndicatorScheduler:
         symbols: list[str] | None = None,
         trade_date: date | None = None,
     ) -> None:
-        if sync_type in ("stock_info", "stock_full", "realtime_mv"):
-            self._compute_by_data_type("截面", symbols, trade_date)
-        elif sync_type in ("kline_daily", "kline_minute"):
-            self._compute_by_data_type("时序", symbols, trade_date)
+        try:
+            if sync_type in ("stock_info", "stock_full", "realtime_mv"):
+                self._compute_by_data_type("截面", symbols, trade_date)
+            elif sync_type in ("kline_daily", "kline_minute"):
+                self._compute_by_data_type("时序", symbols, trade_date)
+        except Exception:
+            # ClickHouse may not be running; indicators are optional post-sync
+            pass
 
     def compute_indicators(
         self,
@@ -217,28 +220,22 @@ class IndicatorScheduler:
         return info_map
 
     def _load_kline_map(self, symbols: list[str], limit: int = 120) -> dict[str, list[dict[str, Any]]]:
-        ch = get_ch_client()
-        symbol_set = set(symbols)
+        from app.data_stores import get_market_data_store
+        from datetime import date as dt_date, timedelta
+        store = get_market_data_store()
+        end = dt_date.today()
+        start = end - timedelta(days=limit * 2)
         try:
-            rows = ch.query_df(
-                """
-                SELECT symbol, trade_date, open, high, low, close, volume, amount, turnover_rate
-                FROM klines_daily
-                WHERE symbol IN %(syms)s
-                ORDER BY symbol, trade_date DESC
-                LIMIT %(lim)s
-                """,
-                parameters={"syms": list(symbol_set), "lim": limit * len(symbol_set)},
-            )
+            df = store.load_daily(symbols, start, end, columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"])
         except Exception:
             return {}
 
-        if rows is None or rows.empty:
+        if df.empty:
             return {}
 
         kline_map: dict[str, list[dict[str, Any]]] = {}
-        for symbol, group in rows.sort_values("trade_date", ascending=False).groupby("symbol"):
-            kline_map[symbol] = group.to_dict("records")
+        for symbol, group in df.sort_values("trade_date", ascending=False).groupby("symbol"):
+            kline_map[symbol] = group.head(limit).to_dict("records")
         return kline_map
 
     def _get_all_symbols(self) -> list[str]:
@@ -260,8 +257,6 @@ class IndicatorScheduler:
         results: dict[str, float | None],
         trade_date: date | None = None,
     ) -> None:
-        ch = get_ch_client()
-        table = "stock_indicators" if indicator.data_type == "截面" else "indicator_timeseries"
         target_date = trade_date or date.today()
 
         rows = [
@@ -277,34 +272,10 @@ class IndicatorScheduler:
         ]
 
         if rows:
-            if indicator.data_type == "截面":
-                ch.execute(
-                    "DELETE FROM stock_indicators WHERE indicator_name = %(name)s AND trade_date = %(date)s",
-                    {"name": indicator.name, "date": target_date}
-                )
-                ch.execute(
-                    "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value, updated_at) VALUES",
-                    rows,
-                )
-                if app_settings.market_data_backend == "parquet":
-                    self._write_indicator_parquet(
-                        rows, indicator.name, target_date, dataset="stock_indicators"
-                    )
-            else:
-                ch.execute(
-                    "DELETE FROM indicator_timeseries WHERE indicator_name = %(name)s AND datetime = %(dt)s",
-                    {"name": indicator.name, "dt": datetime.combine(target_date, datetime.min.time())}
-                )
-                dt_rows = [(r[0], r[1], datetime.combine(r[2], datetime.min.time()) if isinstance(r[2], date) else r[2], r[3], r[4]) for r in rows]
-                ch.execute(
-                    "INSERT INTO indicator_timeseries (symbol, indicator_name, datetime, value, updated_at) VALUES",
-                    dt_rows,
-                )
-                if app_settings.market_data_backend == "parquet":
-                    self._write_indicator_parquet(
-                        [(r[0], r[1], r[2], r[3], r[4]) for r in dt_rows],
-                        indicator.name, target_date, dataset="indicator_timeseries",
-                    )
+            dataset = "stock_indicators" if indicator.data_type == "截面" else "indicator_timeseries"
+            self._write_indicator_parquet(
+                rows, indicator.name, target_date, dataset=dataset
+            )
 
 
     @staticmethod

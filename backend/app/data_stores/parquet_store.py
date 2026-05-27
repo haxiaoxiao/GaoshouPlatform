@@ -17,6 +17,18 @@ from app.db.duckdb import get_duckdb
 
 _DAILY_COLS = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
 _MINUTE_COLS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
+_DATASET_KEY_COLS = {
+    "factor_cache": ["symbol", "trade_date", "expr_hash"],
+    "adj_factors": ["symbol", "trade_date"],
+    "moneyflow": ["symbol", "trade_date"],
+    "block_moneyflow": ["block_code", "trade_date"],
+    "auction_replay": ["symbol", "datetime", "mode"],
+    "ths_index": ["ths_code", "snapshot_date"],
+    "ths_member": ["ths_code", "symbol", "snapshot_date"],
+    "announcements": ["symbol", "ann_date", "title_hash"],
+    "research_reports": ["symbol", "report_date", "title_hash"],
+    "market_news": ["source_api", "publish_time", "title_hash"],
+}
 
 
 def _list_param(values: Sequence) -> str:
@@ -50,16 +62,22 @@ class ParquetMarketDataStore(MarketDataStore):
 
     def _glob_pattern(self, dataset: str) -> str:
         p = self._dataset_path(dataset)
+        if self._has_year_month_partitions(dataset):
+            return str(p / "year=*" / "month=??" / "*.parquet").replace("\\", "/")
         return str(p / "**" / "*.parquet").replace("\\", "/")
 
     def _exists(self, dataset: str) -> bool:
         # 检查是否有任何 parquet 文件
         root = self._dataset_path(dataset)
-        return root.exists() and any(root.rglob("*.parquet"))
+        if not root.exists():
+            return False
+        if any(root.glob("year=*/month=??/*.parquet")):
+            return True
+        return any(".tmp-" not in str(file) for file in root.rglob("*.parquet"))
 
     def _has_year_month_partitions(self, dataset: str) -> bool:
         root = self._dataset_path(dataset)
-        return root.exists() and any(root.glob("year=*/month=*"))
+        return root.exists() and any(root.glob("year=*/month=??"))
 
     def _year_month_filter(self, dataset: str, start: date | datetime, end: date | datetime) -> str:
         if not self._has_year_month_partitions(dataset):
@@ -365,9 +383,14 @@ class ParquetMarketDataStore(MarketDataStore):
         return self._write_partitioned(df, dataset="klines_daily", date_col="trade_date")
 
     def write_minute(self, df: pd.DataFrame, *, dataset: str = "klines_minute") -> int:
+        from app.core.config import settings
+
+        append_only = settings.parquet_minute_append_only
+        if dataset == "klines_minute" and append_only:
+            return self._append_partitioned(df, dataset=dataset, date_col="datetime")
         return self._write_partitioned(df, dataset=dataset, date_col="datetime")
 
-    def _write_partitioned(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:
+    def _append_partitioned(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:
         if df.empty:
             return 0
         df = df.copy()
@@ -375,7 +398,7 @@ class ParquetMarketDataStore(MarketDataStore):
             if df.index.name == date_col:
                 df = df.reset_index()
             else:
-                raise KeyError(f"DataFrame 缺少 {date_col} 列")
+                raise KeyError(f"DataFrame missing {date_col} column")
 
         dt = pd.to_datetime(df[date_col])
         df["year"] = dt.dt.year.astype(str)
@@ -387,8 +410,40 @@ class ParquetMarketDataStore(MarketDataStore):
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        if dataset == "factor_cache":
-            key_cols = ["symbol", "trade_date", "expr_hash"]
+        for (year, month), part in df.groupby(["year", "month"], sort=False):
+            partition_dir = root / f"year={year}" / f"month={month}"
+            partition_dir.mkdir(parents=True, exist_ok=True)
+            body = part.drop(columns=["year", "month"], errors="ignore")
+            if dataset == "klines_minute" and "source" not in body.columns:
+                body["source"] = "qmt"
+            if date_col in body.columns:
+                body = body.sort_values(["symbol", date_col] if "symbol" in body.columns else [date_col])
+            table = pa.Table.from_pandas(body, preserve_index=False)
+            pq.write_table(table, partition_dir / f"part-{uuid.uuid4().hex}.parquet")
+        return len(df)
+
+    def _write_partitioned(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:
+        if df.empty:
+            return 0
+        df = df.copy()
+        if date_col not in df.columns:
+            if df.index.name == date_col:
+                df = df.reset_index()
+            else:
+                raise KeyError(f"DataFrame missing {date_col} column")
+
+        dt = pd.to_datetime(df[date_col])
+        df["year"] = dt.dt.year.astype(str)
+        df["month"] = dt.dt.strftime("%m")
+
+        root = self._dataset_path(dataset)
+        root.mkdir(parents=True, exist_ok=True)
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        if dataset in _DATASET_KEY_COLS:
+            key_cols = _DATASET_KEY_COLS[dataset]
         elif date_col == "trade_date":
             key_cols = ["symbol", "trade_date"]
         else:
@@ -421,6 +476,10 @@ class ParquetMarketDataStore(MarketDataStore):
                 shutil.rmtree(partition_dir)
             tmp_dir.replace(partition_dir)
         return len(df)
+
+    def write_dataset(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:
+        """Write a generic partitioned Parquet dataset with dataset-specific dedupe keys."""
+        return self._write_partitioned(df, dataset=dataset, date_col=date_col)
 
     # ------------------------------------------------------------------
     # 覆盖摘要

@@ -12,7 +12,12 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_catalog import RESEARCH_FACTOR_SPECS, TA_FACTOR_SPECS
+from app.services.factor_catalog import (
+    CN_PAPER_FACTOR_SPECS,
+    RELAY_FACTOR_SPECS,
+    RESEARCH_FACTOR_SPECS,
+    TA_FACTOR_SPECS,
+)
 from app.services.factor_value_store import get_factor_definition, get_factor_group, normalize_factor_time
 from app.services.index_components import ensure_index_components, normalize_index_symbol
 
@@ -33,7 +38,13 @@ HIGH_VOLUME_FACTORS = {
     "high_volume_signal",
 }
 ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
-CATALOG_FACTORS = set(TA_FACTOR_SPECS) | set(RESEARCH_FACTOR_SPECS) | ALPHA101_FACTORS
+CATALOG_FACTORS = (
+    set(TA_FACTOR_SPECS)
+    | set(RESEARCH_FACTOR_SPECS)
+    | set(RELAY_FACTOR_SPECS)
+    | set(CN_PAPER_FACTOR_SPECS)
+    | ALPHA101_FACTORS
+)
 SUPPORTED_PRECOMPUTE_FACTORS = CORE_FACTORS | HIGH_VOLUME_FACTORS | CATALOG_FACTORS
 
 
@@ -228,34 +239,45 @@ def _append_catalog_dependency_check(
     if dep.startswith("klines_daily") or dep == "klines_daily":
         checks.setdefault("klines_daily", {
             "dependency": "klines_daily",
-            "label": "鏃ョ嚎琛屾儏",
+            "label": "日线行情",
             "latest_date": _latest_market_date("klines_daily"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "kline_daily",
-            "reason": f"{factor_name} 闇€瑕佹棩绾胯鎯呮暟鎹€?",
+            "reason": f"{factor_name} 需要日线行情数据",
+        })
+        return
+    if dep.startswith("klines_minute") or dep == "klines_minute":
+        checks.setdefault("klines_minute", {
+            "dependency": "klines_minute",
+            "label": "分钟线行情",
+            "latest_date": _latest_market_date("klines_minute"),
+            "required_start": start_date.isoformat(),
+            "required_end": end_date.isoformat(),
+            "sync_step": "kline_minute",
+            "reason": f"{factor_name} 需要分钟线行情数据",
         })
         return
     if dep.startswith("financial_data") or dep == "financial_data":
         checks.setdefault("financial_data", {
             "dependency": "financial_data",
-            "label": "璐㈠姟鏁版嵁",
+            "label": "财务数据",
             "latest_date": _latest_sqlite_date("financial_data", "report_date"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "financial_data",
-            "reason": f"{factor_name} 闇€瑕佽储鍔℃姤琛ㄦ暟鎹€?",
+            "reason": f"{factor_name} 需要财务报表数据",
         })
         return
     if dep.startswith("stock_daily_basic") or dep == "stock_daily_basic":
         checks.setdefault("stock_daily_basic", {
             "dependency": "stock_daily_basic",
-            "label": "姣忔棩鍩虹鎸囨爣/甯傚€?",
+            "label": "每日基础指标/市值",
             "latest_date": _latest_sqlite_date("stock_daily_basic", "trade_date"),
             "required_start": start_date.isoformat(),
             "required_end": end_date.isoformat(),
             "sync_step": "tushare_daily",
-            "reason": f"{factor_name} 闇€瑕?stock_daily_basic 鏁版嵁",
+            "reason": f"{factor_name} 需要 stock_daily_basic 数据",
         })
 
 
@@ -279,8 +301,9 @@ def _build_sync_plan(
     if "kline_daily" in sync_steps:
         steps.append(_step("kline_daily", start_date, end_date))
     if "kline_minute" in sync_steps:
-        times = sorted({str(gap.get("timer_time") or "10:30") for gap in coverage_gaps if gap["sync_step"] == "kline_minute"})
-        steps.append(_step("kline_minute", start_date, end_date, timer_times=times))
+        times = sorted({str(gap["timer_time"]) for gap in coverage_gaps if gap["sync_step"] == "kline_minute" and gap.get("timer_time")})
+        extra = {"timer_times": times} if times else {}
+        steps.append(_step("kline_minute", start_date, end_date, **extra))
     if "cum_timer" in sync_steps:
         times = sorted({str(gap.get("timer_time") or "14:30") for gap in coverage_gaps if gap["sync_step"] == "cum_timer"})
         steps.append(_step("cum_timer", start_date, end_date, timer_times=times))

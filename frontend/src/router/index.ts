@@ -49,7 +49,19 @@ const router = createRouter({
           component: () => import('@/views/FactorResearch/FactorAnalysisNew.vue'),
           meta: { title: '因子分析(新版)' },
         },
+        {
+          path: 'detail/:factorName',
+          name: 'FactorDetail',
+          component: () => import('@/views/FactorResearch/FactorDetail.vue'),
+          meta: { title: '因子详情' },
+        },
       ],
+    },
+    {
+      path: '/research',
+      name: 'InvestmentResearch',
+      component: () => import('@/views/InvestmentResearch/index.vue'),
+      meta: { title: '投研' },
     },
     {
       path: '/backtest',
@@ -62,6 +74,12 @@ const router = createRouter({
       name: 'FactorBacktest',
       component: () => import('@/views/FactorBacktest/index.vue'),
       meta: { title: '因子回测' },
+    },
+    {
+      path: '/backtest/optimization/:id',
+      name: 'OptimizationReport',
+      component: () => import('@/views/StrategyBacktest/OptimizationReport.vue'),
+      meta: { title: '优化结果' },
     },
     {
       path: '/trade',

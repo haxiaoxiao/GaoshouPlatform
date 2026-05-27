@@ -59,8 +59,17 @@ def _to_json_safe(obj: Any) -> Any:
         return default
 
 
-def _compute_annual_return(total_return: float, nav_series: list[dict]) -> float:
+def _compute_annual_return(
+    total_return: float,
+    nav_series: list[dict],
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> float:
     """从净值曲线时间跨度计算年化收益率，避免依赖 akquant 内部指标"""
+    if start_date is not None and end_date is not None and end_date >= start_date:
+        days = max((end_date - start_date).days, 1)
+        years = days / 365.25
+        return round(float((1 + total_return) ** (1.0 / max(years, 0.01)) - 1.0), 6)
     if not nav_series or len(nav_series) < 2:
         return total_return
     try:
@@ -115,10 +124,17 @@ def normalize_result(
             for t in raw_trades:
                 for old_key, new_key in [
                     ("entry_time", "entry_date"), ("exit_time", "date"),
-                    ("entry_price", "price"), ("net_pnl", "pnl"),
+                    ("net_pnl", "pnl"),
                 ]:
                     if old_key in t and new_key not in t:
                         t[new_key] = t[old_key]
+                if "direction" not in t:
+                    side = str(t.get("side") or "").lower()
+                    t["direction"] = "sell" if side in {"long", "buy", ""} else "buy"
+                if "display_price" not in t:
+                    t["display_price"] = t.get("exit_price") or t.get("entry_price") or t.get("price")
+                if "price" not in t:
+                    t["price"] = t["display_price"]
                 # 添加 trade_date 字段（优先用 exit_time / date，否则 entry_date）
                 if "trade_date" not in t:
                     t["trade_date"] = t.get("date") or t.get("entry_date") or ""
@@ -150,9 +166,14 @@ def normalize_result(
 
     # 指标 — akquant 内部为百分数，/100 转小数
     total_return = _safe_float(getattr(metrics, "total_return_pct", 0)) / 100.0
+    # 分段 warm-start 回测下 AKQuant metrics.total_return_pct 可能重复累计检查点状态。
+    # 平台收益以 equity curve 最后一根权益为准，保证和净值曲线、最终资金一致。
+    if isinstance(eq, pd.Series) and not eq.empty and initial_capital:
+        last_equity = _safe_float(eq.iloc[-1], default=initial_capital)
+        total_return = last_equity / float(initial_capital) - 1.0
     # akquant 的 annualized_return 在部分版本中已是小数而非百分数，不可靠；
-    # 直接从 equity curve 的时间跨度 + total_return 计算，保证一致性
-    annual_return = _compute_annual_return(total_return, nav_series)
+    # 直接从回测区间 + total_return 计算，保证一致性
+    annual_return = _compute_annual_return(total_return, nav_series, start_date, end_date)
     max_drawdown = _safe_float(getattr(metrics, "max_drawdown_pct", 0)) / 100.0
     win_rate_pct = _safe_float(getattr(metrics, "win_rate", 0))  # akquant 已是百分数
 

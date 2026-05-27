@@ -176,7 +176,7 @@ def _load_st_reference(symbols: Sequence[str]) -> tuple[pd.DataFrame, pd.DataFra
             SELECT symbol, name, start_date, end_date
             FROM stock_name_changes
             WHERE symbol IN ({placeholders})
-              AND (name LIKE '%ST%' OR name LIKE '%*%' OR name LIKE '%閫€%')
+              AND (name LIKE '%ST%' OR name LIKE '%*%' OR name LIKE '%退%')
             """,
             conn,
             params=list(symbols),
@@ -205,7 +205,7 @@ def _st_symbols_from_reference(stocks: pd.DataFrame, changes: pd.DataFrame, as_o
     for row in stocks.itertuples(index=False):
         name = str(getattr(row, "name", "") or "")
         delist_date = getattr(row, "delist_date", None)
-        if getattr(row, "is_st", 0) or getattr(row, "is_delist", 0) or "ST" in name or "*" in name or "閫€" in name:
+        if getattr(row, "is_st", 0) or getattr(row, "is_delist", 0) or "ST" in name or "*" in name or "退" in name:
             flagged.add(str(row.symbol))
             continue
         if pd.notna(delist_date) and delist_date <= as_of:
@@ -771,4 +771,3 @@ def precompute_high_volume_features(
         "rows": by_feature,
         "rows_written": written,
     }
-

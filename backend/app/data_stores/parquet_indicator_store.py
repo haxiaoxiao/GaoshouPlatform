@@ -20,7 +20,7 @@ class ParquetIndicatorStore(IndicatorStore):
         self._data_dir = Path(data_dir or settings.parquet_data_dir)
         self._cross_section_dataset = self._first_existing_dataset(
             "stock_indicators",
-            "feature_values",
+            "factor_values",
         )
         self._timeseries_dataset = self._first_existing_dataset(
             "indicator_timeseries",
@@ -44,10 +44,12 @@ class ParquetIndicatorStore(IndicatorStore):
         return datasets[0]
 
     def _indicator_col(self, dataset: str) -> str:
-        return "feature_name" if dataset == "feature_values" else "indicator_name"
+        if dataset == "factor_values":
+            return "factor_name"
+        return "indicator_name"
 
     def _updated_col(self, dataset: str) -> str:
-        return "created_at" if dataset == "feature_values" else "updated_at"
+        return "created_at" if dataset == "factor_values" else "updated_at"
 
     def load_cross_section(
         self,

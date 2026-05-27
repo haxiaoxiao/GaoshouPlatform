@@ -8,7 +8,6 @@ from loguru import logger
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
 from app.core.config import settings
-from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
 from app.db.clickhouse import init_clickhouse_tables
 
@@ -36,12 +35,9 @@ async def lifespan(app: FastAPI):
         logger.info("ClickHouse disabled, using Parquet/DuckDB backend")
 
     # 启动调度器
-    start_scheduler()
-    logger.info("Scheduler started")
+    logger.info("Sync scheduler is owned by the isolated sync service")
 
     # 加载启用的定时任务
-    await load_enabled_tasks()
-    logger.info("Sync tasks loaded")
 
     # 初始化 Redis 缓存
     redis_client = None
@@ -58,8 +54,6 @@ async def lifespan(app: FastAPI):
 
     # 关闭调度器
     logger.info("Stopping application...")
-    stop_scheduler()
-
     # 关闭 Redis 连接
     if redis_client is not None and redis_client.available:
         redis_client.close()

@@ -1,9 +1,10 @@
 import request from './request'
 
-// 同步状态接口
 export interface SyncStatus {
+  task_id?: string
+  run_id?: string
   sync_type: string | null
-  status: 'idle' | 'running' | 'completed' | 'failed'
+  status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   total: number
   current: number
   success_count: number
@@ -15,7 +16,6 @@ export interface SyncStatus {
   details: Record<string, unknown>
 }
 
-// 同步日志接口
 export interface SyncLog {
   id: number
   task_id: number | null
@@ -31,40 +31,97 @@ export interface SyncLog {
   created_at: string
 }
 
-// 同步请求参数
 export interface SyncRequest {
-  sync_type: 'stock_info' | 'stock_full' | 'financial_data' | 'kline_daily' | 'kline_minute' | 'realtime_mv' | 'dividends'
+  sync_type:
+    | 'datasync'
+    | 'stock_info'
+    | 'stock_full'
+    | 'financial_data'
+    | 'kline_daily'
+    | 'index_daily'
+    | 'kline_minute'
+    | 'realtime_mv'
+    | 'dividends'
+    | 'factor_dependency'
+    | 'tushare_relay'
   symbols?: string[]
+  index_symbols?: string[]
   start_date?: string
   end_date?: string
+  sync_mode?: 'incremental' | 'range' | 'full'
   failure_strategy?: 'skip' | 'retry' | 'stop'
-  full_sync?: boolean  // 全量同步标记(适用于K线数据)
+  full_sync?: boolean
+  factor_sync_plan?: Record<string, unknown>
+  relay_datasets?: string[]
+  relay_options?: Record<string, unknown>
 }
 
-// 同步日志查询参数
+export interface SyncCatalogItem {
+  name: string
+  display_name: string
+  category: string
+  source: string
+  storage_dataset?: string
+  date_col?: string
+  recommended_frequency: string
+  requires_qmt: boolean
+  requires_relay_key: boolean
+  risk_level: 'low' | 'medium' | 'high' | string
+  description: string
+  default_enabled?: boolean
+  text_source?: boolean
+  symbol_scoped?: boolean
+  default_params?: Record<string, unknown>
+  coverage?: {
+    row_count: number | null
+    min_date: string | null
+    max_date: string | null
+    estimated?: boolean
+    partition_count?: number
+    error?: string
+  } | null
+}
+
+export interface SyncPreset {
+  name: string
+  display_name: string
+  description: string
+  sync_types: string[]
+  relay_datasets: string[]
+  include_by_default?: boolean
+}
+
+export interface SyncCatalog {
+  presets: SyncPreset[]
+  datasets: SyncCatalogItem[]
+  relay: {
+    configured: boolean
+    rps: number
+    timeout_seconds: number
+    base_url_count: number
+  }
+  guardrails: Record<string, unknown>
+}
+
 export interface SyncLogsParams {
   sync_type?: string
   task_id?: number
   limit?: number
 }
 
-// API 响应包装 (拦截器已自动解包，此接口仅供类型参考)
-// interface ApiResponse<T> {
-//   code: number
-//   message: string
-//   data: T
-// }
-
 export const syncApi = {
-  // 触发数据同步（同步任务可能耗时较长，超时设为 10 分钟）
   trigger: (params: SyncRequest) =>
-    request.post<SyncStatus>('/data/sync', params, { timeout: 600000 }),
+    request.post<SyncStatus>('/data/sync', params),
 
-  // 获取同步状态
   getStatus: () =>
     request.get<SyncStatus>('/data/sync/status'),
 
-  // 获取同步日志
+  cancel: () =>
+    request.post<{ cancelled: boolean }>('/data/sync/cancel', {}),
+
+  getCatalog: (params?: { refresh?: boolean }) =>
+    request.get<SyncCatalog>('/data/sync/catalog', { params }),
+
   getLogs: (params?: SyncLogsParams) =>
     request.get<SyncLog[]>('/data/sync/logs', { params }),
 }
