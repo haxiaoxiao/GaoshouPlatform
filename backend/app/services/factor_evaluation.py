@@ -1,4 +1,5 @@
 """单因子评估服务 — 串联计算层和回测层"""
+import calendar
 from datetime import date
 from datetime import timedelta
 from typing import Any
@@ -230,11 +231,15 @@ class FactorEvaluationService:
     async def board_query(self, query: BoardQuery) -> BoardResponse:
         """Query factor board with filters, sorting, and pagination."""
         rows = await self._saved_factor_board_rows(query)
-        if rows or query.factor_groups:
+        if rows or query.factor_groups or query.factor_keyword:
             total = len(rows)
-            rows = self._sort_and_page_rows(rows, query)
-            self._attach_board_coverage(rows, query)
-            await self._attach_latest_research_runs(rows)
+            await self._attach_latest_research_runs(rows, query)
+            if self._sort_uses_coverage(query.sort_by):
+                self._attach_board_coverage(rows, query)
+                rows = self._sort_and_page_rows(rows, query)
+            else:
+                rows = self._sort_and_page_rows(rows, query)
+                self._attach_missing_board_coverage(rows, query)
             return BoardResponse(
                 rows=rows,
                 total=total,
@@ -250,11 +255,12 @@ class FactorEvaluationService:
 
         rows = []
         for tmpl in all_templates:
+            start_date, end_date = self._board_date_range(query)
             cfg = FactorConfig(
                 expression=tmpl.preset_expression,
                 stock_pool=query.stock_pool,
-                start_date=self._period_start_date(query.period),
-                end_date=date.today(),
+                start_date=start_date,
+                end_date=end_date,
             )
             try:
                 report_obj = await self.report(cfg)
@@ -283,9 +289,13 @@ class FactorEvaluationService:
                 continue
 
         total = len(rows)
-        rows = self._sort_and_page_rows(rows, query)
-        self._attach_board_coverage(rows, query)
-        await self._attach_latest_research_runs(rows)
+        await self._attach_latest_research_runs(rows, query)
+        if self._sort_uses_coverage(query.sort_by):
+            self._attach_board_coverage(rows, query)
+            rows = self._sort_and_page_rows(rows, query)
+        else:
+            rows = self._sort_and_page_rows(rows, query)
+            self._attach_missing_board_coverage(rows, query)
         return BoardResponse(
             rows=rows, total=total,
             page=query.page, page_size=query.page_size,
@@ -374,17 +384,50 @@ class FactorEvaluationService:
                 ic_mean=0.0,
                 ir=0.0,
             ))
-        return rows
+        return self._filter_board_rows(rows, query)
+
+    def _filter_board_rows(self, rows: list[BoardRow], query: BoardQuery) -> list[BoardRow]:
+        keyword = str(query.factor_keyword or "").strip().lower()
+        if not keyword:
+            return rows
+        return [row for row in rows if self._board_row_matches_keyword(row, keyword)]
+
+    @staticmethod
+    def _board_row_matches_keyword(row: BoardRow, keyword: str) -> bool:
+        haystack = " ".join(
+            str(value or "")
+            for value in (
+                row.factor_name,
+                row.display_name,
+                row.description,
+                row.source,
+                row.factor_group,
+                row.factor_group_display_name,
+                row.category,
+            )
+        ).lower()
+        return keyword in haystack
+
+    def _attach_missing_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
+        missing = [row for row in rows if row.coverage_status == "unknown"]
+        if missing:
+            self._attach_board_coverage(missing, query)
 
     def _attach_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
         if not rows:
             return
         from app.services.factor_value_store import get_factor_value_store
 
-        end_date = date.today()
+        start_date, end_date = self._board_date_range(query)
         store = get_factor_value_store()
         try:
-            coverage_by_factor = store.coverage_many([row.factor_name for row in rows])
+            # Limit board coverage scans to the active research window so
+            # sorting by latest metrics can stay responsive on large groups.
+            coverage_by_factor = store.coverage_many(
+                [row.factor_name for row in rows],
+                start_date=start_date,
+                end_date=end_date,
+            )
         except Exception:
             logger.exception("Failed to batch attach factor board coverage")
             coverage_by_factor = {}
@@ -401,13 +444,46 @@ class FactorEvaluationService:
                 logger.exception("Failed to attach factor board coverage: %s", row.factor_name)
                 row.coverage_status = "unknown"
 
-    async def _attach_latest_research_runs(self, rows: list[BoardRow]) -> None:
+    async def _attach_latest_research_runs(self, rows: list[BoardRow], query: BoardQuery) -> None:
         if not rows:
             return
         try:
-            from app.services.factor_research_runs import factor_research_run_service
+            from app.services.factor_research_runs import (
+                factor_research_run_service,
+                research_match_hash,
+                research_params_hash,
+            )
 
-            summaries = await factor_research_run_service.latest_summaries([row.factor_name for row in rows])
+            payload_by_factor = {
+                row.factor_name: self._board_research_payload(row.factor_name, query)
+                for row in rows
+            }
+            normalized_by_factor = {
+                factor_name: factor_research_run_service._normalized_params(payload)
+                for factor_name, payload in payload_by_factor.items()
+            }
+            params_hash_by_factor = {
+                factor_name: research_params_hash(params)
+                for factor_name, params in normalized_by_factor.items()
+            }
+            match_hash_by_factor = {
+                factor_name: research_match_hash(params, ignore_date_range=True)
+                for factor_name, params in normalized_by_factor.items()
+            }
+            requested_range_by_factor = {
+                factor_name: (
+                    date.fromisoformat(str(payload["start_date"])),
+                    date.fromisoformat(str(payload["end_date"])),
+                )
+                for factor_name, payload in payload_by_factor.items()
+            }
+            summaries = await factor_research_run_service.latest_summaries(
+                [row.factor_name for row in rows],
+                stock_pool_value=str(query.stock_pool),
+                params_hash_by_factor=params_hash_by_factor,
+                match_hash_by_factor=match_hash_by_factor,
+                requested_range_by_factor=requested_range_by_factor,
+            )
         except Exception:
             logger.exception("Failed to attach latest factor research runs")
             return
@@ -423,8 +499,103 @@ class FactorEvaluationService:
             row.latest_long_short_return = summary.get("long_short_return")
             row.latest_max_drawdown = summary.get("max_drawdown")
             row.latest_turnover = summary.get("turnover")
+            row.latest_active_symbol_count = summary.get("active_symbol_count")
+            self._attach_research_snapshot_coverage(row, summary)
             row.ic_mean = float(row.latest_ic_mean or 0.0)
             row.ir = float(row.latest_icir or 0.0)
+
+    def _attach_research_snapshot_coverage(self, row: BoardRow, summary: dict[str, Any]) -> None:
+        """Use persisted research summary as the board coverage snapshot."""
+        min_date = summary.get("effective_start_date") or summary.get("requested_start_date")
+        max_date = summary.get("effective_end_date") or summary.get("requested_end_date")
+        symbol_count = self._summary_int(summary.get("active_symbol_count") or summary.get("symbol_count"))
+        date_count = self._summary_int(summary.get("effective_trading_days"))
+        coverage_ratio = self._summary_float(summary.get("coverage_ratio"))
+
+        if min_date is not None:
+            row.coverage_min_date = str(min_date)
+        if max_date is not None:
+            row.coverage_max_date = str(max_date)
+        if symbol_count is not None:
+            row.coverage_symbol_count = symbol_count
+        if date_count is not None:
+            row.coverage_date_count = date_count
+
+        if symbol_count is None or date_count is None:
+            return
+        total_rows = symbol_count * date_count
+        if coverage_ratio is not None:
+            total_rows = round(total_rows * coverage_ratio)
+        row.coverage_total_rows = max(int(total_rows), 0)
+        if row.coverage_total_rows <= 0:
+            row.coverage_status = "empty"
+        elif coverage_ratio is None or coverage_ratio >= 0.99:
+            row.coverage_status = "covered"
+        else:
+            row.coverage_status = "partial"
+
+    @staticmethod
+    def _summary_int(value: Any) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _summary_float(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _board_research_payload(self, factor_name: str, query: BoardQuery) -> dict[str, Any]:
+        start_date, end_date = self._board_date_range(query)
+        costs = self._cost_params_from_query(query)
+        factor_value_params_hash = (query.factor_value_params_hashes or {}).get(factor_name)
+        return {
+            "factor_name": factor_name,
+            "stock_pool_value": str(query.stock_pool),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "portfolio_type": getattr(query.portfolio_type, "value", str(query.portfolio_type)),
+            "rebalance_period": "monthly",
+            **costs,
+            "filter_limit_up": bool(query.filter_limit_up),
+            "filter_limit_down": True,
+            "group_count": 5,
+            "direction": "desc",
+            "pool_membership_mode": query.pool_membership_mode,
+            "factor_value_params_hash": factor_value_params_hash,
+            "factor_value_params_hashes": {factor_name: factor_value_params_hash} if factor_value_params_hash else {},
+            "industry_neutralization": False,
+            "standardize": False,
+        }
+
+    @staticmethod
+    def _cost_params_from_query(query: BoardQuery) -> dict[str, float]:
+        if any(
+            getattr(query, field) is not None
+            for field in ("fee_rate", "stamp_tax_rate", "transfer_fee_rate", "slippage")
+        ):
+            return {
+                "fee_rate": float(query.fee_rate or 0.0),
+                "stamp_tax_rate": float(query.stamp_tax_rate or 0.0),
+                "transfer_fee_rate": float(query.transfer_fee_rate or 0.0),
+                "slippage": float(query.slippage or 0.0),
+            }
+        return FactorEvaluationService._cost_params_from_config(query.fee_config)
+
+    @staticmethod
+    def _cost_params_from_config(fee_config: str) -> dict[str, float]:
+        if fee_config == "none":
+            return {"fee_rate": 0.0, "stamp_tax_rate": 0.0, "transfer_fee_rate": 0.0, "slippage": 0.0}
+        if fee_config == "commission_stamp_slippage":
+            return {"fee_rate": 0.003, "stamp_tax_rate": 0.001, "transfer_fee_rate": 0.0, "slippage": 0.001}
+        return {"fee_rate": 0.003, "stamp_tax_rate": 0.001, "transfer_fee_rate": 0.0, "slippage": 0.0}
 
     @staticmethod
     def _coverage_status(total_rows: int, max_date: str | None, end_date: date) -> str:
@@ -436,10 +607,39 @@ class FactorEvaluationService:
 
     def _sort_and_page_rows(self, rows: list[BoardRow], query: BoardQuery) -> list[BoardRow]:
         reverse = query.sort_order == "desc"
-        rows.sort(key=lambda r: getattr(r, query.sort_by, 0), reverse=reverse)
+        sort_attr = query.sort_by
+        sortable: list[BoardRow] = []
+        missing: list[BoardRow] = []
+        for row in rows:
+            value = getattr(row, sort_attr, None)
+            if value is None:
+                missing.append(row)
+                continue
+            sortable.append(row)
+        sortable.sort(key=lambda row: self._board_sort_key(getattr(row, sort_attr, None)), reverse=reverse)
+        rows[:] = sortable + missing
         start = (query.page - 1) * query.page_size
         end = start + query.page_size
         return rows[start:end]
+
+    @staticmethod
+    def _sort_uses_coverage(sort_by: str) -> bool:
+        return sort_by in {
+            "coverage_min_date",
+            "coverage_max_date",
+            "coverage_total_rows",
+            "coverage_symbol_count",
+            "coverage_date_count",
+            "coverage_status",
+        }
+
+    @staticmethod
+    def _board_sort_key(value: Any) -> Any:
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, (int, float)):
+            return float(value)
+        return str(value)
 
     # ------------------------------------------------------------------
     # Report helpers
@@ -661,9 +861,25 @@ class FactorEvaluationService:
 
     def _period_start_date(self, period: str) -> date:
         today = date.today()
-        mapping = {"3m": 90, "1y": 365, "3y": 3 * 365, "10y": 10 * 365}
-        days = mapping.get(period, 365)
-        return today - timedelta(days=days)
+        if period == "3m":
+            month = today.month - 3
+            year = today.year
+            while month <= 0:
+                month += 12
+                year -= 1
+            day = min(today.day, calendar.monthrange(year, month)[1])
+            return date(year, month, day)
+        years = {"1y": 1, "3y": 3, "10y": 10}.get(period, 1)
+        year = today.year - years
+        day = min(today.day, calendar.monthrange(year, today.month)[1])
+        return date(year, today.month, day)
+
+    def _board_date_range(self, query: BoardQuery) -> tuple[date, date]:
+        end_date = query.end_date or date.today()
+        start_date = query.start_date or self._period_start_date(query.period)
+        if end_date < start_date:
+            return end_date, end_date
+        return start_date, end_date
 
     async def _resolve_pool(self, stock_pool) -> list[str]:
         return await compute_service._resolve_stock_pool(str(stock_pool))
@@ -709,6 +925,8 @@ class FactorEvaluationService:
         for sym, grp in df.groupby("symbol"):
             data[sym] = grp
 
+        from app.compute.operators import auto_discover
+        auto_discover(force_reload=True)
         result = evaluate_expression(expression, data)
 
         if isinstance(result, dict):

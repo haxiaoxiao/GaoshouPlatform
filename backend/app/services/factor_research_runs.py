@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 import time
 import uuid
 from datetime import date, datetime
@@ -15,6 +16,7 @@ import pandas as pd
 from loguru import logger
 from sqlalchemy import select
 
+from app.core.config import settings
 from app.db.models import Factor, FactorResearchRun, FactorResearchRunItem, WatchlistStock
 from app.db.sqlite import async_session_factory
 from app.models.factor import EvalConfig
@@ -28,22 +30,57 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "portfolio_type": "long_only",
     "rebalance_period": "monthly",
     "fee_rate": 0.001,
+    "stamp_tax_rate": 0.0,
+    "transfer_fee_rate": 0.0,
     "slippage": 0.001,
     "filter_limit_up": True,
     "filter_limit_down": True,
     "group_count": 5,
     "direction": "desc",
+    "pool_membership_mode": "static_latest",
+    "factor_value_params_hash": None,
+    "factor_value_params_hashes": {},
     "industry_neutralization": False,
     "standardize": False,
 }
 
-_LATEST_SUMMARY_CACHE: dict[tuple[str, ...], tuple[float, dict[str, dict[str, Any]]]] = {}
+_LATEST_SUMMARY_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, dict[str, Any]]]] = {}
 _LATEST_SUMMARY_CACHE_TTL_SECONDS = 60.0
+_RESEARCH_MATCH_CONTEXT_KEYS = frozenset({"factor_name", "stock_pool_value"})
+_RESEARCH_MATCH_DATE_KEYS = frozenset({"start_date", "end_date"})
+_COMBINATION_FACET_FIELDS = (
+    "factor_value_params_hash",
+    "stock_pool_value",
+    "date_range",
+    "portfolio_type",
+    "fee_profile",
+    "pool_membership_mode",
+    "group_count",
+    "direction",
+    "filter_limit_up",
+    "filter_limit_down",
+    "rebalance_period",
+    "industry_neutralization",
+    "standardize",
+)
 
 
-def research_params_hash(payload: dict[str, Any]) -> str:
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
+def research_params_hash(payload: dict[str, Any], *, exclude_keys: set[str] | frozenset[str] | None = None) -> str:
+    excluded = set(exclude_keys or ())
+    normalized = {
+        str(key): payload[key]
+        for key in sorted(payload)
+        if key not in excluded
+    }
+    text = json.dumps(normalized, ensure_ascii=False, sort_keys=True, default=str, separators=(",", ":"))
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:20]
+
+
+def research_match_hash(payload: dict[str, Any], *, ignore_date_range: bool = False) -> str:
+    exclude = set(_RESEARCH_MATCH_CONTEXT_KEYS)
+    if ignore_date_range:
+        exclude.update(_RESEARCH_MATCH_DATE_KEYS)
+    return research_params_hash(payload, exclude_keys=exclude)
 
 
 class FactorResearchRunService:
@@ -67,19 +104,29 @@ class FactorResearchRunService:
             stock_pool_value=stock_pool_value,
             params_hash=research_params_hash(params),
         )
+        factor_value_params_hash = self._factor_value_params_hash_for(str(payload["factor_name"]), params)
         coverage = get_factor_value_store().coverage(
             str(payload["factor_name"]),
             start_date=start_date,
             end_date=end_date,
             symbols=symbols or None,
+            params_hash=factor_value_params_hash,
         )
         is_custom_factor = await self._is_custom_factor(str(payload["factor_name"]))
+        effective_range = self._coverage_effective_range(coverage, start_date, end_date)
         max_cached_date = str(coverage.get("max_date") or "")
-        covers_requested_end = bool(max_cached_date) and max_cached_date >= end_date.isoformat()
-        has_cached_values = bool(coverage.get("total_rows")) and bool(symbols) and covers_requested_end
+        has_cached_values = bool(coverage.get("total_rows")) and bool(symbols) and effective_range is not None
         if pool_error:
             message = pool_error
-        elif has_cached_values or is_custom_factor:
+        elif is_custom_factor:
+            message = None
+        elif has_cached_values and effective_range and effective_range[1] < end_date:
+            message = (
+                f"Factor cache is available through {effective_range[1].isoformat()}; "
+                f"research will use {effective_range[0].isoformat()} to {effective_range[1].isoformat()} "
+                f"and skip uncached tail dates through {end_date.isoformat()}."
+            )
+        elif has_cached_values:
             message = None
         else:
             message = (
@@ -94,6 +141,9 @@ class FactorResearchRunService:
             "latest_run": self._summary_from_model(existing) if existing else None,
             "params_hash": research_params_hash(params),
             "coverage": coverage,
+            "effective_start_date": effective_range[0].isoformat() if effective_range else None,
+            "effective_end_date": effective_range[1].isoformat() if effective_range else None,
+            "is_clipped_to_cache": bool(effective_range and (effective_range[0] > start_date or effective_range[1] < end_date)),
             "can_run": has_cached_values or is_custom_factor,
             "message": message,
         }
@@ -173,10 +223,12 @@ class FactorResearchRunService:
                 status = "success"
                 error = None
                 run_id = result.get("run_id")
+                summary = dict(result.get("summary") or {})
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
                 run_id = None
+                summary = {}
             async with async_session_factory() as session:
                 row = (await session.execute(
                     select(FactorResearchRunItem)
@@ -188,7 +240,15 @@ class FactorResearchRunService:
                 row.run_id = run_id
                 row.completed_at = datetime.now()
                 await session.commit()
-            results.append({"factor_name": factor_name, "status": status, "run_id": run_id, "error_message": error})
+            results.append({
+                "factor_name": factor_name,
+                "status": status,
+                "run_id": run_id,
+                "error_message": error,
+                "summary": summary or None,
+                "ic_mean": summary.get("ic_mean"),
+                "icir": summary.get("icir"),
+            })
         return {"batch_run_id": batch_run_id, "items": results}
 
     async def get(self, run_id: str) -> dict[str, Any] | None:
@@ -210,27 +270,378 @@ class FactorResearchRunService:
             stmt = stmt.order_by(FactorResearchRun.completed_at.desc(), FactorResearchRun.created_at.desc()).limit(1)
             return (await session.execute(stmt)).scalar_one_or_none()
 
-    async def latest_summaries(self, factor_names: list[str]) -> dict[str, dict[str, Any]]:
+    async def combinations(self, payload: dict[str, Any]) -> dict[str, Any]:
+        factor_names = sorted({str(name) for name in payload.get("factor_names") or [] if str(name)})
+        limit = max(1, min(int(payload.get("limit") or 200), 500))
+        selection = {
+            str(key): value
+            for key, value in dict(payload.get("selection") or {}).items()
+            if value is not None and value != ""
+        }
+        if not factor_names:
+            return {
+                "factor_count": 0,
+                "total_candidates": 0,
+                "candidates": [],
+                "combo_groups": [],
+                "facets": {},
+                "selection": selection,
+            }
+
+        rows = await self._list_success_rows(factor_names)
+        candidates = [self._combination_candidate(row) for row in rows]
+        candidates = [candidate for candidate in candidates if self._combination_matches_selection(candidate, selection)]
+        combo_groups = self._combination_groups(candidates, factor_names)
+        facets = self._combination_facets(candidates, factor_names)
+        return {
+            "factor_count": len(factor_names),
+            "total_candidates": len(candidates),
+            "candidates": candidates[:limit],
+            "combo_groups": combo_groups[:limit],
+            "facets": facets,
+            "selection": selection,
+        }
+
+    async def latest_summaries(
+        self,
+        factor_names: list[str],
+        *,
+        stock_pool_value: str | None = None,
+        params_hash_by_factor: dict[str, str] | None = None,
+        match_hash_by_factor: dict[str, str] | None = None,
+        requested_range_by_factor: dict[str, tuple[date, date]] | None = None,
+    ) -> dict[str, dict[str, Any]]:
         if not factor_names:
             return {}
-        cache_key = tuple(sorted({str(name) for name in factor_names}))
+        clean_names = sorted({str(name) for name in factor_names})
+        hash_key = tuple(sorted((params_hash_by_factor or {}).items()))
+        match_key = tuple(sorted((match_hash_by_factor or {}).items()))
+        range_key = tuple(
+            sorted(
+                (name, bounds[0].isoformat(), bounds[1].isoformat())
+                for name, bounds in (requested_range_by_factor or {}).items()
+            )
+        )
+        cache_key = (tuple(clean_names), stock_pool_value or "", hash_key, match_key, range_key)
         cached = _LATEST_SUMMARY_CACHE.get(cache_key)
         now = time.monotonic()
         if cached and now - cached[0] <= _LATEST_SUMMARY_CACHE_TTL_SECONDS:
             return cached[1]
         summaries: dict[str, dict[str, Any]] = {}
         async with async_session_factory() as session:
+            stmt = (
+                select(FactorResearchRun)
+                .where(FactorResearchRun.factor_name.in_(clean_names))
+                .where(FactorResearchRun.status == "success")
+            )
+            if stock_pool_value:
+                stmt = stmt.where(FactorResearchRun.stock_pool_value == stock_pool_value)
+            if params_hash_by_factor:
+                stmt = stmt.where(FactorResearchRun.params_hash.in_(set(params_hash_by_factor.values())))
             rows = (await session.execute(
+                stmt.order_by(FactorResearchRun.factor_name, FactorResearchRun.completed_at.desc())
+            )).scalars().all()
+        for row in rows:
+            if params_hash_by_factor and row.params_hash != params_hash_by_factor.get(row.factor_name):
+                continue
+            if row.factor_name not in summaries:
+                summaries[row.factor_name] = self._summary_from_model(row)
+        if match_hash_by_factor:
+            fallback = await self._latest_summaries_by_match_hash(
+                clean_names,
+                stock_pool_value=stock_pool_value,
+                match_hash_by_factor=match_hash_by_factor,
+                requested_range_by_factor=requested_range_by_factor or {},
+                skip_factor_names=set(summaries),
+            )
+            for factor_name, summary in fallback.items():
+                summaries.setdefault(factor_name, summary)
+        _LATEST_SUMMARY_CACHE[cache_key] = (now, summaries)
+        return summaries
+
+    async def _latest_summaries_by_match_hash(
+        self,
+        factor_names: list[str],
+        *,
+        stock_pool_value: str | None,
+        match_hash_by_factor: dict[str, str],
+        requested_range_by_factor: dict[str, tuple[date, date]],
+        skip_factor_names: set[str],
+    ) -> dict[str, dict[str, Any]]:
+        candidate_rows = await self._list_success_rows(factor_names, stock_pool_value=stock_pool_value)
+        matched: dict[str, dict[str, Any]] = {}
+        for factor_name in factor_names:
+            if factor_name in skip_factor_names:
+                continue
+            requested_match_hash = match_hash_by_factor.get(factor_name)
+            if not requested_match_hash:
+                continue
+            factor_candidates = [
+                row for row in candidate_rows
+                if row.factor_name == factor_name
+                and self._row_match_hash(row) == requested_match_hash
+            ]
+            if not factor_candidates:
+                continue
+            best_row = self._select_best_compatible_run(
+                factor_candidates,
+                requested_range=requested_range_by_factor.get(factor_name),
+            )
+            if best_row is not None:
+                matched[factor_name] = self._summary_from_model(best_row)
+        return matched
+
+    async def _list_success_rows(
+        self,
+        factor_names: list[str],
+        *,
+        stock_pool_value: str | None = None,
+    ) -> list[FactorResearchRun]:
+        async with async_session_factory() as session:
+            stmt = (
                 select(FactorResearchRun)
                 .where(FactorResearchRun.factor_name.in_(factor_names))
                 .where(FactorResearchRun.status == "success")
-                .order_by(FactorResearchRun.factor_name, FactorResearchRun.completed_at.desc())
+            )
+            if stock_pool_value:
+                stmt = stmt.where(FactorResearchRun.stock_pool_value == stock_pool_value)
+            rows = (await session.execute(
+                stmt.order_by(FactorResearchRun.factor_name, FactorResearchRun.completed_at.desc(), FactorResearchRun.created_at.desc())
             )).scalars().all()
-        for row in rows:
-            if row.factor_name not in summaries:
-                summaries[row.factor_name] = self._summary_from_model(row)
-        _LATEST_SUMMARY_CACHE[cache_key] = (now, summaries)
-        return summaries
+        return rows
+
+    def _row_match_hash(self, row: FactorResearchRun) -> str:
+        params = dict(row.params or {})
+        if "factor_name" not in params:
+            params["factor_name"] = row.factor_name
+        if "stock_pool_value" not in params:
+            params["stock_pool_value"] = row.stock_pool_value
+        if "start_date" not in params and row.start_date is not None:
+            params["start_date"] = row.start_date.isoformat()
+        if "end_date" not in params and row.end_date is not None:
+            params["end_date"] = row.end_date.isoformat()
+        return research_match_hash(params, ignore_date_range=True)
+
+    @staticmethod
+    def _select_best_compatible_run(
+        rows: list[FactorResearchRun],
+        *,
+        requested_range: tuple[date, date] | None = None,
+    ) -> FactorResearchRun | None:
+        if not rows:
+            return None
+        if requested_range is None:
+            return rows[0]
+
+        requested_start, requested_end = requested_range
+
+        def score(row: FactorResearchRun) -> tuple[int, int, float]:
+            row_start = row.start_date
+            row_end = row.end_date
+            overlap_days = max(0, (min(row_end, requested_end) - max(row_start, requested_start)).days + 1)
+            requested_span_days = max(1, (requested_end - requested_start).days + 1)
+            clipped_days = (
+                max(0, (requested_start - row_start).days) +
+                max(0, (row_end - requested_end).days) +
+                max(0, (requested_end - row_end).days) +
+                max(0, (row_start - requested_start).days)
+            )
+            completed_ts = row.completed_at.timestamp() if row.completed_at else row.created_at.timestamp()
+            full_cover = 1 if row_start <= requested_start and row_end >= requested_end else 0
+            overlap_ratio = overlap_days / requested_span_days
+            return (full_cover, overlap_days, overlap_ratio - clipped_days / max(requested_span_days, 1) + completed_ts / 1_000_000_000)
+
+        return max(rows, key=score)
+
+    def _combination_candidate(self, row: FactorResearchRun) -> dict[str, Any]:
+        params = dict(row.params or {})
+        settings = self._combination_settings(row, params)
+        summary = dict(row.summary or {})
+        return {
+            "combo_id": self._combination_id(settings),
+            "run_id": row.run_id,
+            "factor_name": row.factor_name,
+            "factor_display_name": row.factor_display_name,
+            "research_params_hash": row.params_hash,
+            "completed_at": row.completed_at.isoformat() if row.completed_at else None,
+            "created_at": row.created_at.isoformat() if row.created_at else None,
+            "settings": settings,
+            "summary": summary or None,
+            "ic_mean": summary.get("ic_mean"),
+            "icir": summary.get("icir"),
+            "factor_value_params_hash": settings.get("factor_value_params_hash"),
+        }
+
+    def _combination_settings(self, row: FactorResearchRun, params: dict[str, Any]) -> dict[str, Any]:
+        start_date = str(params.get("start_date") or row.start_date.isoformat())
+        end_date = str(params.get("end_date") or row.end_date.isoformat())
+        fee_rate = self._combo_float(params.get("fee_rate"), 0.0)
+        stamp_tax_rate = self._combo_float(params.get("stamp_tax_rate"), 0.0)
+        transfer_fee_rate = self._combo_float(params.get("transfer_fee_rate"), 0.0)
+        slippage = self._combo_float(params.get("slippage"), 0.0)
+        return {
+            "stock_pool_value": str(params.get("stock_pool_value") or row.stock_pool_value),
+            "start_date": start_date,
+            "end_date": end_date,
+            "date_range": f"{start_date}..{end_date}",
+            "portfolio_type": str(params.get("portfolio_type") or "long_only"),
+            "rebalance_period": str(params.get("rebalance_period") or "monthly"),
+            "fee_rate": fee_rate,
+            "stamp_tax_rate": stamp_tax_rate,
+            "transfer_fee_rate": transfer_fee_rate,
+            "slippage": slippage,
+            "fee_profile": self._fee_profile(fee_rate, stamp_tax_rate, transfer_fee_rate, slippage),
+            "filter_limit_up": bool(params.get("filter_limit_up", True)),
+            "filter_limit_down": bool(params.get("filter_limit_down", True)),
+            "group_count": int(params.get("group_count") or 5),
+            "direction": str(params.get("direction") or "desc"),
+            "pool_membership_mode": str(params.get("pool_membership_mode") or "static_latest"),
+            "factor_value_params_hash": str(params.get("factor_value_params_hash") or ""),
+            "industry_neutralization": bool(params.get("industry_neutralization", False)),
+            "standardize": bool(params.get("standardize", False)),
+        }
+
+    @staticmethod
+    def _combo_float(value: Any, default: float) -> float:
+        try:
+            return round(float(value), 8)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _fee_profile(fee_rate: float, stamp_tax_rate: float, transfer_fee_rate: float, slippage: float) -> str:
+        return "|".join(
+            f"{value:.8f}".rstrip("0").rstrip(".") or "0"
+            for value in (fee_rate, stamp_tax_rate, transfer_fee_rate, slippage)
+        )
+
+    @staticmethod
+    def _combination_id(settings: dict[str, Any]) -> str:
+        return research_params_hash(settings)
+
+    @staticmethod
+    def _combination_matches_selection(candidate: dict[str, Any], selection: dict[str, Any]) -> bool:
+        settings = candidate.get("settings") or {}
+        for key, selected in selection.items():
+            if key == "factor_name":
+                if str(candidate.get("factor_name") or "") != str(selected):
+                    return False
+                continue
+            if key == "params_hash":
+                if str(candidate.get("research_params_hash") or "") != str(selected):
+                    return False
+                continue
+            value = settings.get(key)
+            if isinstance(value, bool):
+                selected_value = selected if isinstance(selected, bool) else str(selected).lower() == "true"
+                if value != selected_value:
+                    return False
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                try:
+                    if float(value) != float(selected):
+                        return False
+                except (TypeError, ValueError):
+                    return False
+            elif str(value) != str(selected):
+                return False
+        return True
+
+    def _combination_groups(self, candidates: list[dict[str, Any]], factor_names: list[str]) -> list[dict[str, Any]]:
+        groups: dict[str, dict[str, Any]] = {}
+        total_factor_count = len(set(factor_names))
+        for candidate in candidates:
+            settings = dict(candidate.get("settings") or {})
+            combo_id = str(candidate.get("combo_id") or self._combination_id(settings))
+            group = groups.setdefault(
+                combo_id,
+                {
+                    "combo_id": combo_id,
+                    "settings": settings,
+                    "factor_names": [],
+                    "run_ids": {},
+                    "factor_value_params_hashes": {},
+                    "metrics_by_factor": {},
+                    "latest_completed_at": None,
+                    "covered_factor_count": 0,
+                    "total_factor_count": total_factor_count,
+                },
+            )
+            factor_name = str(candidate.get("factor_name") or "")
+            if factor_name and factor_name not in group["factor_names"]:
+                group["factor_names"].append(factor_name)
+            if factor_name:
+                group["run_ids"][factor_name] = candidate.get("run_id")
+                group["factor_value_params_hashes"][factor_name] = candidate.get("factor_value_params_hash") or ""
+                group["metrics_by_factor"][factor_name] = {
+                    "ic_mean": candidate.get("ic_mean"),
+                    "icir": candidate.get("icir"),
+                }
+            completed_at = candidate.get("completed_at")
+            if completed_at and (group["latest_completed_at"] is None or completed_at > group["latest_completed_at"]):
+                group["latest_completed_at"] = completed_at
+        for group in groups.values():
+            group["factor_names"] = sorted(group["factor_names"])
+            group["covered_factor_count"] = len(group["factor_names"])
+        return sorted(
+            groups.values(),
+            key=lambda item: (int(item["covered_factor_count"]), str(item.get("latest_completed_at") or "")),
+            reverse=True,
+        )
+
+    def _combination_facets(self, candidates: list[dict[str, Any]], factor_names: list[str]) -> dict[str, list[dict[str, Any]]]:
+        facets: dict[str, list[dict[str, Any]]] = {}
+        total_factor_count = len(set(factor_names))
+        for field in _COMBINATION_FACET_FIELDS:
+            buckets: dict[str, dict[str, Any]] = {}
+            for candidate in candidates:
+                settings = candidate.get("settings") or {}
+                value = settings.get(field)
+                if value is None or value == "":
+                    continue
+                key = str(value)
+                bucket = buckets.setdefault(
+                    key,
+                    {
+                        "field": field,
+                        "value": value,
+                        "label": self._combination_facet_label(field, value, settings),
+                        "count": 0,
+                        "factor_names": set(),
+                        "covered_factor_count": 0,
+                        "total_factor_count": total_factor_count,
+                    },
+                )
+                bucket["count"] += 1
+                factor_name = str(candidate.get("factor_name") or "")
+                if factor_name:
+                    bucket["factor_names"].add(factor_name)
+            options: list[dict[str, Any]] = []
+            for bucket in buckets.values():
+                factors = sorted(bucket.pop("factor_names"))
+                bucket["factor_names"] = factors
+                bucket["covered_factor_count"] = len(factors)
+                options.append(bucket)
+            facets[field] = sorted(
+                options,
+                key=lambda item: (int(item["covered_factor_count"]), int(item["count"]), str(item["label"])),
+                reverse=True,
+            )
+        return facets
+
+    @staticmethod
+    def _combination_facet_label(field: str, value: Any, settings: dict[str, Any]) -> str:
+        if field == "date_range":
+            return f"{settings.get('start_date')} ~ {settings.get('end_date')}"
+        if field == "fee_profile":
+            return (
+                f"佣金 {settings.get('fee_rate', 0):g} / "
+                f"印花税 {settings.get('stamp_tax_rate', 0):g} / "
+                f"过户费 {settings.get('transfer_fee_rate', 0):g} / "
+                f"滑点 {settings.get('slippage', 0):g}"
+            )
+        if isinstance(value, bool):
+            return "是" if value else "否"
+        return str(value)
 
     def _normalized_params(self, payload: dict[str, Any]) -> dict[str, Any]:
         params = {**DEFAULT_PARAMS, **dict(payload.get("params") or {})}
@@ -239,7 +650,30 @@ class FactorResearchRunService:
                 params[key] = payload[key]
         for key in ["factor_name", "stock_pool_value", "start_date", "end_date"]:
             params[key] = str(payload[key])
+        factor_name = str(params.get("factor_name") or "")
+        raw_hashes = payload.get("factor_value_params_hashes") or params.get("factor_value_params_hashes") or {}
+        selected_hash = None
+        if isinstance(raw_hashes, dict) and factor_name:
+            selected_hash = raw_hashes.get(factor_name)
+        selected_hash = selected_hash or payload.get("factor_value_params_hash") or params.get("factor_value_params_hash")
+        if selected_hash:
+            selected_hash = str(selected_hash)
+            params["factor_value_params_hash"] = selected_hash
+            params["factor_value_params_hashes"] = {factor_name: selected_hash} if factor_name else {}
+        else:
+            params["factor_value_params_hash"] = None
+            params["factor_value_params_hashes"] = {}
         return params
+
+    @staticmethod
+    def _factor_value_params_hash_for(factor_name: str, params: dict[str, Any]) -> str | None:
+        hashes = params.get("factor_value_params_hashes") or {}
+        if isinstance(hashes, dict):
+            value = hashes.get(factor_name)
+            if value:
+                return str(value)
+        value = params.get("factor_value_params_hash")
+        return str(value) if value else None
 
     async def _is_custom_factor(self, factor_name: str) -> bool:
         async with async_session_factory() as session:
@@ -261,7 +695,13 @@ class FactorResearchRunService:
     async def _load_factor_matrix(self, factor_name: str, symbols: list[str], start_date: date, end_date: date, params: dict[str, Any]) -> pd.DataFrame:
         store = get_factor_value_store()
         if store.exists():
-            df = store.load(factor_names=[factor_name], start_date=start_date, end_date=end_date, symbols=symbols)
+            df = store.load(
+                factor_names=[factor_name],
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+                params_hash=self._factor_value_params_hash_for(factor_name, params),
+            )
             if not df.empty:
                 df = df.drop_duplicates(subset=["symbol", "trade_date"], keep="last")
                 matrix = df.pivot_table(index="trade_date", columns="symbol", values="value", aggfunc="last")
@@ -305,16 +745,33 @@ class FactorResearchRunService:
         evaluator = FactorEvaluationService()
         factor_df = await self._load_factor_matrix(factor_name, symbols, start_date, end_date, params)
         return_df = evaluator._load_return_matrix(symbols, start_date, end_date)
-        factor_df, return_df = self._align_frames(factor_df, return_df)
+        requested_eligible_trading_days = int(return_df.notna().any(axis=1).sum()) if not return_df.empty else 0
+        factor_df, return_df = self._align_frames(factor_df, return_df, symbols)
+        membership_mask = await self._load_pool_membership_mask(
+            stock_pool_value,
+            factor_df.index,
+            factor_df.columns,
+            mode=str(params.get("pool_membership_mode") or "static_latest"),
+        )
+        if membership_mask is not None:
+            factor_df = factor_df.where(membership_mask)
+            return_df = return_df.where(membership_mask)
+        factor_df, return_df, membership_mask = self._trim_to_effective_factor_dates(
+            factor_df,
+            return_df,
+            membership_mask,
+        )
         if factor_df.empty or return_df.empty:
-            raise ValueError("因子或收益矩阵为空。")
+            raise ValueError("No overlapping cached factor values and return data are available in the requested range.")
+        effective_start_date = factor_df.index.min().date()
+        effective_end_date = factor_df.index.max().date()
         eval_config = EvalConfig(group_count=int(params.get("group_count") or 5))
         ic_points = evaluator._compute_ic_series(factor_df, return_df, eval_config)
         industry_ic = evaluator._compute_industry_ic(factor_df, return_df)
         turnover = evaluator._compute_turnover(factor_df)
         signal_decay = evaluator._compute_signal_decay(factor_df, return_df)
         quantile = self._quantile_nav(factor_df, return_df, params)
-        latest = factor_df.loc[factor_df.index.max()].dropna()
+        latest = self._latest_non_empty_cross_section(factor_df)
         top = [{"symbol": str(k), "value": float(v)} for k, v in latest.sort_values(ascending=False).head(20).items()]
         bottom = [{"symbol": str(k), "value": float(v)} for k, v in latest.sort_values(ascending=True).head(20).items()]
         ic_values = [float(value) for _, value in ic_points if value is not None and math.isfinite(float(value))]
@@ -323,7 +780,14 @@ class FactorResearchRunService:
         icir = ic_mean / ic_std if ic_std > 0 else 0.0
         summary = {
             "symbol_count": len(symbols),
-            "coverage_ratio": self._coverage_ratio(factor_df, symbols),
+            "active_symbol_count": self._active_symbol_count(membership_mask, len(symbols)),
+            "coverage_ratio": self._coverage_ratio(factor_df, symbols, membership_mask),
+            "requested_start_date": start_date.isoformat(),
+            "requested_end_date": end_date.isoformat(),
+            "effective_start_date": effective_start_date.isoformat(),
+            "effective_end_date": effective_end_date.isoformat(),
+            "effective_trading_days": int(len(factor_df.index)),
+            "dropped_trading_days": int(max(0, requested_eligible_trading_days - len(factor_df.index))),
             "ic_mean": round(ic_mean, 4),
             "ic_std": round(ic_std, 4),
             "icir": round(icir, 4),
@@ -340,6 +804,8 @@ class FactorResearchRunService:
             "stock_pool_value": stock_pool_value,
             "start_date": start_date.isoformat(),
             "end_date": end_date.isoformat(),
+            "effective_start_date": effective_start_date.isoformat(),
+            "effective_end_date": effective_end_date.isoformat(),
             "params": params,
             "summary": summary,
             "ic_series": [{"date": str(day), "value": value} for day, value in ic_points],
@@ -354,18 +820,213 @@ class FactorResearchRunService:
         }
 
     @staticmethod
-    def _align_frames(factor_df: pd.DataFrame, return_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def _coverage_effective_range(
+        coverage: dict[str, Any],
+        requested_start: date,
+        requested_end: date,
+    ) -> tuple[date, date] | None:
+        try:
+            min_date = date.fromisoformat(str(coverage.get("min_date")))
+            max_date = date.fromisoformat(str(coverage.get("max_date")))
+        except (TypeError, ValueError):
+            return None
+        effective_start = max(requested_start, min_date)
+        effective_end = min(requested_end, max_date)
+        if effective_end < effective_start:
+            return None
+        return effective_start, effective_end
+
+    @staticmethod
+    def _align_frames(
+        factor_df: pd.DataFrame,
+        return_df: pd.DataFrame,
+        symbols: list[str] | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
         factor_df = factor_df.copy()
         return_df = return_df.copy()
         factor_df.index = pd.to_datetime(factor_df.index).normalize()
         return_df.index = pd.to_datetime(return_df.index).normalize()
+        factor_df.columns = [str(column) for column in factor_df.columns]
+        return_df.columns = [str(column) for column in return_df.columns]
         dates = factor_df.index.intersection(return_df.index)
-        symbols = factor_df.columns.intersection(return_df.columns)
-        return factor_df.loc[dates, symbols], return_df.loc[dates, symbols]
+        if symbols:
+            target_symbols = list(dict.fromkeys(str(symbol) for symbol in symbols))
+        else:
+            target_symbols = list(factor_df.columns.intersection(return_df.columns))
+        return (
+            factor_df.reindex(index=dates, columns=target_symbols),
+            return_df.reindex(index=dates, columns=target_symbols),
+        )
 
     @staticmethod
-    def _coverage_ratio(factor_df: pd.DataFrame, symbols: list[str]) -> float:
-        possible = max(1, len(factor_df.index) * max(1, len(symbols)))
+    def _trim_to_effective_factor_dates(
+        factor_df: pd.DataFrame,
+        return_df: pd.DataFrame,
+        membership_mask: pd.DataFrame | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+        if factor_df.empty or return_df.empty:
+            return factor_df, return_df, membership_mask
+        valid_dates = factor_df.index[factor_df.notna().any(axis=1) & return_df.notna().any(axis=1)]
+        factor_df = factor_df.loc[valid_dates]
+        return_df = return_df.loc[valid_dates]
+        if membership_mask is not None and not membership_mask.empty:
+            membership_mask = membership_mask.loc[valid_dates]
+        return factor_df, return_df, membership_mask
+
+    async def _load_pool_membership_mask(
+        self,
+        stock_pool_value: str,
+        dates: pd.Index,
+        symbols: pd.Index,
+        *,
+        mode: str = "static_latest",
+    ) -> pd.DataFrame | None:
+        if mode == "union" or stock_pool_value.startswith("watchlist_") or len(dates) == 0 or len(symbols) == 0:
+            return None
+        item = get_index_item(stock_pool_value)
+        if item is None or not item.pool_enabled:
+            return None
+
+        normalized_dates = pd.to_datetime(dates).normalize()
+        target_symbols = [str(symbol) for symbol in symbols]
+        if mode == "static_latest":
+            return await self._load_static_index_membership_mask(item.symbol, normalized_dates, symbols, target_symbols)
+        if mode != "point_in_time":
+            raise ValueError(f"Unsupported pool_membership_mode: {mode}")
+        membership = await self._load_index_membership_by_snapshot(
+            item.symbol,
+            normalized_dates.max().date(),
+            target_symbols,
+        )
+        if not membership:
+            raise ValueError(f"No point-in-time index components available for {item.symbol}")
+
+        snapshot_dates = sorted(membership)
+        rows: list[pd.Series] = []
+        for current_date in normalized_dates:
+            active_snapshot = None
+            for snapshot_date in snapshot_dates:
+                if snapshot_date <= current_date.date():
+                    active_snapshot = snapshot_date
+                else:
+                    break
+            active_symbols = membership.get(active_snapshot, set()) if active_snapshot else set()
+            rows.append(pd.Series([str(symbol) in active_symbols for symbol in symbols], index=symbols))
+        return pd.DataFrame(rows, index=normalized_dates, columns=symbols).astype(bool)
+
+    async def _load_static_index_membership_mask(
+        self,
+        index_symbol: str,
+        dates: pd.DatetimeIndex,
+        columns: pd.Index,
+        symbols: list[str],
+    ) -> pd.DataFrame:
+        latest_symbols = await self._load_latest_index_snapshot_symbols(
+            index_symbol,
+            dates.max().date(),
+            symbols,
+        )
+        if not latest_symbols:
+            raise ValueError(f"No static index component snapshot available for {index_symbol}")
+        active = pd.Series([str(symbol) in latest_symbols for symbol in columns], index=columns)
+        return pd.DataFrame([active.to_numpy()] * len(dates), index=dates, columns=columns).astype(bool)
+
+    async def _load_latest_index_snapshot_symbols(
+        self,
+        index_symbol: str,
+        end_date: date,
+        symbols: list[str],
+    ) -> set[str]:
+        if not symbols:
+            return set()
+        placeholders = ",".join("?" for _ in symbols)
+
+        def _query() -> set[str]:
+            with sqlite3.connect(settings.sqlite_db_path) as conn:
+                snapshot = conn.execute(
+                    """
+                    SELECT MAX(trade_date)
+                    FROM index_components
+                    WHERE index_symbol = ?
+                      AND trade_date <= ?
+                    """,
+                    (index_symbol, end_date.isoformat()),
+                ).fetchone()
+                snapshot_date = snapshot[0] if snapshot else None
+                if not snapshot_date:
+                    return set()
+                rows = conn.execute(
+                    f"""
+                    SELECT symbol
+                    FROM index_components
+                    WHERE index_symbol = ?
+                      AND trade_date = ?
+                      AND symbol IN ({placeholders})
+                    """,
+                    [index_symbol, snapshot_date, *symbols],
+                ).fetchall()
+            return {str(row[0]) for row in rows}
+
+        import asyncio
+
+        return await asyncio.to_thread(_query)
+
+    async def _load_index_membership_by_snapshot(
+        self,
+        index_symbol: str,
+        end_date: date,
+        symbols: list[str],
+    ) -> dict[date, set[str]]:
+        if not symbols:
+            return {}
+        placeholders = ",".join("?" for _ in symbols)
+
+        def _query() -> dict[date, set[str]]:
+            with sqlite3.connect(settings.sqlite_db_path) as conn:
+                rows = conn.execute(
+                    f"""
+                    SELECT trade_date, symbol
+                    FROM index_components
+                    WHERE index_symbol = ?
+                      AND trade_date <= ?
+                      AND symbol IN ({placeholders})
+                    ORDER BY trade_date
+                    """,
+                    [index_symbol, end_date.isoformat(), *symbols],
+                ).fetchall()
+            result: dict[date, set[str]] = {}
+            for trade_date, symbol in rows:
+                result.setdefault(date.fromisoformat(str(trade_date)), set()).add(str(symbol))
+            return result
+
+        import asyncio
+
+        return await asyncio.to_thread(_query)
+
+    @staticmethod
+    def _latest_non_empty_cross_section(factor_df: pd.DataFrame) -> pd.Series:
+        for day in sorted(factor_df.index, reverse=True):
+            latest = factor_df.loc[day].dropna()
+            if not latest.empty:
+                return latest
+        return pd.Series(dtype=float)
+
+    @staticmethod
+    def _active_symbol_count(membership_mask: pd.DataFrame | None, fallback: int) -> int:
+        if membership_mask is None or membership_mask.empty:
+            return fallback
+        active_counts = membership_mask.sum(axis=1)
+        if active_counts.empty:
+            return fallback
+        return int(round(float(active_counts.mean())))
+
+    @staticmethod
+    def _coverage_ratio(factor_df: pd.DataFrame, symbols: list[str], membership_mask: pd.DataFrame | None = None) -> float:
+        if membership_mask is not None and not membership_mask.empty:
+            possible = int(membership_mask.sum().sum())
+        else:
+            possible = len(factor_df.index) * max(1, len(symbols))
+        possible = max(1, possible)
         return round(float(factor_df.notna().sum().sum()) / possible, 4)
 
     @staticmethod
@@ -376,7 +1037,7 @@ class FactorResearchRunService:
     def _quantile_nav(self, factor_df: pd.DataFrame, return_df: pd.DataFrame, params: dict[str, Any]) -> dict[str, Any]:
         group_count = int(params.get("group_count") or 5)
         direction = str(params.get("direction") or "desc")
-        fee = float(params.get("fee_rate") or 0.0) + float(params.get("slippage") or 0.0)
+        fee = self._transaction_cost_rate(params)
         series_by_group: dict[str, list[dict[str, Any]]] = {f"q{i + 1}": [] for i in range(group_count)}
         nav_values = {key: 1.0 for key in series_by_group}
         ls_nav = 1.0
@@ -425,6 +1086,15 @@ class FactorResearchRunService:
         series = pd.Series(nav_values, dtype=float)
         drawdown = series / series.cummax() - 1
         return abs(float(drawdown.min()))
+
+    @staticmethod
+    def _transaction_cost_rate(params: dict[str, Any]) -> float:
+        return (
+            float(params.get("fee_rate") or 0.0)
+            + float(params.get("stamp_tax_rate") or 0.0)
+            + float(params.get("transfer_fee_rate") or 0.0)
+            + float(params.get("slippage") or 0.0)
+        )
 
     def _summary_from_model(self, row: FactorResearchRun | None) -> dict[str, Any] | None:
         if row is None:

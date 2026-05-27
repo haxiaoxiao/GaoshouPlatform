@@ -57,7 +57,7 @@ class PortfolioType(str, Enum):
 class FactorConfig(BaseModel):
     """Single config reused across compute, evaluation, and backtest layers."""
     expression: str = Field(..., description="Factor expression, e.g. '(1/PE_TTM) + ROE'")
-    stock_pool: str = Field(..., description="Stock universe")
+    stock_pool: StockPool = Field(..., description="Stock universe")
     start_date: datetime.date
     end_date: datetime.date
     benchmark: str = Field("000300.SH", description="Benchmark symbol")
@@ -157,11 +157,20 @@ class BoardQuery(BaseModel):
     """Query parameters for factor board."""
     categories: list[str] | None = None  # None = all
     factor_groups: list[str] | None = None
+    factor_keyword: str | None = None
     stock_pool: str = StockPool.ZZ500.value
     period: Literal["3m", "1y", "3y", "10y"] = "3y"
+    start_date: datetime.date | None = None
+    end_date: datetime.date | None = None
     portfolio_type: PortfolioType = PortfolioType.LONG_ONLY
     fee_config: Literal["none", "commission_stamp", "commission_stamp_slippage"] = "none"
+    fee_rate: float | None = Field(default=None, ge=0, le=0.05)
+    stamp_tax_rate: float | None = Field(default=None, ge=0, le=0.05)
+    transfer_fee_rate: float | None = Field(default=None, ge=0, le=0.05)
+    slippage: float | None = Field(default=None, ge=0, le=0.05)
     filter_limit_up: bool = True
+    pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
+    factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
     sort_by: str = "ic_mean"
     sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1)
@@ -190,6 +199,7 @@ class BoardRow(BaseModel):
     latest_long_short_return: float | None = None
     latest_max_drawdown: float | None = None
     latest_turnover: float | None = None
+    latest_active_symbol_count: int | None = None
     min_quantile_excess_return: float
     max_quantile_excess_return: float
     min_quantile_turnover: float

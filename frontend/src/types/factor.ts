@@ -107,11 +107,20 @@ export interface BacktestMetrics {
 export interface BoardQuery {
   categories?: string[]
   factor_groups?: string[]
+  factor_keyword?: string
   stock_pool?: string
   period?: '3m' | '1y' | '3y' | '10y'
+  start_date?: string | null
+  end_date?: string | null
   portfolio_type?: 'long_only' | 'long_short_i' | 'long_short_ii'
   fee_config?: 'none' | 'commission_stamp' | 'commission_stamp_slippage'
+  fee_rate?: number
+  stamp_tax_rate?: number
+  transfer_fee_rate?: number
+  slippage?: number
   filter_limit_up?: boolean
+  pool_membership_mode?: 'static_latest' | 'point_in_time' | 'union'
+  factor_value_params_hashes?: Record<string, string>
   sort_by?: string
   sort_order?: 'asc' | 'desc'
   page?: number
@@ -139,6 +148,7 @@ export interface BoardRow {
   latest_long_short_return?: number | null
   latest_max_drawdown?: number | null
   latest_turnover?: number | null
+  latest_active_symbol_count?: number | null
   min_quantile_excess_return: number
   max_quantile_excess_return: number
   min_quantile_turnover: number

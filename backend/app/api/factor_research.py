@@ -27,11 +27,16 @@ class FactorResearchRunRequest(BaseModel):
     portfolio_type: Literal["long_only", "long_short_i", "long_short_ii"] = "long_only"
     rebalance_period: Literal["daily", "weekly", "monthly"] = "monthly"
     fee_rate: float = Field(default=0.001, ge=0, le=0.05)
+    stamp_tax_rate: float = Field(default=0.0, ge=0, le=0.05)
+    transfer_fee_rate: float = Field(default=0.0, ge=0, le=0.05)
     slippage: float = Field(default=0.001, ge=0, le=0.05)
     filter_limit_up: bool = True
     filter_limit_down: bool = True
     group_count: int = Field(default=5, ge=2, le=20)
     direction: Literal["asc", "desc"] = "desc"
+    pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
+    factor_value_params_hash: str | None = Field(default=None, max_length=80)
+    factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
     industry_neutralization: bool = False
     standardize: bool = False
     force: bool = False
@@ -59,11 +64,15 @@ class FactorResearchBatchRequest(BaseModel):
     portfolio_type: Literal["long_only", "long_short_i", "long_short_ii"] = "long_only"
     rebalance_period: Literal["daily", "weekly", "monthly"] = "monthly"
     fee_rate: float = Field(default=0.001, ge=0, le=0.05)
+    stamp_tax_rate: float = Field(default=0.0, ge=0, le=0.05)
+    transfer_fee_rate: float = Field(default=0.0, ge=0, le=0.05)
     slippage: float = Field(default=0.001, ge=0, le=0.05)
     filter_limit_up: bool = True
     filter_limit_down: bool = True
     group_count: int = Field(default=5, ge=2, le=20)
     direction: Literal["asc", "desc"] = "desc"
+    pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
+    factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
     industry_neutralization: bool = False
     standardize: bool = False
     force: bool = False
@@ -89,6 +98,23 @@ class FactorResearchBatchRequest(BaseModel):
         params["start_date"] = self.start_date.isoformat()
         params["end_date"] = self.end_date.isoformat()
         return params
+
+
+class FactorResearchCombinationRequest(BaseModel):
+    factor_names: list[str] = Field(min_length=1)
+    selection: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=200, ge=1, le=500)
+
+    @field_validator("factor_names")
+    @classmethod
+    def validate_factor_names(cls, factor_names: list[str]) -> list[str]:
+        cleaned = [name.strip() for name in factor_names if name and name.strip()]
+        if not cleaned:
+            raise ValueError("factor_names cannot be empty")
+        return cleaned
+
+    def to_service_payload(self) -> dict[str, Any]:
+        return self.model_dump()
 
 
 @router.post("/runs/prepare")
@@ -121,6 +147,16 @@ async def batch_factor_research(request: FactorResearchBatchRequest):
         return {"code": 0, "message": "success", "data": data}
     except Exception as exc:
         logger.exception("Batch factor research failed")
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/runs/combinations")
+async def list_factor_research_combinations(request: FactorResearchCombinationRequest):
+    try:
+        data = await factor_research_run_service.combinations(request.to_service_payload())
+        return {"code": 0, "message": "success", "data": data}
+    except Exception as exc:
+        logger.exception("List factor research combinations failed")
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
