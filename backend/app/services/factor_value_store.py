@@ -399,6 +399,32 @@ def factor_params_hash(params: dict[str, Any] | None) -> str:
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
 
 
+def default_factor_params(factor_name: str) -> dict[str, Any]:
+    definition = get_factor_definition(factor_name) or {}
+    schema = definition.get("params_schema") or {}
+    if not isinstance(schema, dict):
+        return {}
+    params: dict[str, Any] = {}
+    for name, meta in schema.items():
+        if not isinstance(meta, dict):
+            continue
+        raw = meta.get("default")
+        if raw is None and name in {"time", "as_of_time"}:
+            raw = definition.get("as_of_time")
+        if raw is None or raw == "":
+            continue
+        kind = str(meta.get("type") or "string")
+        if kind == "integer":
+            params[str(name)] = int(raw)
+        elif kind == "number":
+            params[str(name)] = float(raw)
+        elif kind == "boolean":
+            params[str(name)] = bool(raw)
+        else:
+            params[str(name)] = str(raw)
+    return params
+
+
 class FactorValueStore:
     """Parquet dataset for point-in-time factor values.
 
@@ -537,6 +563,58 @@ class FactorValueStore:
                 shutil.move(str(tmp_dir), str(partition_dir))
         return len(body)
 
+    def append(self, df: pd.DataFrame) -> int:
+        """Append factor values without rewriting existing partitions.
+
+        This is intended for large precompute batches where rewriting a whole
+        month partition would require loading unrelated cached factors into
+        memory. Read paths de-duplicate logical keys by latest created_at.
+        """
+        if df.empty:
+            return 0
+        body = self._normalize_columns(df)
+        required = {"symbol", "trade_date", "factor_name", "value"}
+        missing = required - set(body.columns)
+        if missing:
+            raise KeyError(f"Factor values missing columns: {sorted(missing)}")
+
+        body["symbol"] = body["symbol"].astype(str)
+        body["trade_date"] = pd.to_datetime(body["trade_date"]).dt.date
+        body["as_of_time"] = body.get("as_of_time", "").fillna("").astype(str) if "as_of_time" in body.columns else ""
+        body["factor_name"] = body["factor_name"].astype(str)
+        if "params_hash" not in body.columns:
+            body["params_hash"] = factor_params_hash({})
+        body["params_hash"] = body["params_hash"].fillna(factor_params_hash({})).astype(str)
+        if "source" not in body.columns:
+            body["source"] = "precompute"
+        body["source"] = body["source"].fillna("precompute").astype(str)
+        if "created_at" not in body.columns:
+            body["created_at"] = datetime.now()
+        body["value"] = pd.to_numeric(body["value"], errors="coerce")
+        body = body.dropna(subset=["value"])
+        if body.empty:
+            return 0
+
+        dt = pd.to_datetime(body["trade_date"])
+        body["year"] = dt.dt.year.astype(str)
+        body["month"] = dt.dt.strftime("%m")
+        root = self._dataset_path()
+        root.mkdir(parents=True, exist_ok=True)
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        total = 0
+        for (_year, _month), part in body.groupby(["year", "month"], sort=False):
+            partition_dir = root / f"year={_year}" / f"month={_month}"
+            partition_dir.mkdir(parents=True, exist_ok=True)
+            part_body = self._normalize_columns(part.drop(columns=["year", "month"], errors="ignore"))
+            part_body = part_body.drop_duplicates(subset=[c for c in self.key_cols if c in part_body.columns], keep="last")
+            file_path = partition_dir / f"part-{uuid.uuid4().hex}.parquet"
+            pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), file_path)
+            total += len(part_body)
+        return total
+
     def load(
         self,
         *,
@@ -578,11 +656,24 @@ class FactorValueStore:
                     year,
                     month
                 FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            ),
+            factor_values_latest AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                            ORDER BY created_at DESC NULLS LAST
+                        ) AS row_num
+                    FROM factor_values_normalized
+                    WHERE {' AND '.join(conditions)}
+                      {partition_filter}
+                )
+                WHERE row_num = 1
             )
             SELECT symbol, trade_date, as_of_time, factor_name, params_hash, value, source, created_at
-            FROM factor_values_normalized
-            WHERE {' AND '.join(conditions)}
-              {partition_filter}
+            FROM factor_values_latest
             ORDER BY trade_date, factor_name, symbol
         """
         df = get_duckdb().execute(sql).df()
@@ -624,11 +715,12 @@ class FactorValueStore:
         symbols: Sequence[str] | None = None,
         as_of_time: str | None = None,
         params: dict[str, Any] | None = None,
+        params_hash: str | None = None,
     ) -> dict[str, Any]:
         if not self.exists():
             return self._empty_coverage(factor_name)
 
-        params_hash = factor_params_hash(params) if params is not None else None
+        effective_params_hash = params_hash if params_hash is not None else (factor_params_hash(params) if params is not None else None)
         conditions = [
             f"factor_name = {_sql_literal(factor_name)}",
             f"trade_date >= {_sql_literal(start_date)}",
@@ -638,8 +730,8 @@ class FactorValueStore:
             conditions.append(f"symbol IN {_list_param(symbols)}")
         if as_of_time is not None:
             conditions.append(f"as_of_time = {_sql_literal(normalize_factor_time(as_of_time))}")
-        if params_hash is not None:
-            conditions.append(f"params_hash = {_sql_literal(params_hash)}")
+        if effective_params_hash is not None:
+            conditions.append(f"params_hash = {_sql_literal(effective_params_hash)}")
 
         partition_filter = self._year_month_filter(start_date, end_date)
         where_sql = " AND ".join(conditions)
@@ -653,9 +745,25 @@ class FactorValueStore:
                     {name_expr} AS factor_name,
                     params_hash,
                     value,
+                    created_at,
                     year,
                     month
                 FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            ),
+            factor_values_latest AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                            ORDER BY created_at DESC NULLS LAST
+                        ) AS row_num
+                    FROM factor_values_normalized
+                    WHERE {where_sql}
+                      {partition_filter}
+                )
+                WHERE row_num = 1
             )
             SELECT
                 COUNT(*) AS total_rows,
@@ -663,9 +771,7 @@ class FactorValueStore:
                 COUNT(DISTINCT trade_date) AS date_count,
                 MIN(trade_date) AS min_date,
                 MAX(trade_date) AS max_date
-            FROM factor_values_normalized
-            WHERE {where_sql}
-              {partition_filter}
+            FROM factor_values_latest
         """
         stats = get_duckdb().execute(stats_sql).fetchone()
         total_rows = int(stats[0] or 0) if stats else 0
@@ -681,14 +787,28 @@ class FactorValueStore:
                     {name_expr} AS factor_name,
                     params_hash,
                     value,
+                    created_at,
                     year,
                     month
                 FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            ),
+            factor_values_latest AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                            ORDER BY created_at DESC NULLS LAST
+                        ) AS row_num
+                    FROM factor_values_normalized
+                    WHERE {where_sql}
+                      {partition_filter}
+                )
+                WHERE row_num = 1
             )
             SELECT DISTINCT symbol
-            FROM factor_values_normalized
-            WHERE {where_sql}
-              {partition_filter}
+            FROM factor_values_latest
             ORDER BY symbol
             LIMIT 20
         """
@@ -750,9 +870,25 @@ class FactorValueStore:
                     {name_expr} AS factor_name,
                     params_hash,
                     value,
+                    created_at,
                     year,
                     month
                 FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            ),
+            factor_values_latest AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                            ORDER BY created_at DESC NULLS LAST
+                        ) AS row_num
+                    FROM factor_values_normalized
+                    WHERE {where_sql}
+                      {partition_filter}
+                )
+                WHERE row_num = 1
             )
             SELECT
                 factor_name,
@@ -761,9 +897,7 @@ class FactorValueStore:
                 COUNT(DISTINCT trade_date) AS date_count,
                 MIN(trade_date) AS min_date,
                 MAX(trade_date) AS max_date
-            FROM factor_values_normalized
-            WHERE {where_sql}
-              {partition_filter}
+            FROM factor_values_latest
             GROUP BY factor_name
         """
         rows = get_duckdb().execute(sql).fetchall()
@@ -780,6 +914,116 @@ class FactorValueStore:
                 "symbols_sample": [],
             }
         return result
+
+    def list_param_hashes(
+        self,
+        factor_names: Sequence[str],
+        *,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        symbols: Sequence[str] | None = None,
+        limit_per_factor: int = 12,
+    ) -> list[dict[str, Any]]:
+        names = sorted({str(name) for name in factor_names if str(name)})
+        if not names or not self.exists():
+            return []
+
+        conditions = [f"factor_name IN {_list_param(names)}"]
+        partition_filter = ""
+        if start_date is not None:
+            conditions.append(f"trade_date >= {_sql_literal(start_date)}")
+        if end_date is not None:
+            conditions.append(f"trade_date <= {_sql_literal(end_date)}")
+        if symbols:
+            conditions.append(f"symbol IN {_list_param(symbols)}")
+        if start_date is not None and end_date is not None:
+            partition_filter = self._year_month_filter(start_date, end_date)
+
+        where_sql = " AND ".join(conditions)
+        name_expr = self._name_expr()
+        sql = f"""
+            WITH factor_values_normalized AS (
+                SELECT
+                    symbol,
+                    trade_date,
+                    as_of_time,
+                    {name_expr} AS factor_name,
+                    params_hash,
+                    source,
+                    created_at,
+                    year,
+                    month
+                FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+            ),
+            factor_values_latest AS (
+                SELECT *
+                FROM (
+                    SELECT
+                        *,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                            ORDER BY created_at DESC NULLS LAST
+                        ) AS row_num
+                    FROM factor_values_normalized
+                    WHERE {where_sql}
+                      {partition_filter}
+                )
+                WHERE row_num = 1
+            )
+            SELECT
+                factor_name,
+                params_hash,
+                as_of_time,
+                COUNT(*) AS total_rows,
+                COUNT(DISTINCT symbol) AS symbol_count,
+                COUNT(DISTINCT trade_date) AS date_count,
+                MIN(trade_date) AS min_date,
+                MAX(trade_date) AS max_date,
+                MAX(created_at) AS latest_created_at,
+                ANY_VALUE(source) AS source
+            FROM factor_values_latest
+            GROUP BY factor_name, params_hash, as_of_time
+        """
+        rows = get_duckdb().execute(sql).fetchall()
+        default_hash_by_factor = {
+            name: factor_params_hash(default_factor_params(name))
+            for name in names
+        }
+        items: list[dict[str, Any]] = []
+        for row in rows:
+            factor_name = str(row[0])
+            params_hash_value = str(row[1] or "")
+            items.append({
+                "factor_name": factor_name,
+                "params_hash": params_hash_value,
+                "as_of_time": str(row[2] or ""),
+                "total_rows": int(row[3] or 0),
+                "symbol_count": int(row[4] or 0),
+                "date_count": int(row[5] or 0),
+                "min_date": str(row[6]) if row[6] is not None else None,
+                "max_date": str(row[7]) if row[7] is not None else None,
+                "latest_created_at": str(row[8]) if row[8] is not None else None,
+                "source": str(row[9] or ""),
+                "is_default": params_hash_value == default_hash_by_factor.get(factor_name),
+            })
+
+        items.sort(
+            key=lambda item: (
+                str(item["factor_name"]),
+                bool(item["is_default"]),
+                str(item["max_date"] or ""),
+                int(item["total_rows"] or 0),
+            ),
+            reverse=True,
+        )
+        limited: list[dict[str, Any]] = []
+        counts: dict[str, int] = {}
+        for item in items:
+            factor_name = str(item["factor_name"])
+            counts[factor_name] = counts.get(factor_name, 0) + 1
+            if counts[factor_name] <= max(1, int(limit_per_factor or 1)):
+                limited.append(item)
+        return limited
 
     def preview(
         self,

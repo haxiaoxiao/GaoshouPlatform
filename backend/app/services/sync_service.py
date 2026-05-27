@@ -139,6 +139,61 @@ def _latest_market_date(dataset: str) -> date | None:
     return _latest_clickhouse_date(table, date_column)
 
 
+def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | None:
+    if not symbols:
+        return None
+
+    date_column = "datetime" if "minute" in dataset else "trade_date"
+    if app_settings.market_data_backend == "parquet":
+        from app.db.duckdb import get_duckdb
+
+        root = Path(app_settings.parquet_data_dir) / dataset
+        if not root.exists() or not any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
+            return None
+
+        pattern = str(root / "year=*" / "month=??" / "*.parquet")
+        if not any(root.glob("year=*/month=??/*.parquet")):
+            pattern = str(root / "**" / "*.parquet")
+        pattern = pattern.replace("\\", "/")
+        placeholders = ", ".join("?" for _ in symbols)
+        rows = get_duckdb().execute(
+            f"""
+            SELECT symbol, max({date_column})
+            FROM read_parquet(?, hive_partitioning=true)
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            [pattern, *symbols],
+        ).fetchall()
+    else:
+        table = "klines_minute" if "minute" in dataset else "klines_daily"
+        ch_client = get_ch_client()
+        try:
+            rows = ch_client.execute(
+                f"SELECT symbol, max({date_column}) FROM {table} WHERE symbol IN %(symbols)s GROUP BY symbol",
+                {"symbols": tuple(symbols)},
+            )
+        finally:
+            try:
+                ch_client.disconnect()
+            except Exception:
+                pass
+
+    by_symbol = {row[0]: row[1] for row in rows if row and row[1] is not None}
+    if len(by_symbol) != len(set(symbols)):
+        return None
+
+    latest_values: list[date] = []
+    for value in by_symbol.values():
+        if isinstance(value, datetime):
+            latest_values.append(value.date())
+        elif isinstance(value, date):
+            latest_values.append(value)
+        else:
+            latest_values.append(datetime.fromisoformat(str(value)).date())
+    return min(latest_values) if latest_values else None
+
+
 def _next_sync_start(latest_date: date | None, end_date: date, initial_days: int) -> date:
     if latest_date is None:
         return end_date - td(days=initial_days)
@@ -257,6 +312,8 @@ class SyncProgress:
     def progress_percent(self) -> float:
         """计算进度百分比"""
         if self.total == 0:
+            if self.status == "completed":
+                return 100.0
             return 0.0
         return round(self.current / self.total * 100, 2)
 
@@ -1684,8 +1741,24 @@ class SyncService:
             progress.details["total_rows"] = total_rows
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
-            if synced_symbols:
-                indicator_scheduler.run_after_sync("kline_daily", symbols=synced_symbols, trade_date=end_date)
+            if synced_symbols and app_settings.qmt_daily_compute_indicators_after_sync:
+                progress.details["post_sync_step"] = "compute_indicators"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            indicator_scheduler.run_after_sync,
+                            "kline_daily",
+                            symbols=synced_symbols,
+                            trade_date=end_date,
+                        ),
+                        timeout=300,
+                    )
+                    progress.details["indicator_compute"] = "completed"
+                except Exception as exc:
+                    progress.details["indicator_compute_error"] = str(exc)
+            else:
+                progress.details["indicator_compute"] = "skipped"
 
             progress.status = "completed"
             progress.end_time = datetime.now()
@@ -1741,6 +1814,7 @@ class SyncService:
         run_id: str | None = None,
         failure_strategy: str = "skip",
         full_sync: bool = False,
+        auto_incremental: bool = False,
     ) -> SyncProgress:
         """
         同步日K线数据
@@ -1764,6 +1838,17 @@ class SyncService:
         if start_date is None:
             start_date = end_date - td(days=30)
 
+        requested_start_date = start_date
+        requested_end_date = end_date
+        incremental_latest_date: date | None = None
+        if auto_incremental and not full_sync:
+            if symbols:
+                incremental_latest_date = _latest_market_date_for_symbols("klines_daily", symbols)
+            else:
+                incremental_latest_date = _latest_market_date("klines_daily")
+            if incremental_latest_date is not None:
+                start_date = max(start_date, incremental_latest_date + td(days=1))
+
         # 初始化进度
         progress = SyncProgress(
             sync_type="kline_daily",
@@ -1773,11 +1858,42 @@ class SyncService:
                 "run_id": run_id,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "requested_start_date": requested_start_date.isoformat(),
+                "requested_end_date": requested_end_date.isoformat(),
                 "full_sync": full_sync,
+                "auto_incremental": auto_incremental,
+                "latest_local_date": incremental_latest_date.isoformat() if incremental_latest_date else None,
             },
         )
         _current_sync = progress
         await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        if start_date > end_date:
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details.update(
+                {
+                    "skipped": True,
+                    "skip_reason": "already up to date",
+                    "total_klines": 0,
+                    "failed_symbols": [],
+                }
+            )
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            await self.create_sync_log(
+                sync_type="kline_daily",
+                status="completed",
+                total_count=0,
+                success_count=0,
+                failed_count=0,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            _current_sync = None
+            return progress
 
         # ClickHouse is optional. In parquet mode without clickhouse_enabled,
         # sync writes directly to Parquet and does not require Docker/CH.
@@ -1923,13 +2039,42 @@ class SyncService:
                     progress.current = min(offset + len(batch_symbols), progress.total)
                     await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
             # 更新进度
-            try:
-                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
-                progress.details["cache_cleaned"] = cleaned
-            except Exception:
-                pass
+            if app_settings.qmt_daily_clean_cache_after_sync:
+                progress.details["post_sync_step"] = "clean_local_cache"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    cleaned = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            qmt_gateway.clean_local_cache,
+                            symbols=symbols,
+                            data_type="kline",
+                        ),
+                        timeout=120,
+                    )
+                    progress.details["cache_cleaned"] = cleaned
+                except Exception as exc:
+                    progress.details["cache_clean_error"] = str(exc)
+            else:
+                progress.details["cache_cleaned"] = "skipped"
 
-            indicator_scheduler.run_after_sync("kline_daily", symbols=symbols, trade_date=end_date)
+            if app_settings.qmt_daily_compute_indicators_after_sync:
+                progress.details["post_sync_step"] = "compute_indicators"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            indicator_scheduler.run_after_sync,
+                            "kline_daily",
+                            symbols=symbols,
+                            trade_date=end_date,
+                        ),
+                        timeout=300,
+                    )
+                    progress.details["indicator_compute"] = "completed"
+                except Exception as exc:
+                    progress.details["indicator_compute_error"] = str(exc)
+            else:
+                progress.details["indicator_compute"] = "skipped"
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines

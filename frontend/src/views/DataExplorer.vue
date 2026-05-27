@@ -903,14 +903,34 @@ onMounted(async () => {
 }
 
 .explorer-table-v2 {
-  --el-table-header-bg-color: rgba(10, 10, 12, 0.95);
-  --el-table-border-color: var(--border-subtle);
-  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.06);
-  background: transparent;
+  --el-table-v2-row-bg-color: rgba(11, 16, 24, 0.98);
+  --el-table-v2-row-hover-bg-color: rgba(56, 189, 248, 0.08);
+  --el-table-v2-header-bg-color: rgba(10, 10, 12, 0.95);
+  --el-table-v2-header-text-color: var(--text-secondary);
+  --el-table-v2-border-color: var(--border-subtle);
+  background: #0b1018;
+  color: var(--text-primary);
   font-size: 12px;
 }
 
+.explorer-table-v2 :deep(.el-table-v2__main),
+.explorer-table-v2 :deep(.el-table-v2__left),
+.explorer-table-v2 :deep(.el-table-v2__right),
+.explorer-table-v2 :deep(.el-table-v2__header),
+.explorer-table-v2 :deep(.el-table-v2__body),
+.explorer-table-v2 :deep(.el-table-v2__empty) {
+  background: #0b1018;
+  color: var(--text-primary);
+}
+
+.explorer-table-v2 :deep(.el-table-v2__row),
+.explorer-table-v2 :deep(.el-table-v2__row-cell) {
+  background: rgba(11, 16, 24, 0.98);
+  color: var(--text-primary);
+}
+
 .explorer-table-v2 :deep(.el-table-v2__header-cell) {
+  background: rgba(10, 10, 12, 0.95);
   color: var(--text-secondary);
   font-weight: 600;
 }
@@ -922,6 +942,10 @@ onMounted(async () => {
 
 .explorer-table-v2 :deep(.el-table-v2__row-cell) {
   border-bottom: 1px solid var(--border-subtle);
+}
+
+.explorer-table-v2 :deep(.el-table-v2__row:hover .el-table-v2__row-cell) {
+  background: rgba(56, 189, 248, 0.08);
 }
 
 .cell-text {

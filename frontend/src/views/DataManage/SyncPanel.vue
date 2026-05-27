@@ -73,8 +73,20 @@
         </div>
         <div class="control-grid">
           <label>
-            <span>日期范围</span>
+            <span>同步模式</span>
+            <el-segmented v-model="syncMode" :options="syncModeOptions" />
+          </label>
+          <label>
+            <span>{{ syncMode === 'incremental' ? '截止日期' : '日期范围' }}</span>
             <el-date-picker
+              v-if="syncMode === 'incremental'"
+              v-model="incrementalEndDate"
+              type="date"
+              value-format="YYYY-MM-DD"
+              placeholder="截止日期"
+            />
+            <el-date-picker
+              v-else
               v-model="dateRange"
               type="daterange"
               value-format="YYYY-MM-DD"
@@ -264,11 +276,18 @@ const executing = ref(false)
 const stockScope = ref<'custom' | 'all'>('custom')
 const symbolText = ref('000001.SZ')
 const dateRange = ref<[string, string]>([formatDate(weekAgo), formatDate(today)])
+const incrementalEndDate = ref(formatDate(today))
+const syncMode = ref<'incremental' | 'range' | 'full'>('incremental')
 const failureStrategy = ref<'skip' | 'retry' | 'stop'>('skip')
 const relayDailyLimit = ref(200)
 const thsMemberLimit = ref(50)
 const blockLimit = ref(5)
 const syncStatus = ref<SyncStatus>(idleStatus())
+const syncModeOptions = [
+  { label: '增量', value: 'incremental' },
+  { label: '指定区间', value: 'range' },
+  { label: '覆盖重刷', value: 'full' },
+]
 const stockScopeOptions = [
   { label: '自定义', value: 'custom' },
   { label: '全市场', value: 'all' },
@@ -447,12 +466,15 @@ async function executeQueue() {
 
 function basePayload() {
   const [start, end] = dateRange.value
+  const isIncremental = syncMode.value === 'incremental'
+  const isFull = syncMode.value === 'full'
   return {
-    start_date: start,
-    end_date: end,
+    start_date: isIncremental ? undefined : start,
+    end_date: isIncremental ? incrementalEndDate.value : end,
+    sync_mode: syncMode.value,
     symbols: stockScope.value === 'custom' ? parseSymbols(symbolText.value) : undefined,
     failure_strategy: failureStrategy.value,
-    full_sync: false,
+    full_sync: isFull,
   }
 }
 

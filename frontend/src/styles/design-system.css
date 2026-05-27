@@ -498,6 +498,37 @@ h4 { font-size: var(--text-lg); }
   background: #111923;
 }
 
+.el-table-v2 {
+  --el-table-v2-row-bg-color: #0e1620;
+  --el-table-v2-row-hover-bg-color: #182637;
+  --el-table-v2-header-bg-color: #111a25;
+  --el-table-v2-header-text-color: #c6d1e1;
+  --el-table-v2-border-color: var(--border-subtle);
+  background: #0b1018 !important;
+  color: var(--text-primary);
+}
+
+.el-table-v2__main,
+.el-table-v2__left,
+.el-table-v2__right,
+.el-table-v2__header,
+.el-table-v2__body,
+.el-table-v2__empty {
+  background: #0b1018 !important;
+  color: var(--text-primary);
+}
+
+.el-table-v2__row,
+.el-table-v2__row-cell {
+  background: #0e1620;
+  color: var(--text-primary);
+}
+
+.el-table-v2__header-cell {
+  background: #111a25;
+  color: #c6d1e1;
+}
+
 /* Cards */
 .el-card {
   background: var(--bg-elevated);

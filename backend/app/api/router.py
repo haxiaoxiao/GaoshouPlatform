@@ -19,6 +19,7 @@ from app.api.factor_values import router as factor_values_router
 from app.api.factor_research import router as factor_research_router
 from app.api.small_cap_debug import router as small_cap_debug_router
 from app.api.grid_trading import router as grid_trading_router
+from app.api.sentiment import router as sentiment_router
 
 api_router = APIRouter()
 
@@ -46,3 +47,4 @@ api_router.include_router(factor_values_router, prefix="/v2/factor-values", tags
 api_router.include_router(factor_research_router, prefix="/factor-research", tags=["因子研究结果"])
 api_router.include_router(factor_research_router, prefix="/v2/factor-research", tags=["因子研究结果"])
 api_router.include_router(small_cap_debug_router, prefix="/v2/small-cap-debug", tags=["small-cap-debug"])
+api_router.include_router(sentiment_router, prefix="/sentiment", tags=["sentiment"])

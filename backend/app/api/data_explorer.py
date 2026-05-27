@@ -380,7 +380,21 @@ def search_table(
     table_name: str,
     request: ExplorerSearchRequest = Body(...),
 ):
-    _validate_table(table_name)
+    try:
+        _validate_table(table_name)
+    except ValueError as exc:
+        return {
+            "code": 1,
+            "message": str(exc),
+            "data": {
+                "columns": request.columns or [],
+                "rows": [],
+                "total": 0,
+                "page": request.page,
+                "page_size": request.page_size,
+                "total_pages": 0,
+            },
+        }
     backend = "parquet" if _use_parquet() else "clickhouse"
     source, select_sql, selected_columns, where_sql = _build_search_sql(table_name, request, backend=backend)
     offset = (request.page - 1) * request.page_size

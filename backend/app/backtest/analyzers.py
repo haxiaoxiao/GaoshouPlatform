@@ -68,7 +68,7 @@ def compute_ic_series(
         common = f.index.intersection(r.index)
         if len(common) < 10:
             continue
-        ic = f[common].corr(r[common], method="spearman")
+        ic = _spearman_corr(f[common], r[common])
         if not np.isnan(ic):
             d_str = str(d.date()) if hasattr(d, "date") else str(d)[:10]
             ic_list.append({"date": d_str, "ic": float(ic)})
@@ -77,6 +77,20 @@ def compute_ic_series(
         return pd.Series()
 
     return pd.Series({d["date"]: d["ic"] for d in ic_list})
+
+
+def _spearman_corr(left: pd.Series, right: pd.Series) -> float:
+    """Spearman correlation without scipy, using average ranks then Pearson."""
+    ranked_left = pd.to_numeric(left, errors="coerce").rank(method="average")
+    ranked_right = pd.to_numeric(right, errors="coerce").rank(method="average")
+    common = ranked_left.dropna().index.intersection(ranked_right.dropna().index)
+    if len(common) < 2:
+        return float("nan")
+    ranked_left = ranked_left.loc[common]
+    ranked_right = ranked_right.loc[common]
+    if ranked_left.nunique(dropna=True) <= 1 or ranked_right.nunique(dropna=True) <= 1:
+        return float("nan")
+    return float(ranked_left.corr(ranked_right))
 
 
 def compute_turnover(

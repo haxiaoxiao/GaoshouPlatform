@@ -186,6 +186,7 @@ const icons = {
   explorer: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>',
   watchlist: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
   factor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg>',
+  research: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"/><path d="M8 7h8"/><path d="M8 11h6"/></svg>',
   backtest: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>',
   trade: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>',
   monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>'
@@ -197,6 +198,7 @@ const mainNavItems = [
   { path: '/explorer', label: '数据浏览器', icon: icons.explorer, badge: '' },
   { path: '/watchlist', label: '自选股', icon: icons.watchlist, badge: '' },
   { path: '/factor', label: '因子研究', icon: icons.factor, badge: '' },
+  { path: '/research', label: '投研', icon: icons.research, badge: '' },
   { path: '/backtest', label: '策略回测', icon: icons.backtest, badge: '' },
   { path: '/trade', label: '实盘交易', icon: icons.trade, badge: '' },
 ]
@@ -211,6 +213,7 @@ const pageTitles: Record<string, { title: string; subtitle?: string }> = {
   '/explorer': { title: '数据浏览器', subtitle: '本地行情与指标数据查询' },
   '/watchlist': { title: '自选股', subtitle: '分组管理自选股票' },
   '/factor': { title: '因子研究', subtitle: '因子分析与筛选' },
+  '/research': { title: '投研', subtitle: '研报落地与实验跟踪' },
   '/backtest': { title: '策略回测', subtitle: '策略开发与验证' },
   '/trade': { title: '实盘交易', subtitle: '模拟盘与实盘' },
   '/monitor': { title: '系统监控', subtitle: '运行状态与日志' }

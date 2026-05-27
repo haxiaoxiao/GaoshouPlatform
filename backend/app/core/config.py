@@ -59,6 +59,8 @@ class Settings(BaseSettings):
     duckdb_path: str = ":memory:"
     clickhouse_enabled: bool = False
     parquet_minute_append_only: bool = True
+    qmt_daily_clean_cache_after_sync: bool = False
+    qmt_daily_compute_indicators_after_sync: bool = False
     qmt_minute_clean_cache_after_sync: bool = False
     qmt_minute_compute_indicators_after_sync: bool = False
     sync_service_url: str = "http://127.0.0.1:8810"
@@ -81,6 +83,8 @@ class Settings(BaseSettings):
 
     # API 配置
     api_prefix: str = "/api"
+    backend_port: int = 8800
+    frontend_port: int = 3500
 
     @property
     def base_dir(self) -> Path:

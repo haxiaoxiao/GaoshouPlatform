@@ -1,0 +1,85 @@
+name: Deploy
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+    branches:
+      - main
+      - develop
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        required: true
+        type: choice
+        options:
+          - development
+          - production
+      branch:
+        description: Branch to deploy. Defaults to develop for development and main for production.
+        required: false
+        type: string
+
+concurrency:
+  group: gaoshou-windows-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy-development:
+    name: Deploy development
+    if: >-
+      ${{
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_branch == 'develop') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.environment == 'development')
+      }}
+    runs-on:
+      - self-hosted
+      - Windows
+      - gaoshou-windows
+    environment: development
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'develop' }}
+
+      - name: Deploy development
+        shell: powershell
+        run: |
+          $branch = "${{ github.event.inputs.branch }}"
+          if (-not $branch) { $branch = "develop" }
+          .\tools\deploy-windows.ps1 -Environment development -Branch $branch
+
+  deploy-production:
+    name: Deploy production
+    if: >-
+      ${{
+        (github.event_name == 'workflow_run' &&
+         github.event.workflow_run.conclusion == 'success' &&
+         github.event.workflow_run.head_branch == 'main') ||
+        (github.event_name == 'workflow_dispatch' &&
+         github.event.inputs.environment == 'production')
+      }}
+    runs-on:
+      - self-hosted
+      - Windows
+      - gaoshou-windows
+    environment: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch || 'main' }}
+
+      - name: Deploy production
+        shell: powershell
+        run: |
+          $branch = "${{ github.event.inputs.branch }}"
+          if (-not $branch) { $branch = "main" }
+          .\tools\deploy-windows.ps1 -Environment production -Branch $branch

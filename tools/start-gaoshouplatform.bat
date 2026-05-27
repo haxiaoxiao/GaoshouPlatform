@@ -3,20 +3,20 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 title GaoshouPlatform Launcher
 
-set "ROOT=E:\Projects\GaoshouPlatform"
+for %%I in ("%~dp0..") do set "SCRIPT_ROOT=%%~fI"
+if defined GAOSHOU_ROOT (set "ROOT=%GAOSHOU_ROOT%") else (set "ROOT=%SCRIPT_ROOT%")
 set "BACKEND_DIR=%ROOT%\backend"
 set "FRONTEND_DIR=%ROOT%\frontend"
-set "ENV_FILE=%ROOT%\.env.local"
-set "PYTHON=%BACKEND_DIR%\.venv\Scripts\python.exe"
-set "BACKEND_HOST=127.0.0.1"
-set "BACKEND_PORT=8800"
-set "SYNC_HOST=127.0.0.1"
-set "SYNC_PORT=8810"
-set "FRONTEND_HOST=127.0.0.1"
-set "FRONTEND_PORT=3500"
-set "BACKEND_URL=http://%BACKEND_HOST%:%BACKEND_PORT%/health"
-set "SYNC_URL=http://%SYNC_HOST%:%SYNC_PORT%/health"
-set "FRONTEND_URL=http://%FRONTEND_HOST%:%FRONTEND_PORT%"
+if defined GAOSHOU_ENV_FILE (set "ENV_FILE=%GAOSHOU_ENV_FILE%") else (set "ENV_FILE=%ROOT%\.env.local")
+if defined GAOSHOU_PYTHON (set "PYTHON=%GAOSHOU_PYTHON%") else (set "PYTHON=%BACKEND_DIR%\.venv\Scripts\python.exe")
+
+if defined GAOSHOU_BACKEND_HOST (set "BACKEND_HOST=%GAOSHOU_BACKEND_HOST%") else (set "BACKEND_HOST=127.0.0.1")
+if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else (set "BACKEND_PORT=8800")
+if defined GAOSHOU_SYNC_HOST (set "SYNC_HOST=%GAOSHOU_SYNC_HOST%") else (set "SYNC_HOST=127.0.0.1")
+if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
+if defined GAOSHOU_FRONTEND_HOST (set "FRONTEND_HOST=%GAOSHOU_FRONTEND_HOST%") else (set "FRONTEND_HOST=127.0.0.1")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
+
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
 if "%GAOSHOU_SKIP_PAUSE%"=="1" set "NO_PAUSE=1"
@@ -37,10 +37,18 @@ if exist "%ENV_FILE%" (
     if /i "!K!"=="QMT_ACCOUNT_ID" set "QMT_ACCOUNT_ID=!V!"
     if /i "!K!"=="QMT_TRADER_PATH" set "QMT_TRADER_PATH=!V!"
     if /i "!K!"=="GRID_TRADING_ENABLE_ORDER_SUBMIT" set "GRID_TRADING_ENABLE_ORDER_SUBMIT=!V!"
-    if /i "!K!"=="SYNC_SERVICE_PORT" set "SYNC_PORT=!V!"
+    if /i "!K!"=="BACKEND_PORT" if not defined GAOSHOU_BACKEND_PORT set "BACKEND_PORT=!V!"
+    if /i "!K!"=="SYNC_SERVICE_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
+    if /i "!K!"=="SYNC_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
+    if /i "!K!"=="FRONTEND_PORT" if not defined GAOSHOU_FRONTEND_PORT set "FRONTEND_PORT=!V!"
   )
 )
+
+set "BACKEND_URL=http://%BACKEND_HOST%:%BACKEND_PORT%/health"
 set "SYNC_URL=http://%SYNC_HOST%:%SYNC_PORT%/health"
+set "FRONTEND_URL=http://%FRONTEND_HOST%:%FRONTEND_PORT%"
+set "SYNC_SERVICE_URL=http://%SYNC_HOST%:%SYNC_PORT%"
+set "SYNC_SERVICE_PORT=%SYNC_PORT%"
 set "QMT_ACCOUNT_STATUS=not configured"
 if defined QMT_ACCOUNT_ID set "QMT_ACCOUNT_STATUS=configured"
 
@@ -48,6 +56,7 @@ echo ========================================
 echo   GaoshouPlatform Startup
 echo ========================================
 echo Root:      %ROOT%
+echo Env file:  %ENV_FILE%
 echo Backend:   http://%BACKEND_HOST%:%BACKEND_PORT%
 echo Sync:      http://%SYNC_HOST%:%SYNC_PORT%
 echo Frontend:  %FRONTEND_URL%
@@ -71,7 +80,7 @@ if not exist "%FRONTEND_DIR%\package.json" (
   exit /b 1
 )
 
-echo [1/7] Stopping stale project backend/sync/frontend processes...
+echo [1/7] Stopping stale project processes on configured ports...
 call :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
 echo       OK
@@ -85,7 +94,7 @@ if errorlevel 1 (
   if errorlevel 1 (
     docker run -d --name redis-server -p %REDIS_PORT%:6379 redis:7-alpine >nul 2>&1
   )
-  docker ps --format "{{.Names}}" | findstr /x "redis-server" >nul 2>&1
+  docker ps --format "{{.Names}}" 2>nul | findstr /x "redis-server" >nul 2>&1
   if errorlevel 1 (
     echo       WARN: Redis is not running. Continue without Redis.
   ) else (
@@ -103,7 +112,7 @@ if "%NEED_CLICKHOUSE%"=="1" (
     echo       WARN: Docker not found. ClickHouse cannot be started.
   ) else (
     docker start clickhouse-server >nul 2>&1
-    docker ps --format "{{.Names}}" | findstr /x "clickhouse-server" >nul 2>&1
+    docker ps --format "{{.Names}}" 2>nul | findstr /x "clickhouse-server" >nul 2>&1
     if errorlevel 1 (
       echo       WARN: ClickHouse is not running.
     ) else (
@@ -119,12 +128,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%SYNC_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Sync service health check failed: %SYNC_URL%
-  echo.
-  echo ========================================
-  echo   Startup failed
-  echo ========================================
-  echo Check the sync service window for details.
-  echo.
   if "%NO_PAUSE%"=="0" pause
   exit /b 1
 )
@@ -135,12 +138,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%BACKEND_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Backend health check failed: %BACKEND_URL%
-  echo.
-  echo ========================================
-  echo   Startup failed
-  echo ========================================
-  echo Check the backend window for details.
-  echo.
   if "%NO_PAUSE%"=="0" pause
   exit /b 1
 )
@@ -161,12 +158,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%FRONTEND_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Frontend did not bind to %FRONTEND_URL%
-  echo.
-  echo ========================================
-  echo   Startup failed
-  echo ========================================
-  echo Check the frontend window for details.
-  echo.
   if "%NO_PAUSE%"=="0" pause
   exit /b 1
 )
@@ -187,5 +178,5 @@ exit /b 0
 
 :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@(%BACKEND_PORT%,%SYNC_PORT%,%FRONTEND_PORT%,3501,5173); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if ($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match 'uvicorn app\.(main|sync_main):app|node_modules.*vite|vite\.js' } | ForEach-Object { $ids += [int]$_.ProcessId }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
 exit /b 0

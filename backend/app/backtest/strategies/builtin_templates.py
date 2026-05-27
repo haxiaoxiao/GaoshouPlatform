@@ -11,6 +11,19 @@ from app.backtest.strategies.dual_stock_grid_akquant import (
     DUAL_STOCK_GRID_STRATEGY_CODE,
     DUAL_STOCK_GRID_SYMBOLS,
 )
+from app.backtest.strategies.cn_paper_factor_akquant import (
+    CN_PAPER_FACTOR_STRATEGY_CODE,
+    DEFAULT_CN_PAPER_FACTOR_PARAMS,
+    DEFAULT_CN_PAPER_FACTOR_RISK_CONFIG,
+)
+from app.backtest.strategies.cn_paper_style_rotation_akquant import (
+    CN_PAPER_DEFENSIVE_ALLOCATION_STRATEGY_CODE,
+    CN_PAPER_STYLE_ROTATION_STRATEGY_CODE,
+    DEFAULT_CN_PAPER_DEFENSIVE_ALLOCATION_PARAMS,
+    DEFAULT_CN_PAPER_DEFENSIVE_ALLOCATION_RISK_CONFIG,
+    DEFAULT_CN_PAPER_STYLE_ROTATION_PARAMS,
+    DEFAULT_CN_PAPER_STYLE_ROTATION_RISK_CONFIG,
+)
 from app.backtest.strategies.multi_factor_akquant import (
     DEFAULT_MULTI_FACTOR_PARAMS,
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
@@ -72,6 +85,42 @@ MULTI_FACTOR_PARAMETERS = {
 }
 
 
+CN_PAPER_FACTOR_PARAMETERS = {
+    **DEFAULT_CN_PAPER_FACTOR_PARAMS,
+    "risk_config": DEFAULT_CN_PAPER_FACTOR_RISK_CONFIG,
+    "backtest_settings": {
+        "engine": "akquant",
+        "barType": "daily",
+        "showOptimizationPanel": False,
+    },
+    "required_factor_group": "cn_paper_implemented",
+}
+
+
+CN_PAPER_STYLE_ROTATION_PARAMETERS = {
+    **DEFAULT_CN_PAPER_STYLE_ROTATION_PARAMS,
+    "risk_config": DEFAULT_CN_PAPER_STYLE_ROTATION_RISK_CONFIG,
+    "backtest_settings": {
+        "engine": "akquant",
+        "barType": "daily",
+        "showOptimizationPanel": False,
+    },
+    "required_factor_group": "cn_paper_style_rotation",
+}
+
+
+CN_PAPER_DEFENSIVE_ALLOCATION_PARAMETERS = {
+    **DEFAULT_CN_PAPER_DEFENSIVE_ALLOCATION_PARAMS,
+    "risk_config": DEFAULT_CN_PAPER_DEFENSIVE_ALLOCATION_RISK_CONFIG,
+    "backtest_settings": {
+        "engine": "akquant",
+        "barType": "daily",
+        "showOptimizationPanel": False,
+    },
+    "required_factor_group": "cn_paper_style_rotation",
+}
+
+
 BUILTIN_STRATEGY_TEMPLATES: dict[str, BuiltinStrategyTemplate] = {
     "dual_stock_grid": BuiltinStrategyTemplate(
         key="dual_stock_grid",
@@ -97,6 +146,30 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, BuiltinStrategyTemplate] = {
         parameters=MULTI_FACTOR_PARAMETERS,
         bar_type="daily",
     ),
+    "cn_paper_factor": BuiltinStrategyTemplate(
+        key="cn_paper_factor",
+        name="研报因子组合",
+        description="基于已落地非 Tick 量化研报因子的 AKQuant 月频多因子组合；运行前先预计算 cn_paper_implemented 因子组。",
+        code=CN_PAPER_FACTOR_STRATEGY_CODE,
+        parameters=CN_PAPER_FACTOR_PARAMETERS,
+        bar_type="daily",
+    ),
+    "cn_paper_style_rotation": BuiltinStrategyTemplate(
+        key="cn_paper_style_rotation",
+        name="研报风格轮动组合",
+        description="基于大小盘、成长价值和行业动量的 A 股风格轮动模板；运行前先预计算 cn_paper_style_rotation 因子组。",
+        code=CN_PAPER_STYLE_ROTATION_STRATEGY_CODE,
+        parameters=CN_PAPER_STYLE_ROTATION_PARAMETERS,
+        bar_type="daily",
+    ),
+    "cn_paper_defensive_allocation": BuiltinStrategyTemplate(
+        key="cn_paper_defensive_allocation",
+        name="研报防御配置组合",
+        description="中国版全天候增强的权益代理模板，偏向财务健康、低波动和动量回撤质量；宏观和多资产信号仍待数据源。",
+        code=CN_PAPER_DEFENSIVE_ALLOCATION_STRATEGY_CODE,
+        parameters=CN_PAPER_DEFENSIVE_ALLOCATION_PARAMETERS,
+        bar_type="daily",
+    ),
 }
 
 
@@ -107,4 +180,3 @@ def list_builtin_strategy_templates() -> list[dict[str, Any]]:
 def get_builtin_strategy_template(key: str) -> BuiltinStrategyTemplate | None:
     normalized = str(key or "").strip().replace("-", "_")
     return BUILTIN_STRATEGY_TEMPLATES.get(normalized)
-

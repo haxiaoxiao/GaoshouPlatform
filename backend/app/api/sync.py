@@ -26,6 +26,7 @@ class SyncRequest(BaseModel):
     index_symbols: list[str] | None = None
     start_date: date | None = None
     end_date: date | None = None
+    sync_mode: str = "range"
     failure_strategy: str = "skip"
     full_sync: bool = False
     factor_sync_plan: dict[str, Any] | None = None
@@ -60,6 +61,7 @@ async def _run_sync_task(
     engine = create_async_engine(settings.database_url)
     async_session = async_sessionmaker(engine, expire_on_commit=False)
     request_payload = request.model_dump(mode="json")
+    effective_full_sync = request.full_sync or request.sync_mode == "full"
 
     # Periodically persist in-memory sync progress into sync_runs.
     async def _persister() -> None:
@@ -88,6 +90,18 @@ async def _run_sync_task(
 
         qmt_required_types = {"datasync", "stock_info", "stock_full", "financial_data", "realtime_mv", "kline_daily", "kline_minute", "kline_weekly", "dividends"}
         qmt_required = request.sync_type in qmt_required_types
+        if request.sync_type == "kline_daily" and request.sync_mode == "incremental" and not effective_full_sync:
+            try:
+                target_end = request.end_date or date.today()
+                latest = (
+                    sync_service_module._latest_market_date_for_symbols("klines_daily", request.symbols)
+                    if request.symbols
+                    else sync_service_module._latest_market_date("klines_daily")
+                )
+                if latest is not None and latest >= target_end:
+                    qmt_required = False
+            except Exception as exc:
+                logger.debug("Unable to pre-check incremental daily coverage: {}", exc)
         if request.sync_type == "factor_dependency":
             steps = (request.factor_sync_plan or {}).get("steps") or []
             qmt_required = any(
@@ -116,13 +130,13 @@ async def _run_sync_task(
                     symbols=request.symbols,
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
                     run_id=run_id,
                 )
             elif request.sync_type == "stock_info":
                 progress = await service.sync_stock_info(
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
                 )
             elif request.sync_type == "stock_full":
                 progress = await service.sync_stock_full(
@@ -144,7 +158,8 @@ async def _run_sync_task(
                     start_date=request.start_date,
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
+                    auto_incremental=request.sync_mode == "incremental" and not effective_full_sync,
                     run_id=run_id,
                 )
             elif request.sync_type == "index_daily":
@@ -153,7 +168,7 @@ async def _run_sync_task(
                     start_date=request.start_date,
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
                     run_id=run_id,
                 )
             elif request.sync_type == "kline_weekly":
@@ -162,7 +177,7 @@ async def _run_sync_task(
                     start_date=request.start_date,
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
                 )
             elif request.sync_type == "dividends":
                 progress = await service.sync_dividends(
@@ -177,7 +192,7 @@ async def _run_sync_task(
                     start_date=request.start_date,
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
-                    full_sync=request.full_sync,
+                    full_sync=effective_full_sync,
                     run_id=run_id,
                 )
             elif request.sync_type == "factor_dependency":
@@ -237,6 +252,8 @@ async def trigger_sync(
         raise HTTPException(status_code=400, detail=f"sync_type must be one of: {', '.join(VALID_SYNC_TYPES)}")
     if request.failure_strategy not in ("skip", "retry", "stop"):
         raise HTTPException(status_code=400, detail="failure_strategy must be skip, retry or stop")
+    if request.sync_mode not in ("incremental", "range", "full"):
+        raise HTTPException(status_code=400, detail="sync_mode must be incremental, range or full")
 
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()

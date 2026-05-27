@@ -48,6 +48,7 @@ export interface SyncRequest {
   index_symbols?: string[]
   start_date?: string
   end_date?: string
+  sync_mode?: 'incremental' | 'range' | 'full'
   failure_strategy?: 'skip' | 'retry' | 'stop'
   full_sync?: boolean
   factor_sync_plan?: Record<string, unknown>

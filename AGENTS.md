@@ -49,7 +49,7 @@
 | `docs/user-manual.md` | 使用手册，面向平台使用和策略回测操作 |
 | `docs/data-source-cheatsheet.md` | 数据源小抄，记录 miniQMT/Tushare/AKShare 的优势、限制和使用场景 |
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口小抄，记录历史分钟、集合竞价、财务、公告、指数等验证结果 |
-| `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 |
+| `docs/akquant-integration-todo.md` | AKQuant 当前集成状态、验证命令和仍需跟进事项 |
 | `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
 | `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：当前参数、数据口径、已对齐节点和剩余差异 |
 

@@ -67,6 +67,13 @@
             </el-option-group>
           </el-select>
         </el-form-item>
+        <el-form-item label="成分口径">
+          <el-select v-model="form.pool_membership_mode" style="width:180px">
+            <el-option label="Static latest" value="static_latest" />
+            <el-option label="Point-in-time" value="point_in_time" />
+            <el-option label="Union" value="union" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="回测区间">
           <div class="date-range">
             <el-date-picker v-model="form.start_date" value-format="YYYY-MM-DD" type="date" />
@@ -207,12 +214,16 @@ const form = reactive({
   end_date: queryDate('end_date', todayText),
   portfolio_type: String(route.query.portfolio_type || 'long_only') as 'long_only' | 'long_short_i' | 'long_short_ii',
   rebalance_period: 'monthly' as 'daily' | 'weekly' | 'monthly',
-  fee_rate: feeRateFromQuery(),
-  slippage: route.query.fee_config === 'commission_stamp_slippage' ? 0.001 : 0,
+  fee_rate: numericQuery('fee_rate', feeRateFromQuery()),
+  stamp_tax_rate: numericQuery('stamp_tax_rate', stampTaxFromQuery()),
+  transfer_fee_rate: numericQuery('transfer_fee_rate', 0),
+  slippage: numericQuery('slippage', route.query.fee_config === 'commission_stamp' ? 0 : 0.001),
   filter_limit_up: route.query.filter_limit_up !== 'false',
   filter_limit_down: true,
   group_count: 5,
   direction: 'desc' as 'asc' | 'desc',
+  pool_membership_mode: String(route.query.pool_membership_mode || 'static_latest') as 'static_latest' | 'point_in_time' | 'union',
+  factor_value_params_hash: stringQuery('factor_value_params_hash'),
   industry_neutralization: false,
   standardize: false,
 })
@@ -240,6 +251,7 @@ const summaryCards = computed(() => {
     { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'negative' },
     { label: '换手率', value: formatPercent(summary.turnover), valueClass: '' },
     { label: '覆盖率', value: formatPercent(summary.coverage_ratio), valueClass: '' },
+    { label: '有效股票', value: String(summary.active_symbol_count || '-'), valueClass: '' },
     { label: '股票数', value: String(summary.symbol_count || '-'), valueClass: '' },
   ]
 })
@@ -252,13 +264,31 @@ const decayChartRef = ref<HTMLElement | null>(null)
 let charts: echarts.ECharts[] = []
 
 function feeRateFromQuery() {
-  if (route.query.fee_config === 'commission_stamp' || route.query.fee_config === 'commission_stamp_slippage') return 0.004
+  if (route.query.fee_config === 'commission_stamp' || route.query.fee_config === 'commission_stamp_slippage') return 0.003
   return 0.001
 }
 
+function stampTaxFromQuery() {
+  if (route.query.fee_config === 'commission_stamp' || route.query.fee_config === 'commission_stamp_slippage') return 0.001
+  return 0
+}
+
+function numericQuery(key: string, fallback: number) {
+  const value = route.query[key]
+  if (typeof value !== 'string') return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : fallback
+}
+
+function stringQuery(key: string) {
+  const value = route.query[key]
+  return typeof value === 'string' && value ? value : ''
+}
+
 function inferLogic(item: FactorValueDefinition | null, factor: string) {
-  const alphaLogic = inferAlpha101Logic(factor)
+  const alphaLogic = inferAlpha101Logic(item, factor)
   if (alphaLogic) return alphaLogic
+  if (item?.human_description) return item.human_description
   if (item?.description) return item.description
   if (factor.startsWith('ta_')) return '技术分析因子，基于日线 OHLCV 序列按 TA-Lib 同名函数计算。'
   if (factor.startsWith('alpha101_')) return 'WorldQuant Alpha101 横截面/时序公式因子，本地实现使用 A 股日线面板数据计算。'
@@ -282,8 +312,10 @@ function inferFormula(item: (FactorValueDefinition & { formula?: string; express
   return item?.description || '未登记公式；如为自定义因子，公式来自 factors.code / parameters.expression。'
 }
 
-function inferAlpha101Logic(factor: string) {
+function inferAlpha101Logic(item: FactorValueDefinition | null, factor: string) {
   if (!factor.startsWith('alpha101_')) return ''
+  if (item?.human_description) return item.human_description
+  if (item?.description) return item.description
   if (factor === 'alpha101_002') {
     return 'Alpha101 #002 衡量“成交量变化”和“日内价格强弱”之间的 6 日滚动相关性，并取负值。具体做法是：先计算 log(volume) 的 2 日变化并做当日横截面排名，再计算 (close - open) / open 代表日内收益并做横截面排名，最后对每只股票滚动计算两者 6 日相关系数并乘以 -1。值越高通常表示量能变化与日内强弱越负相关，属于短周期价量背离/反转类信号。'
   }
@@ -380,11 +412,15 @@ function requestPayload(force = false) {
     portfolio_type: form.portfolio_type,
     rebalance_period: form.rebalance_period,
     fee_rate: form.fee_rate,
+    stamp_tax_rate: form.stamp_tax_rate,
+    transfer_fee_rate: form.transfer_fee_rate,
     slippage: form.slippage,
     filter_limit_up: form.filter_limit_up,
     filter_limit_down: form.filter_limit_down,
     group_count: form.group_count,
     direction: form.direction,
+    pool_membership_mode: form.pool_membership_mode,
+    factor_value_params_hash: form.factor_value_params_hash || null,
     industry_neutralization: form.industry_neutralization,
     standardize: form.standardize,
     force,
@@ -538,18 +574,18 @@ function renderDecayChart() {
   charts.push(chart)
 }
 
-function formatNumber(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '-'
+function formatNumber(value?: number | string | null) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '-'
   return Number(value).toFixed(4)
 }
 
-function formatPercent(value?: number | null) {
-  if (value === null || value === undefined || Number.isNaN(value)) return '-'
+function formatPercent(value?: number | string | null) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return '-'
   return `${(Number(value) * 100).toFixed(2)}%`
 }
 
-function valueClass(value?: number | null) {
-  if (value === null || value === undefined) return ''
+function valueClass(value?: number | string | null) {
+  if (value === null || value === undefined || value === '' || Number.isNaN(Number(value))) return ''
   return Number(value) >= 0 ? 'positive' : 'negative'
 }
 
@@ -572,14 +608,23 @@ onUnmounted(disposeCharts)
   display: flex;
   flex-direction: column;
   gap: 12px;
+  --detail-surface: rgba(19, 19, 24, 0.94);
+  --detail-surface-strong: rgba(14, 15, 20, 0.98);
+  --detail-surface-soft: rgba(36, 39, 51, 0.7);
+  --detail-border: rgba(108, 117, 137, 0.22);
+  --detail-border-strong: rgba(96, 165, 250, 0.24);
+  --detail-accent-soft: rgba(56, 189, 248, 0.12);
+  --detail-warn-soft: rgba(245, 158, 11, 0.12);
 }
 .detail-header,
 .param-panel,
 .panel,
 .summary-card {
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--detail-border);
   border-radius: 8px;
-  background: var(--bg-elevated);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
+    var(--detail-surface);
   box-shadow: var(--shadow-sm);
 }
 .detail-header {
@@ -626,9 +671,11 @@ h2 {
 .info-card {
   min-width: 0;
   padding: 12px;
-  border: 1px solid var(--border-default);
+  border: 1px solid var(--detail-border);
   border-radius: 8px;
-  background: var(--bg-elevated);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0)),
+    var(--detail-surface);
   box-shadow: var(--shadow-sm);
 }
 .info-card--wide {
@@ -648,10 +695,12 @@ h2 {
 .info-panel code {
   display: block;
   padding: 9px 10px;
-  border: 1px solid var(--border-subtle);
+  border: 1px solid var(--detail-border-strong);
   border-radius: 6px;
   color: var(--text-bright);
-  background: rgba(8, 8, 10, 0.42);
+  background:
+    linear-gradient(180deg, rgba(56, 189, 248, 0.05), rgba(56, 189, 248, 0)),
+    var(--detail-surface-strong);
   font-family: var(--font-data);
   font-size: 12px;
   line-height: 1.6;
@@ -708,6 +757,86 @@ h2 {
   color: var(--text-bright);
   font-size: 14px;
   margin-bottom: 10px;
+}
+.factor-detail :deep(.el-button:not(.el-button--primary)) {
+  color: var(--text-primary);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)), var(--detail-surface-soft);
+  border-color: var(--detail-border);
+}
+.factor-detail :deep(.el-button:not(.el-button--primary):hover) {
+  color: var(--text-bright);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(56, 189, 248, 0)), rgba(31, 41, 55, 0.92);
+  border-color: var(--detail-border-strong);
+}
+.factor-detail :deep(.el-tag) {
+  color: #93c5fd;
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.12), rgba(56, 189, 248, 0.04));
+  border-color: rgba(96, 165, 250, 0.22);
+}
+.factor-detail :deep(.el-input__wrapper),
+.factor-detail :deep(.el-select__wrapper),
+.factor-detail :deep(.el-textarea__inner),
+.factor-detail :deep(.el-date-editor .el-input__wrapper) {
+  background: var(--detail-surface-strong);
+  box-shadow: 0 0 0 1px var(--detail-border) inset;
+}
+.factor-detail :deep(.el-input__wrapper:hover),
+.factor-detail :deep(.el-select__wrapper:hover),
+.factor-detail :deep(.el-date-editor .el-input__wrapper:hover) {
+  box-shadow: 0 0 0 1px var(--detail-border-strong) inset;
+}
+.factor-detail :deep(.el-radio-button__inner),
+.factor-detail :deep(.el-checkbox__inner) {
+  background: var(--detail-surface-strong);
+  border-color: var(--detail-border);
+  color: var(--text-primary);
+}
+.factor-detail :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
+  background: linear-gradient(180deg, rgba(14, 165, 233, 0.96), rgba(2, 132, 199, 0.96));
+  border-color: rgba(56, 189, 248, 0.5);
+  box-shadow: none;
+}
+.factor-detail :deep(.el-checkbox__input.is-checked .el-checkbox__inner),
+.factor-detail :deep(.el-checkbox__input.is-indeterminate .el-checkbox__inner) {
+  background: #0ea5e9;
+  border-color: #0ea5e9;
+}
+.factor-detail :deep(.el-alert--warning) {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.05));
+  border: 1px solid rgba(245, 158, 11, 0.24);
+}
+.factor-detail :deep(.el-alert--warning .el-alert__title),
+.factor-detail :deep(.el-alert--warning .el-alert__description),
+.factor-detail :deep(.el-alert--warning .el-alert__icon) {
+  color: #fcd34d;
+}
+.factor-detail :deep(.el-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: rgba(255, 255, 255, 0.02);
+  --el-table-border-color: var(--detail-border);
+  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.06);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+  background: transparent;
+}
+.factor-detail :deep(.el-table__inner-wrapper::before) {
+  background-color: var(--detail-border);
+}
+.factor-detail :deep(.el-empty) {
+  --el-empty-fill-color-0: rgba(255, 255, 255, 0.03);
+  --el-empty-fill-color-1: rgba(255, 255, 255, 0.05);
+  --el-empty-fill-color-2: rgba(56, 189, 248, 0.08);
+  --el-empty-fill-color-3: rgba(255, 255, 255, 0.08);
+  --el-empty-fill-color-4: rgba(255, 255, 255, 0.12);
+  --el-empty-fill-color-5: rgba(255, 255, 255, 0.18);
+  --el-empty-fill-color-6: rgba(255, 255, 255, 0.22);
+  --el-empty-fill-color-7: rgba(255, 255, 255, 0.1);
+  --el-empty-fill-color-8: rgba(56, 189, 248, 0.18);
+  --el-empty-fill-color-9: rgba(56, 189, 248, 0.22);
+}
+.factor-detail :deep(.el-empty__description p) {
+  color: var(--text-secondary);
 }
 .chart {
   height: 280px;

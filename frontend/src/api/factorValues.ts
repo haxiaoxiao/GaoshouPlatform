@@ -15,6 +15,7 @@ export interface FactorValueDefinition {
   point_in_time_safe: boolean
   source: string
   formula?: string
+  human_description?: string
   version?: string
   data_policy?: Record<string, unknown>
 }
@@ -81,6 +82,8 @@ export interface FactorValuePrecomputeResult {
   written_factor_count?: number
   zero_row_factor_count?: number
   zero_row_factor_names?: string[]
+  failed_factor_names?: string[]
+  errors?: Record<string, string>
   coverage_ranges?: Array<{
     factor_name: string
     total_rows: number
@@ -98,6 +101,46 @@ export interface FactorValueGroup {
   display_name: string
   description: string
   factor_names: string[]
+}
+
+export interface FactorValueParamHash {
+  factor_name: string
+  params_hash: string
+  as_of_time: string
+  total_rows: number
+  symbol_count: number
+  date_count: number
+  min_date: string | null
+  max_date: string | null
+  latest_created_at: string | null
+  source: string
+  is_default: boolean
+}
+
+export interface FactorPaperManifestItem {
+  paper_id: number
+  title: string
+  strategy_type: string
+  data_frequency: string
+  data_dependencies: string[]
+  factor_rules: string
+  rebalance_frequency: string
+  landing_status: string
+  landing_grade: string
+  platform_mapping: string
+  validation_metrics: string[]
+  factor_names: string[]
+  notes: string
+}
+
+export interface FactorPaperExperimentSpec {
+  paper_ids: number[]
+  name: string
+  model_family: string[]
+  feature_groups: string[]
+  default_factor_names: string[]
+  status: string
+  target_policy: string
 }
 
 export interface FactorValuePreviewItem {
@@ -119,6 +162,25 @@ export const factorValueApi = {
 
   groups() {
     return request.get<FactorValueGroup[]>('/factor-values/groups', { timeout: 30000 })
+  },
+
+  paramHashes(data: {
+    factor_names: string[]
+    start_date?: string
+    end_date?: string
+    symbols?: string[]
+    index_symbol?: string
+    limit_per_factor?: number
+  }) {
+    return request.post<FactorValueParamHash[]>('/factor-values/param-hashes', data, { timeout: 60000 })
+  },
+
+  paperManifest() {
+    return request.get<FactorPaperManifestItem[]>('/factor-values/paper-manifest', { timeout: 30000 })
+  },
+
+  paperExperiments() {
+    return request.get<FactorPaperExperimentSpec[]>('/factor-values/paper-experiments', { timeout: 30000 })
   },
 
   prepare(data: FactorPrecomputePrepareRequest) {
@@ -150,6 +212,7 @@ export const factorValueApi = {
 
   precomputeGroup(data: {
     group_name: string
+    factor_names?: string[]
     start_date: string
     end_date: string
     symbols?: string[]

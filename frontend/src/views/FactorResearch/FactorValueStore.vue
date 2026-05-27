@@ -22,13 +22,23 @@
             class="factor-select"
           />
         </el-form-item>
-        <el-form-item label="因子">
+        <el-form-item label="因子" class="factor-form-item factor-form-item--wide">
           <el-select-v2
             v-model="form.factorName"
             :options="factorOptions"
             filterable
-            class="factor-select"
-          />
+            :item-height="48"
+            :height="420"
+            popper-class="factor-select-dropdown factor-select-dropdown--wide"
+            class="factor-select factor-select--wide"
+          >
+            <template #default="{ item }">
+              <div class="factor-option">
+                <span class="factor-option__label">{{ item.displayName || item.label }}</span>
+                <span class="factor-option__meta">{{ item.value }}</span>
+              </div>
+            </template>
+          </el-select-v2>
         </el-form-item>
         <el-form-item label="股票池">
           <el-select-v2
@@ -115,6 +125,14 @@
         <span>预计算：真正生成并写入因子缓存。</span>
       </div>
     </section>
+
+    <el-alert
+      v-if="coverageError"
+      type="warning"
+      :closable="false"
+      class="result-alert"
+      :title="`覆盖率查询失败：${coverageError}`"
+    />
 
     <section class="summary" v-if="coverage">
       <div>
@@ -256,6 +274,14 @@
     </section>
 
     <el-alert
+      v-if="previewError"
+      type="warning"
+      :closable="false"
+      class="result-alert"
+      :title="`预览失败：${previewError}`"
+    />
+
+    <el-alert
       v-if="preview && preview.total === 0"
       type="warning"
       :closable="false"
@@ -311,7 +337,7 @@
           <span>{{ filteredDefinitions.length.toLocaleString() }} 个可用因子</span>
         </div>
       </div>
-      <el-table :data="filteredDefinitions" v-loading="definitionsLoading" stripe height="calc(100vh - 430px)">
+      <el-table class="definition-table" :data="filteredDefinitions" v-loading="definitionsLoading" stripe height="100%">
         <el-table-column prop="display_name" label="名称" min-width="190" />
         <el-table-column prop="name" label="键名" min-width="180" />
         <el-table-column prop="factor_type" label="类型" width="110" />
@@ -360,10 +386,14 @@ import {
   type FactorValuePrecomputeResult,
 } from '@/api/factorValues'
 
+type PrecomputeMode = 'single' | 'group'
+
 const definitions = ref<FactorValueDefinition[]>([])
 const groups = ref<FactorValueGroup[]>([])
 const coverage = ref<FactorValueCoverage | null>(null)
+const coverageError = ref('')
 const preview = ref<FactorValuePreview | null>(null)
+const previewError = ref('')
 const lastResult = ref<FactorValuePrecomputeResult | null>(null)
 const definitionsLoading = ref(false)
 const coverageLoading = ref(false)
@@ -431,9 +461,10 @@ const setDateShortcut = (shortcut: { months: number; years: number }) => {
 
 const selectedDefinition = computed(() => definitions.value.find(item => item.name === form.factorName))
 const selectedGroup = computed(() => groups.value.find(item => item.name === form.groupName))
+const selectedGroupFactorNames = computed(() => selectedGroup.value?.factor_names || [])
 const definitionByName = computed(() => new Map(definitions.value.map(item => [item.name, item])))
 const filteredDefinitions = computed(() => {
-  const factorNames = selectedGroup.value?.factor_names || []
+  const factorNames = selectedGroupFactorNames.value
   if (!factorNames.length) return definitions.value
   const selectedNames = new Set(factorNames)
   return definitions.value.filter(item => selectedNames.has(item.name))
@@ -444,6 +475,7 @@ const groupOptions = computed(() => groups.value.map(group => ({
 })))
 const factorOptions = computed(() => filteredDefinitions.value.map(item => ({
   label: `${item.display_name} (${item.name})`,
+  displayName: item.display_name,
   value: item.name,
 })))
 const previewTradeDate = computed(() => coverage.value?.max_date || form.endDate)
@@ -513,6 +545,8 @@ const formatRatio = (current: unknown, total: unknown) => {
   if (!Number.isFinite(currentValue) || !Number.isFinite(totalValue) || totalValue <= 0) return ''
   return `${currentValue.toLocaleString()} / ${totalValue.toLocaleString()}`
 }
+
+const formatRequestError = (error: unknown) => error instanceof Error ? error.message : '请求失败'
 
 const formatCoverageRange = (row: { coverage: { min_date: string | null; max_date: string | null } | null }) => {
   if (!row.coverage?.min_date || !row.coverage?.max_date) return '无数据'
@@ -641,11 +675,15 @@ const loadIndexCatalog = async () => {
 
 const loadCoverage = async () => {
   coverageLoading.value = true
+  coverageError.value = ''
   try {
     coverage.value = await factorValueApi.coverage({
       ...buildQueryParams(),
       full_range: true,
     })
+  } catch (error) {
+    coverage.value = null
+    coverageError.value = formatRequestError(error)
   } finally {
     coverageLoading.value = false
   }
@@ -661,6 +699,7 @@ const singlePrecomputePayload = () => ({
 
 const groupPrecomputePayload = () => ({
   group_name: form.groupName,
+  factor_names: selectedGroupFactorNames.value,
   start_date: form.startDate,
   end_date: form.endDate,
   index_symbol: form.indexSymbol || undefined,
@@ -680,14 +719,14 @@ const clearPrecomputePolling = () => {
   }
 }
 
-const pollPrecomputeTask = async (taskId: string): Promise<RuntimeTask> => {
+const pollPrecomputeTask = async (taskId: string, mode: PrecomputeMode = 'single'): Promise<RuntimeTask> => {
   clearPrecomputePolling()
   for (;;) {
     const task = await runtimeTaskApi.get(taskId)
     activeTask.value = task
     if (['done', 'completed'].includes(String(task.status))) return task
     if (task.status === 'failed') {
-      const recovered = await recoverCompletedPrecompute(task)
+      const recovered = await recoverCompletedPrecompute(task, mode)
       if (recovered) return task
       throw new Error(task.error || '因子预计算失败')
     }
@@ -697,9 +736,10 @@ const pollPrecomputeTask = async (taskId: string): Promise<RuntimeTask> => {
   }
 }
 
-const recoverCompletedPrecompute = async (task: RuntimeTask) => {
+const recoverCompletedPrecompute = async (task: RuntimeTask, mode: PrecomputeMode) => {
   const result = task.meta?.result as FactorValuePrecomputeResult | undefined
   if (result && Number(result.rows_written || 0) > 0) return true
+  if (mode === 'group') return recoverCompletedGroupPrecompute(task, result)
   const coverage = await factorValueApi.coverage({
     ...buildQueryParams(),
     full_range: false,
@@ -730,6 +770,66 @@ const recoverCompletedPrecompute = async (task: RuntimeTask) => {
   return true
 }
 
+const recoverCompletedGroupPrecompute = async (
+  task: RuntimeTask,
+  result: FactorValuePrecomputeResult | undefined,
+) => {
+  const factorNames = result?.factor_names?.length
+    ? result.factor_names
+    : selectedGroupFactorNames.value
+  if (!factorNames.length) return false
+  const baseParams = buildQueryParams()
+  const coverageItems = await Promise.all(factorNames.map(async factorName => {
+    try {
+      const item = await factorValueApi.coverage({
+        ...baseParams,
+        factor_name: factorName,
+        full_range: false,
+      })
+      return { factorName, item }
+    } catch {
+      return null
+    }
+  }))
+  const rows: Record<string, number> = {}
+  const ranges: NonNullable<FactorValuePrecomputeResult['coverage_ranges']> = []
+  coverageItems.forEach(entry => {
+    if (!entry) return
+    const totalRows = Number(entry.item.total_rows || 0)
+    rows[entry.factorName] = totalRows
+    ranges.push({
+      factor_name: entry.factorName,
+      total_rows: totalRows,
+      symbol_count: Number(entry.item.symbol_count || 0),
+      date_count: Number(entry.item.date_count || 0),
+      min_date: entry.item.min_date,
+      max_date: entry.item.max_date,
+      is_complete_to_end: entry.item.max_date === form.endDate,
+    })
+  })
+  const rowsWritten = Object.values(rows).reduce((sum, count) => sum + count, 0)
+  if (rowsWritten <= 0) return false
+  lastResult.value = {
+    task_id: task.task_id,
+    symbols: ranges.reduce((max, item) => Math.max(max, item.symbol_count), 0),
+    start_date: form.startDate,
+    end_date: form.endDate,
+    as_of_time: String(buildFactorParams().time || ''),
+    window: Number(buildFactorParams().window || 0),
+    threshold: Number(buildFactorParams().threshold || 0),
+    factor_names: factorNames,
+    rows,
+    rows_written: rowsWritten,
+    requested_factor_count: factorNames.length,
+    written_factor_count: Object.values(rows).filter(count => count > 0).length,
+    zero_row_factor_count: Object.values(rows).filter(count => count <= 0).length,
+    zero_row_factor_names: factorNames.filter(name => Number(rows[name] || 0) <= 0),
+    coverage_ranges: ranges,
+  }
+  ElMessage.warning('任务状态返回失败，但已检测到因子集合缓存写入，已按完成处理并刷新覆盖率。')
+  return true
+}
+
 const resultFromTask = (task: RuntimeTask, fallback: FactorValuePrecomputeResult) => {
   return (task.meta?.result as FactorValuePrecomputeResult | undefined) || fallback
 }
@@ -737,16 +837,18 @@ const resultFromTask = (task: RuntimeTask, fallback: FactorValuePrecomputeResult
 const runDirectPrecompute = async () => {
   activeTask.value = null
   const started = await factorValueApi.precompute({ ...singlePrecomputePayload(), async_task: true })
-  const task = started.task_id ? await pollPrecomputeTask(started.task_id) : null
-  lastResult.value = task ? resultFromTask(task, started) : started
+  const task = started.task_id ? await pollPrecomputeTask(started.task_id, 'single') : null
+  const recoveredResult = lastResult.value
+  lastResult.value = task ? resultFromTask(task, recoveredResult || started) : started
   await finishPrecompute('因子值预计算完成')
 }
 
 const runDirectGroupPrecompute = async () => {
   activeTask.value = null
   const started = await factorValueApi.precomputeGroup({ ...groupPrecomputePayload(), async_task: true })
-  const task = started.task_id ? await pollPrecomputeTask(started.task_id) : null
-  lastResult.value = task ? resultFromTask(task, started) : started
+  const task = started.task_id ? await pollPrecomputeTask(started.task_id, 'group') : null
+  const recoveredResult = lastResult.value
+  lastResult.value = task ? resultFromTask(task, recoveredResult || started) : started
   await finishPrecompute('因子集合预计算完成')
 }
 
@@ -783,10 +885,13 @@ const waitForDependencySync = async () => {
 
 const prepareAndRunPrecompute = async (mode: 'single' | 'group') => {
   const isGroup = mode === 'group'
+  if (isGroup && !selectedGroupFactorNames.value.length) {
+    throw new Error('当前分组没有可预计算因子')
+  }
   const prepare = await factorValueApi.prepare({
     ...(isGroup ? groupPrecomputePayload() : singlePrecomputePayload()),
     mode,
-    factor_names: isGroup ? [] : [form.factorName],
+    factor_names: isGroup ? selectedGroupFactorNames.value : [form.factorName],
     group_name: isGroup ? form.groupName : null,
   })
   if (!prepare.can_precompute && prepare.sync_plan) {
@@ -828,6 +933,7 @@ const runGroupPrecompute = async () => {
 
 const loadPreview = async () => {
   previewLoading.value = true
+  previewError.value = ''
   try {
     preview.value = await factorValueApi.preview({
       ...buildQueryParams(),
@@ -836,6 +942,9 @@ const loadPreview = async () => {
     })
     if (preview.value?.items?.length)
       await loadStockNames(preview.value.items.map(item => item.symbol))
+  } catch (error) {
+    preview.value = null
+    previewError.value = formatRequestError(error)
   } finally {
     previewLoading.value = false
   }
@@ -885,12 +994,15 @@ const formatValue = (value: number) => {
 
 const resetQueryResults = () => {
   coverage.value = null
+  coverageError.value = ''
   preview.value = null
+  previewError.value = ''
   lastResult.value = null
 }
 
 const autoQuery = async () => {
   await loadCoverage()
+  if (coverageError.value) return
   await loadPreview()
 }
 
@@ -935,9 +1047,19 @@ onBeforeUnmount(() => {
   flex-direction: column;
   gap: 12px;
   min-height: 0;
+  --factor-surface: rgba(19, 19, 24, 0.96);
+  --factor-surface-strong: rgba(14, 15, 20, 0.98);
+  --factor-surface-soft: rgba(36, 39, 51, 0.72);
+  --factor-border: rgba(108, 117, 137, 0.22);
+  --factor-border-strong: rgba(96, 165, 250, 0.24);
+  --factor-row-striped: rgba(255, 255, 255, 0.025);
+  --factor-row-hover: rgba(56, 189, 248, 0.06);
 }
 
 .toolbar {
+  position: sticky;
+  top: 0;
+  z-index: 12;
   padding: 13px 14px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
@@ -946,6 +1068,7 @@ onBeforeUnmount(() => {
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
     var(--bg-surface);
   box-shadow: var(--shadow-sm);
+  backdrop-filter: blur(12px);
 }
 
 .toolbar-header {
@@ -1002,15 +1125,16 @@ onBeforeUnmount(() => {
 }
 
 .control-form {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 2px 10px;
-  align-items: flex-start;
+  align-items: start;
 }
 
 .control-form :deep(.el-form-item) {
   margin-right: 0;
   margin-bottom: 10px;
+  min-width: 0;
 }
 
 .control-form :deep(.el-form-item__label) {
@@ -1019,15 +1143,23 @@ onBeforeUnmount(() => {
 }
 
 .factor-select {
-  width: 232px;
+  width: 100%;
+}
+
+.factor-form-item--wide {
+  grid-column: span 2;
+}
+
+.factor-select--wide {
+  min-width: min(100%, 520px);
 }
 
 .short-input {
-  width: 130px;
+  width: 100%;
 }
 
 .date-range {
-  width: 136px;
+  width: 100%;
 }
 
 .date-control {
@@ -1065,11 +1197,12 @@ onBeforeUnmount(() => {
 }
 
 .number-input {
-  width: 120px;
+  width: 100%;
 }
 
 .action-item {
-  margin-left: auto;
+  grid-column: 1 / -1;
+  margin-left: 0;
 }
 
 .action-help {
@@ -1084,7 +1217,7 @@ onBeforeUnmount(() => {
 
 .summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(140px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
   gap: 8px;
 }
 
@@ -1340,7 +1473,7 @@ onBeforeUnmount(() => {
 
 .preview-dual {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 
@@ -1385,7 +1518,10 @@ onBeforeUnmount(() => {
 }
 
 .table-panel {
+  display: flex;
+  flex-direction: column;
   min-height: 0;
+  height: min(58vh, 720px);
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background: var(--bg-elevated);
@@ -1418,10 +1554,31 @@ onBeforeUnmount(() => {
 }
 
 :deep(.el-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-row-hover-bg-color: var(--factor-row-hover);
+  --el-table-border-color: var(--factor-border);
+  --el-table-header-bg-color: rgba(10, 10, 12, 0.72);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
   border: 0;
   border-radius: 0;
   overflow: hidden;
   background: transparent;
+}
+
+:deep(.el-table__body tr),
+:deep(.el-table__body td.el-table__cell) {
+  background: transparent !important;
+}
+
+:deep(.el-table--striped .el-table__body tr.el-table__row--striped > td.el-table__cell) {
+  background: var(--factor-row-striped) !important;
+}
+
+:deep(.el-table .el-table-fixed-column--left),
+:deep(.el-table .el-table-fixed-column--right) {
+  background: var(--factor-surface) !important;
 }
 
 :deep(.el-table th.el-table__cell) {
@@ -1435,14 +1592,193 @@ onBeforeUnmount(() => {
   border-bottom-color: var(--border-subtle);
 }
 
+:deep(.el-table__inner-wrapper::before) {
+  background-color: var(--factor-border);
+}
+
 :deep(.el-button) {
   border-radius: 6px;
 }
 
+:deep(.el-button:not(.el-button--primary)) {
+  color: var(--text-primary);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)), var(--factor-surface-soft);
+  border-color: var(--factor-border);
+}
+
+:deep(.el-button:not(.el-button--primary):hover) {
+  color: var(--text-bright);
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(56, 189, 248, 0)), rgba(31, 41, 55, 0.92);
+  border-color: var(--factor-border-strong);
+}
+
 :deep(.el-input__wrapper),
-:deep(.el-select__wrapper) {
-  background: rgba(8, 8, 10, 0.42);
-  box-shadow: 0 0 0 1px var(--border-subtle) inset;
+:deep(.el-select__wrapper),
+:deep(.el-date-editor .el-input__wrapper) {
+  background: var(--factor-surface-strong);
+  box-shadow: 0 0 0 1px var(--factor-border) inset;
+}
+
+:deep(.el-tag) {
+  color: #cbd5e1;
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.14), rgba(148, 163, 184, 0.06));
+  border-color: rgba(148, 163, 184, 0.2);
+}
+
+:deep(.group-tags .el-tag),
+:deep(.dep-tag.el-tag),
+:deep(.coverage-warning__tags .el-tag),
+:deep(.date-shortcut.el-tag) {
+  color: #dbe4f0 !important;
+  background-color: rgba(51, 65, 85, 0.38) !important;
+  background-image: linear-gradient(180deg, rgba(148, 163, 184, 0.14), rgba(148, 163, 184, 0.06)) !important;
+  border-color: rgba(148, 163, 184, 0.24) !important;
+}
+
+:deep(.el-tag--success) {
+  color: #86efac;
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.16), rgba(34, 197, 94, 0.06));
+  border-color: rgba(34, 197, 94, 0.22);
+}
+
+:deep(.el-tag--warning) {
+  color: #fcd34d;
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.16), rgba(245, 158, 11, 0.06));
+  border-color: rgba(245, 158, 11, 0.22);
+}
+
+:deep(.el-tag--danger) {
+  color: #fca5a5;
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.16), rgba(239, 68, 68, 0.06));
+  border-color: rgba(239, 68, 68, 0.22);
+}
+
+:deep(.el-tag--info) {
+  color: #93c5fd;
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.14), rgba(56, 189, 248, 0.06));
+  border-color: rgba(96, 165, 250, 0.22);
+}
+
+:deep(.el-alert) {
+  border-color: var(--factor-border);
+}
+
+:deep(.el-alert--success) {
+  background: linear-gradient(180deg, rgba(34, 197, 94, 0.14), rgba(34, 197, 94, 0.05));
+}
+
+:deep(.el-alert--info) {
+  background: linear-gradient(180deg, rgba(56, 189, 248, 0.14), rgba(56, 189, 248, 0.05));
+}
+
+:deep(.el-alert--warning) {
+  background: linear-gradient(180deg, rgba(245, 158, 11, 0.14), rgba(245, 158, 11, 0.05));
+}
+
+:deep(.el-alert__title),
+:deep(.el-alert__description) {
+  color: var(--text-primary);
+}
+
+:global(.factor-select-dropdown--wide) {
+  min-width: min(720px, calc(100vw - 32px)) !important;
+  border: 1px solid rgba(96, 165, 250, 0.22) !important;
+  border-radius: 8px !important;
+  background:
+    linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(12, 15, 22, 0.98)),
+    #0c0f16 !important;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(148, 163, 184, 0.08) inset !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown),
+:global(.factor-select-dropdown--wide .el-select-dropdown__wrap),
+:global(.factor-select-dropdown--wide .el-select-dropdown__list),
+:global(.factor-select-dropdown--wide .el-virtual-list),
+:global(.factor-select-dropdown--wide .el-virtual-list__container),
+:global(.factor-select-dropdown--wide .el-vl__wrapper),
+:global(.factor-select-dropdown--wide .el-vl__window),
+:global(.factor-select-dropdown--wide .el-vl__list),
+:global(.factor-select-dropdown--wide ul[role="listbox"]) {
+  width: 100% !important;
+  background: transparent !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown) {
+  width: 100% !important;
+}
+
+:global(.factor-select-dropdown--wide .el-vl__window) {
+  width: 100% !important;
+  scrollbar-color: rgba(96, 165, 250, 0.32) rgba(15, 23, 42, 0.6);
+}
+
+:global(.factor-select-dropdown--wide .el-popper__arrow::before) {
+  border-color: rgba(96, 165, 250, 0.22) !important;
+  background: #151b26 !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item) {
+  height: 48px;
+  width: 100% !important;
+  line-height: normal;
+  padding: 6px 12px;
+  color: #dbe7f5 !important;
+  background: transparent !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item:hover),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.hover) {
+  color: #f8fbff !important;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.16), rgba(99, 102, 241, 0.08)) !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.selected) {
+  color: #ffffff !important;
+  background: linear-gradient(90deg, rgba(14, 165, 233, 0.28), rgba(37, 99, 235, 0.16)) !important;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.is-disabled) {
+  color: rgba(148, 163, 184, 0.45) !important;
+  background: transparent !important;
+}
+
+:global(.factor-option) {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+}
+
+:global(.factor-option__label) {
+  overflow: hidden;
+  color: #e8f1fb;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.factor-option__meta) {
+  overflow: hidden;
+  color: #9fb2c7;
+  font-family: var(--font-data);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item:hover .factor-option__label),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.hover .factor-option__label),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected .factor-option__label) {
+  color: #ffffff;
+}
+
+:global(.factor-select-dropdown--wide .el-select-dropdown__item:hover .factor-option__meta),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.hover .factor-option__meta),
+:global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected .factor-option__meta) {
+  color: #bfdbfe;
 }
 
 @media (max-width: 1100px) {
@@ -1465,8 +1801,39 @@ onBeforeUnmount(() => {
     margin-left: 0;
   }
 
-  .summary {
-    grid-template-columns: repeat(2, minmax(140px, 1fr));
+  .table-panel {
+    height: 520px;
+  }
+}
+
+@media (max-width: 760px) {
+  .toolbar {
+    padding: 10px;
+  }
+
+  .toolbar-meta {
+    white-space: normal;
+  }
+
+  .control-form {
+    grid-template-columns: 1fr;
+  }
+
+  .factor-form-item--wide {
+    grid-column: 1;
+  }
+
+  .date-control__row,
+  .date-shortcuts {
+    flex-wrap: wrap;
+  }
+
+  .preview-dual {
+    grid-template-columns: 1fr;
+  }
+
+  .table-panel {
+    height: 420px;
   }
 }
 </style>

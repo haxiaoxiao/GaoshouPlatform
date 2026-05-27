@@ -3,6 +3,7 @@
 from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis, FactorResearchRun, FactorResearchRunItem
 from .financial import FinancialData
+from .sentiment import SentimentPost
 from .stock import Stock
 from .strategy import Backtest, Order, Strategy, Trade
 from .sync import SyncLog, SyncRun, SyncTask
@@ -21,6 +22,7 @@ __all__ = [
     "FactorResearchRun",
     "FactorResearchRunItem",
     "FinancialData",
+    "SentimentPost",
     "WatchlistGroup",
     "WatchlistStock",
     "SyncTask",

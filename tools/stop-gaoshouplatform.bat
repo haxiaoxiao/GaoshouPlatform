@@ -3,11 +3,12 @@ setlocal EnableExtensions EnableDelayedExpansion
 chcp 65001 >nul
 title GaoshouPlatform Shutdown
 
-set "ROOT=E:\Projects\GaoshouPlatform"
-set "ENV_FILE=%ROOT%\.env.local"
-set "BACKEND_PORT=8800"
-set "SYNC_PORT=8810"
-set "FRONTEND_PORT=3500"
+for %%I in ("%~dp0..") do set "SCRIPT_ROOT=%%~fI"
+if defined GAOSHOU_ROOT (set "ROOT=%GAOSHOU_ROOT%") else (set "ROOT=%SCRIPT_ROOT%")
+if defined GAOSHOU_ENV_FILE (set "ENV_FILE=%GAOSHOU_ENV_FILE%") else (set "ENV_FILE=%ROOT%\.env.local")
+if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else (set "BACKEND_PORT=8800")
+if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
 set "STOP_REDIS=0"
 set "STOP_CLICKHOUSE=0"
 set "NO_PAUSE=0"
@@ -28,7 +29,10 @@ if exist "%ENV_FILE%" (
     set "V=%%b"
     if /i "!K!"=="MARKET_DATA_BACKEND" set "MARKET_DATA_BACKEND=!V!"
     if /i "!K!"=="CLICKHOUSE_ENABLED" set "CLICKHOUSE_ENABLED=!V!"
-    if /i "!K!"=="SYNC_SERVICE_PORT" set "SYNC_PORT=!V!"
+    if /i "!K!"=="BACKEND_PORT" if not defined GAOSHOU_BACKEND_PORT set "BACKEND_PORT=!V!"
+    if /i "!K!"=="SYNC_SERVICE_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
+    if /i "!K!"=="SYNC_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
+    if /i "!K!"=="FRONTEND_PORT" if not defined GAOSHOU_FRONTEND_PORT set "FRONTEND_PORT=!V!"
   )
 )
 if /i "%MARKET_DATA_BACKEND%"=="clickhouse" set "STOP_CLICKHOUSE=1"
@@ -37,11 +41,14 @@ if /i "%CLICKHOUSE_ENABLED%"=="true" set "STOP_CLICKHOUSE=1"
 echo ========================================
 echo   GaoshouPlatform Shutdown
 echo ========================================
+echo Root:      %ROOT%
+echo Env file:  %ENV_FILE%
+echo Ports:     backend=%BACKEND_PORT% sync=%SYNC_PORT% frontend=%FRONTEND_PORT%
 echo.
 
-echo [1/3] Stopping backend/sync/frontend processes...
+echo [1/3] Stopping backend/sync/frontend processes on configured ports...
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@(%BACKEND_PORT%,%SYNC_PORT%,%FRONTEND_PORT%,3501,5173); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if ($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match 'uvicorn app\.(main|sync_main):app|node_modules.*vite|vite\.js' } | ForEach-Object { $ids += [int]$_.ProcessId }; $ids | Select-Object -Unique | ForEach-Object { Write-Host ('      Killing PID ' + $_); Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Write-Host ('      Killing PID ' + $_); Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
 echo       OK
 
@@ -64,8 +71,8 @@ if errorlevel 1 (
   )
 )
 
-echo [3/3] Verifying ports...
-for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT% 3501 5173) do (
+echo [3/3] Verifying configured ports...
+for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT%) do (
   netstat -ano 2>nul | findstr ":%%p " | findstr "LISTENING" >nul 2>&1
   if not errorlevel 1 (
     echo       WARN: port %%p is still listening

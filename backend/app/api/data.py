@@ -103,6 +103,7 @@ class SyncRequest(BaseModel):
     symbols: list[str] | None = Field(default=None, description="股票代码列表")
     start_date: date | None = Field(default=None, description="开始日期")
     end_date: date | None = Field(default=None, description="结束日期")
+    sync_mode: str = Field(default="range", description="sync mode: incremental/range/full")
     failure_strategy: str = Field(default="skip", description="失败策略: skip/retry/stop")
     full_sync: bool = Field(default=False, description="全量同步标记")
     factor_sync_plan: dict[str, Any] | None = Field(default=None, description="因子依赖同步计划")

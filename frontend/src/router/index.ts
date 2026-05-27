@@ -58,6 +58,12 @@ const router = createRouter({
       ],
     },
     {
+      path: '/research',
+      name: 'InvestmentResearch',
+      component: () => import('@/views/InvestmentResearch/index.vue'),
+      meta: { title: '投研' },
+    },
+    {
       path: '/backtest',
       name: 'StrategyBacktest',
       component: () => import('@/views/StrategyBacktest/index.vue'),
