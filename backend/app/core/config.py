@@ -106,6 +106,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = _ENV_FILES
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()

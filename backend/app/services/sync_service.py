@@ -22,6 +22,7 @@ from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
+from app.services.index_components import ensure_index_components
 from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
 
 
@@ -1648,6 +1649,8 @@ class SyncService:
         blocked_providers: dict[str, str] = {}
         total_rows = 0
         synced_symbols: list[str] = []
+        component_results: list[dict[str, Any]] = []
+        component_failed_symbols: list[dict[str, str]] = []
 
         try:
             for index, item in enumerate(items, start=1):
@@ -1721,7 +1724,19 @@ class SyncService:
                 elif not any(entry["symbol"] == item.symbol for entry in failed_symbols):
                     empty_symbols.append(item.symbol)
 
+                if item.pool_enabled and item.requires_components_when_pool:
+                    try:
+                        component_result = await ensure_index_components(item.symbol, start_date, end_date)
+                        component_results.append(component_result)
+                    except Exception as exc:
+                        component_failed_symbols.append({"symbol": item.symbol, "error": str(exc)})
+                        logger.warning("Index component sync failed for {}: {}", item.symbol, exc)
+                        if failure_strategy == "stop":
+                            raise
+
                 progress.current = index
+                progress.details["component_results"] = component_results[-100:]
+                progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
                 await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
                 if provider_blocked_now:
@@ -1738,6 +1753,8 @@ class SyncService:
             progress.details["empty_symbols"] = empty_symbols
             progress.details["failed_symbols"] = failed_symbols[:100]
             progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
             progress.details["total_rows"] = total_rows
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
@@ -1781,6 +1798,8 @@ class SyncService:
             progress.error_message = str(exc)
             progress.details["failed_symbols"] = failed_symbols[:100]
             progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
             await self.create_sync_log(
                 sync_type="index_daily",
                 status="failed",

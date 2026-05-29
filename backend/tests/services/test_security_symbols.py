@@ -19,3 +19,18 @@ def test_index_catalog_accepts_canonical_code_alias_and_jq_code():
     item = get_index_item("930955.CSI")
     assert item is not None
     assert item.symbol == "930955.SH"
+
+
+def test_index_catalog_exposes_growth_board_stock_pools():
+    expected = {
+        "chinext": "399006.SZ",
+        "chinext50": "399673.SZ",
+        "chinext_composite": "399102.SZ",
+        "star50": "000688.SH",
+        "star100": "000698.SH",
+    }
+    for alias, symbol in expected.items():
+        item = get_index_item(alias)
+        assert item is not None
+        assert item.symbol == symbol
+        assert item.pool_enabled is True

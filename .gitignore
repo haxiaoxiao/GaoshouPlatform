@@ -57,6 +57,8 @@ data/tmp_*/
 *.tmp.*
 %TEMP%/
 logs/
+.tools/
+.codegraph/
 .playwright-mcp/
 .superpowers/
 app/reports/
