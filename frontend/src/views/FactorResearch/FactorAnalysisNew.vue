@@ -62,7 +62,17 @@ import type { FactorReport, StockPool } from '@/types/factor'
 
 const route = useRoute()
 const factorName = ref(String(route.params.id || ''))
-const stockPoolOptions: StockPool[] = ['hs300', 'zz500', 'zz800', 'zz1000']
+const stockPoolOptions: StockPool[] = [
+  'hs300',
+  'zz500',
+  'zz800',
+  'zz1000',
+  'chinext',
+  'chinext50',
+  'chinext_composite',
+  'star50',
+  'star100',
+]
 const queryStockPool = String(route.query.stock_pool || 'hs300')
 const stockPool = ref<StockPool>(
   stockPoolOptions.includes(queryStockPool as StockPool)

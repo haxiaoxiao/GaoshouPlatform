@@ -8,7 +8,17 @@ export interface FactorConfig {
   direction?: FactorDirection
 }
 
-export type StockPool = 'hs300' | 'zz500' | 'zz800' | 'zz1000' | 'zz_quanzhi'
+export type StockPool =
+  | 'hs300'
+  | 'zz500'
+  | 'zz800'
+  | 'zz1000'
+  | 'zz_quanzhi'
+  | 'chinext'
+  | 'chinext50'
+  | 'chinext_composite'
+  | 'star50'
+  | 'star100'
 export type FactorDirection = 'asc' | 'desc'
 
 /** Evaluation config */
