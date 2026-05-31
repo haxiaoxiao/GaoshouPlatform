@@ -214,6 +214,69 @@ watch(
   height: 100%;
 }
 
+:deep(.el-table) {
+  --el-table-bg-color: rgba(10, 14, 20, 0.78);
+  --el-table-tr-bg-color: rgba(11, 16, 24, 0.72);
+  --el-table-header-bg-color: rgba(11, 20, 31, 0.95);
+  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.08);
+  --el-table-border-color: rgba(108, 117, 137, 0.22);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+  background: rgba(10, 14, 20, 0.78) !important;
+  color: var(--text-primary);
+}
+
+:deep(.el-table__inner-wrapper),
+:deep(.el-table__body-wrapper),
+:deep(.el-table__fixed),
+:deep(.el-table__fixed-right),
+:deep(.el-table__fixed-body-wrapper),
+:deep(.el-table__fixed-right-patch) {
+  background: transparent !important;
+}
+
+:deep(.el-table th.el-table__cell) {
+  background: rgba(11, 20, 31, 0.95) !important;
+  color: var(--text-secondary);
+  border-bottom-color: rgba(108, 117, 137, 0.24);
+}
+
+:deep(.el-table tr),
+:deep(.el-table__body tr),
+:deep(.el-table__body td.el-table__cell) {
+  background: rgba(11, 16, 24, 0.72) !important;
+  color: var(--text-primary);
+}
+
+:deep(.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell) {
+  background: rgba(15, 23, 34, 0.82) !important;
+}
+
+:deep(.el-table__body tr:hover > td.el-table__cell) {
+  background: rgba(56, 189, 248, 0.08) !important;
+}
+
+:deep(.el-table .el-table__cell) {
+  border-bottom-color: rgba(108, 117, 137, 0.22) !important;
+}
+
+:deep(.el-table__inner-wrapper::before),
+:deep(.el-table__border-left-patch),
+:deep(.el-table__border-bottom-patch) {
+  background-color: rgba(108, 117, 137, 0.22) !important;
+}
+
+:deep(.el-table .el-table-fixed-column--left),
+:deep(.el-table .el-table-fixed-column--right) {
+  background: rgba(11, 16, 24, 0.94) !important;
+}
+
+:deep(.el-tag:not(.el-tag--success):not(.el-tag--warning):not(.el-tag--danger):not(.el-tag--info)) {
+  color: #dbeafe;
+  background-color: rgba(56, 189, 248, 0.12);
+  border-color: rgba(56, 189, 248, 0.24);
+}
+
 @media (max-width: 1280px) {
   .factor-header {
     grid-template-columns: 1fr;

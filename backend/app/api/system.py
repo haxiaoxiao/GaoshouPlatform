@@ -1,14 +1,15 @@
 # backend/app/api/system.py
+import asyncio
 from datetime import date
 
 from fastapi import APIRouter
 
 from app.core.config import settings
-from app.data_stores import get_market_data_store
 from app.cache.redis_cache import get_redis_client
 from app.services.backtest_redis_cache import get_backtest_cache
 from app.services.runtime_tasks import get_task, list_tasks
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
+from app.services.tushare_relay_sync import dataset_coverage
 
 router = APIRouter()
 
@@ -16,27 +17,26 @@ router = APIRouter()
 @router.get("/status")
 async def get_system_status():
     """获取系统状态（含数据后端配置和覆盖摘要）"""
-    store = get_market_data_store()
     parquet_info = {}
 
     if settings.market_data_backend == "parquet":
         try:
-            daily = store.coverage([], date(2000, 1, 1), date.today(), dataset="klines_daily")
-            minute_dataset = (
-                "klines_minute_timer"
-                if store._exists("klines_minute_timer")
-                else "klines_minute"
+            daily, minute_timer, minute, cum_timer = await asyncio.gather(
+                asyncio.to_thread(dataset_coverage, "klines_daily", "trade_date"),
+                asyncio.to_thread(dataset_coverage, "klines_minute_timer", "datetime"),
+                asyncio.to_thread(dataset_coverage, "klines_minute", "datetime"),
+                asyncio.to_thread(dataset_coverage, "klines_minute_cum_timer", "datetime"),
             )
-            minute = store.coverage([], date(2000, 1, 1), date.today(), dataset=minute_dataset)
-            cum_timer = store.coverage([], date(2000, 1, 1), date.today(), dataset="klines_minute_cum_timer")
+            minute_info = minute_timer if minute_timer.get("max_date") else minute
+            minute_dataset = "klines_minute_timer" if minute_timer.get("max_date") else "klines_minute"
             parquet_info = {
-                "klines_daily_rows": daily.get("total_rows", 0),
-                "klines_daily_symbols": len(daily.get("symbols_covered", [])),
+                "klines_daily_rows": int(daily.get("row_count") or 0),
+                "klines_daily_latest": daily.get("max_date"),
                 "klines_minute_dataset": minute_dataset,
-                "klines_minute_rows": minute.get("total_rows", 0),
-                "klines_minute_symbols": len(minute.get("symbols_covered", [])),
-                "klines_minute_cum_timer_rows": cum_timer.get("total_rows", 0),
-                "klines_minute_cum_timer_symbols": len(cum_timer.get("symbols_covered", [])),
+                "klines_minute_rows": int(minute_info.get("row_count") or 0),
+                "klines_minute_latest": minute_info.get("max_date"),
+                "klines_minute_cum_timer_rows": int(cum_timer.get("row_count") or 0),
+                "klines_minute_cum_timer_latest": cum_timer.get("max_date"),
             }
         except Exception:
             parquet_info = {"error": "无法读取 Parquet 状态"}

@@ -122,9 +122,43 @@ INDEX_CATALOG: tuple[IndexCatalogItem, ...] = (
         jq_symbol="000906.XSHG",
         component_mode="derived_union",
     ),
+    _pool_item(
+        "399006.SZ",
+        "创业板指",
+        notes="Growth board pool. Falls back to the latest available constituent snapshot when strict history is missing.",
+        stock_pool_alias="chinext",
+        jq_symbol="399006.XSHE",
+    ),
+    _pool_item(
+        "399673.SZ",
+        "创业板50",
+        notes="Leading ChiNext names for growth/innovation factor research.",
+        stock_pool_alias="chinext50",
+        jq_symbol="399673.XSHE",
+    ),
+    _pool_item(
+        "399102.SZ",
+        "创业板综",
+        notes="Broader ChiNext universe. Current constituents are usable when historical snapshots are incomplete.",
+        stock_pool_alias="chinext_composite",
+        jq_symbol="399102.XSHE",
+    ),
+    _pool_item(
+        "000688.SH",
+        "科创50",
+        notes="STAR Market core pool. Falls back to the latest available constituent snapshot when strict history is missing.",
+        stock_pool_alias="star50",
+        jq_symbol="000688.XSHG",
+    ),
+    _pool_item(
+        "000698.SH",
+        "科创100",
+        notes="STAR Market expanded core pool for technology-growth factor research.",
+        stock_pool_alias="star100",
+        jq_symbol="000698.XSHG",
+    ),
     _benchmark_item("000001.SH", "上证指数"),
     _benchmark_item("399001.SZ", "深证成指"),
-    _benchmark_item("399006.SZ", "创业板指"),
     _benchmark_item("000016.SH", "上证50"),
     _benchmark_item(
         "000985.SH",
@@ -133,8 +167,6 @@ INDEX_CATALOG: tuple[IndexCatalogItem, ...] = (
         stock_pool_alias="zz_quanzhi",
     ),
     _benchmark_item("932000.SH", "中证2000"),
-    _benchmark_item("000688.SH", "科创50"),
-    _benchmark_item("000698.SH", "科创100"),
     _benchmark_item("000922.SH", "中证红利"),
     _benchmark_item(
         "930955.SH",
@@ -170,6 +202,18 @@ INDEX_CATALOG: tuple[IndexCatalogItem, ...] = (
     _benchmark_item("801350.SI", "申万建筑材料", provider="tushare.sw_daily", market_family="sw_industry"),
     _benchmark_item("801360.SI", "申万建筑装饰", provider="tushare.sw_daily", market_family="sw_industry"),
     _benchmark_item("801370.SI", "申万轻工制造", provider="tushare.sw_daily", market_family="sw_industry"),
+)
+
+COMMON_BENCHMARK_SYMBOLS: tuple[str, ...] = (
+    "000300.SH",
+    "000905.SH",
+    "000852.SH",
+    "000016.SH",
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "000688.SH",
+    "399101.SZ",
 )
 
 
@@ -239,6 +283,7 @@ def list_index_items(*, benchmark_only: bool | None = None, pool_only: bool | No
 
 def catalog_item_to_dict(item: IndexCatalogItem) -> dict[str, Any]:
     payload = asdict(item)
+    payload["common_benchmark"] = item.symbol in COMMON_BENCHMARK_SYMBOLS
     if item.pool_enabled:
         payload["component_status"] = "available"
         payload["reason"] = None

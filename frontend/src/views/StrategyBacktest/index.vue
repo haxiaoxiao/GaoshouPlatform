@@ -192,6 +192,33 @@
               <el-select v-model="btEngine" size="small" style="width:100px" @change="onEngineChange">
                 <el-option v-for="e in engineOptions" :key="e.value" :label="e.label" :value="e.value" />
               </el-select>
+              <span>基准</span>
+              <el-select v-model="selectedBenchmarkSymbol" size="small" style="width:132px" clearable>
+                <el-option
+                  v-for="item in benchmarkOptions"
+                  :key="item.symbol"
+                  :label="`${item.display_name} ${item.symbol}`"
+                  :value="item.symbol"
+                />
+              </el-select>
+              <template v-if="btEngine === 'akquant'">
+                <span>热启动</span>
+                <el-select v-model="warmStartMode" size="small" style="width:86px">
+                  <el-option label="Auto" value="auto" />
+                  <el-option label="Always" value="always" />
+                  <el-option label="Off" value="off" />
+                </el-select>
+                <el-input-number
+                  v-if="warmStartMode !== 'off'"
+                  v-model="warmStartChunkDays"
+                  :min="1"
+                  :max="365"
+                  size="small"
+                  controls-position="right"
+                  style="width:92px"
+                />
+                <el-checkbox v-if="warmStartMode !== 'off'" v-model="warmStartKeepCheckpoints" size="small">保留</el-checkbox>
+              </template>
               <el-button size="small" @click="checkBacktestCoverage" :loading="coverageChecking">检查数据</el-button>
               <el-button type="primary" size="small" @click="runBacktestTask" :loading="btRunning">运行回测</el-button>
               <el-button
@@ -666,6 +693,10 @@ interface BtSettings {
   frequency?: string
   barType?: string
   engine?: string
+  benchmarkSymbol?: string
+  warmStartMode?: 'auto' | 'always' | 'off'
+  warmStartChunkDays?: number
+  warmStartKeepCheckpoints?: boolean
   showOptimizationPanel?: boolean
   optParamGridText?: string
   optMetric?: string
@@ -690,6 +721,10 @@ const collectBtSettings = (): BtSettings => ({
     frequency: btFrequency.value,
     barType: btBarType.value,
     engine: btEngine.value,
+    benchmarkSymbol: selectedBenchmarkSymbol.value || undefined,
+    warmStartMode: warmStartMode.value,
+    warmStartChunkDays: warmStartChunkDays.value,
+    warmStartKeepCheckpoints: warmStartKeepCheckpoints.value,
     showOptimizationPanel: showOptimizationPanel.value,
     optParamGridText: optParamGridText.value,
     optMetric: optMetric.value,
@@ -710,6 +745,10 @@ const btEndDate = ref(saved.endDate || getDefaultEndDate())
 const btCapital = ref(saved.capital ?? 1_000_000)
 const btFrequency = ref(saved.frequency || 'monthly')
 const btBarType = ref(saved.barType || 'daily')
+const selectedBenchmarkSymbol = ref(saved.benchmarkSymbol || '000300.SH')
+const warmStartMode = ref<'auto' | 'always' | 'off'>(saved.warmStartMode || 'auto')
+const warmStartChunkDays = ref(saved.warmStartChunkDays || 30)
+const warmStartKeepCheckpoints = ref(Boolean(saved.warmStartKeepCheckpoints))
 const showOptimizationPanel = ref(Boolean(saved.showOptimizationPanel))
 const btSymbols = ref<string[]>(saved.symbols || [])
 const isAllStocks = ref(false)
@@ -722,6 +761,9 @@ const watchlistGroups = ref<WatchlistGroup[]>([])
 const selectedWatchlistGroup = ref<number | null>(null)
 const indexCatalog = ref<IndexCatalogItem[]>([])
 const indexPoolOptions = computed(() => indexCatalog.value.filter(item => item.pool_enabled))
+const benchmarkOptions = computed(() =>
+  indexCatalog.value.filter(item => item.benchmark_enabled && (item.common_benchmark || item.pool_enabled))
+)
 
 // 最终提交用的 symbol 列表
 const effectiveSymbols = computed(() => {
@@ -870,6 +912,9 @@ const loadIndexPool = async (indexSymbol: string | null) => {
       symbols: res?.symbols || [],
       indexSymbol: res?.index_symbol || indexSymbol,
     }
+    if (catalogItem?.benchmark_enabled && (!selectedBenchmarkSymbol.value || selectedBenchmarkSymbol.value === '000300.SH')) {
+      selectedBenchmarkSymbol.value = catalogItem.symbol
+    }
     btSymbols.value = []
     isAllStocks.value = false
     ElMessage.success(`已选择指数池 ${poolSource.value.label}，历史成分 ${poolSource.value.count} 只`)
@@ -957,6 +1002,10 @@ const applyBtSettings = (settings?: BtSettings | null) => {
   if (typeof settings.capital === 'number') btCapital.value = settings.capital
   if (settings.frequency) btFrequency.value = settings.frequency
   if (settings.barType) btBarType.value = settings.barType
+  if (settings.benchmarkSymbol !== undefined) selectedBenchmarkSymbol.value = settings.benchmarkSymbol || '000300.SH'
+  if (settings.warmStartMode) warmStartMode.value = settings.warmStartMode
+  if (typeof settings.warmStartChunkDays === 'number') warmStartChunkDays.value = settings.warmStartChunkDays
+  if (typeof settings.warmStartKeepCheckpoints === 'boolean') warmStartKeepCheckpoints.value = settings.warmStartKeepCheckpoints
   if (typeof settings.showOptimizationPanel === 'boolean') showOptimizationPanel.value = settings.showOptimizationPanel
   if (typeof settings.optParamGridText === 'string') optParamGridText.value = settings.optParamGridText
   if (typeof settings.optMetric === 'string') optMetric.value = settings.optMetric
@@ -1114,6 +1163,14 @@ const buildBacktestPayload = () => {
     rebalance_freq: btFrequency.value,
     n_groups: isExpression ? btNGroups.value : 5,
     bar_type: btBarType.value,
+    benchmark_symbol: selectedBenchmarkSymbol.value || undefined,
+    warm_start: engine === 'akquant'
+      ? {
+          mode: warmStartMode.value,
+          chunk_days: warmStartChunkDays.value,
+          keep_checkpoints: warmStartKeepCheckpoints.value,
+        }
+      : undefined,
   }
 }
 
@@ -1133,6 +1190,13 @@ const coverageSummaryLines = (coverage: any) => {
   }
   if (coverage?.market?.missing_symbols_sample?.length) {
     lines.push(`缺行情样本: ${coverage.market.missing_symbols_sample.slice(0, 8).join(', ')}`)
+  }
+  if (coverage?.benchmark) {
+    const b = coverage.benchmark
+    lines.push(`基准 ${b.symbol}: ${b.covered_days || 0} 日${b.ok ? '' : '，行情缺失将隐藏对比线'}`)
+  }
+  if (coverage?.benchmark_warnings?.length) {
+    lines.push(`基准提示: ${coverage.benchmark_warnings.join('；')}`)
   }
   return lines
 }

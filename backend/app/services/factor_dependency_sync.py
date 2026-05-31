@@ -19,7 +19,7 @@ from app.services.factor_catalog import (
     TA_FACTOR_SPECS,
 )
 from app.services.factor_value_store import get_factor_definition, get_factor_group, normalize_factor_time
-from app.services.index_components import ensure_index_components, normalize_index_symbol
+from app.services.index_components import ensure_index_components, load_index_symbols, normalize_index_symbol
 
 
 CORE_FACTORS = {
@@ -498,24 +498,7 @@ async def _resolve_plan_symbols(plan: dict[str, Any]) -> list[str] | None:
         return None
     start = date.fromisoformat(str(plan["start_date"]))
     end = date.fromisoformat(str(plan["end_date"]))
-
-    def _query() -> list[str]:
-        idx = normalize_index_symbol(str(index_symbol)) or str(index_symbol)
-        with sqlite3.connect(settings.sqlite_db_path) as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT symbol
-                FROM index_components
-                WHERE index_symbol = ?
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                ORDER BY symbol
-                """,
-                (idx, (start - timedelta(days=370)).isoformat(), end.isoformat()),
-            ).fetchall()
-        return [str(row[0]) for row in rows]
-
-    return await asyncio.to_thread(_query)
+    return await load_index_symbols(str(index_symbol), start, end)
 
 
 def _latest_sqlite_date(table: str, column: str) -> str | None:
@@ -538,28 +521,18 @@ def _latest_index_component_date(index_symbol: str) -> str | None:
 
 def _index_components_cover_request(index_symbol: str, start_date: date, end_date: date) -> bool:
     idx = normalize_index_symbol(index_symbol) or index_symbol
+    # Current-snapshot fallback is accepted for factor research when strict
+    # point-in-time constituents have not been accumulated yet.
     with sqlite3.connect(settings.sqlite_db_path) as conn:
-        before = conn.execute(
+        row = conn.execute(
             """
-            SELECT trade_date
+            SELECT COUNT(*)
             FROM index_components
-            WHERE index_symbol = ? AND trade_date <= ?
-            ORDER BY trade_date DESC
-            LIMIT 1
+            WHERE index_symbol = ?
             """,
-            (idx, start_date.isoformat()),
+            (idx,),
         ).fetchone()
-        latest = conn.execute(
-            """
-            SELECT MAX(trade_date)
-            FROM index_components
-            WHERE index_symbol = ? AND trade_date <= ?
-            """,
-            (idx, end_date.isoformat()),
-        ).fetchone()
-    before_date = _parse_date(before[0]) if before and before[0] else None
-    latest_date = _parse_date(latest[0]) if latest and latest[0] else None
-    return bool(before_date and latest_date and latest_date >= end_date - timedelta(days=45))
+    return bool(row and int(row[0] or 0) > 0)
 
 
 def _latest_market_date(dataset: str, *, timer_time: str | None = None) -> str | None:

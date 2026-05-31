@@ -67,6 +67,16 @@
             </el-option-group>
           </el-select>
         </el-form-item>
+        <el-form-item label="基准">
+          <el-select v-model="form.benchmark_symbol" filterable style="width:180px">
+            <el-option
+              v-for="item in benchmarkOptions"
+              :key="item.symbol"
+              :label="`${item.display_name} ${item.symbol}`"
+              :value="item.symbol"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="成分口径">
           <el-select v-model="form.pool_membership_mode" style="width:180px">
             <el-option label="Static latest" value="static_latest" />
@@ -108,6 +118,10 @@
         </el-form-item>
         <el-form-item label="处理选项">
           <div class="switch-row">
+            <el-select v-model="form.outlier_handling" style="width:126px">
+              <el-option label="不去极值" value="none" />
+              <el-option label="Winsor 2.5%" value="winsorize" />
+            </el-select>
             <el-checkbox v-model="form.filter_limit_up">过滤涨停</el-checkbox>
             <el-checkbox v-model="form.filter_limit_down">过滤跌停</el-checkbox>
             <el-checkbox v-model="form.industry_neutralization">行业中性化</el-checkbox>
@@ -207,6 +221,9 @@ const detail = ref<FactorResearchRunDetail | null>(null)
 const indexCatalog = ref<IndexCatalogItem[]>([])
 const watchlistGroups = ref<WatchlistGroup[]>([])
 const poolEnabledIndexes = computed(() => indexCatalog.value.filter(item => item.pool_enabled))
+const benchmarkOptions = computed(() =>
+  indexCatalog.value.filter(item => item.benchmark_enabled && (item.common_benchmark || item.pool_enabled))
+)
 
 const form = reactive({
   stock_pool_value: String(route.query.stock_pool || 'zz500'),
@@ -219,13 +236,15 @@ const form = reactive({
   transfer_fee_rate: numericQuery('transfer_fee_rate', 0),
   slippage: numericQuery('slippage', route.query.fee_config === 'commission_stamp' ? 0 : 0.001),
   filter_limit_up: route.query.filter_limit_up !== 'false',
-  filter_limit_down: true,
-  group_count: 5,
-  direction: 'desc' as 'asc' | 'desc',
+  filter_limit_down: route.query.filter_limit_down !== 'false',
+  group_count: numericQuery('group_count', 5),
+  direction: enumQuery('direction', ['asc', 'desc'], 'desc'),
   pool_membership_mode: String(route.query.pool_membership_mode || 'static_latest') as 'static_latest' | 'point_in_time' | 'union',
+  benchmark_symbol: stringQuery('benchmark_symbol') || '000300.SH',
   factor_value_params_hash: stringQuery('factor_value_params_hash'),
-  industry_neutralization: false,
-  standardize: false,
+  outlier_handling: enumQuery('outlier_handling', ['none', 'winsorize'], 'none'),
+  industry_neutralization: route.query.industry_neutralization === 'true',
+  standardize: route.query.standardize === 'true',
 })
 
 const factorExplanation = computed(() => {
@@ -248,6 +267,8 @@ const summaryCards = computed(() => {
     { label: 'ICIR', value: formatNumber(summary.icir), valueClass: valueClass(summary.icir) },
     { label: '|IC| > 0.02', value: formatPercent(summary.abs_ic_gt_002_ratio), valueClass: '' },
     { label: '多空收益', value: formatPercent(summary.long_short_return), valueClass: valueClass(summary.long_short_return) },
+    { label: '基准收益', value: formatPercent(summary.benchmark_return), valueClass: valueClass(summary.benchmark_return) },
+    { label: '超额收益', value: formatPercent(summary.excess_long_short_return), valueClass: valueClass(summary.excess_long_short_return) },
     { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'negative' },
     { label: '换手率', value: formatPercent(summary.turnover), valueClass: '' },
     { label: '覆盖率', value: formatPercent(summary.coverage_ratio), valueClass: '' },
@@ -283,6 +304,11 @@ function numericQuery(key: string, fallback: number) {
 function stringQuery(key: string) {
   const value = route.query[key]
   return typeof value === 'string' && value ? value : ''
+}
+
+function enumQuery<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  const value = route.query[key]
+  return typeof value === 'string' && allowed.includes(value as T) ? value as T : fallback
 }
 
 function inferLogic(item: FactorValueDefinition | null, factor: string) {
@@ -383,7 +409,7 @@ function inferProcess(item: FactorValueDefinition | null, factor: string) {
   const process = [
     '按股票池和日期范围读取因子值缓存 factor_values；若为内置/目录因子且缓存为空，会提示先预计算。',
     '读取同一股票池的 forward return（日线收益矩阵），与因子矩阵按交易日和股票代码取交集。',
-    '按配置处理涨跌停过滤、分组数、方向、手续费和滑点；详情页当前不会把缺数据静默当作 0。',
+    '按配置处理去极值、标准化、行业中性化、涨跌停过滤、分组数、方向、手续费和滑点；详情页当前不会把缺数据静默当作 0。',
     '计算 IC 序列、ICIR、分位组净值、多空收益、最大回撤、换手率、行业 IC、信号衰减和 Top/Bottom 股票。',
     '相同参数优先读取 factor_research_runs 最近成功结果；点击“重新计算”才创建新 run。',
   ]
@@ -420,7 +446,9 @@ function requestPayload(force = false) {
     group_count: form.group_count,
     direction: form.direction,
     pool_membership_mode: form.pool_membership_mode,
+    benchmark_symbol: form.benchmark_symbol,
     factor_value_params_hash: form.factor_value_params_hash || null,
+    outlier_handling: form.outlier_handling,
     industry_neutralization: form.industry_neutralization,
     standardize: form.standardize,
     force,
@@ -490,11 +518,20 @@ function renderNavChart() {
   const chart = echarts.init(navChartRef.value)
   const groups = detail.value.quantile_nav.groups
   const firstSeries = Object.values(groups)[0] || []
+  const dates = firstSeries.map(item => item.date)
+  const alignSeries = (items?: Array<{ date: string; value: number }>) => {
+    const byDate = new Map((items || []).map(item => [item.date, item.value]))
+    return dates.map(day => byDate.get(day) ?? null)
+  }
+  const benchmarkSeries = alignSeries(detail.value.quantile_nav.benchmark)
+  const excessSeries = alignSeries(detail.value.quantile_nav.excess_long_short)
+  const hasBenchmark = benchmarkSeries.some(value => value != null)
+  const hasExcess = excessSeries.some(value => value != null)
   chart.setOption({
     tooltip: { trigger: 'axis' },
     legend: { textStyle: { color: '#9ca3af' } },
     grid: { left: 42, right: 20, top: 30, bottom: 28 },
-    xAxis: { type: 'category', data: firstSeries.map(item => item.date) },
+    xAxis: { type: 'category', data: dates },
     yAxis: { type: 'value' },
     series: [
       ...Object.entries(groups).map(([name, data]) => ({
@@ -510,6 +547,20 @@ function renderNavChart() {
         lineStyle: { width: 2.5 },
         data: (detail.value.quantile_nav.long_short || []).map(item => item.value),
       },
+      ...(hasBenchmark ? [{
+        name: String(detail.value.summary?.benchmark_name || 'benchmark'),
+        type: 'line',
+        symbol: 'none',
+        lineStyle: { color: '#f59e0b', width: 1.5 },
+        data: benchmarkSeries,
+      }] : []),
+      ...(hasExcess ? [{
+        name: 'excess_long_short',
+        type: 'line',
+        symbol: 'none',
+        lineStyle: { color: '#a78bfa', width: 1.8, type: 'dashed' },
+        data: excessSeries,
+      }] : []),
     ],
   })
   charts.push(chart)
@@ -589,7 +640,7 @@ function valueClass(value?: number | string | null) {
   return Number(value) >= 0 ? 'positive' : 'negative'
 }
 
-watch(() => form.stock_pool_value, loadLatest)
+watch(() => [form.stock_pool_value, form.benchmark_symbol], loadLatest)
 
 onMounted(async () => {
   loading.value = true

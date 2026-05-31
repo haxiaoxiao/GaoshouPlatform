@@ -30,6 +30,7 @@ if AKQUANT_AVAILABLE:
 from app.backtest.engine.akquant.adapter import ClickHouseFeedAdapter
 from app.backtest.engine.akquant.normalizer import normalize_result
 from app.backtest.engine.akquant.reporter import REPORTS_DIR, generate_report
+from app.services.benchmark_series import attach_benchmark_result
 from app.services.timer_minute_sync import timer_times_from_params, timer_times_to_strings
 
 _DYNAMIC_STRATEGY_REGISTRY: dict[str, type] = {}
@@ -180,13 +181,18 @@ class AkquantEngine(IBacktestEngine):
             config=config,
         )
         benchmark_returns = None
+        benchmark_warning = None
         if config.benchmark_symbol:
-            benchmark_returns = await data_provider.load_benchmark(
-                config.benchmark_symbol, start_date, end_date
-            )
+            try:
+                benchmark_returns = await data_provider.load_benchmark(
+                    config.benchmark_symbol, start_date, end_date
+                )
+            except Exception as exc:
+                benchmark_warning = f"Benchmark data load failed for {config.benchmark_symbol}: {exc}"
 
         history_depth = self._history_depth(config)
-        if self._should_run_chunked(config, start_date, end_date):
+        chunked_run = self._should_run_chunked(config, start_date, end_date)
+        if chunked_run:
             raw_result = await self._run_chunked(
                 config=config,
                 data_provider=data_provider,
@@ -229,6 +235,18 @@ class AkquantEngine(IBacktestEngine):
             start_date=start_date,
             end_date=end_date,
             initial_capital=config.initial_capital,
+        )
+        if not chunked_run:
+            config._warm_start_runtime = {
+                "enabled": False,
+                "mode": self._warm_start_options(config)["mode"],
+            }
+        result.warm_start = config._warm_start_runtime
+        attach_benchmark_result(
+            result,
+            benchmark_symbol=config.benchmark_symbol,
+            benchmark_returns=benchmark_returns,
+            warning=benchmark_warning,
         )
 
         try:
@@ -435,19 +453,41 @@ class AkquantEngine(IBacktestEngine):
         start_date: date,
         end_date: date,
     ) -> bool:
+        options = self._warm_start_options(config)
+        mode = options["mode"]
+        if mode == "off":
+            return False
         if config.bar_type not in {"minute", "minute_timer"}:
             return False
+        # The current checkpoint adapter is only safe for full minute streams.
         if config.bar_type == "minute_timer":
             return False
-        if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"}:
+        if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"} and mode != "always":
             return False
+        if mode == "always":
+            return True
         days = (end_date - start_date).days + 1
         threshold_days = int(os.getenv("AKQUANT_CHUNK_THRESHOLD_DAYS", "45"))
         threshold_symbols = int(os.getenv("AKQUANT_CHUNK_THRESHOLD_SYMBOLS", "100"))
         return days > threshold_days or len(config.symbols) > threshold_symbols
 
-    def _chunk_dates(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
-        chunk_days = max(1, int(os.getenv("AKQUANT_CHUNK_DAYS", "30")))
+    def _warm_start_options(self, config: BacktestConfig) -> dict[str, Any]:
+        raw = dict(config.warm_start or {})
+        mode = str(raw.get("mode") or "auto").strip().lower()
+        if mode not in {"auto", "always", "off"}:
+            mode = "auto"
+        try:
+            chunk_days = int(raw.get("chunk_days") or os.getenv("AKQUANT_CHUNK_DAYS", "30"))
+        except (TypeError, ValueError):
+            chunk_days = 30
+        return {
+            "mode": mode,
+            "chunk_days": max(1, chunk_days),
+            "keep_checkpoints": bool(raw.get("keep_checkpoints", False)),
+        }
+
+    def _chunk_dates(self, start_date: date, end_date: date, config: BacktestConfig) -> list[tuple[date, date]]:
+        chunk_days = self._warm_start_options(config)["chunk_days"]
         chunks: list[tuple[date, date]] = []
         current = start_date
         while current <= end_date:
@@ -467,7 +507,8 @@ class AkquantEngine(IBacktestEngine):
         timer_times: tuple[str, ...] | None = None,
         progress_callback: Callable[[float, dict | None], None] | None = None,
     ) -> Any:
-        chunks = self._chunk_dates(start_date, end_date)
+        warm_options = self._warm_start_options(config)
+        chunks = self._chunk_dates(start_date, end_date, config)
         task_id = getattr(config, "_task_id", "manual")
         checkpoint_dir = REPORTS_DIR / "checkpoints" / str(task_id)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -479,8 +520,17 @@ class AkquantEngine(IBacktestEngine):
             len(config.symbols),
             (end_date - start_date).days + 1,
             len(chunks),
-            os.getenv("AKQUANT_CHUNK_DAYS", "30"),
+            warm_options["chunk_days"],
         )
+        keep_env = os.getenv("AKQUANT_KEEP_CHECKPOINTS", "").lower() in {"1", "true", "yes"}
+        config._warm_start_runtime = {
+            "enabled": True,
+            "mode": warm_options["mode"],
+            "chunk_days": warm_options["chunk_days"],
+            "chunks": len(chunks),
+            "checkpoint_retained": bool(warm_options["keep_checkpoints"] or keep_env),
+            "checkpoint_dir": str(checkpoint_dir) if warm_options["keep_checkpoints"] or keep_env else None,
+        }
 
         loop = asyncio.get_running_loop()
         try:
@@ -602,7 +652,10 @@ class AkquantEngine(IBacktestEngine):
                             start_time=str(chunk_start),
                             end_time=str(chunk_end),
                         )
-                    aq.save_snapshot(result.engine, result.strategy, str(checkpoint_path))
+                    try:
+                        aq.save_snapshot(result.engine, result.strategy, str(checkpoint_path))
+                    except Exception as exc:
+                        raise RuntimeError(f"AKQuant checkpoint serialization failed: {exc}") from exc
                     return result
 
                 raw_result = await loop.run_in_executor(None, _run_segment)
@@ -645,8 +698,7 @@ class AkquantEngine(IBacktestEngine):
                 raise RuntimeError("No AKQuant chunks were executed")
             return raw_result
         finally:
-            keep = os.getenv("AKQUANT_KEEP_CHECKPOINTS", "").lower()
-            if keep not in {"1", "true", "yes"}:
+            if not (warm_options["keep_checkpoints"] or keep_env):
                 shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
     def validate_config(self, config: BacktestConfig) -> list[str]:

@@ -124,10 +124,12 @@
         <el-form-item label="股票池">
           <el-select v-model="params.stock_pool">
             <el-option-group label="指数股票池">
-              <el-option label="沪深300" value="hs300" />
-              <el-option label="中证500" value="zz500" />
-              <el-option label="中证800" value="zz800" />
-              <el-option label="中证1000" value="zz1000" />
+              <el-option
+                v-for="pool in stockPoolOptions"
+                :key="pool.value"
+                :label="pool.label"
+                :value="pool.value"
+              />
             </el-option-group>
             <el-option-group v-if="props.watchlistGroups?.length" label="自选股分组">
               <el-option
@@ -209,6 +211,17 @@ const showRef = ref(false)
 
 const operators = ref<{ name: string; signature: string; description: string; level: number; category: string }[]>([])
 const loadingRef = ref(false)
+const stockPoolOptions = [
+  { label: '沪深300', value: 'hs300' },
+  { label: '中证500', value: 'zz500' },
+  { label: '中证800', value: 'zz800' },
+  { label: '中证1000', value: 'zz1000' },
+  { label: '创业板指', value: 'chinext' },
+  { label: '创业板50', value: 'chinext50' },
+  { label: '创业板综', value: 'chinext_composite' },
+  { label: '科创50', value: 'star50' },
+  { label: '科创100', value: 'star100' },
+]
 
 const canCreate = computed(() => {
   if (!factorName.value.trim()) return false

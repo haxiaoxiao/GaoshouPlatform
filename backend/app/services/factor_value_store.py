@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
@@ -23,9 +22,11 @@ from app.services.factor_catalog import (
     list_catalog_definitions,
     list_catalog_groups,
 )
+from app.services.factor_precompute_runtime import precompute_memory_policy
 
 CUSTOM_FACTOR_CATEGORY = "custom"
 CUSTOM_FACTOR_GROUP_NAME = "custom_factor_library"
+DEFAULT_PRECOMPUTE_BATCH_ROWS = precompute_memory_policy().batch_rows
 
 
 @dataclass(frozen=True)
@@ -500,69 +501,6 @@ class FactorValueStore:
             current = date(current.year + 1, 1, 1) if current.month == 12 else date(current.year, current.month + 1, 1)
         return "\n              AND (" + " OR ".join(terms) + ")" if terms else ""
 
-    def write(self, df: pd.DataFrame) -> int:
-        if df.empty:
-            return 0
-        body = self._normalize_columns(df)
-        required = {"symbol", "trade_date", "factor_name", "value"}
-        missing = required - set(body.columns)
-        if missing:
-            raise KeyError(f"Factor values missing columns: {sorted(missing)}")
-
-        body["symbol"] = body["symbol"].astype(str)
-        body["trade_date"] = pd.to_datetime(body["trade_date"]).dt.date
-        body["as_of_time"] = body.get("as_of_time", "").fillna("").astype(str) if "as_of_time" in body.columns else ""
-        body["factor_name"] = body["factor_name"].astype(str)
-        if "params_hash" not in body.columns:
-            body["params_hash"] = factor_params_hash({})
-        body["params_hash"] = body["params_hash"].fillna(factor_params_hash({})).astype(str)
-        if "source" not in body.columns:
-            body["source"] = "precompute"
-        body["source"] = body["source"].fillna("precompute").astype(str)
-        if "created_at" not in body.columns:
-            body["created_at"] = datetime.now()
-        body["value"] = pd.to_numeric(body["value"], errors="coerce")
-        body = body.dropna(subset=["value"])
-        if body.empty:
-            return 0
-
-        dt = pd.to_datetime(body["trade_date"])
-        body["year"] = dt.dt.year.astype(str)
-        body["month"] = dt.dt.strftime("%m")
-        root = self._dataset_path()
-        root.mkdir(parents=True, exist_ok=True)
-
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-
-        for (_year, _month), part in body.groupby(["year", "month"], sort=False):
-            partition_dir = root / f"year={_year}" / f"month={_month}"
-            existing_frames = []
-            if partition_dir.exists():
-                for file in partition_dir.glob("*.parquet"):
-                    try:
-                        existing_frames.append(self._normalize_columns(pd.read_parquet(file)))
-                    except Exception as exc:
-                        logger.warning("Failed to read existing factor parquet {}: {}", file, exc)
-            part_body = self._normalize_columns(part.drop(columns=["year", "month"], errors="ignore"))
-            if existing_frames:
-                part_body = pd.concat(existing_frames + [part_body], ignore_index=True)
-                part_body = self._normalize_columns(part_body)
-            present_keys = [c for c in self.key_cols if c in part_body.columns]
-            part_body = part_body.drop_duplicates(subset=present_keys, keep="last")
-            part_body = part_body.sort_values(["factor_name", "symbol", "trade_date", "as_of_time"])
-
-            tmp_dir = partition_dir.with_name(f"{partition_dir.name}.tmp-{uuid.uuid4().hex}")
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), tmp_dir / "part-0.parquet")
-            if partition_dir.exists():
-                shutil.rmtree(partition_dir)
-            try:
-                tmp_dir.replace(partition_dir)
-            except PermissionError:
-                shutil.move(str(tmp_dir), str(partition_dir))
-        return len(body)
-
     def append(self, df: pd.DataFrame) -> int:
         """Append factor values without rewriting existing partitions.
 
@@ -614,6 +552,9 @@ class FactorValueStore:
             pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), file_path)
             total += len(part_body)
         return total
+
+    def batch_writer(self, *, batch_size: int = DEFAULT_PRECOMPUTE_BATCH_ROWS) -> "FactorValueBatchWriter":
+        return FactorValueBatchWriter(self, batch_size=batch_size)
 
     def load(
         self,
@@ -716,6 +657,7 @@ class FactorValueStore:
         as_of_time: str | None = None,
         params: dict[str, Any] | None = None,
         params_hash: str | None = None,
+        include_symbols_sample: bool = True,
     ) -> dict[str, Any]:
         if not self.exists():
             return self._empty_coverage(factor_name)
@@ -778,41 +720,44 @@ class FactorValueStore:
         if total_rows == 0:
             return self._empty_coverage(factor_name)
 
-        sample_sql = f"""
-            WITH factor_values_normalized AS (
-                SELECT
-                    symbol,
-                    trade_date,
-                    as_of_time,
-                    {name_expr} AS factor_name,
-                    params_hash,
-                    value,
-                    created_at,
-                    year,
-                    month
-                FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
-            ),
-            factor_values_latest AS (
-                SELECT *
-                FROM (
+        sample_symbols: list[str] = []
+        if include_symbols_sample:
+            sample_sql = f"""
+                WITH factor_values_normalized AS (
                     SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
-                            ORDER BY created_at DESC NULLS LAST
-                        ) AS row_num
-                    FROM factor_values_normalized
-                    WHERE {where_sql}
-                      {partition_filter}
+                        symbol,
+                        trade_date,
+                        as_of_time,
+                        {name_expr} AS factor_name,
+                        params_hash,
+                        value,
+                        created_at,
+                        year,
+                        month
+                    FROM read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)
+                ),
+                factor_values_latest AS (
+                    SELECT *
+                    FROM (
+                        SELECT
+                            *,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
+                                ORDER BY created_at DESC NULLS LAST
+                            ) AS row_num
+                        FROM factor_values_normalized
+                        WHERE {where_sql}
+                          {partition_filter}
+                    )
+                    WHERE row_num = 1
                 )
-                WHERE row_num = 1
-            )
-            SELECT DISTINCT symbol
-            FROM factor_values_latest
-            ORDER BY symbol
-            LIMIT 20
-        """
-        sample_df = get_duckdb().execute(sample_sql).df()
+                SELECT DISTINCT symbol
+                FROM factor_values_latest
+                ORDER BY symbol
+                LIMIT 20
+            """
+            sample_df = get_duckdb().execute(sample_sql).df()
+            sample_symbols = sample_df["symbol"].astype(str).tolist() if not sample_df.empty else []
         return {
             "factor_name": factor_name,
             "total_rows": total_rows,
@@ -820,7 +765,7 @@ class FactorValueStore:
             "date_count": int(stats[2] or 0),
             "min_date": str(stats[3]) if stats[3] is not None else None,
             "max_date": str(stats[4]) if stats[4] is not None else None,
-            "symbols_sample": sample_df["symbol"].astype(str).tolist() if not sample_df.empty else [],
+            "symbols_sample": sample_symbols,
         }
 
     def coverage_many(
@@ -1056,6 +1001,65 @@ class FactorValueStore:
             "max_date": None,
             "symbols_sample": [],
         }
+
+
+class FactorValueBatchWriter:
+    """Buffered append writer for large factor precompute jobs.
+
+    The precompute path should append small parquet parts and rely on the read
+    path's latest-row de-duplication. Rewriting a whole month partition can load
+    unrelated cached factors into memory and spike RAM during batch jobs.
+    """
+
+    def __init__(self, store: FactorValueStore, *, batch_size: int = DEFAULT_PRECOMPUTE_BATCH_ROWS) -> None:
+        self.store = store
+        self.batch_size = max(1, int(batch_size))
+        self._rows: list[dict[str, Any]] = []
+        self.counts: dict[str, int] = {}
+        self.written = 0
+
+    @property
+    def rows_buffered(self) -> int:
+        return len(self._rows)
+
+    def add(self, row: dict[str, Any]) -> None:
+        self._rows.append(row)
+        factor_name = str(row.get("factor_name") or "")
+        if factor_name:
+            self.counts[factor_name] = self.counts.get(factor_name, 0) + 1
+        if len(self._rows) >= self.batch_size:
+            self.flush()
+
+    def extend(self, rows: Sequence[dict[str, Any]]) -> None:
+        for row in rows:
+            self.add(row)
+
+    def write_frame(self, frame: pd.DataFrame) -> int:
+        if frame.empty:
+            return 0
+        if "factor_name" in frame.columns:
+            for factor_name, count in frame["factor_name"].astype(str).value_counts().items():
+                self.counts[str(factor_name)] = self.counts.get(str(factor_name), 0) + int(count)
+        if len(frame) <= self.batch_size:
+            written = self.store.append(frame)
+            self.written += written
+            return written
+
+        written = 0
+        for start in range(0, len(frame), self.batch_size):
+            chunk = frame.iloc[start:start + self.batch_size].copy()
+            written += self.store.append(chunk)
+        self.written += written
+        return written
+
+    def flush(self) -> int:
+        if not self._rows:
+            return 0
+        frame = pd.DataFrame(self._rows)
+        self._rows = []
+        written = self.store.append(frame)
+        self.written += written
+        return written
 
 
 def get_factor_value_store() -> FactorValueStore:

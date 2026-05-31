@@ -8,6 +8,7 @@ import time
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -37,6 +38,7 @@ from app.services.timer_minute_sync import (
 )
 from app.services.optimization_result_store import save_optimization_result
 from app.services.runtime_tasks import register_task, update_task
+from app.services.benchmark_series import benchmark_summary, resolve_benchmark_symbol
 from sqlalchemy import select
 from app.backtest.strategies.builtin_templates import (
     DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
@@ -257,6 +259,20 @@ def _multi_factor_coverage(
     }
 
 
+async def _multi_factor_coverage_async(
+    *,
+    symbols: list[str],
+    start_date: date,
+    end_date: date,
+) -> dict:
+    return await asyncio.to_thread(
+        _multi_factor_coverage,
+        symbols=symbols,
+        start_date=start_date,
+        end_date=end_date,
+    )
+
+
 def _config_from_request(req: "RunBacktestRequest", start_date: date, end_date: date) -> BacktestConfig:
     return BacktestConfig(
         mode=req.mode,
@@ -288,7 +304,8 @@ def _config_from_request(req: "RunBacktestRequest", start_date: date, end_date: 
         analysis_config=req.analysis_config,
         strategy_params=req.strategy_params,
         engine=req.engine,
-        benchmark_symbol=req.benchmark_symbol,
+        benchmark_symbol=resolve_benchmark_symbol(req.benchmark_symbol),
+        warm_start=req.warm_start.model_dump() if req.warm_start else None,
         strategy_id=req.strategy_id,
         strategy_code=req.strategy_code,
         index_symbol=normalize_index_symbol(req.index_symbol),
@@ -335,6 +352,11 @@ async def _prepare_backtest_config(
 
 
 
+class WarmStartRequest(BaseModel):
+    mode: Literal["auto", "always", "off"] = "auto"
+    chunk_days: int | None = Field(default=30, ge=1, le=365)
+    keep_checkpoints: bool = False
+
 
 class RunBacktestRequest(BaseModel):
     mode: str = "vectorized"
@@ -371,7 +393,8 @@ class RunBacktestRequest(BaseModel):
     strategy_id: int | None = None
     strategy_name: str | None = None
     strategy_code: str | None = None  # akquant strategy code
-    benchmark_symbol: str | None = None  # benchmark index
+    benchmark_symbol: str | None = "000300.SH"  # benchmark index
+    warm_start: WarmStartRequest | None = None
 
 
 class OptimizeRequest(RunBacktestRequest):
@@ -458,6 +481,8 @@ async def _save_backtest_result(
                     "max_positions": config.max_positions,
                     "risk_config": config.risk_config,
                     "strategy_id": config.strategy_id,
+                    "benchmark_symbol": config.benchmark_symbol,
+                    "warm_start": config.warm_start,
                 },
                 result=result_dict if success else None,
             )
@@ -1366,7 +1391,8 @@ async def get_timer_coverage(
     start = date.fromisoformat(start_date) if start_date else date(2021, 5, 15)
     end = date.fromisoformat(end_date) if end_date else date.today()
     try:
-        summary = find_earliest_timer_coverage_date(
+        summary = await asyncio.to_thread(
+            find_earliest_timer_coverage_date,
             symbols=[s.strip() for s in symbols.split(",") if s.strip()],
             index_symbol=index_symbol,
             start=start,
@@ -1400,7 +1426,8 @@ async def get_backtest_data_coverage(req: RunBacktestRequest):
     dataset = _market_dataset_for_bar_type(config.bar_type)
     try:
         store = get_market_data_store()
-        market = store.coverage(
+        market = await asyncio.to_thread(
+            store.coverage,
             symbols,
             start_date,
             end_date,
@@ -1424,11 +1451,36 @@ async def get_backtest_data_coverage(req: RunBacktestRequest):
 
         factor_summary = None
         if _is_multi_factor_strategy(config):
-            factor_summary = _multi_factor_coverage(
+            factor_summary = await _multi_factor_coverage_async(
                 symbols=symbols,
                 start_date=start_date,
                 end_date=end_date,
             )
+
+        benchmark = None
+        benchmark_warnings: list[str] = []
+        if config.benchmark_symbol:
+            try:
+                benchmark_returns = await asyncio.to_thread(
+                    store.load_benchmark,
+                    config.benchmark_symbol,
+                    start_date,
+                    end_date,
+                )
+                benchmark = benchmark_summary(config.benchmark_symbol, benchmark_returns)
+                if benchmark.get("warning"):
+                    benchmark_warnings.append(str(benchmark["warning"]))
+            except Exception as exc:
+                benchmark = {
+                    "symbol": config.benchmark_symbol,
+                    "name": None,
+                    "covered_days": 0,
+                    "min_date": None,
+                    "max_date": None,
+                    "ok": False,
+                    "warning": str(exc),
+                }
+                benchmark_warnings.append(f"Benchmark coverage check failed for {config.benchmark_symbol}: {exc}")
 
         warnings = []
         if market_summary["coverage_ratio"] < 0.8:
@@ -1451,7 +1503,9 @@ async def get_backtest_data_coverage(req: RunBacktestRequest):
                 "symbol_count": len(symbols),
                 "market": market_summary,
                 "factor": factor_summary,
+                "benchmark": benchmark,
                 "warnings": warnings,
+                "benchmark_warnings": benchmark_warnings,
                 "ok": not warnings,
             },
         }

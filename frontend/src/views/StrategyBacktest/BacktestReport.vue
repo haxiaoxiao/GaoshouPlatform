@@ -218,18 +218,46 @@ const renderCharts = () => {
     if (!navChart) navChart = echarts.init(navChartRef.value)
     const dates = navData.map(d => d.date)
     const navs = navData.map(d => d.nav)
+    const alignNav = (items?: Array<{ date: string; nav: number }>) => {
+      const byDate = new Map((items || []).map(item => [item.date, item.nav]))
+      return dates.map(day => byDate.get(day) ?? null)
+    }
+    const benchmarkNavs = alignNav(report.value?.result?.benchmark_nav_series)
+    const excessNavs = alignNav(report.value?.result?.excess_nav_series)
+    const hasBenchmark = benchmarkNavs.some(value => value != null)
+    const hasExcess = excessNavs.some(value => value != null)
     navChart.setOption({
       tooltip: { trigger: 'axis' },
+      legend: {
+        data: ['NAV', ...(hasBenchmark ? [report.value?.result?.benchmark_name || 'Benchmark'] : []), ...(hasExcess ? ['Excess NAV'] : [])],
+        textStyle: { color: '#9ca3af' },
+      },
       grid: { left: 50, right: 50, top: 20, bottom: 30 },
       xAxis: { type: 'category', data: dates, show: false },
       yAxis: { type: 'value', axisLabel: { fontSize: 10, formatter: (v: number) => v.toFixed(2) } },
       series: [{
-        type: 'line', data: navs, smooth: true,
+        name: 'NAV', type: 'line', data: navs, smooth: true,
         lineStyle: { color: '#409eff', width: 1 },
         areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
           { offset: 0, color: 'rgba(64,158,255,0.2)' }, { offset: 1, color: 'rgba(64,158,255,0)' }
         ])},
-      }],
+      },
+      ...(hasBenchmark ? [{
+        name: report.value?.result?.benchmark_name || 'Benchmark',
+        type: 'line',
+        data: benchmarkNavs,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { color: '#f59e0b', width: 1 },
+      }] : []),
+      ...(hasExcess ? [{
+        name: 'Excess NAV',
+        type: 'line',
+        data: excessNavs,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { color: '#a78bfa', width: 1, type: 'dashed' },
+      }] : [])],
     }, true)
   }
 

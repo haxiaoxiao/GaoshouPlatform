@@ -47,6 +47,9 @@ VALID_SYNC_TYPES = (
     "dividends",
     "factor_dependency",
     "tushare_relay",
+    "ths_concept",
+    "sentiment_xueqiu",
+    "sentiment_nga",
 )
 
 
@@ -209,6 +212,29 @@ async def _run_sync_task(
                     start_date=request.start_date,
                     end_date=request.end_date,
                     relay_options=request.relay_options,
+                    failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
+            elif request.sync_type == "ths_concept":
+                progress = await service.sync_ths_concept(
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    relay_options=request.relay_options,
+                    failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
+            elif request.sync_type == "sentiment_xueqiu":
+                progress = await service.sync_sentiment_xueqiu(
+                    symbols=request.symbols,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
+            elif request.sync_type == "sentiment_nga":
+                progress = await service.sync_sentiment_nga(
+                    start_date=request.start_date,
+                    end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
                     run_id=run_id,
                 )

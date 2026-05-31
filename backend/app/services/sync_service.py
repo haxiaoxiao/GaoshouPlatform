@@ -22,6 +22,7 @@ from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
+from app.services.index_components import ensure_index_components
 from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
 
 
@@ -1648,6 +1649,8 @@ class SyncService:
         blocked_providers: dict[str, str] = {}
         total_rows = 0
         synced_symbols: list[str] = []
+        component_results: list[dict[str, Any]] = []
+        component_failed_symbols: list[dict[str, str]] = []
 
         try:
             for index, item in enumerate(items, start=1):
@@ -1721,7 +1724,19 @@ class SyncService:
                 elif not any(entry["symbol"] == item.symbol for entry in failed_symbols):
                     empty_symbols.append(item.symbol)
 
+                if item.pool_enabled and item.requires_components_when_pool:
+                    try:
+                        component_result = await ensure_index_components(item.symbol, start_date, end_date)
+                        component_results.append(component_result)
+                    except Exception as exc:
+                        component_failed_symbols.append({"symbol": item.symbol, "error": str(exc)})
+                        logger.warning("Index component sync failed for {}: {}", item.symbol, exc)
+                        if failure_strategy == "stop":
+                            raise
+
                 progress.current = index
+                progress.details["component_results"] = component_results[-100:]
+                progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
                 await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
                 if provider_blocked_now:
@@ -1738,6 +1753,8 @@ class SyncService:
             progress.details["empty_symbols"] = empty_symbols
             progress.details["failed_symbols"] = failed_symbols[:100]
             progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
             progress.details["total_rows"] = total_rows
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
@@ -1781,6 +1798,8 @@ class SyncService:
             progress.error_message = str(exc)
             progress.details["failed_symbols"] = failed_symbols[:100]
             progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
             await self.create_sync_log(
                 sync_type="index_daily",
                 status="failed",
@@ -2623,6 +2642,248 @@ class SyncService:
             logger.opt(exception=True).error(f"sync_tushare_relay failed: {e}")
             await self.create_sync_log(
                 sync_type="tushare_relay",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_ths_concept(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        relay_options: dict[str, Any] | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        """Sync Tonghuashun concepts and derive SQLite memberships."""
+        from app.services.tushare_relay_sync import run_tushare_relay_sync
+
+        global _current_sync
+        options = {
+            "derive_ths_concepts": True,
+            "ths_member_limit": 1000,
+            "limit": 1000,
+            **dict(relay_options or {}),
+        }
+        progress = SyncProgress(
+            sync_type="ths_concept",
+            status="running",
+            start_time=datetime.now(),
+            details={"run_id": run_id} if run_id else {},
+        )
+        _current_sync = progress
+
+        try:
+            await run_tushare_relay_sync(
+                self.session,
+                progress,
+                relay_datasets=["ths_index", "ths_member"],
+                symbols=None,
+                start_date=start_date,
+                end_date=end_date,
+                relay_options=options,
+                failure_strategy=failure_strategy,
+            )
+            await self.create_sync_log(
+                sync_type="ths_concept",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            logger.opt(exception=True).error(f"sync_ths_concept failed: {e}")
+            await self.create_sync_log(
+                sync_type="ths_concept",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_sentiment_xueqiu(
+        self,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import SentimentIngestService
+
+        global _current_sync
+        symbol_list = [str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()]
+        progress = SyncProgress(
+            sync_type="sentiment_xueqiu",
+            status="running",
+            start_time=datetime.now(),
+            total=len(symbol_list),
+            details={"run_id": run_id, "source": "xueqiu_spyder"},
+        )
+        _current_sync = progress
+
+        try:
+            if not symbol_list:
+                raise ValueError("sentiment_xueqiu requires at least one symbol")
+
+            ingest = SentimentIngestService(self.session)
+            results: list[dict[str, Any]] = []
+            for index, symbol in enumerate(symbol_list, start=1):
+                try:
+                    result = await ingest.run(
+                        "xueqiu_spyder",
+                        symbol,
+                        max_pages=3,
+                        min_reply=5,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    results.append(result)
+                    progress.success_count += 1
+                except Exception as exc:
+                    progress.failed_count += 1
+                    results.append({"source": "xueqiu_spyder", "symbol": symbol, "error": str(exc)})
+                    if failure_strategy == "stop":
+                        raise
+                progress.current = index
+                progress.details["results"] = results
+                progress.details["symbol_count"] = len(symbol_list)
+                if run_id:
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+            progress.status = "completed" if progress.failed_count == 0 else "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = None if progress.failed_count == 0 else "Some Xueqiu symbols failed"
+            await self.create_sync_log(
+                sync_type="sentiment_xueqiu",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            logger.opt(exception=True).error("sync_sentiment_xueqiu failed: {}", e)
+            await self.create_sync_log(
+                sync_type="sentiment_xueqiu",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_sentiment_nga(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import SentimentIngestService
+
+        global _current_sync
+        progress = SyncProgress(
+            sync_type="sentiment_nga",
+            status="running",
+            start_time=datetime.now(),
+            total=1,
+            details={"run_id": run_id, "source": "flocktrader"},
+        )
+        _current_sync = progress
+
+        try:
+            ingest = SentimentIngestService(self.session)
+            result = await ingest.run(
+                "flocktrader",
+                None,
+                max_pages=3,
+                min_reply=0,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=True,
+            )
+            progress.current = 1
+            progress.success_count = 1
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["result"] = result
+            await self.create_sync_log(
+                sync_type="sentiment_nga",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            logger.opt(exception=True).error("sync_sentiment_nga failed: {}", e)
+            await self.create_sync_log(
+                sync_type="sentiment_nga",
                 status="failed",
                 total_count=progress.total,
                 success_count=progress.success_count,

@@ -308,27 +308,100 @@ def _has_any_snapshot(index_symbol: str, start: date, end: date) -> bool:
     return bool(row and int(row[0] or 0) > 0)
 
 
+def _query_symbols_between(index_symbol: str, start: date, end: date) -> list[str]:
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM index_components
+            WHERE index_symbol = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY symbol
+            """,
+            (idx, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    return [str(row["symbol"]).upper() for row in rows]
+
+
+def _query_latest_snapshot_symbols(index_symbol: str) -> tuple[str | None, list[str]]:
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    with _connect() as conn:
+        latest = conn.execute(
+            """
+            SELECT MAX(trade_date)
+            FROM index_components
+            WHERE index_symbol = ?
+            """,
+            (idx,),
+        ).fetchone()
+        latest_date = str(latest[0]) if latest and latest[0] else None
+        if latest_date is None:
+            return None, []
+        rows = conn.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM index_components
+            WHERE index_symbol = ? AND trade_date = ?
+            ORDER BY symbol
+            """,
+            (idx, latest_date),
+        ).fetchall()
+    return latest_date, [str(row["symbol"]).upper() for row in rows]
+
+
 async def load_index_symbols(index_symbol: str, start: date, end: date) -> list[str]:
-    await ensure_index_components(index_symbol, start, end)
+    ensure_error: Exception | None = None
+    try:
+        await ensure_index_components(index_symbol, start, end)
+    except Exception as exc:
+        ensure_error = exc
+        logger.warning("Index component sync failed for {} in {}..{}: {}", index_symbol, start, end, exc)
+
     idx = normalize_index_symbol(index_symbol) or index_symbol
     lookback = start - timedelta(days=370)
+    symbols = await asyncio.to_thread(_query_symbols_between, idx, lookback, end)
+    if symbols:
+        return symbols
 
-    def _query() -> list[str]:
-        with _connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT symbol
-                FROM index_components
-                WHERE index_symbol = ?
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                ORDER BY symbol
-                """,
-                (idx, lookback.isoformat(), end.isoformat()),
-            ).fetchall()
-        return [str(row["symbol"]).upper() for row in rows]
+    # Some newer thematic pools have incomplete historical constituent files.
+    # Factor research can still run on a stable universe by using the latest
+    # snapshot while future syncs keep recording point-in-time history.
+    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
+    if latest_symbols:
+        logger.info(
+            "Index components fallback to latest snapshot {} for {} requested {}..{}",
+            latest_date,
+            idx,
+            start,
+            end,
+        )
+        return latest_symbols
 
-    return await asyncio.to_thread(_query)
+    today = date.today()
+    if end < today or start < today:
+        try:
+            await ensure_index_components(idx, today, today)
+        except Exception as exc:
+            if ensure_error is None:
+                ensure_error = exc
+            logger.warning("Index component current fallback sync failed for {}: {}", idx, exc)
+
+    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
+    if latest_symbols:
+        logger.info(
+            "Index components fallback to current/latest snapshot {} for {} requested {}..{}",
+            latest_date,
+            idx,
+            start,
+            end,
+        )
+        return latest_symbols
+
+    if ensure_error is not None:
+        raise ensure_error
+    return []
 
 
 async def index_pool_summary(index_symbol: str, start: date, end: date) -> dict[str, Any]:

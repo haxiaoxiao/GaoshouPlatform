@@ -44,6 +44,9 @@ export interface SyncRequest {
     | 'dividends'
     | 'factor_dependency'
     | 'tushare_relay'
+    | 'ths_concept'
+    | 'sentiment_xueqiu'
+    | 'sentiment_nga'
   symbols?: string[]
   index_symbols?: string[]
   start_date?: string

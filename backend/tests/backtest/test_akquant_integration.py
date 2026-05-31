@@ -14,6 +14,8 @@ from app.backtest.api import (
     _resolve_strategy_code,
     router,
 )
+from app.backtest.config import BacktestConfig
+from app.backtest.engine.akquant.engine import AkquantEngine
 from app.backtest.engine.akquant.capabilities import get_akquant_capabilities
 from app.backtest.engine.data_provider import ClickHouseDataProvider, StoreDataProvider
 from app.services.akquant_optimize import _load_optimization_data
@@ -79,6 +81,8 @@ async def test_prepare_backtest_config_resolves_index_and_strategy(monkeypatch):
         end_date="2025-01-31",
         strategy_id=43,
         timer_times=["10:30"],
+        benchmark_symbol="zz500",
+        warm_start={"mode": "always", "chunk_days": 10, "keep_checkpoints": True},
     )
 
     config, error = await _prepare_backtest_config(
@@ -95,7 +99,31 @@ async def test_prepare_backtest_config_resolves_index_and_strategy(monkeypatch):
     assert config.universe_mode == "index"
     assert config.strategy_code == "class S: pass"
     assert config.timer_times == ["10:30"]
+    assert config.benchmark_symbol == "000905.SH"
+    assert config.warm_start == {"mode": "always", "chunk_days": 10, "keep_checkpoints": True}
     assert config._task_id == "task-x"
+
+
+def test_akquant_warm_start_options_control_chunking():
+    engine = AkquantEngine()
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 20)
+    config = BacktestConfig(
+        symbols=["000001.SZ"],
+        start_date=start,
+        end_date=end,
+        bar_type="minute",
+        warm_start={"mode": "off", "chunk_days": 7},
+    )
+
+    assert engine._should_run_chunked(config, start, end) is False
+
+    config.warm_start = {"mode": "always", "chunk_days": 7}
+    assert engine._should_run_chunked(config, start, end) is True
+    assert engine._chunk_dates(start, end, config)[0] == (start, date(2025, 1, 7))
+
+    config.bar_type = "daily"
+    assert engine._should_run_chunked(config, start, end) is False
 
 
 @pytest.mark.asyncio

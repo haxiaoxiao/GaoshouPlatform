@@ -24,6 +24,9 @@ def invalidate_after_sync(sync_type: str) -> dict[str, object]:
         "dividends": [],
         "factor_dependency": ["*:daily_window:*", "*:daily_basic_mv:*", "*:timer_coverage:*", "*:index_components:*"],
         "tushare_relay": ["*:daily_basic_mv:*", "*:timer_coverage:*"],
+        "ths_concept": ["*:daily_basic_mv:*"],
+        "sentiment_xueqiu": [],
+        "sentiment_nga": [],
     }
     patterns = patterns_by_sync.get(sync_type, [])
     get_compute_cache().clear_l1()

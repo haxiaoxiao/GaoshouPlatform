@@ -18,8 +18,10 @@ export interface FactorResearchRunRequest {
   pool_membership_mode: 'static_latest' | 'point_in_time' | 'union'
   factor_value_params_hash?: string | null
   factor_value_params_hashes?: Record<string, string>
+  outlier_handling: 'none' | 'winsorize'
   industry_neutralization: boolean
   standardize: boolean
+  benchmark_symbol?: string | null
   force?: boolean
 }
 
@@ -52,6 +54,10 @@ export interface FactorResearchRunSummary {
   max_drawdown?: number
   sharpe?: number
   turnover?: number
+  benchmark_symbol?: string | null
+  benchmark_name?: string | null
+  benchmark_return?: number
+  excess_long_short_return?: number
 }
 
 export interface FactorResearchRunDetail {
@@ -76,6 +82,8 @@ export interface FactorResearchRunDetail {
   quantile_nav?: {
     groups?: Record<string, Array<{ date: string; value: number }>>
     long_short?: Array<{ date: string; value: number }>
+    benchmark?: Array<{ date: string; value: number }>
+    excess_long_short?: Array<{ date: string; value: number }>
   }
   quantile_summary?: Record<string, number>
   top?: Array<{ symbol: string; value: number }>
@@ -123,6 +131,7 @@ export interface FactorResearchCombinationSelection {
   direction?: 'asc' | 'desc'
   pool_membership_mode?: 'static_latest' | 'point_in_time' | 'union'
   factor_value_params_hash?: string
+  outlier_handling?: 'none' | 'winsorize'
   industry_neutralization?: boolean
   standardize?: boolean
 }

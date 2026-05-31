@@ -241,6 +241,12 @@ interface BacktestResult {
   trades?: Trade[]
   nav_series?: Array<{ date: string; nav: number }>
   daily_returns?: Array<{ date: string; return: number }>
+  benchmark_symbol?: string | null
+  benchmark_name?: string | null
+  benchmark_nav_series?: Array<{ date: string; nav: number }>
+  excess_nav_series?: Array<{ date: string; nav: number }>
+  warnings?: string[]
+  warm_start?: Record<string, unknown> | null
   start_date?: string | null
   end_date?: string | null
   initial_capital?: number
@@ -459,6 +465,15 @@ function renderCharts() {
       if (v > peak) peak = v
       return peak > 0 ? (v / peak - 1) * 100 : 0
     })
+    const alignNav = (items?: Array<{ date: string; nav: number }>) => {
+      const byDate = new Map((items || []).map(item => [item.date, item.nav]))
+      return navData.map(item => byDate.get(item.date) ?? null)
+    }
+    const benchmarkNavs = alignNav(props.result?.benchmark_nav_series)
+    const excessNavs = alignNav(props.result?.excess_nav_series)
+    const hasBenchmark = benchmarkNavs.some(value => value != null)
+    const hasExcess = excessNavs.some(value => value != null)
+    const legendData = ['NAV', ...(hasBenchmark ? [props.result?.benchmark_name || 'Benchmark'] : []), ...(hasExcess ? ['Excess NAV'] : []), 'Drawdown']
 
     navChart.setOption({
       tooltip: {
@@ -469,7 +484,7 @@ function renderCharts() {
           return `${ps[0].axisValue}<br/>NAV: ${pt?.data?.toFixed(4) || '-'}<br/>Drawdown: ${ddPt?.data?.toFixed(2) || '-'}%`
         },
       },
-      legend: { data: ['NAV', 'Drawdown'], textStyle: { color: '#8888a0', fontSize: 11 }, top: 0 },
+      legend: { data: legendData, textStyle: { color: '#8888a0', fontSize: 11 }, top: 0 },
       grid: { left: 60, right: 60, top: 30, bottom: 30 },
       xAxis: {
         type: 'category', data: navData.map(d => d.date),
@@ -498,6 +513,24 @@ function renderCharts() {
           ])},
           showSymbol: false, smooth: true,
         },
+        ...(hasBenchmark ? [{
+          name: props.result?.benchmark_name || 'Benchmark',
+          type: 'line',
+          yAxisIndex: 0,
+          data: benchmarkNavs,
+          lineStyle: { color: '#f59e0b', width: 1.2 },
+          showSymbol: false,
+          smooth: true,
+        }] : []),
+        ...(hasExcess ? [{
+          name: 'Excess NAV',
+          type: 'line',
+          yAxisIndex: 0,
+          data: excessNavs,
+          lineStyle: { color: '#a78bfa', width: 1.2, type: 'dashed' },
+          showSymbol: false,
+          smooth: true,
+        }] : []),
         {
           name: '回撤', type: 'line', yAxisIndex: 1, data: dd,
           lineStyle: { color: '#d93026', width: 1 },
