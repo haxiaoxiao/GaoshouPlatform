@@ -11,21 +11,6 @@ from fastapi import APIRouter, Body, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.services.factor_value_store import (
-    get_factor_definition,
-    get_factor_group,
-    get_factor_value_store,
-    list_factor_definitions,
-    list_factor_groups,
-)
-from app.services.factor_catalog import (
-    CN_PAPER_FACTOR_SPECS,
-    RELAY_FACTOR_SPECS,
-    RESEARCH_FACTOR_SPECS,
-    TA_FACTOR_SPECS,
-    is_catalog_factor,
-    list_paper_implementation_manifest,
-)
 from app.services.alpha101_calculator import precompute_alpha101_factors
 from app.services.cn_paper_factor_calculator import precompute_cn_paper_factors
 from app.services.cn_paper_ml_experiment import (
@@ -33,11 +18,25 @@ from app.services.cn_paper_ml_experiment import (
     list_cn_paper_experiment_specs,
     summarize_feature_snapshot,
 )
+from app.services.factor_catalog import (
+    CN_PAPER_FACTOR_SPECS,
+    RELAY_FACTOR_SPECS,
+    RESEARCH_FACTOR_SPECS,
+    TA_FACTOR_SPECS,
+    list_paper_implementation_manifest,
+)
+from app.services.factor_dependency_sync import build_precompute_prepare
 from app.services.factor_precompute import (
     precompute_high_volume_features,
     precompute_small_cap_core_features,
 )
-from app.services.factor_dependency_sync import build_precompute_prepare
+from app.services.factor_value_store import (
+    get_factor_definition,
+    get_factor_group,
+    get_factor_value_store,
+    list_factor_definitions,
+    list_factor_groups,
+)
 from app.services.index_components import load_index_symbols
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
@@ -313,8 +312,7 @@ async def precompute(request: FactorPrecomputeRequest = Body(...)) -> dict[str, 
             "end_date": request.end_date.isoformat(),
         },
     )
-    params = request.params or {}
-    names = set(request.factor_names)
+    set(request.factor_names)
     if request.async_task:
         asyncio.create_task(_run_single_precompute_task(task_id, request))
         return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request)}
@@ -350,7 +348,6 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
     if not request.symbols and not request.index_symbol:
         raise HTTPException(status_code=400, detail="symbols or index_symbol is required")
     group_factor_names = [str(name) for name in group.get("factor_names") or [] if str(name)]
-    params = request.params or {}
     task_id = f"factor-group-{str(uuid.uuid4())[:8]}"
     register_task(
         task_id=task_id,

@@ -18,7 +18,6 @@ from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-
 CANONICAL_SOURCES = {"xueqiu_spyder", "flocktrader"}
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",

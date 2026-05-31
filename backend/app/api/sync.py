@@ -10,12 +10,17 @@ from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import app.services.sync_service as sync_service_module
 from app.db.sqlite import get_async_session
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.cache_invalidation import invalidate_after_sync
-from app.services.sync_run_store import get_latest_sync_run, idle_sync_status, run_to_status, upsert_sync_run
+from app.services.sync_run_store import (
+    get_latest_sync_run,
+    idle_sync_status,
+    run_to_status,
+    upsert_sync_run,
+)
 from app.services.sync_service import SyncProgress, SyncService
-import app.services.sync_service as sync_service_module
 
 router = APIRouter()
 

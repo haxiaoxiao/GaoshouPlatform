@@ -1,7 +1,7 @@
 # backend/app/engines/factor_engine.py
 """因子计算引擎"""
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from typing import Any
 
 import numpy as np
@@ -291,7 +291,7 @@ class FactorEngine:
 
         result_dfs = []
 
-        for symbol, group in df.groupby("symbol"):
+        for _symbol, group in df.groupby("symbol"):
             group = group.sort_values("trade_date").copy()
 
             # 1. 计算蜡烛上影线
@@ -355,7 +355,7 @@ class FactorEngine:
         """
         result_dfs = []
 
-        for symbol, group in df.groupby("symbol"):
+        for _symbol, group in df.groupby("symbol"):
             group = group.sort_values("trade_date").copy()
             # 计算未来收益率
             group["forward_return"] = group["close"].shift(-forward_period) / group["close"] - 1

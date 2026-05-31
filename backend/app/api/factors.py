@@ -1,43 +1,41 @@
 """Factor CRUD, templates, validation, preview, and precompute endpoints."""
 
 import asyncio
-
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Body, Depends, HTTPException
+from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.compute.operators import auto_discover
+from app.db.models import Factor
+from app.db.models.factor import FactorAnalysis
+from app.db.sqlite import get_async_session
 from app.models.factor import (
-    FactorTemplate,
-    FactorCreate,
-    FactorUpdate,
-    FactorResponse,
-    StockPool,
-    FactorDirection,
-    FactorConfig,
     EvalConfig,
+    FactorConfig,
+    FactorCreate,
+    FactorDirection,
+    FactorResponse,
+    FactorTemplate,
+    FactorUpdate,
     ICMethod,
+    StockPool,
     ValidateRequest,
     ValidateResponse,
 )
-from app.db.models import Factor
-from app.db.sqlite import get_async_session
 from app.services.compute_service import compute_service
+from app.services.factor_evaluation import FactorEvaluationService
 from app.services.factor_service import FactorCreate as DbFactorCreate
-from app.services.factor_service import FactorUpdate as DbFactorUpdate
 from app.services.factor_service import FactorService
+from app.services.factor_service import FactorUpdate as DbFactorUpdate
 from app.services.factor_templates import FactorTemplatesService
 from app.services.factor_validator import FactorValidator
-from app.services.factor_value_store import get_factor_value_store
-from app.services.factor_value_store import factor_params_hash
-from app.services.factor_evaluation import FactorEvaluationService
-from app.db.models.factor import FactorAnalysis
-from app.compute.operators import auto_discover
-from loguru import logger
-from decimal import Decimal
+from app.services.factor_value_store import factor_params_hash, get_factor_value_store
 
 # Ensure operators are registered before any expression evaluation
 auto_discover()
@@ -562,11 +560,11 @@ async def analyze_factor(
         ic_method = request.ic_method or "spearman"
         if meta["source_type"] == "python":
             from app.models.factor import (
+                DecayPoint,
                 FactorReport,
                 ICPoint,
                 IndustryIC,
                 TurnoverPoint,
-                DecayPoint,
             )
             from app.services.python_factor_runner import run_python_factor
 

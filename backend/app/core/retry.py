@@ -1,6 +1,6 @@
 """Exponential backoff retry utility for async operations."""
 import asyncio
-from collections.abc import Callable, Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any, TypeVar
 
 from loguru import logger

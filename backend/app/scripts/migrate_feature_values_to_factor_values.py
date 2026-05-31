@@ -14,7 +14,6 @@ import pandas as pd
 
 from app.core.config import settings
 
-
 NAME_MAP = {
     "smallcap_market_cap": "market_cap",
     "smallcap_market_cap_rank": "market_cap_rank",

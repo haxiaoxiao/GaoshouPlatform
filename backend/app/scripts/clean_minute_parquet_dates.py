@@ -15,7 +15,6 @@ from pathlib import Path
 import duckdb
 from loguru import logger
 
-
 DEFAULT_ROOT = Path(r"E:\Projects\GaoshouPlatform\data\parquet\klines_minute")
 
 

@@ -1,13 +1,13 @@
 """Parquet 指标数据存储实现"""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
 
 from app.data_stores.indicator_base import IndicatorStore
-from app.data_stores.parquet_store import _sql_literal, _list_param
+from app.data_stores.parquet_store import _list_param
 from app.db.duckdb import get_duckdb
 
 

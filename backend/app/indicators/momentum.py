@@ -1,5 +1,4 @@
 """动量类指标。"""
-import math
 from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 

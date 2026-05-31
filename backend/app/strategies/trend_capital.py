@@ -12,13 +12,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
 
 import numpy as np
 
 from app.db.clickhouse import get_ch_client
-
 
 # ═══════════════════════════════════════════════════════════════
 # 配置参数
@@ -166,7 +165,7 @@ class TrendCapitalStrategy:
 
             vols = np.array([m["volume"] for m in minutes], dtype=np.float64)
             closes = np.array([m["close"] for m in minutes], dtype=np.float64)
-            opens_ = np.array([m["open"] for m in minutes], dtype=np.float64)
+            np.array([m["open"] for m in minutes], dtype=np.float64)
             amounts = np.array([m["amount"] for m in minutes], dtype=np.float64)
 
             is_trend = vols > thresh

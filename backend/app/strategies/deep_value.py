@@ -11,9 +11,9 @@ from typing import Any
 
 import numpy as np
 
+from app.core.config import settings
 from app.data_stores import get_market_data_store
 from app.data_stores.factory import get_indicator_store
-from app.core.config import settings
 
 
 @dataclass
@@ -41,8 +41,9 @@ class DeepValueStrategy:
         if self.pool_symbols:
             return self.pool_symbols
         from sqlalchemy import create_engine, select
-        from app.db.models.stock import Stock
+
         from app.core.config import settings
+        from app.db.models.stock import Stock
         url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(url)
         with engine.connect() as conn:
@@ -153,13 +154,11 @@ class DeepValueStrategy:
             return {"error": "调仓日不足", "rebalance_dates": len(rebalance_dates)}
 
         # ── 批量加载每日收盘价（用于跟踪持仓） ──
-        daily_prices: dict[str, dict[date, float]] = {}
-        all_held: set[str] = set()
 
         baskets: list[DVBasket] = []
         all_trades: list[dict] = []
 
-        for i, rebalance_date in enumerate(rebalance_dates):
+        for _i, rebalance_date in enumerate(rebalance_dates):
             # ── 平仓：上一期持有的所有股票按当日价格卖出 ──
             for basket in list(baskets):
                 for item in basket.stocks:

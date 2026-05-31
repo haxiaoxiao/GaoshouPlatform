@@ -2,9 +2,8 @@
 分钟K线指标计算脚本
 基于分钟K线数据计算日内时序指标，存入 ClickHouse
 """
-import asyncio
-import sys
 import io
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
@@ -14,6 +13,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from clickhouse_driver import Client
+
 from app.core.config import settings
 
 
@@ -43,47 +43,6 @@ def compute_minute_indicators():
         return
 
     # 指标SQL模板
-    indicators = [
-        # 日内涨跌幅 (当日最新价 vs 开盘价)
-        ("intraday_return", """
-            (last(close) - first(open)) / first(open) * 100
-        """, "%"),
-
-        # 当前价格
-        ("last_price", "last(close)", "元"),
-
-        # 开盘价
-        ("open_price", "first(open)", "元"),
-
-        # 最高价
-        ("high_price", "max(high)", "元"),
-
-        # 最低价
-        ("low_price", "min(low)", "元"),
-
-        # 成交量
-        ("total_volume", "sum(volume)", "股"),
-
-        # 成交额
-        ("total_amount", "sum(amount)", "万元"),
-
-        # 均价 (VWAP)
-        ("vwap", "sum(amount) / NULLIF(sum(volume), 0)", "元"),
-
-        # 均价（简单）
-        ("avg_price", "avg(close)", "元"),
-
-        # 涨跌幅 (收盘 vs 昨日收盘) - 需要昨日收盘价
-        # 这里简化为日内波动
-        ("intraday_volatility", """
-            (max(close) - min(close)) / first(open) * 100
-        """, "%"),
-
-        # 换手率 (需要流通股本，这里用成交量/100万估算)
-        ("volume_ratio", """
-            sum(volume) / 1000000
-        """, "万手"),
-    ]
 
     for symbol in symbols[:100]:  # 先测试100只
         try:
@@ -134,7 +93,7 @@ def compute_minute_indicators():
 
     # 统计
     count = ch.execute("SELECT count() FROM indicator_timeseries")[0][0]
-    print(f"\n\n指标计算完成!")
+    print("\n\n指标计算完成!")
     print(f"indicator_timeseries 总行数: {count:,}")
 
 

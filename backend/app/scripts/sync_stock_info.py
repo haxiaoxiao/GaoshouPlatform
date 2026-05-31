@@ -2,8 +2,8 @@
 股票基础信息同步脚本
 """
 import asyncio
-import sys
 import io
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -15,6 +15,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from clickhouse_driver import Client
+
 from app.engines.qmt_gateway import qmt_gateway
 
 
@@ -84,7 +85,7 @@ class StockInfoSyncer:
                 self.synced_stocks += 1
 
                 # 显示进度
-                elapsed = (datetime.now() - start_time).total_seconds()
+                (datetime.now() - start_time).total_seconds()
                 rate = i / len(stocks) * 100
 
                 st_count = sum(1 for s in stocks[:i] if s.is_st)
@@ -94,7 +95,7 @@ class StockInfoSyncer:
                 self.failed_stocks.append((stock.symbol, str(e)))
                 print(f"\n[X] {stock.symbol} 失败: {e}")
 
-        print(f"\n\n=== 同步完成 ===")
+        print("\n\n=== 同步完成 ===")
         print(f"成功: {self.synced_stocks}/{self.total_stocks}")
         if self.failed_stocks:
             print(f"失败: {len(self.failed_stocks)} 只")

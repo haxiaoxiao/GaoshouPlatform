@@ -3,7 +3,7 @@
 Extracted from compute/api.py; adds batch_compute for factor board use.
 """
 
-from datetime import date, datetime
+from datetime import date
 
 import pandas as pd
 from loguru import logger
@@ -75,6 +75,7 @@ class ComputeService:
         # Fallback: 从 SQLite stocks 表读取
         import sqlite3
         from pathlib import Path
+
         from app.core.config import settings
         db_path = Path(settings.data_dir) / "gaoshou.db"
         if db_path.exists():
@@ -93,6 +94,7 @@ class ComputeService:
         Returns dict[symbol -> DataFrame] keyed by trade_date.
         """
         import numpy as np
+
         from app.data_stores import get_market_data_store
 
         store = get_market_data_store()

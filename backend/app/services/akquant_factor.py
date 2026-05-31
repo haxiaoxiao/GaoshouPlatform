@@ -6,7 +6,7 @@ from datetime import date
 from typing import Any
 
 
-class AkquantFactorUnavailable(RuntimeError):
+class AkquantFactorUnavailableError(RuntimeError):
     """Raised when AKQuant factor dependencies are not available."""
 
 
@@ -36,7 +36,7 @@ def _evaluate_akquant_factor_sync(
         import polars as pl
         from akquant.factor.engine import FactorEngine
     except Exception as exc:  # pragma: no cover - depends on optional packages
-        raise AkquantFactorUnavailable(
+        raise AkquantFactorUnavailableError(
             "AKQuant factor engine requires akquant and polars"
         ) from exc
 

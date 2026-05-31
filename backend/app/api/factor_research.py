@@ -15,7 +15,6 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.services.factor_research_runs import factor_research_run_service
 
-
 router = APIRouter()
 
 

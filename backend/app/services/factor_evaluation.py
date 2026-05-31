@@ -3,7 +3,6 @@ import asyncio
 import calendar
 import inspect
 from datetime import date
-from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -26,9 +25,17 @@ except Exception:  # pragma: no cover - compatibility for parquet-only deploymen
 # Ensure operators are registered before any expression evaluation
 auto_discover()
 from app.models.factor import (
-    FactorConfig, EvalConfig, BtConfig, FactorReport,
-    ICPoint, IndustryIC, TurnoverPoint, DecayPoint, StockFactorValue,
-    BoardQuery, BoardRow, BoardResponse, StockPool,
+    BoardQuery,
+    BoardResponse,
+    BoardRow,
+    DecayPoint,
+    EvalConfig,
+    FactorConfig,
+    FactorReport,
+    ICPoint,
+    IndustryIC,
+    StockFactorValue,
+    TurnoverPoint,
 )
 from app.services.compute_service import compute_service
 
@@ -299,9 +306,10 @@ class FactorEvaluationService:
 
     async def _saved_factor_board_rows(self, query: BoardQuery) -> list[BoardRow]:
         """Return saved custom factors + built-in indicator definitions for the board."""
-        from app.db.sqlite import async_session_factory
-        from app.db.models import Factor, FactorAnalysis
         from sqlalchemy import select
+
+        from app.db.models import Factor, FactorAnalysis
+        from app.db.sqlite import async_session_factory
 
         rows: list[BoardRow] = []
         from app.services.factor_value_store import list_factor_definitions, list_factor_groups
@@ -730,6 +738,7 @@ class FactorEvaluationService:
         """Load industry classification from SQLite stocks table."""
         import sqlite3
         from pathlib import Path
+
         from app.core.config import settings
 
         db_path = Path(settings.data_dir) / "gaoshou.db"
@@ -843,7 +852,7 @@ class FactorEvaluationService:
             if ic_series.empty:
                 result.append((lag, 0.0, 0.0))
                 continue
-            mean_ic = float(ic_series.mean())
+            float(ic_series.mean())
 
             # Also compute top/bottom quantile returns at this lag
             dates = sorted(factor_df.index.intersection(lagged_return.dropna(how="all").index))

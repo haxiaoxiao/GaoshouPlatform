@@ -4,7 +4,6 @@ from __future__ import annotations
 import shutil
 import tempfile
 from datetime import date, datetime, timedelta
-from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -286,8 +285,8 @@ class TestFactory:
 
     def test_clickhouse_backend(self, monkeypatch):
         monkeypatch.setattr("app.core.config.settings.market_data_backend", "clickhouse")
-        from app.data_stores.factory import get_market_data_store
         from app.data_stores.clickhouse_store import ClickHouseMarketDataStore
+        from app.data_stores.factory import get_market_data_store
 
         s = get_market_data_store()
         assert isinstance(s, ClickHouseMarketDataStore)

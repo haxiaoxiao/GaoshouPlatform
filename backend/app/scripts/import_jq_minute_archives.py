@@ -20,7 +20,6 @@ from loguru import logger
 
 from app.data_stores.parquet_store import ParquetMarketDataStore
 
-
 DEFAULT_SOURCE = Path(
     r"E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版\01_数据文件\202604开始的数据"
 )

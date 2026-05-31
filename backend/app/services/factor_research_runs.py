@@ -18,14 +18,10 @@ from loguru import logger
 from sqlalchemy import select
 
 from app.core.config import settings
+from app.data_stores import get_market_data_store
 from app.db.models import Factor, FactorResearchRun, FactorResearchRunItem, WatchlistStock
 from app.db.sqlite import async_session_factory
 from app.models.factor import EvalConfig
-from app.services.factor_evaluation import FactorEvaluationService
-from app.services.factor_value_store import get_factor_definition, get_factor_value_store
-from app.services.index_catalog import get_index_item
-from app.services.index_components import load_index_symbols
-from app.data_stores import get_market_data_store
 from app.services.benchmark_series import (
     DEFAULT_BENCHMARK_SYMBOL,
     benchmark_display_name,
@@ -34,7 +30,10 @@ from app.services.benchmark_series import (
     resolve_benchmark_symbol,
     returns_to_nav_series,
 )
-
+from app.services.factor_evaluation import FactorEvaluationService
+from app.services.factor_value_store import get_factor_definition, get_factor_value_store
+from app.services.index_catalog import get_index_item
+from app.services.index_components import load_index_symbols
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "portfolio_type": "long_only",

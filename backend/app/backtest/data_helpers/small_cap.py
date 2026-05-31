@@ -1,11 +1,9 @@
 """小市值策略数据助手 — 通过 MarketDataStore 访问行情数据"""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from typing import Any
+from datetime import date, timedelta
 
 import pandas as pd
-from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store

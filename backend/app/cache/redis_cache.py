@@ -3,7 +3,7 @@
 
 import json
 import os
-from typing import Any, Optional
+from typing import Any
 
 import redis
 from loguru import logger
@@ -59,7 +59,7 @@ class RedisClient:
     def available(self) -> bool:
         return self._available
 
-    def get(self, key: str) -> Optional[str]:
+    def get(self, key: str) -> str | None:
         """获取缓存值"""
         if not self._available or self._pool is None:
             return None
@@ -133,7 +133,7 @@ class RedisClient:
 
 
 # 全局单例
-_redis_client: Optional[RedisClient] = None
+_redis_client: RedisClient | None = None
 
 
 def get_redis_client() -> RedisClient:

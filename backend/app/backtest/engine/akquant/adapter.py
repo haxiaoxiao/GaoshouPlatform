@@ -8,8 +8,8 @@ from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 from app.backtest.engine.akquant import AKQUANT_AVAILABLE
@@ -130,7 +130,7 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
             len(df_all),
         )
 
-    def load(self, request: "FeedSlice") -> pd.DataFrame:
+    def load(self, request: FeedSlice) -> pd.DataFrame:
         if not self._loaded:
             return pd.DataFrame()
 

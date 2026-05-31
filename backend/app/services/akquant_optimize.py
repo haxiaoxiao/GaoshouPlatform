@@ -20,11 +20,10 @@ from app.backtest.engine.akquant.engine import _install_dynamic_strategy_pickle_
 from app.backtest.engine.data_provider import StoreDataProvider
 from app.services.timer_minute_sync import timer_times_from_params, timer_times_to_strings
 
-
 ProgressCallback = Callable[[str, str, float | None, dict[str, Any] | None], None]
 
 
-class AkquantOptimizeUnavailable(RuntimeError):
+class AkquantOptimizeUnavailableError(RuntimeError):
     """Raised when AKQuant optimization cannot run."""
 
 
@@ -81,7 +80,7 @@ def _emit_progress(
 def _param_combinations(param_grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     keys = list(param_grid.keys())
     values = [list(param_grid[key]) for key in keys]
-    return [dict(zip(keys, combo)) for combo in product(*values)]
+    return [dict(zip(keys, combo, strict=False)) for combo in product(*values)]
 
 
 def _param_preview(combinations: list[dict[str, Any]], limit: int = 20) -> str:
@@ -110,7 +109,7 @@ async def run_grid_search(
 ) -> list[dict[str, Any]]:
     """Run AKQuant Grid Search and return JSON-safe rows."""
     if not AKQUANT_AVAILABLE:
-        raise AkquantOptimizeUnavailable("akquant is not installed")
+        raise AkquantOptimizeUnavailableError("akquant is not installed")
     if not config.strategy_code:
         raise ValueError("strategy_code is required for AKQuant optimization")
     if not param_grid:
@@ -198,7 +197,7 @@ async def run_walk_forward(
 ) -> list[dict[str, Any]]:
     """Run AKQuant Walk-forward Validation and return JSON-safe rows."""
     if not AKQUANT_AVAILABLE:
-        raise AkquantOptimizeUnavailable("akquant is not installed")
+        raise AkquantOptimizeUnavailableError("akquant is not installed")
     if not config.strategy_code:
         raise ValueError("strategy_code is required for AKQuant walk-forward")
     if not param_grid:
@@ -474,6 +473,7 @@ def _load_optimization_data(
 
 def _json_safe(row: dict[str, Any]) -> dict[str, Any]:
     import math
+
     import numpy as np
 
     clean: dict[str, Any] = {}

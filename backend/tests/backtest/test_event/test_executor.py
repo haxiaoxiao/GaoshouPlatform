@@ -1,13 +1,13 @@
 """EventDrivenExecutor 单元测试"""
-import pytest
 from datetime import date
 
 import pandas as pd
+import pytest
 
-from app.backtest.event.events import Event, EventType
-from app.backtest.event.event_bus import EventBus
 from app.backtest.event.calendar import TradingCalendar
+from app.backtest.event.event_bus import EventBus
 from app.backtest.event.event_source import BarEventSource
+from app.backtest.event.events import EventType
 from app.backtest.event.executor import EventDrivenExecutor
 
 
@@ -60,7 +60,7 @@ class TestExecutor:
             bus.add_listener(et, lambda e, et=et: events_received.append(et))
 
         executor = EventDrivenExecutor(bus)
-        ctx = executor.run(event_source)
+        executor.run(event_source)
 
         assert EventType.ENGINE_START in events_received
         assert EventType.ENGINE_END in events_received

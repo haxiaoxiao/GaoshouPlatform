@@ -22,7 +22,6 @@ from app.core.config import settings
 from app.data_stores import get_market_data_store
 from app.scripts.fill_small_cap_missing_data import ensure_reference_tables
 
-
 DEFAULT_STATE_DB = Path(r"E:\Projects\GaoshouPlatform\data\parquet\import_state\tushare_daily_sync.sqlite")
 
 

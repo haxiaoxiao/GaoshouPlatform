@@ -1,5 +1,6 @@
 import socket
 from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]

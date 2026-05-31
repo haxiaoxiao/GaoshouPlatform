@@ -7,13 +7,13 @@
 from __future__ import annotations
 
 import traceback
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import date, datetime, timedelta
 from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
-from loguru import logger
 
 from app.data_stores import get_market_data_store
 
@@ -151,7 +151,7 @@ def _validate_and_normalize(
         if missing:
             return rows, errors
 
-    symbols_valid = set(context.get("symbols", []))
+    set(context.get("symbols", []))
     start = date.fromisoformat(context["start_date"])
     end = date.fromisoformat(context["end_date"])
 
@@ -228,6 +228,7 @@ def _load_stock_info(symbols: Sequence[str]) -> pd.DataFrame:
     """加载股票基础信息。"""
     import sqlite3
     from pathlib import Path
+
     from app.core.config import settings
 
     db_path = Path(settings.data_dir) / "gaoshou.db"
@@ -246,6 +247,7 @@ def _load_financial(symbols: Sequence[str]) -> pd.DataFrame:
     """加载最近财务数据。"""
     import sqlite3
     from pathlib import Path
+
     from app.core.config import settings
 
     db_path = Path(settings.data_dir) / "gaoshou.db"

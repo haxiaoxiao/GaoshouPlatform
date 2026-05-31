@@ -10,7 +10,11 @@ import pandas as pd
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 def _sqlite_db_path() -> Path:

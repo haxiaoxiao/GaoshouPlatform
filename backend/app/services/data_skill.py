@@ -10,20 +10,19 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.clickhouse import get_ch_client
 from app.data_stores import get_market_data_store
+from app.db.clickhouse import get_ch_client
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.security_symbols import normalize_security_symbol
-
 
 # ═══════════════════════════════════════════════════════════════
 # 数据类 — 统一返回格式
@@ -481,8 +480,9 @@ class DataSkill:
         symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return []
-        from app.data_stores import get_indicator_store
         from datetime import date as dt_date
+
+        from app.data_stores import get_indicator_store
 
         store = get_indicator_store()
         target_date = trade_date or store.latest_trade_date(None, symbols) or dt_date.today()

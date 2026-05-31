@@ -6,7 +6,6 @@ from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
-from loguru import logger
 
 from app.backtest.engine.interface import IDataProvider
 from app.data_stores import get_market_data_store

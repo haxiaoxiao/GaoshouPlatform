@@ -1,6 +1,6 @@
 """Factor creation templates — 4 preset types with predefined expressions and params."""
 
-from app.models.factor import FactorTemplate, TemplateType, StockPool
+from app.models.factor import FactorTemplate, StockPool, TemplateType
 
 TEMPLATES: list[dict] = [
     {

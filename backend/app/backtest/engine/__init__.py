@@ -1,26 +1,27 @@
 """回测引擎注册表"""
 from __future__ import annotations
 
-from typing import Any, Type
+from typing import Any
 
-from app.backtest.engine.interface import IBacktestEngine, IDataProvider
 from loguru import logger
+
+from app.backtest.engine.interface import IBacktestEngine
 
 
 class EngineRegistry:
     """引擎注册表 — 通过装饰器注册"""
 
-    _engines: dict[str, Type[IBacktestEngine]] = {}
+    _engines: dict[str, type[IBacktestEngine]] = {}
     _discovered: bool = False
 
     @classmethod
-    def register(cls, engine_class: Type[IBacktestEngine]) -> Type[IBacktestEngine]:
+    def register(cls, engine_class: type[IBacktestEngine]) -> type[IBacktestEngine]:
         name = engine_class.name or engine_class.__name__
         cls._engines[name] = engine_class
         return engine_class
 
     @classmethod
-    def get(cls, name: str) -> Type[IBacktestEngine]:
+    def get(cls, name: str) -> type[IBacktestEngine]:
         cls.ensure_discovered()
         if name not in cls._engines:
             available = list(cls._engines.keys())

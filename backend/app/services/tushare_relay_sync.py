@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import calendar
 import copy
+import hashlib
 import math
 import time
 from dataclasses import dataclass, field
@@ -21,8 +21,7 @@ from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
 from app.db.models import Stock, StockConceptMembership
 from app.services.security_symbols import normalize_security_symbol
-from app.services.tushare_relay import TushareRelayClient, TushareRelayError, TushareRelayMeta
-
+from app.services.tushare_relay import TushareRelayClient, TushareRelayMeta
 
 CATALOG_CACHE_TTL_SECONDS = 300
 COVERAGE_CACHE_TTL_SECONDS = 300

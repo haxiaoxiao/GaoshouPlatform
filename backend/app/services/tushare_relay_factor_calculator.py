@@ -12,7 +12,6 @@ from app.data_stores.parquet_store import _list_param, _sql_literal
 from app.db.duckdb import get_duckdb
 from app.services.factor_value_store import get_factor_value_store
 
-
 RELAY_FACTOR_COLUMNS = {
     "moneyflow_net_mf_amount": ("moneyflow", "trade_date", "net_mf_amount"),
     "moneyflow_net_mf_vol": ("moneyflow", "trade_date", "net_mf_vol"),

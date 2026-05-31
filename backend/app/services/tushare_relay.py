@@ -12,7 +12,6 @@ from loguru import logger
 
 from app.core.config import settings
 
-
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 
 
@@ -64,7 +63,7 @@ def parse_relay_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 if isinstance(item, dict):
                     rows.append(item)
                 elif isinstance(item, (list, tuple)):
-                    rows.append(dict(zip(fields, item)))
+                    rows.append(dict(zip(fields, item, strict=False)))
             return rows
         rows_value = data.get("rows") or data.get("items")
         if isinstance(rows_value, list):

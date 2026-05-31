@@ -1,6 +1,16 @@
 # backend/app/api/router.py
 from fastapi import APIRouter
 
+from app.api.factor_research import router as factor_research_router
+from app.api.factor_values import router as factor_values_router
+from app.api.factors import router as factors_router
+from app.api.grid_trading import router as grid_trading_router
+from app.api.sentiment import router as sentiment_router
+from app.api.small_cap_debug import router as small_cap_debug_router
+from app.backtest.api import router as backtest_engine_router
+from app.compute.api import router as compute_router
+
+from .akshare import router as akshare_router
 from .backtest import router as backtest_router
 from .data import router as data_router
 from .data_explorer import router as data_explorer_router
@@ -8,18 +18,9 @@ from .data_skill import router as data_skill_router
 from .evaluation import router as evaluation_router
 from .factor import router as factor_router
 from .indicator import router as indicator_router
+from .parquet_explorer import router as parquet_explorer_router
 from .strategy import router as strategy_router
 from .system import router as system_router
-from .akshare import router as akshare_router
-from .parquet_explorer import router as parquet_explorer_router
-from app.compute.api import router as compute_router
-from app.backtest.api import router as backtest_engine_router
-from app.api.factors import router as factors_router
-from app.api.factor_values import router as factor_values_router
-from app.api.factor_research import router as factor_research_router
-from app.api.small_cap_debug import router as small_cap_debug_router
-from app.api.grid_trading import router as grid_trading_router
-from app.api.sentiment import router as sentiment_router
 
 api_router = APIRouter()
 

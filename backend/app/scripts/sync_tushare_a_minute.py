@@ -29,7 +29,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import sqlite3
 import sys
@@ -41,7 +40,6 @@ from typing import Iterable
 
 import pandas as pd
 from loguru import logger
-
 
 DEFAULT_ROOT = Path(r"E:\Projects\QuantData\tushare_a_minute")
 DEFAULT_TOKENS_FILE = Path(r"E:\Projects\GaoshouPlatform\TushareTokensForA.md")

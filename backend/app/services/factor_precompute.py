@@ -96,6 +96,7 @@ def _resolve_symbols(
 
 def _sqlite_db_path():
     from pathlib import Path
+
     from app.core.config import settings
 
     return Path(settings.data_dir) / "gaoshou.db"

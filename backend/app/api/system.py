@@ -1,11 +1,10 @@
 # backend/app/api/system.py
 import asyncio
-from datetime import date
 
 from fastapi import APIRouter
 
-from app.core.config import settings
 from app.cache.redis_cache import get_redis_client
+from app.core.config import settings
 from app.services.backtest_redis_cache import get_backtest_cache
 from app.services.runtime_tasks import get_task, list_tasks
 from app.services.sync_proxy import proxy_sync_request, sync_service_health

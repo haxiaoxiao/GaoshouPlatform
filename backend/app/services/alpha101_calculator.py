@@ -11,7 +11,11 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 class Alphas:
@@ -800,14 +804,14 @@ class Alphas:
         scale(rank(ts_argmax(close, 10))))))"""
         left = 2 * self._scale(
             self._rank(
-                (
+
                     (
                         (self.data["close"] - self.data["low"])
                         - (self.data["high"] - self.data["close"])
                     )
                     / (self.data["high"] - self.data["low"] + self.eps)
                     * self.data["volume"]
-                )
+
             )
         )
         right = self._scale(self._rank(self._ts_argmax(self.data["close"], 10)))
@@ -1546,14 +1550,14 @@ class Alphas:
             self._ind_neutralize(
                 self._ind_neutralize(
                     self._rank(
-                        (
+
                             (
                                 (self.data["close"] - self.data["low"])
                                 - (self.data["high"] - self.data["close"])
                             )
                             / (self.data["high"] - self.data["low"] + self.eps)
                             * self.data["volume"]
-                        )
+
                     )
                 )
             )

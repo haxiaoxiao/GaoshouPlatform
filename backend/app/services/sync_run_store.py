@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.sync import SyncRun
 
-
 TERMINAL_SYNC_STATUSES = {"completed", "failed", "cancelled"}
 
 

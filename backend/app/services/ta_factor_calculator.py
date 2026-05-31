@@ -9,7 +9,11 @@ import pandas as pd
 from app.compute.operators.ta_ops import _call_ta
 from app.data_stores import get_market_data_store
 from app.services.factor_catalog import TA_FACTOR_SPECS
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 def _build_daily_frame(symbols: Sequence[str], start_date: date, end_date: date, lookback_days: int) -> pd.DataFrame:
@@ -82,9 +86,9 @@ def _compute_factor(frame: pd.DataFrame, factor_name: str) -> np.ndarray:
     close = frame["close"].to_numpy(dtype=np.float64)
     high = frame["high"].to_numpy(dtype=np.float64)
     low = frame["low"].to_numpy(dtype=np.float64)
-    open_ = frame["open"].to_numpy(dtype=np.float64)
+    frame["open"].to_numpy(dtype=np.float64)
     volume = frame["volume"].fillna(0.0).to_numpy(dtype=np.float64)
-    amount = frame["amount"].fillna(0.0).to_numpy(dtype=np.float64)
+    frame["amount"].fillna(0.0).to_numpy(dtype=np.float64)
 
     if factor_name == "ta_sma_20":
         return np.asarray(_call_ta("SMA", close, timeperiod=20), dtype=np.float64)

@@ -12,7 +12,6 @@ from app.data_stores import get_market_data_store
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.qmt_trading import QmtAccountSnapshot, qmt_trading_service
 
-
 GRID_SYMBOLS = ["002624.SZ", "300418.SZ"]
 GRID_NAMES = {"002624.SZ": "完美世界", "300418.SZ": "昆仑万维"}
 
@@ -27,7 +26,7 @@ class GridAccountSnapshot:
     error: str | None = None
 
     @classmethod
-    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> "GridAccountSnapshot":
+    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> GridAccountSnapshot:
         return cls(
             cash=snapshot.cash,
             total_asset=snapshot.total_asset,

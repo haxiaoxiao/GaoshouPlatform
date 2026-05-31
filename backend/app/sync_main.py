@@ -12,7 +12,6 @@ from app.db.clickhouse import init_clickhouse_tables
 from app.db.sqlite import async_session_factory
 from app.services.sync_run_store import mark_stale_running_syncs_failed
 
-
 setup_logging(debug=True)
 
 

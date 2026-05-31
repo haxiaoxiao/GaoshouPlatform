@@ -7,9 +7,7 @@ from typing import Any
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
 
-from app.db.clickhouse import get_ch_client
 from app.data_stores import get_market_data_store
 from app.db.models import (
     Stock,

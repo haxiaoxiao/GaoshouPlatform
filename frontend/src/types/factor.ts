@@ -129,8 +129,14 @@ export interface BoardQuery {
   transfer_fee_rate?: number
   slippage?: number
   filter_limit_up?: boolean
+  filter_limit_down?: boolean
+  group_count?: number
+  direction?: 'asc' | 'desc'
   pool_membership_mode?: 'static_latest' | 'point_in_time' | 'union'
   factor_value_params_hashes?: Record<string, string>
+  outlier_handling?: 'none' | 'winsorize'
+  industry_neutralization?: boolean
+  standardize?: boolean
   sort_by?: string
   sort_order?: 'asc' | 'desc'
   page?: number

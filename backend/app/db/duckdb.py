@@ -47,7 +47,6 @@ def query_parquet_df(
     conn: duckdb.DuckDBPyConnection | None = None,
 ):
     """执行 DuckDB 查询并返回 DataFrame"""
-    import pandas as pd
 
     db = conn or get_duckdb()
     if params:

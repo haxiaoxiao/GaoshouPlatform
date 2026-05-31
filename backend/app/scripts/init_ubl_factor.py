@@ -4,7 +4,6 @@ import asyncio
 from datetime import date
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Factor
 from app.db.sqlite import async_session_factory
@@ -99,7 +98,6 @@ UBL 上下影线因子（东吴证券研报）
 async def run_ubl_analysis():
     """运行 UBL 因子分析"""
     from app.engines.factor_engine import FactorConfig, get_factor_engine
-    from app.services.factor_service import FactorService
 
     print("开始运行 UBL 因子分析...")
 
