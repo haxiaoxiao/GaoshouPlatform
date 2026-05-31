@@ -11,6 +11,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
+from app.services.factor_precompute_runtime import precompute_memory_policy, release_precompute_memory
 from app.services.factor_value_store import (
     FactorValueStore,
     factor_params_hash,
@@ -1699,13 +1700,20 @@ def precompute_alpha101_factors(
     created_at = datetime.now()
     empty_hash = factor_params_hash({})
     total = max(len(factor_names), 1)
-    counts: dict[str, int] = {str(name): 0 for name in factor_names}
     errors: dict[str, str] = {}
-    written = 0
     factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
     from app.services.alpha101_wide_calculator import WideAlphas, is_alpha101_wide_supported
 
-    wide_calculator = WideAlphas(panel) if any(is_alpha101_wide_supported(str(name)) for name in factor_names) else None
+    # Wide matrices are faster for small universes, but they multiply the panel
+    # into several dense DataFrames and can blow RAM on large pools. Fall back to
+    # the long Series implementation when the input panel is already large.
+    panel_rows = len(panel)
+    policy = precompute_memory_policy()
+    use_wide = any(is_alpha101_wide_supported(str(name)) for name in factor_names) and panel_rows <= policy.wide_panel_max_rows
+    wide_calculator = WideAlphas(panel) if use_wide else None
+    if not use_wide:
+        logger.info("Alpha101 precompute using long-form calculator for {} rows and {} factors", panel_rows, len(factor_names))
     for index, factor_name in enumerate(factor_names, start=1):
         report(0.10 + 0.78 * (index / total), "alpha101", current=index, total=total, factor_name=factor_name)
         try:
@@ -1733,7 +1741,7 @@ def precompute_alpha101_factors(
         factor_frame["params_hash"] = empty_hash
         factor_frame["source"] = "precompute.alpha101"
         factor_frame["created_at"] = created_at
-        rows_written = factor_store.append(factor_frame[[
+        writer.write_frame(factor_frame[[
             "symbol",
             "trade_date",
             "as_of_time",
@@ -1743,17 +1751,17 @@ def precompute_alpha101_factors(
             "source",
             "created_at",
         ]])
-        counts[factor_name] = rows_written
-        written += rows_written
-        report(0.10 + 0.78 * (index / total), "alpha101", current=index, total=total, factor_name=factor_name, rows_written=written)
-    report(0.92, "write", rows_written=written)
-    report(1.0, "done", rows_written=written)
+        report(0.10 + 0.78 * (index / total), "alpha101", current=index, total=total, factor_name=factor_name, rows_written=writer.written)
+        del series, factor_frame
+        release_precompute_memory()
+    report(0.92, "write", rows_written=writer.written)
+    report(1.0, "done", rows_written=writer.written)
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "rows": counts,
-        "rows_written": written,
+        "rows": {str(name): writer.counts.get(str(name), 0) for name in factor_names},
+        "rows_written": writer.written,
         "failed_factor_names": list(errors),
         "errors": errors,
     }

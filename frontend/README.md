@@ -7,17 +7,17 @@ Last updated: 2026-05-25.
 ## 启动
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\frontend
+cd E:\Projects\GaoshouPlatform-dev\frontend
 npm install
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
-常见本地端口：
+环境端口必须严格分开：
 
-| 服务 | 默认/常见端口 |
-|---|---|
-| Vite 前端 | `5173` 或桌面脚本指定的 `3500` |
-| FastAPI 后端 | `8000` 或当前开发会话的 `8800` |
+| 环境 | 前端 | 后端 API | 同步服务 |
+|---|---:|---:|---:|
+| dev | `13500` | `18800` | `18810` |
+| prod | `3500` | `8800` | `8810` |
 
 实际访问地址以启动脚本输出为准。
 

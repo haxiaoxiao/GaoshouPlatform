@@ -251,10 +251,11 @@ async def get_kline_minute(
     start_date: date | None = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: date | None = Query(None, description="结束日期 YYYY-MM-DD"),
     limit: int = Query(500, ge=1, le=5000, description="最大条数"),
+    timer_times: list[str] | None = Query(None, description="分钟时间点过滤，如 10:00,10:30,14:50"),
     session: AsyncSession = Depends(get_async_session),
 ):
     skill = DataSkill(session)
-    bars = await skill.get_kline_minute(symbol, start_date, end_date, limit)
+    bars = await skill.get_kline_minute(symbol, start_date, end_date, limit, timer_times=timer_times)
     return {"code": 0, "data": [_serialize_bar(b) for b in bars]}
 
 
@@ -342,5 +343,65 @@ async def get_indicator(
     session: AsyncSession = Depends(get_async_session),
 ):
     skill = DataSkill(session)
-    value = skill.get_indicator(symbol, name, trade_date)
-    return {"code": 0, "data": {"symbol": symbol, "indicator": name, "value": value, "trade_date": trade_date.isoformat() if trade_date else None}}
+    value = await skill.get_indicator(symbol, name, trade_date)
+    return {
+        "code": 0,
+        "data": {
+            "symbol": symbol,
+            "indicator": name,
+            "value": value,
+            "trade_date": trade_date.isoformat() if trade_date else None,
+        },
+    }
+
+
+@router.post("/indicator/batch", summary="批量查询截面指标")
+async def get_indicators_batch(
+    symbols: list[str] = Query(description="股票代码列表"),
+    names: list[str] | None = Query(None, description="指标名称列表（可选，不传表示返回该日期该股票的所有指标）"),
+    trade_date: date | None = Query(None, description="交易日期（可选，不传表示取 store 可用的最新日期）"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicators_batch(symbols=symbols, trade_date=trade_date, names=names)
+    return {"code": 0, "data": rows}
+
+
+@router.get("/indicator/timeseries/{symbol}", summary="查询股票指标时序数据")
+async def get_indicator_timeseries(
+    symbol: str = Path(description="股票代码"),
+    names: list[str] = Query(..., description="指标名称列表，如 pe_ttm,pb"),
+    start_date: date = Query(..., description="起始日期 YYYY-MM-DD"),
+    end_date: date = Query(..., description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(5000, ge=1, le=200000, description="最大返回行数"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicator_timeseries(
+        symbol=symbol,
+        names=names,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    return {"code": 0, "data": rows}
+
+
+@router.post("/indicator/timeseries/batch", summary="批量查询指标时序数据")
+async def get_indicators_timeseries_batch(
+    symbols: list[str] = Query(description="股票代码列表"),
+    names: list[str] = Query(..., description="指标名称列表，如 pe_ttm,pb"),
+    start_date: date = Query(..., description="起始日期 YYYY-MM-DD"),
+    end_date: date = Query(..., description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(200000, ge=1, le=500000, description="最大返回行数"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicators_timeseries_batch(
+        symbols=symbols,
+        names=names,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    return {"code": 0, "data": rows}

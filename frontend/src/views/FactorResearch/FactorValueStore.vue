@@ -127,6 +127,14 @@
     </section>
 
     <el-alert
+      v-if="definitionsError"
+      type="warning"
+      :closable="false"
+      class="result-alert"
+      :title="`因子定义加载失败：${definitionsError}`"
+    />
+
+    <el-alert
       v-if="coverageError"
       type="warning"
       :closable="false"
@@ -387,11 +395,30 @@ import {
 } from '@/api/factorValues'
 
 type PrecomputeMode = 'single' | 'group'
+type PrecomputeParamValue = string | number | boolean
+
+interface PersistedPrecomputeTask {
+  taskId: string
+  mode: PrecomputeMode
+  factorName: string
+  groupName: string
+  indexSymbol: string
+  startDate: string
+  endDate: string
+  params: Record<string, PrecomputeParamValue>
+  updatedAt: number
+}
+
+const ACTIVE_PRECOMPUTE_TASK_KEY = 'gaoshou.factorValueStore.activePrecomputeTask'
+const PRECOMPUTE_POLL_CANCELLED = 'PRECOMPUTE_POLL_CANCELLED'
+const COMPLETED_TASK_STATUSES = new Set(['done', 'completed'])
+const TERMINAL_TASK_STATUSES = new Set(['done', 'completed', 'failed', 'cancelled'])
 
 const definitions = ref<FactorValueDefinition[]>([])
 const groups = ref<FactorValueGroup[]>([])
 const coverage = ref<FactorValueCoverage | null>(null)
 const coverageError = ref('')
+const definitionsError = ref('')
 const preview = ref<FactorValuePreview | null>(null)
 const previewError = ref('')
 const lastResult = ref<FactorValuePrecomputeResult | null>(null)
@@ -403,7 +430,10 @@ const previewLoading = ref(false)
 const dependencySyncStatus = ref<SyncStatus | null>(null)
 const activeTask = ref<RuntimeTask | null>(null)
 let precomputePollTimer: number | null = null
+let precomputePollResolve: (() => void) | null = null
+let precomputePollRunId = 0
 let isSyncingFactorFromGroup = false
+let isAutoQuerySuspended = true
 
 const legacyIndexOptions = [
   { label: '中小综指 / 小市值 399101.SZ', value: '399101.SZ' },
@@ -452,7 +482,7 @@ const form = reactive({
   startDate: getDateBefore({ years: 1 }),
   endDate: formatDate(new Date()),
 })
-const paramValues = reactive<Record<string, string | number | boolean>>({})
+const paramValues = reactive<Record<string, PrecomputeParamValue>>({})
 
 const setDateShortcut = (shortcut: { months: number; years: number }) => {
   form.startDate = getDateBefore({ months: shortcut.months, years: shortcut.years })
@@ -547,6 +577,124 @@ const formatRatio = (current: unknown, total: unknown) => {
 }
 
 const formatRequestError = (error: unknown) => error instanceof Error ? error.message : '请求失败'
+
+const isPrecomputeParamValue = (value: unknown): value is PrecomputeParamValue => {
+  return ['string', 'number', 'boolean'].includes(typeof value)
+}
+
+const toParamRecord = (value: unknown): Record<string, PrecomputeParamValue> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const params: Record<string, PrecomputeParamValue> = {}
+  Object.entries(value as Record<string, unknown>).forEach(([key, item]) => {
+    if (isPrecomputeParamValue(item)) params[key] = item
+  })
+  return params
+}
+
+const replaceParamValues = (params: Record<string, PrecomputeParamValue>) => {
+  Object.keys(paramValues).forEach(key => delete paramValues[key])
+  Object.entries(params).forEach(([key, value]) => {
+    paramValues[key] = value
+  })
+}
+
+const readPersistedPrecomputeTask = (): PersistedPrecomputeTask | null => {
+  try {
+    const raw = window.sessionStorage.getItem(ACTIVE_PRECOMPUTE_TASK_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as Partial<PersistedPrecomputeTask>
+    if (!parsed.taskId) return null
+    return {
+      taskId: parsed.taskId,
+      mode: parsed.mode === 'group' ? 'group' : 'single',
+      factorName: parsed.factorName || form.factorName,
+      groupName: parsed.groupName || form.groupName,
+      indexSymbol: parsed.indexSymbol || form.indexSymbol,
+      startDate: parsed.startDate || form.startDate,
+      endDate: parsed.endDate || form.endDate,
+      params: toParamRecord(parsed.params),
+      updatedAt: Number(parsed.updatedAt || Date.now()),
+    }
+  } catch {
+    return null
+  }
+}
+
+const clearPersistedPrecomputeTask = (taskId?: string) => {
+  const saved = readPersistedPrecomputeTask()
+  if (taskId && saved?.taskId && saved.taskId !== taskId) return
+  window.sessionStorage.removeItem(ACTIVE_PRECOMPUTE_TASK_KEY)
+}
+
+const suspendAutoQueryForFormRestore = () => {
+  isAutoQuerySuspended = true
+  window.setTimeout(() => {
+    isAutoQuerySuspended = false
+  }, 0)
+}
+
+const applyPersistedPrecomputeTask = (snapshot: PersistedPrecomputeTask) => {
+  suspendAutoQueryForFormRestore()
+  form.groupName = snapshot.groupName
+  form.factorName = snapshot.factorName
+  form.indexSymbol = snapshot.indexSymbol
+  form.startDate = snapshot.startDate
+  form.endDate = snapshot.endDate
+  syncDefaultsFromDefinition()
+  replaceParamValues(snapshot.params)
+}
+
+const persistPrecomputeTask = (taskId: string, mode: PrecomputeMode) => {
+  const snapshot: PersistedPrecomputeTask = {
+    taskId,
+    mode,
+    factorName: form.factorName,
+    groupName: form.groupName,
+    indexSymbol: form.indexSymbol,
+    startDate: form.startDate,
+    endDate: form.endDate,
+    params: toParamRecord(paramValues),
+    updatedAt: Date.now(),
+  }
+  window.sessionStorage.setItem(ACTIVE_PRECOMPUTE_TASK_KEY, JSON.stringify(snapshot))
+}
+
+const precomputeModeFromTask = (
+  task: RuntimeTask,
+  saved: PersistedPrecomputeTask | null = null,
+): PrecomputeMode => {
+  if (saved?.mode) return saved.mode
+  if (String(task.task_id).startsWith('factor-group-') || task.meta?.group_name) return 'group'
+  return 'single'
+}
+
+const precomputeSnapshotFromTask = (task: RuntimeTask, saved: PersistedPrecomputeTask | null = null) => {
+  const meta = task.meta || {}
+  const factorNames = Array.isArray(meta.factor_names) ? meta.factor_names.map(String).filter(Boolean) : []
+  return {
+    taskId: task.task_id,
+    mode: precomputeModeFromTask(task, saved),
+    factorName: saved?.factorName || factorNames[0] || form.factorName,
+    groupName: saved?.groupName || String(meta.group_name || form.groupName),
+    indexSymbol: saved?.indexSymbol || String(meta.index_symbol || form.indexSymbol || ''),
+    startDate: saved?.startDate || String(meta.start_date || form.startDate),
+    endDate: saved?.endDate || String(meta.end_date || form.endDate),
+    params: saved?.params || toParamRecord(meta.params),
+    updatedAt: Date.now(),
+  } satisfies PersistedPrecomputeTask
+}
+
+const isPrecomputeRuntimeTask = (task: RuntimeTask) => {
+  return task.kind === 'factor_precompute'
+    || String(task.task_id).startsWith('factor-')
+    || String(task.task_id).startsWith('factor-group-')
+}
+
+const isTaskCompleted = (task: RuntimeTask) => COMPLETED_TASK_STATUSES.has(String(task.status))
+const isTaskTerminal = (task: RuntimeTask) => TERMINAL_TASK_STATUSES.has(String(task.status))
+const isPollCancelledError = (error: unknown) => {
+  return error instanceof Error && error.message === PRECOMPUTE_POLL_CANCELLED
+}
 
 const formatCoverageRange = (row: { coverage: { min_date: string | null; max_date: string | null } | null }) => {
   if (!row.coverage?.min_date || !row.coverage?.max_date) return '无数据'
@@ -644,6 +792,7 @@ const buildQueryParams = () => {
 
 const loadDefinitions = async () => {
   definitionsLoading.value = true
+  definitionsError.value = ''
   try {
     const [nextDefinitions, nextGroups] = await Promise.all([
       factorValueApi.definitions(),
@@ -656,6 +805,8 @@ const loadDefinitions = async () => {
     }
     ensureFactorInSelectedGroup()
     syncDefaultsFromDefinition()
+  } catch (error) {
+    definitionsError.value = formatRequestError(error)
   } finally {
     definitionsLoading.value = false
   }
@@ -713,26 +864,83 @@ const finishPrecompute = async (message: string) => {
 }
 
 const clearPrecomputePolling = () => {
+  precomputePollRunId += 1
   if (precomputePollTimer !== null) {
     window.clearTimeout(precomputePollTimer)
     precomputePollTimer = null
+  }
+  const resolve = precomputePollResolve
+  precomputePollResolve = null
+  if (resolve) resolve()
+}
+
+const waitForNextPrecomputePoll = () => {
+  return new Promise<void>(resolve => {
+    precomputePollResolve = resolve
+    precomputePollTimer = window.setTimeout(() => {
+      precomputePollTimer = null
+      precomputePollResolve = null
+      resolve()
+    }, 1000)
+  })
+}
+
+const completePrecomputeFromTask = async (
+  task: RuntimeTask,
+  mode: PrecomputeMode,
+  message: string,
+) => {
+  const recoveredResult = lastResult.value
+  const taskResult = task.meta?.result as FactorValuePrecomputeResult | undefined
+  if (taskResult) {
+    lastResult.value = taskResult
+  } else if (!recoveredResult) {
+    await recoverCompletedPrecompute(task, mode)
+  }
+  clearPersistedPrecomputeTask(task.task_id)
+  await finishPrecompute(message)
+}
+
+const resumePrecomputeTask = async (
+  taskId: string,
+  mode: PrecomputeMode,
+  message: string,
+) => {
+  if (mode === 'group') {
+    groupPrecomputeLoading.value = true
+  } else {
+    precomputeLoading.value = true
+  }
+  try {
+    const task = await pollPrecomputeTask(taskId, mode)
+    await completePrecomputeFromTask(task, mode, message)
+  } catch (error) {
+    if (isPollCancelledError(error)) return
+    clearPersistedPrecomputeTask(taskId)
+    throw error
+  } finally {
+    if (mode === 'group') {
+      groupPrecomputeLoading.value = false
+    } else {
+      precomputeLoading.value = false
+    }
   }
 }
 
 const pollPrecomputeTask = async (taskId: string, mode: PrecomputeMode = 'single'): Promise<RuntimeTask> => {
   clearPrecomputePolling()
+  const pollRunId = precomputePollRunId
   for (;;) {
+    if (pollRunId !== precomputePollRunId) throw new Error(PRECOMPUTE_POLL_CANCELLED)
     const task = await runtimeTaskApi.get(taskId)
     activeTask.value = task
-    if (['done', 'completed'].includes(String(task.status))) return task
+    if (isTaskCompleted(task)) return task
     if (task.status === 'failed') {
       const recovered = await recoverCompletedPrecompute(task, mode)
       if (recovered) return task
       throw new Error(task.error || '因子预计算失败')
     }
-    await new Promise(resolve => {
-      precomputePollTimer = window.setTimeout(resolve, 1000)
-    })
+    await waitForNextPrecomputePoll()
   }
 }
 
@@ -834,21 +1042,101 @@ const resultFromTask = (task: RuntimeTask, fallback: FactorValuePrecomputeResult
   return (task.meta?.result as FactorValuePrecomputeResult | undefined) || fallback
 }
 
+const attachPrecomputeTask = async (
+  task: RuntimeTask,
+  saved: PersistedPrecomputeTask | null = null,
+) => {
+  const snapshot = precomputeSnapshotFromTask(task, saved)
+  const mode = snapshot.mode
+  applyPersistedPrecomputeTask(snapshot)
+  activeTask.value = task
+  if (isTaskCompleted(task)) {
+    await completePrecomputeFromTask(task, mode, '因子预计算已完成')
+    return true
+  }
+  if (task.status === 'failed') {
+    clearPersistedPrecomputeTask(task.task_id)
+    ElMessage.error(task.error || '因子预计算失败')
+    return true
+  }
+  if (isTaskTerminal(task)) {
+    clearPersistedPrecomputeTask(task.task_id)
+    return false
+  }
+  persistPrecomputeTask(task.task_id, mode)
+  void resumePrecomputeTask(
+    task.task_id,
+    mode,
+    mode === 'group' ? '因子集合预计算完成' : '因子值预计算完成',
+  ).catch(error => {
+    if (!isPollCancelledError(error)) {
+      ElMessage.error(formatRequestError(error))
+    }
+  })
+  return true
+}
+
+const restorePrecomputeTask = async () => {
+  const saved = readPersistedPrecomputeTask()
+  if (saved) {
+    try {
+      const task = await runtimeTaskApi.get(saved.taskId)
+      return await attachPrecomputeTask(task, saved)
+    } catch {
+      clearPersistedPrecomputeTask(saved.taskId)
+    }
+  }
+  try {
+    const tasks = await runtimeTaskApi.list(false)
+    const task = tasks.find(isPrecomputeRuntimeTask)
+    if (task) return await attachPrecomputeTask(task)
+  } catch {
+    return false
+  }
+  return false
+}
+
 const runDirectPrecompute = async () => {
   activeTask.value = null
   const started = await factorValueApi.precompute({ ...singlePrecomputePayload(), async_task: true })
-  const task = started.task_id ? await pollPrecomputeTask(started.task_id, 'single') : null
-  const recoveredResult = lastResult.value
-  lastResult.value = task ? resultFromTask(task, recoveredResult || started) : started
+  if (started.task_id) {
+    persistPrecomputeTask(started.task_id, 'single')
+    try {
+      const task = await pollPrecomputeTask(started.task_id, 'single')
+      const recoveredResult = lastResult.value
+      lastResult.value = resultFromTask(task, recoveredResult || started)
+      clearPersistedPrecomputeTask(started.task_id)
+      await finishPrecompute('因子值预计算完成')
+      return
+    } catch (error) {
+      if (isPollCancelledError(error)) return
+      clearPersistedPrecomputeTask(started.task_id)
+      throw error
+    }
+  }
+  lastResult.value = started
   await finishPrecompute('因子值预计算完成')
 }
 
 const runDirectGroupPrecompute = async () => {
   activeTask.value = null
   const started = await factorValueApi.precomputeGroup({ ...groupPrecomputePayload(), async_task: true })
-  const task = started.task_id ? await pollPrecomputeTask(started.task_id, 'group') : null
-  const recoveredResult = lastResult.value
-  lastResult.value = task ? resultFromTask(task, recoveredResult || started) : started
+  if (started.task_id) {
+    persistPrecomputeTask(started.task_id, 'group')
+    try {
+      const task = await pollPrecomputeTask(started.task_id, 'group')
+      const recoveredResult = lastResult.value
+      lastResult.value = task ? resultFromTask(task, recoveredResult || started) : started
+      clearPersistedPrecomputeTask(started.task_id)
+      await finishPrecompute('因子集合预计算完成')
+      return
+    } catch (error) {
+      if (isPollCancelledError(error)) return
+      clearPersistedPrecomputeTask(started.task_id)
+      throw error
+    }
+  }
+  lastResult.value = started
   await finishPrecompute('因子集合预计算完成')
 }
 
@@ -1013,7 +1301,7 @@ watch(() => form.factorName, () => {
     isSyncingFactorFromGroup = false
     return
   }
-  autoQuery()
+  if (!isAutoQuerySuspended) void autoQuery()
 })
 
 watch(
@@ -1022,18 +1310,23 @@ watch(
     ensureFactorInSelectedGroup()
     syncDefaultsFromDefinition()
     resetQueryResults()
-    autoQuery()
+    if (!isAutoQuerySuspended) void autoQuery()
   }
 )
 
 watch(
   () => [form.indexSymbol, form.startDate, form.endDate],
-  () => { resetQueryResults(); autoQuery() }
+  () => {
+    resetQueryResults()
+    if (!isAutoQuerySuspended) void autoQuery()
+  }
 )
 
 onMounted(async () => {
   await Promise.all([loadDefinitions(), loadIndexCatalog()])
-  await autoQuery()
+  const restored = await restorePrecomputeTask()
+  isAutoQuerySuspended = false
+  if (!restored) await autoQuery()
 })
 
 onBeforeUnmount(() => {

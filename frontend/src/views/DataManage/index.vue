@@ -70,6 +70,11 @@
           <KlineQuery />
         </div>
 
+        <!-- Sentiment -->
+        <div v-if="mountedTabs.sentiment" v-show="activeTab === 'sentiment'" class="panel">
+          <SentimentPanel />
+        </div>
+
         <!-- Sync Panel -->
         <div v-if="mountedTabs.sync" v-show="activeTab === 'sync'" class="panel">
           <SyncPanel />
@@ -86,6 +91,7 @@ import { Refresh } from '@element-plus/icons-vue'
 import StockList from './StockList.vue'
 import SyncPanel from './SyncPanel.vue'
 import KlineQuery from './KlineQuery.vue'
+import SentimentPanel from './SentimentPanel.vue'
 import request from '@/api/request'
 import { syncApi } from '@/api/sync'
 
@@ -96,7 +102,8 @@ const icons = {
   refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>',
   activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
   search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>',
-  barChart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>'
+  barChart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>',
+  sentiment: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M8.5 13a4 4 0 0 0 7 0"/></svg>'
 }
 
 // State
@@ -163,7 +170,8 @@ const heroMetrics = ref([
 // Tabs
 const tabs = [
   { key: 'stockList', label: '股票列表', icon: icons.search },
-  { key: 'klineQuery', label: 'K线查询', icon: icons.barChart },
+  { key: 'klineQuery', label: '行情查询', icon: icons.barChart },
+  { key: 'sentiment', label: '情绪', icon: icons.sentiment },
   { key: 'sync', label: '数据同步', icon: icons.refresh }
 ]
 

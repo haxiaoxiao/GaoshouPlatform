@@ -28,7 +28,7 @@ async def proxy_sync_request(
     )
     timeout = httpx.Timeout(connect=2.0, read=5.0, write=5.0, pool=2.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=False) as client:
             response = await client.request(
                 method,
                 _sync_url(path),
@@ -51,7 +51,7 @@ async def proxy_sync_request(
 
 async def sync_service_health() -> dict[str, Any]:
     try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
+        async with httpx.AsyncClient(timeout=2.0, trust_env=False) as client:
             response = await client.get(_sync_url("/health"))
         if response.status_code >= 400:
             return {"healthy": False, "error": response.text}

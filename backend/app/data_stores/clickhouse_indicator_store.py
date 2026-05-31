@@ -87,18 +87,18 @@ class ClickHouseIndicatorStore(IndicatorStore):
         symbols: list[str] | None = None,
     ) -> date | None:
         where = ["trade_date IS NOT NULL"]
-        params = {}
+        params: dict = {}
         if names:
             where.append("indicator_name IN %(names)s")
-            params["names"] = names
+            params["names"] = tuple(names)
         if symbols:
-            where.append("symbol IN %(symbols)s")
-            params["symbols"] = symbols
-        rows = self.ch.execute(
+            where.append("symbol IN %(syms)s")
+            params["syms"] = tuple(symbols)
+        rows = self._execute(
             f"SELECT max(trade_date) FROM stock_indicators WHERE {' AND '.join(where)}",
             params,
         )
-        return rows[0][0] if rows and rows[0][0] is not None else None
+        return rows[0][0] if rows and rows[0] and rows[0][0] is not None else None
 
     def write_cross_section(self, df: pd.DataFrame) -> int:
         logger.warning("ClickHouseIndicatorStore.write_cross_section 未实现，请使用现有调度器")

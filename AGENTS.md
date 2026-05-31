@@ -492,15 +492,24 @@ def handle_bar(context, bar):
 
 ## 启动命令
 
-```powershell
-# 后端
-cd E:\Projects\GaoshouPlatform\backend
-.venv\Scripts\activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+### 环境端口隔离
 
-# 前端
-cd E:\Projects\GaoshouPlatform\frontend
-npm run dev
+dev 和 prod 端口必须严格分开；启动、关闭、健康检查、前端代理、接口调用都先确认当前仓库路径和端口，不要混用。
+
+| 环境 | 根目录 | 后端 API | 同步服务 | 前端 |
+|---|---|---:|---:|---:|
+| dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
+| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3500` |
+
+```powershell
+# dev 后端
+cd E:\Projects\GaoshouPlatform-dev\backend
+.venv\Scripts\activate
+uvicorn app.main:app --host 127.0.0.1 --port 18800
+
+# dev 前端
+cd E:\Projects\GaoshouPlatform-dev\frontend
+npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
 ### 桌面启动/关闭脚本维护规则

@@ -1,24 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
+import subprocess
 import sys
+import time as time_module
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Iterable
 
-from sqlalchemy import select
+import requests
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-CANONICAL_SOURCES = {"xueqiu_spyder", "flocktrader"}
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "flocktrader")
+CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
     "xueqiu-spyder": "xueqiu_spyder",
@@ -75,6 +81,16 @@ def parse_sources(raw: str | None) -> list[str] | None:
         return None
     sources = [normalize_sentiment_source(item) for item in raw.split(",") if item.strip()]
     return list(dict.fromkeys(sources))
+
+
+def ordered_sentiment_sources(sources: Iterable[str] | None = None) -> list[str]:
+    raw_sources = list(sources) if sources else list(DEFAULT_SOURCE_ORDER)
+    ordered: list[str] = []
+    for source in raw_sources:
+        normalized = normalize_sentiment_source(source)
+        if normalized not in ordered:
+            ordered.append(normalized)
+    return ordered
 
 
 def _source_storage_values(sources: list[str] | None) -> list[str] | None:
@@ -160,8 +176,16 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _config_value(env_name: str, setting_name: str, default: str = "") -> str:
+    env_value = os.environ.get(env_name)
+    if env_value is not None and str(env_value).strip():
+        return str(env_value).strip()
+    value = getattr(settings, setting_name, default)
+    return str(value).strip() if value is not None else default
+
+
 def _nga_data_dir() -> Path:
-    raw = os.environ.get("NGA_DATA_DIR")
+    raw = _config_value("NGA_DATA_DIR", "nga_data_dir", str(_repo_root() / "data" / "sentiment" / "NGAdata"))
     return Path(raw).expanduser() if raw else _repo_root() / "data" / "sentiment" / "NGAdata"
 
 
@@ -263,6 +287,105 @@ def _in_date_window(value: datetime | None, start_date: date | None, end_date: d
     return True
 
 
+def _xueqiu_profile_dir() -> Path:
+    return Path(_config_value("XUEQIU_USER_DATA_DIR", "xueqiu_user_data_dir", str(_repo_root() / "data" / "sentiment" / "xueqiu-profile"))).expanduser()
+
+
+def _xueqiu_debug_port() -> int:
+    try:
+        return max(int(_config_value("XUEQIU_DEBUG_PORT", "xueqiu_debug_port", "9222")), 1)
+    except ValueError:
+        return 9222
+
+
+class _BuiltinXueqiuCrawler:
+    def __init__(self):
+        self._playwright = None
+        self._browser = None
+        self._page = None
+        self._connect()
+
+    def _connect(self) -> None:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise RuntimeError("playwright is not installed; install backend requirements to enable built-in Xueqiu sync") from exc
+
+        port = _xueqiu_debug_port()
+        self._playwright = sync_playwright().start()
+        try:
+            self._browser = self._playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+        except Exception:
+            chrome_path = _resolve_chrome_path(_config_value("XUEQIU_CHROME_PATH", "xueqiu_chrome_path"))
+            profile_dir = _xueqiu_profile_dir()
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(
+                [
+                    chrome_path,
+                    f"--remote-debugging-port={port}",
+                    f"--user-data-dir={profile_dir}",
+                    "--no-first-run",
+                    "https://xueqiu.com/",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time_module.sleep(3)
+            self._browser = self._playwright.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+
+        contexts = getattr(self._browser, "contexts", [])
+        if contexts and contexts[0].pages:
+            self._page = contexts[0].pages[0]
+        elif contexts:
+            self._page = contexts[0].new_page()
+        else:
+            context = self._browser.new_context()
+            self._page = context.new_page()
+
+        if "xueqiu.com" not in str(self._page.url or ""):
+            self._page.goto("https://xueqiu.com/", wait_until="domcontentloaded", timeout=15_000)
+
+    def get_stock_posts(self, symbol: str, *, sort: str = "reply", page: int = 1, count: int = 20) -> list[dict[str, Any]]:
+        result = self._page.evaluate(
+            """async ({symbol, sort, page, count}) => {
+                const params = new URLSearchParams({
+                    symbol,
+                    sort,
+                    source: 'all',
+                    count: String(count),
+                    page: String(page),
+                });
+                const url = `/query/v1/symbol/search/status.json?${params.toString()}`;
+                const resp = await fetch(url, {credentials: 'include'});
+                const ct = resp.headers.get('content-type') || '';
+                const text = await resp.text();
+                if (!ct.includes('json')) {
+                    return {ok: false, error: 'non_json_response', text: text.slice(0, 240)};
+                }
+                try {
+                    const payload = JSON.parse(text);
+                    return {ok: true, data: payload};
+                } catch (error) {
+                    return {ok: false, error: String(error), text: text.slice(0, 240)};
+                }
+            }""",
+            {"symbol": symbol, "sort": sort, "page": page, "count": count},
+        )
+        if not isinstance(result, dict) or not result.get("ok"):
+            snippet = result.get("text") if isinstance(result, dict) else None
+            raise RuntimeError(f"Xueqiu stock posts request failed: {result!r} snippet={snippet!r}")
+        payload = result.get("data") or {}
+        return list(payload.get("list") or [])
+
+    def close(self) -> None:
+        try:
+            if self._browser is not None:
+                self._browser.close()
+        finally:
+            if self._playwright is not None:
+                self._playwright.stop()
+
+
 def _open_xueqiu_stock_page(crawler: Any, xq_symbol: str) -> None:
     page = getattr(crawler, "_page", None)
     if page is None:
@@ -293,7 +416,7 @@ def _resolve_chrome_path(default_path: str | None = None) -> str:
 
 
 def _inject_xueqiu_cookie(crawler: Any) -> dict[str, Any]:
-    raw_cookie = os.environ.get("XUEQIU_COOKIE", "").strip()
+    raw_cookie = _config_value("XUEQIU_COOKIE", "xueqiu_cookie").strip()
     if not raw_cookie:
         return {
             "cookie_present": False,
@@ -580,6 +703,47 @@ class SentimentService:
             "hottest_posts": [serialize_post(post) for post in posts[:5]],
         }
 
+    async def overview(self, sources: list[str] | None = None) -> dict[str, Any]:
+        requested_sources = ordered_sentiment_sources(sources)
+        storage_sources = _source_storage_values(requested_sources)
+
+        totals_stmt = select(
+            func.count(SentimentPost.id),
+            func.count(func.distinct(SentimentPost.symbol)),
+            func.max(SentimentPost.published_at),
+        )
+        if storage_sources:
+            totals_stmt = totals_stmt.where(SentimentPost.source.in_(storage_sources))
+        total_posts, total_symbols, latest_published_at = (await self.session.execute(totals_stmt)).one()
+
+        source_rows = []
+        for source in requested_sources:
+            source_storage = _source_storage_values([source]) or [source]
+            source_stmt = select(
+                func.count(SentimentPost.id),
+                func.count(func.distinct(SentimentPost.symbol)),
+                func.max(SentimentPost.published_at),
+            ).where(SentimentPost.source.in_(source_storage))
+            post_count, symbol_count, latest_source_published_at = (await self.session.execute(source_stmt)).one()
+            source_rows.append(
+                {
+                    "source": source,
+                    **_source_runtime_status(source),
+                    "post_count": int(post_count or 0),
+                    "symbol_count": int(symbol_count or 0),
+                    "latest_published_at": (
+                        latest_source_published_at.isoformat() if latest_source_published_at else None
+                    ),
+                }
+            )
+
+        return {
+            "sources": source_rows,
+            "total_posts": int(total_posts or 0),
+            "symbol_count": int(total_symbols or 0),
+            "latest_published_at": latest_published_at.isoformat() if latest_published_at else None,
+        }
+
 
 def serialize_post(post: SentimentPost) -> dict[str, Any]:
     return {
@@ -608,10 +772,70 @@ class SentimentIngestService:
         self.session = session
         self.service = SentimentService(session)
 
+    async def run_many(
+        self,
+        symbol: str | None,
+        *,
+        sources: list[str] | None = None,
+        max_pages: int = 3,
+        min_reply: int = 20,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        force_refresh: bool = False,
+    ) -> dict[str, Any]:
+        normalized_symbol = normalize_sentiment_symbol(symbol) if symbol else None
+        requested_sources = ordered_sentiment_sources(sources)
+
+        results: list[dict[str, Any]] = []
+        succeeded_sources: list[str] = []
+        failed_sources: list[str] = []
+        total_upserted = 0
+        total_collected = 0
+        total_matched = 0
+
+        for source in requested_sources:
+            try:
+                result = await self.run(
+                    source,
+                    normalized_symbol,
+                    max_pages=max_pages,
+                    min_reply=min_reply,
+                    start_date=start_date,
+                    end_date=end_date,
+                    force_refresh=force_refresh,
+                )
+                results.append({"ok": True, **result})
+                succeeded_sources.append(source)
+                total_upserted += int(result.get("upserted") or 0)
+                total_collected += int(result.get("collected") or 0)
+                total_matched += int(result.get("matched") or 0)
+            except Exception as exc:
+                failed_sources.append(source)
+                results.append(
+                    {
+                        "ok": False,
+                        "source": source,
+                        "symbol": normalized_symbol,
+                        "error": str(exc),
+                    }
+                )
+
+        return {
+            "symbol": normalized_symbol,
+            "requested_sources": requested_sources,
+            "succeeded_sources": succeeded_sources,
+            "failed_sources": failed_sources,
+            "all_succeeded": len(failed_sources) == 0,
+            "total_upserted": total_upserted,
+            "total_collected": total_collected,
+            "total_matched": total_matched,
+            "results": results,
+        }
+
     async def run(
         self,
         source: str,
-        symbol: str,
+        symbol: str | None,
         max_pages: int = 3,
         min_reply: int = 20,
         start_date: date | None = None,
@@ -619,8 +843,10 @@ class SentimentIngestService:
         force_refresh: bool = False,
     ) -> dict[str, Any]:
         source = normalize_sentiment_source(source)
-        symbol = normalize_sentiment_symbol(symbol)
+        symbol = normalize_sentiment_symbol(symbol) if symbol else None
         if source == "xueqiu_spyder":
+            if not symbol:
+                raise ValueError("xueqiu_spyder ingest requires a symbol")
             posts, xueqiu_stats = await asyncio.to_thread(
                 self._collect_xueqiu,
                 symbol,
@@ -666,45 +892,31 @@ class SentimentIngestService:
         start_date: date | None = None,
         end_date: date | None = None,
     ) -> tuple[list[SentimentPostInput], dict[str, Any]]:
-        project_dir = Path(os.environ.get("XUEQIU_SPYDER_DIR", r"E:\Projects\xueqiu-spyder"))
-        if not project_dir.exists():
-            raise RuntimeError(f"xueqiu-spyder directory not found: {project_dir}")
-        with _temporary_project_imports(project_dir, ["config", "crawler", "analyzer"]):
-            import crawler as xueqiu_crawler_module
-            try:
-                from analyzer import _strip_html
-            except ImportError:
-                _strip_html = _strip_html_fallback
-
-            xueqiu_crawler_module.CHROME_PATH = _resolve_chrome_path(
-                getattr(xueqiu_crawler_module, "CHROME_PATH", None)
-            )
-            crawler = xueqiu_crawler_module.XueqiuCrawler()
-            try:
-                xq_symbol = _to_xueqiu_symbol(symbol)
-                auth = _inject_xueqiu_cookie(crawler)
-                _open_xueqiu_stock_page(crawler, xq_symbol)
-                auth = _verify_xueqiu_login(crawler, auth)
-                raw_posts: list[dict[str, Any]] = []
-                for page in range(1, max_pages + 1):
-                    raw_posts.extend(crawler.get_stock_posts(xq_symbol, page=page))
-                normalized: list[SentimentPostInput] = []
-                for raw in raw_posts:
-                    post = normalize_xueqiu_spyder_post(raw, symbol=symbol, strip_html=_strip_html)
-                    if post is None:
-                        continue
-                    reply_count = post.reply_count
-                    if reply_count < min_reply:
-                        continue
-                    if not _in_date_window(post.published_at, start_date, end_date):
-                        continue
-                    normalized.append(post)
-                return [post for post in normalized if post.source_post_id], {"auth": auth}
-            finally:
-                crawler.close()
+        crawler = _BuiltinXueqiuCrawler()
+        try:
+            xq_symbol = _to_xueqiu_symbol(symbol)
+            auth = _inject_xueqiu_cookie(crawler)
+            _open_xueqiu_stock_page(crawler, xq_symbol)
+            auth = _verify_xueqiu_login(crawler, auth)
+            raw_posts: list[dict[str, Any]] = []
+            for page in range(1, max_pages + 1):
+                raw_posts.extend(crawler.get_stock_posts(xq_symbol, page=page))
+            normalized: list[SentimentPostInput] = []
+            for raw in raw_posts:
+                post = normalize_xueqiu_spyder_post(raw, symbol=symbol, strip_html=_strip_html_fallback)
+                if post is None:
+                    continue
+                if post.reply_count < min_reply:
+                    continue
+                if not _in_date_window(post.published_at, start_date, end_date):
+                    continue
+                normalized.append(post)
+            return [post for post in normalized if post.source_post_id], {"auth": auth}
+        finally:
+            crawler.close()
 
     def _collect_flocktrader(self, symbol: str, max_pages: int) -> list[SentimentPostInput]:
-        project_dir = Path(os.environ.get("FLOCKTRADER_DIR", r"E:\Projects\flocktrader"))
+        project_dir = Path(_config_value("FLOCKTRADER_DIR", "flocktrader_dir", r"E:\Projects\flocktrader"))
         if not project_dir.exists():
             raise RuntimeError(f"flocktrader directory not found: {project_dir}")
         with _temporary_project_imports(project_dir, ["config", "models", "crawler", "analyzer"]):
@@ -713,7 +925,7 @@ class SentimentIngestService:
 
             sentiment_analyzer = SentimentAnalyzer()
             keyword_extractor = KeywordExtractor()
-            crawler = NGACrawler(cookies=os.environ.get("NGA_COOKIE", ""))
+            crawler = NGACrawler(cookies=_config_value("NGA_COOKIE", "nga_cookie"))
             topics = crawler.scan_topics(max_pages=max_pages)
             result: list[SentimentPostInput] = []
             for topic in topics:
@@ -738,7 +950,7 @@ class SentimentIngestService:
 
     async def _collect_flocktrader_by_date(
         self,
-        symbol: str,
+        symbol: str | None,
         *,
         max_pages: int,
         start_date: date | None,
@@ -751,8 +963,11 @@ class SentimentIngestService:
         if start > end:
             raise ValueError("start_date cannot be after end_date")
 
-        stock = await self.session.get(Stock, symbol)
-        aliases = _symbol_aliases_from_parts(symbol, stock)
+        aliases: list[str] | None = None
+        if symbol:
+            stock = await self.session.get(Stock, symbol)
+            aliases = _symbol_aliases_from_parts(symbol, stock)
+        stock_aliases = await self._load_stock_aliases() if not symbol else None
         raw_posts, stats = self._load_or_crawl_nga_date_posts(
             start,
             end,
@@ -766,11 +981,12 @@ class SentimentIngestService:
 
         normalized: list[SentimentPostInput] = []
         for raw in analyzed:
-            if not _post_mentions_symbol(raw, symbol, aliases):
+            if symbol:
+                if not _post_mentions_symbol(raw, symbol, aliases):
+                    continue
+                normalized.extend(normalize_nga_data_posts(raw, symbol=symbol, aliases=aliases))
                 continue
-            post = normalize_nga_data_post(raw, symbol=symbol, aliases=aliases)
-            if post is not None:
-                normalized.append(post)
+            normalized.extend(normalize_nga_data_posts(raw, stock_aliases=stock_aliases))
         stats.matched_posts = len(normalized)
         return normalized, stats
 
@@ -799,60 +1015,294 @@ class SentimentIngestService:
         return raw_posts, stats
 
     def _crawl_nga_day(self, day: date, *, max_pages: int) -> list[Any]:
-        project_dir = Path(os.environ.get("FLOCKTRADER_DIR", r"E:\Projects\flocktrader"))
-        if not project_dir.exists():
-            raise RuntimeError(f"flocktrader directory not found: {project_dir}")
-        cookie = os.environ.get("NGA_COOKIE", "")
+        cookie = _config_value("NGA_COOKIE", "nga_cookie")
         if not cookie:
             raise RuntimeError(
                 "NGA_COOKIE is required to crawl missing NGAdata files; "
                 "set it in the environment or pre-populate data/sentiment/NGAdata"
             )
-
-        since = datetime.combine(day, time.min)
-        until = datetime.combine(day, time.max.replace(microsecond=0))
-        with _temporary_project_imports(project_dir, ["config", "models", "crawler"]):
-            from config import get_fid, load_config
-            from crawler import NGACrawler
-
-            fid = get_fid(load_config())
-            crawler = NGACrawler(cookies=cookie)
-            topics = crawler.scan_topics(
-                fid=fid,
-                since_date=since,
-                until_date=until,
-                max_pages=max_pages,
-            )
-            posts = []
+        start_dt = datetime.combine(day, time.min)
+        end_dt = datetime.combine(day, time.max.replace(microsecond=0))
+        board_fid = int(getattr(settings, "nga_board_fid", 706) or 706)
+        collected: list[dict[str, Any]] = []
+        seen_tids: set[str] = set()
+        for page in range(1, max_pages + 1):
+            board_html = _fetch_nga_html("https://nga.178.com/thread.php", params={"fid": board_fid, "page": page})
+            topics = _parse_nga_board_topics(board_html)
+            if not topics:
+                break
             for topic in topics:
-                post = crawler.crawl_topic(
-                    tid=str(topic.get("tid", "")),
-                    title=str(topic.get("title", "")),
-                    last_reply_time=topic.get("last_reply_time"),
-                    since_date=since,
+                tid = str(topic.get("tid") or "")
+                if not tid or tid in seen_tids:
+                    continue
+                seen_tids.add(tid)
+                detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
+                thread_posts = _parse_nga_thread_posts(detail_html)
+                if not thread_posts:
+                    continue
+                publish_time = _parse_datetime(thread_posts[0].get("publish_time")) or topic.get("publish_time")
+                last_reply_time = _parse_datetime(thread_posts[-1].get("publish_time")) or publish_time
+                if last_reply_time is None:
+                    continue
+                if last_reply_time < start_dt or last_reply_time > end_dt:
+                    continue
+                title = thread_posts[0].get("title") or topic.get("title") or ""
+                content = thread_posts[0].get("content") or title
+                comments = [
+                    {"content": post.get("content") or "", "publish_time": post.get("publish_time")}
+                    for post in thread_posts[1:]
+                    if str(post.get("content") or "").strip()
+                ]
+                stock_codes = _extract_nga_post_symbols({"title": title, "content": content, "comments": comments})
+                sentiment_score, sentiment_label = _nga_sentiment(" ".join([title, content, *[str(item.get('content') or '') for item in comments]]))
+                collected.append(
+                    {
+                        "tid": tid,
+                        "title": title,
+                        "author": topic.get("author"),
+                        "content": content,
+                        "publish_time": publish_time.isoformat() if isinstance(publish_time, datetime) else publish_time,
+                        "last_reply_time": last_reply_time.isoformat() if isinstance(last_reply_time, datetime) else last_reply_time,
+                        "reply_count": topic.get("reply_count", len(comments)),
+                        "comments": comments,
+                        "stock_codes": stock_codes,
+                        "keywords": _nga_keywords(" ".join([title, content]), stock_codes),
+                        "sentiment_score": sentiment_score,
+                        "sentiment_label": sentiment_label,
+                    }
                 )
-                if post is not None:
-                    posts.append(post)
-            return posts
+            if all((_parse_datetime(item.get("publish_time")) or start_dt) < start_dt for item in topics):
+                break
+        return collected
 
     def _analyze_nga_posts(self, raw_posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if not raw_posts:
             return []
-        project_dir = Path(os.environ.get("FLOCKTRADER_DIR", r"E:\Projects\flocktrader"))
-        if not project_dir.exists():
-            raise RuntimeError(f"flocktrader directory not found: {project_dir}")
-        with _temporary_project_imports(project_dir, ["config", "models", "analyzer"]):
-            from analyzer import DailyAnalyzer
-            from models import Post
+        analyzed: list[dict[str, Any]] = []
+        for raw in raw_posts:
+            text = " ".join(_text_parts(raw))
+            stock_codes = _extract_nga_post_symbols(raw)
+            score, label = _nga_sentiment(text)
+            enriched = dict(raw)
+            enriched["stock_codes"] = stock_codes
+            enriched["keywords"] = _nga_keywords(text, stock_codes)
+            enriched["sentiment_score"] = score
+            enriched["sentiment_label"] = label
+            analyzed.append(enriched)
+        return analyzed
 
-            posts = [Post.from_dict(raw) for raw in raw_posts]
-            analyzed = DailyAnalyzer().analyze_posts(posts)
-            return [post.to_dict() for post in analyzed]
+    async def _load_stock_aliases(self) -> list[tuple[str, str]]:
+        result = await self.session.execute(select(Stock.symbol, Stock.name, Stock.company_name))
+        aliases: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for symbol, name, company_name in result.all():
+            normalized_symbol = normalize_sentiment_symbol(symbol)
+            if not normalized_symbol:
+                continue
+            for alias in {str(name or "").strip(), str(company_name or "").strip(), str(_short_company_name(company_name) or "").strip()}:
+                if len(alias) < 3:
+                    continue
+                key = (alias, normalized_symbol)
+                if key in seen:
+                    continue
+                seen.add(key)
+                aliases.append(key)
+        aliases.sort(key=lambda item: len(item[0]), reverse=True)
+        return aliases
 
 
 def _to_xueqiu_symbol(symbol: str) -> str:
     code, exchange = symbol.split(".")
     return f"{exchange}{code}"
+
+
+def _infer_market_from_code(code: str) -> str:
+    text = str(code or "").strip().upper()
+    if not text:
+        return ""
+    if text.startswith(("SH", "SZ", "BJ")):
+        return ""
+    if text.startswith(("6", "9", "5")):
+        return "SH"
+    if text.startswith(("0", "2", "3")):
+        return "SZ"
+    if text.startswith(("4", "8")):
+        return "BJ"
+    return ""
+
+
+def _extract_nga_post_symbols(
+    raw: dict[str, Any],
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    candidates: list[str] = []
+    raw_codes = raw.get("stock_codes") or []
+    if isinstance(raw_codes, list):
+        candidates.extend(str(item).strip() for item in raw_codes if str(item).strip())
+    text = " ".join(_text_parts(raw))
+    candidates.extend(re.findall(r"\b(?:SH|SZ|BJ)\d{6}\b", text.upper()))
+
+    normalized: list[str] = []
+    for candidate in candidates:
+        symbol = normalize_security_symbol(candidate, _infer_market_from_code(candidate))
+        if symbol and symbol not in normalized and "." in symbol:
+            normalized.append(symbol)
+
+    if stock_aliases:
+        text_upper = text.upper()
+        for alias, symbol in stock_aliases:
+            alias_text = str(alias or "").strip()
+            if len(alias_text) < 3:
+                continue
+            if alias_text.upper() in text_upper and symbol not in normalized:
+                normalized.append(symbol)
+    return normalized
+
+
+def _nga_headers() -> dict[str, str]:
+    cookie = _config_value("NGA_COOKIE", "nga_cookie")
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": f"https://nga.178.com/thread.php?fid={int(getattr(settings, 'nga_board_fid', 706) or 706)}",
+    }
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _decode_nga_response(content: bytes) -> str:
+    return content.decode("gbk", errors="ignore")
+
+
+def _nga_clean_text(value: str | None) -> str:
+    text = str(value or "")
+    text = text.replace("<br/>", "\n").replace("<br>", "\n")
+    text = re.sub(r"\[img\].*?\[/img\]", " ", text, flags=re.I | re.S)
+    text = re.sub(r"\[[^\]]+\]", " ", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _fetch_nga_html(url: str, *, params: dict[str, Any] | None = None) -> str:
+    response = requests.get(url, headers=_nga_headers(), params=params, timeout=20)
+    response.raise_for_status()
+    return _decode_nga_response(response.content)
+
+
+def _parse_nga_board_topics(html_text: str) -> list[dict[str, Any]]:
+    pattern = re.compile(
+        r"<tr class='row\d+ topicrow'>.*?"
+        r"href='/read\.php\?tid=(?P<tid>\d+)'.*?class='replies'>(?P<replies>\d+)</a>.*?"
+        r"<a href='/read\.php\?tid=(?P=tid)'[^>]*class='topic'>(?P<title>.*?)</a>.*?"
+        r"title='用户ID (?P<author_id>\d+)'>(?P<author>.*?)</a>"
+        r"<span class='silver postdate'[^>]*>(?P<postdate>\d+)</span>",
+        re.S,
+    )
+    topics: list[dict[str, Any]] = []
+    for match in pattern.finditer(html_text):
+        title = _nga_clean_text(match.group("title"))
+        if not title:
+            continue
+        post_ts = int(match.group("postdate"))
+        topics.append(
+            {
+                "tid": match.group("tid"),
+                "title": title,
+                "author": _nga_clean_text(match.group("author")) or match.group("author_id"),
+                "author_id": match.group("author_id"),
+                "reply_count": _to_int(match.group("replies")),
+                "publish_time": datetime.fromtimestamp(post_ts),
+            }
+        )
+    return topics
+
+
+def _parse_nga_thread_posts(html_text: str) -> list[dict[str, Any]]:
+    pattern = re.compile(
+        r"href='nuke\.php\?func=ucp&uid=(?P<author_id>\d+)'[^>]*id='postauthor(?P<idx>\d+)'[^>]*>.*?</a>.*?"
+        r"<span id='postdate(?P=idx)'[^>]*>(?P<publish_time>[^<]+)</span>.*?"
+        r"<span id='postcontentandsubject(?P=idx)'>.*?"
+        r"<h3 id='postsubject(?P=idx)'>(?P<title>.*?)</h3><br/>.*?"
+        r"<(?:p|span) id='postcontent(?P=idx)' class='postcontent ubbcode'>(?P<content>.*?)</(?:p|span)>",
+        re.S,
+    )
+    posts: list[dict[str, Any]] = []
+    for match in pattern.finditer(html_text):
+        posts.append(
+            {
+                "author": match.group("author_id"),
+                "publish_time": match.group("publish_time"),
+                "title": _nga_clean_text(match.group("title")),
+                "content": _nga_clean_text(match.group("content")),
+            }
+        )
+    return posts
+
+
+def _nga_sentiment(text: str) -> tuple[float | None, str | None]:
+    normalized = str(text or "")
+    if not normalized:
+        return None, None
+    bullish_terms = ("看多", "买入", "加仓", "看涨", "利好", "反弹", "突破", "新高")
+    bearish_terms = ("看空", "卖出", "减仓", "利空", "下跌", "回调", "暴雷", "新低")
+    bullish = sum(normalized.count(term) for term in bullish_terms)
+    bearish = sum(normalized.count(term) for term in bearish_terms)
+    total = bullish + bearish
+    if total == 0:
+        return None, None
+    score = bullish / total
+    return score, _normalize_sentiment_label(None, score)
+
+
+def _nga_keywords(text: str, stock_codes: list[str]) -> list[str]:
+    candidates = ["业绩", "估值", "涨停", "回调", "反弹", "芯片", "白酒", "银行", "存储", "科技", "军工"]
+    keywords = [term for term in candidates if term in text]
+    for code in stock_codes:
+        if code not in keywords:
+            keywords.append(code)
+    return keywords[:12]
+
+
+def _source_runtime_status(source: str) -> dict[str, Any]:
+    source = normalize_sentiment_source(source)
+    if source == "xueqiu_spyder":
+        try:
+            from playwright.sync_api import sync_playwright as _unused  # noqa: F401
+            playwright_ready = True
+        except ImportError:
+            playwright_ready = False
+        try:
+            chrome_path = _resolve_chrome_path(_config_value("XUEQIU_CHROME_PATH", "xueqiu_chrome_path"))
+            chrome_ready = Path(chrome_path).exists()
+        except Exception:
+            chrome_path = _config_value("XUEQIU_CHROME_PATH", "xueqiu_chrome_path")
+            chrome_ready = False
+        cookie_configured = bool(_config_value("XUEQIU_COOKIE", "xueqiu_cookie").strip())
+        profile_dir = _xueqiu_profile_dir()
+        return {
+            "label": "Xueqiu",
+            "project_dir": str(profile_dir),
+            "project_ready": playwright_ready and chrome_ready,
+            "cookie_configured": cookie_configured,
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": playwright_ready and chrome_ready and cookie_configured,
+        }
+
+    cache_dir = _nga_data_dir()
+    cache_file_count = len(list(cache_dir.glob("posts_*.json"))) if cache_dir.exists() else 0
+    cookie_configured = bool(_config_value("NGA_COOKIE", "nga_cookie").strip())
+    return {
+        "label": "NGA",
+        "project_dir": f"https://nga.178.com/thread.php?fid={int(getattr(settings, 'nga_board_fid', 706) or 706)}",
+        "project_ready": True,
+        "cookie_configured": cookie_configured,
+        "cache_dir": str(cache_dir),
+        "cache_file_count": cache_file_count,
+        "ready": cookie_configured or cache_file_count > 0,
+    }
 
 
 def normalize_xueqiu_spyder_post(
@@ -953,3 +1403,19 @@ def normalize_nga_data_post(
         keywords=keywords,
         raw=raw,
     )
+
+
+def normalize_nga_data_posts(
+    raw: dict[str, Any],
+    *,
+    symbol: str | None = None,
+    aliases: list[str] | None = None,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[SentimentPostInput]:
+    target_symbols = [normalize_sentiment_symbol(symbol)] if symbol else _extract_nga_post_symbols(raw, stock_aliases=stock_aliases)
+    normalized: list[SentimentPostInput] = []
+    for target_symbol in target_symbols:
+        post = normalize_nga_data_post(raw, symbol=target_symbol, aliases=aliases if symbol else None)
+        if post is not None:
+            normalized.append(post)
+    return normalized

@@ -1,7 +1,7 @@
 """Parquet 指标数据存储实现"""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -96,9 +96,10 @@ class ParquetIndicatorStore(IndicatorStore):
         indicator_col = self._indicator_col(dataset)
         updated_col = self._updated_col(dataset)
         name_list = _list_param(names)
+        end_plus = end + timedelta(days=1)
         conditions = f"""{indicator_col} IN {name_list}
           AND datetime >= '{start}'
-          AND datetime < '{end}'"""
+          AND datetime < '{end_plus}'"""
         if symbols:
             conditions += f" AND symbol IN {_list_param(symbols)}"
 

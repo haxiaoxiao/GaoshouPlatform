@@ -123,7 +123,7 @@
   </div>
 </template>
 
-<script setup lang="tsx">
+<script setup lang="ts">
 import { ref, reactive, computed, onMounted, h } from 'vue'
 import { useResizeObserver } from '@vueuse/core'
 import { ElMessage } from 'element-plus'

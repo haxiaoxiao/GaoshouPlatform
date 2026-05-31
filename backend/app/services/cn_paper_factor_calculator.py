@@ -19,6 +19,11 @@ import pandas as pd
 from app.core.config import settings
 from app.data_stores import get_market_data_store
 from app.services.factor_catalog import CN_PAPER_FACTOR_SPECS
+from app.services.factor_precompute_runtime import (
+    precompute_memory_policy,
+    release_precompute_memory,
+    symbol_date_chunks,
+)
 from app.services.factor_value_store import (
     FactorValueStore,
     factor_params_hash,
@@ -599,9 +604,12 @@ def precompute_cn_paper_factors(
     categories = _factor_categories(names)
     created_at = datetime.now()
     empty_hash = factor_params_hash({})
-    rows: list[dict[str, Any]] = []
-    counts: dict[str, int] = {name: 0 for name in names}
     errors: dict[str, str] = {}
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
+
+    def add_feature_row(row: dict[str, Any]) -> None:
+        writer.add(row)
 
     if categories["daily"]:
         report(0.05, "cn_paper_load_daily", factor_count=len(categories["daily"]))
@@ -627,52 +635,86 @@ def precompute_cn_paper_factors(
                 })
                 factor_frame = factor_frame[(factor_frame["trade_date"] >= start_date) & (factor_frame["trade_date"] <= end_date)]
                 factor_frame = factor_frame.replace([np.inf, -np.inf], np.nan).dropna(subset=["value"])
-                for item in factor_frame.itertuples(index=False):
-                    rows.append({
-                        "symbol": str(item.symbol),
-                        "trade_date": item.trade_date,
-                        "as_of_time": "",
-                        "factor_name": str(item.factor_name),
-                        "params_hash": empty_hash,
-                        "value": float(item.value),
-                        "source": "precompute.cn_paper",
-                        "created_at": created_at,
-                    })
-                    counts[str(item.factor_name)] = counts.get(str(item.factor_name), 0) + 1
+                factor_frame["as_of_time"] = ""
+                factor_frame["params_hash"] = empty_hash
+                factor_frame["source"] = "precompute.cn_paper"
+                factor_frame["created_at"] = created_at
+                writer.write_frame(factor_frame[[
+                    "symbol",
+                    "trade_date",
+                    "as_of_time",
+                    "factor_name",
+                    "params_hash",
+                    "value",
+                    "source",
+                    "created_at",
+                ]])
+                del factor_frame, values
+                gc.collect()
             except Exception as exc:
                 errors[factor_name] = str(exc)
 
     if categories["minute"]:
         report(0.58, "cn_paper_load_minute", factor_count=len(categories["minute"]))
-        minute = _load_minute(symbols, start_date, end_date, lookback_days=10)
-        if minute.empty:
+        chunks = symbol_date_chunks(symbols, start_date, end_date, policy=precompute_memory_policy())
+        loaded_any_minute = False
+        written_any_minute = False
+        for chunk in chunks:
+            report(
+                0.58 + 0.30 * (chunk.index / chunk.total),
+                "cn_paper_load_minute",
+                current=chunk.index,
+                total=chunk.total,
+                current_date=chunk.start_date.isoformat(),
+                end_date=chunk.end_date.isoformat(),
+                symbols=len(chunk.symbols),
+                rows_written=writer.written,
+            )
+            # Minute factors do not require cross-sectional state, so keep
+            # each read bounded by symbol and date chunks. Loading the full
+            # pool/range can materialize hundreds of millions of 1m rows.
+            minute = _load_minute(chunk.symbols, chunk.start_date, chunk.end_date, lookback_days=10)
+            if minute.empty:
+                continue
+            loaded_any_minute = True
+            minute_frame = _compute_minute_factor_frame(minute, categories["minute"], chunk.start_date, chunk.end_date)
+            if minute_frame.empty:
+                del minute, minute_frame
+                release_precompute_memory()
+                continue
+            minute_frame["as_of_time"] = ""
+            minute_frame["params_hash"] = empty_hash
+            minute_frame["source"] = "precompute.cn_paper"
+            minute_frame["created_at"] = created_at
+            writer.write_frame(minute_frame[[
+                "symbol",
+                "trade_date",
+                "as_of_time",
+                "factor_name",
+                "params_hash",
+                "value",
+                "source",
+                "created_at",
+            ]])
+            writer.flush()
+            written_any_minute = True
+            del minute, minute_frame
+            release_precompute_memory()
+        if not loaded_any_minute:
             errors.update({name: "No minute data available for CN paper factor precompute" for name in categories["minute"]})
-        else:
-            minute_frame = _compute_minute_factor_frame(minute, categories["minute"], start_date, end_date)
-            for item in minute_frame.itertuples(index=False):
-                rows.append({
-                    "symbol": str(item.symbol),
-                    "trade_date": item.trade_date,
-                    "as_of_time": "",
-                    "factor_name": str(item.factor_name),
-                    "params_hash": empty_hash,
-                    "value": float(item.value),
-                    "source": "precompute.cn_paper",
-                    "created_at": created_at,
-                })
-                counts[str(item.factor_name)] = counts.get(str(item.factor_name), 0) + 1
+        elif not written_any_minute:
+            logger.warning("CN paper minute data loaded but produced no factor rows for {}", categories["minute"])
 
-    report(0.92, "cn_paper_write", rows_buffered=len(rows))
-    factor_store = store or get_factor_value_store()
-    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
+    report(0.92, "cn_paper_write", rows_buffered=writer.rows_buffered)
+    writer.flush()
     failed = [name for name in names if name in errors]
-    report(1.0, "cn_paper_done", rows_written=written)
+    report(1.0, "cn_paper_done", rows_written=writer.written)
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "rows": counts,
-        "rows_written": written,
+        "rows": {name: writer.counts.get(name, 0) for name in names},
+        "rows_written": writer.written,
         "failed_factor_names": failed,
         "errors": errors,
     }

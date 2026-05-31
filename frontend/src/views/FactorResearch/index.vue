@@ -25,10 +25,10 @@
 
       <el-tabs v-model="activeTab" class="factor-tabs">
         <el-tab-pane label="因子缓存" name="factor-values" lazy>
-          <FactorValueStore v-if="activeTab === 'factor-values'" />
+          <FactorValueStore v-show="activeTab === 'factor-values'" />
         </el-tab-pane>
         <el-tab-pane label="因子看板" name="board" lazy>
-          <FactorBoard v-if="activeTab === 'board'" />
+          <FactorBoard v-show="activeTab === 'board'" />
         </el-tab-pane>
       </el-tabs>
     </section>

@@ -10,6 +10,7 @@ from loguru import logger
 from app.core.config import settings
 from app.data_stores.parquet_store import _list_param, _sql_literal
 from app.db.duckdb import get_duckdb
+from app.services.factor_precompute_runtime import release_precompute_memory, symbol_chunks
 from app.services.factor_value_store import get_factor_value_store
 
 RELAY_FACTOR_COLUMNS = {
@@ -28,8 +29,8 @@ def precompute_relay_factors(
     symbols: list[str],
     progress_callback: Callable[[float, str, dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    rows: list[dict[str, Any]] = []
-    counts = {name: 0 for name in factor_names}
+    store = get_factor_value_store()
+    writer = store.batch_writer()
     errors: dict[str, str] = {}
 
     def report(progress: float, stage: str, **meta: Any) -> None:
@@ -40,28 +41,36 @@ def precompute_relay_factors(
         raise ValueError("No symbols supplied for Relay factor precompute")
     report(0.05, "load_relay_datasets", factor_names=factor_names, symbol_count=len(symbols))
 
-    for index, factor_name in enumerate(factor_names, start=1):
-        try:
-            if factor_name == "auction_gap_pct":
-                factor_rows = _load_auction_gap_pct(start_date, end_date, symbols)
-            elif factor_name == "block_moneyflow_net_amount":
-                factor_rows = _load_block_moneyflow_net_amount(start_date, end_date, symbols)
-            else:
-                factor_rows = _load_direct_factor(factor_name, start_date, end_date, symbols)
-            rows.extend(factor_rows)
-            counts[factor_name] = len(factor_rows)
-        except Exception as exc:
-            errors[factor_name] = str(exc)
-            logger.warning("Relay factor {} precompute skipped: {}", factor_name, exc)
-        report(0.05 + 0.85 * index / max(len(factor_names), 1), "compute_relay_factor", factor_name=factor_name)
+    chunks = symbol_chunks(symbols)
+    total_steps = max(len(factor_names) * max(len(chunks), 1), 1)
+    current_step = 0
+    for factor_name in factor_names:
+        for symbol_chunk in chunks:
+            current_step += 1
+            try:
+                if factor_name == "auction_gap_pct":
+                    factor_rows = _load_auction_gap_pct(start_date, end_date, symbol_chunk)
+                elif factor_name == "block_moneyflow_net_amount":
+                    factor_rows = _load_block_moneyflow_net_amount(start_date, end_date, symbol_chunk)
+                else:
+                    factor_rows = _load_direct_factor(factor_name, start_date, end_date, symbol_chunk)
+                writer.extend(factor_rows)
+                writer.flush()
+                del factor_rows
+                release_precompute_memory()
+            except Exception as exc:
+                errors[factor_name] = str(exc)
+                logger.warning("Relay factor {} precompute skipped: {}", factor_name, exc)
+                break
+            report(0.05 + 0.85 * current_step / total_steps, "compute_relay_factor", factor_name=factor_name, current=current_step, total=total_steps)
 
-    report(0.94, "write_relay_factor_values", rows_buffered=len(rows))
-    written = get_factor_value_store().write(pd.DataFrame(rows)) if rows else 0
-    report(1.0, "done", rows_written=written)
+    report(0.94, "write_relay_factor_values", rows_buffered=writer.rows_buffered)
+    writer.flush()
+    report(1.0, "done", rows_written=writer.written)
     return {
         "factor_names": factor_names,
-        "rows": counts,
-        "rows_written": written,
+        "rows": {name: writer.counts.get(name, 0) for name in factor_names},
+        "rows_written": writer.written,
         "errors": errors,
         "failed_factor_names": [name for name, error in errors.items() if error],
     }
