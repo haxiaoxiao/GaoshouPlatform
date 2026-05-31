@@ -10,20 +10,22 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import asyncio
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import delete, select, func
+from loguru import logger
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.clickhouse import get_ch_client
 from app.data_stores import get_market_data_store
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.security_symbols import normalize_security_symbol
-
 
 # ═══════════════════════════════════════════════════════════════
 # 数据类 — 统一返回格式
@@ -172,12 +174,9 @@ class DataSkill:
         """
         symbol = normalize_security_symbol(symbol) or symbol
         db_stock = await self._get_db_stock(symbol)
-        if db_stock and db_stock.total_mv:
-            return self._stock_to_snapshot(db_stock)
-
-        snapshot = self._stock_to_snapshot(db_stock) if db_stock else None
-        if snapshot:
-            return snapshot
+        if db_stock is not None:
+            latest_financial = await self._get_latest_financial(symbol)
+            return self._stock_to_snapshot(db_stock, latest_financial)
 
         return await self._get_stock_from_qmt(symbol)
 
@@ -196,10 +195,11 @@ class DataSkill:
         stmt = select(Stock).where(Stock.symbol.in_(symbols))
         rows = (await self.session.execute(stmt)).scalars().all()
         db_map = {s.symbol: s for s in rows}
+        latest_financial_map = await self._get_latest_financial_map(list(db_map.keys()))
 
         missing = [s for s in symbols if s not in db_map]
         for symbol, stock in db_map.items():
-            result[symbol] = self._stock_to_snapshot(stock)
+            result[symbol] = self._stock_to_snapshot(stock, latest_financial_map.get(symbol))
 
         if missing:
             try:
@@ -207,8 +207,12 @@ class DataSkill:
                 for qs in qmt_stocks:
                     snapshot = self._qmt_stock_info_to_snapshot(qs)
                     result[qs.symbol] = snapshot
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning(
+                    "DataSkill.get_stocks: QMT batch fetch failed ({} symbols): {}",
+                    len(missing),
+                    exc,
+                )
 
         return result
 
@@ -284,17 +288,25 @@ class DataSkill:
             limit: 最大条数
         """
         symbol = normalize_security_symbol(symbol) or symbol
-        bars = self._query_market_klines(symbol, start_date, end_date, limit)
-        if bars:
-            return bars
-
+        if limit <= 0:
+            return []
         if end_date is None:
             end_date = date.today()
         if start_date is None:
-            start_date = end_date - timedelta(days=limit)
+            # Why: 避免 start_date=None 时从 2000 年全量扫描；用 limit 估算一个合理的回看窗口。
+            start_date = end_date - timedelta(days=max(limit * 2, 30))
+        if start_date > end_date:
+            return []
+        # MarketDataStore queries are synchronous (DuckDB/ClickHouse). Run in a worker thread to avoid
+        # blocking the FastAPI event loop under load.
+        bars = await asyncio.to_thread(self._query_market_klines, symbol, start_date, end_date, limit)
+        if bars:
+            return bars
 
         raw = await qmt_gateway.get_kline_daily(symbol, start_date, end_date)
-        return [self._qmt_kline_to_bar(k) for k in raw]
+        bars_qmt = [self._qmt_kline_to_bar(k) for k in raw]
+        bars_qmt.sort(key=lambda b: b.datetime, reverse=True)
+        return bars_qmt[:limit]
 
     async def get_kline_minute(
         self,
@@ -302,20 +314,68 @@ class DataSkill:
         start_date: date | None = None,
         end_date: date | None = None,
         limit: int = 500,
+        timer_times: list[str] | None = None,
     ) -> list[KlineBar]:
-        """获取分钟K线数据（同上，ClickHouse 优先）"""
-        symbol = normalize_security_symbol(symbol) or symbol
-        bars = self._query_market_klines_minute(symbol, start_date, end_date, limit)
-        if bars:
-            return bars
+        """获取分钟K线数据（Parquet/ClickHouse 优先，无数据时从 QMT 请求）
 
+        Args:
+            timer_times: 可选的分钟时间点过滤（如 ["10:00", "10:30", "14:50"]）。
+                传入时会优先尝试读取稀疏分钟线（minute_timer）数据集；若稀疏数据缺失再回退到完整分钟线。
+        """
+        symbol = normalize_security_symbol(symbol) or symbol
+        if limit <= 0:
+            return []
         if end_date is None:
             end_date = date.today()
         if start_date is None:
-            start_date = end_date
+            # Why: minute 默认只取最近若干个 bar；按每交易日约 240 分钟估算需要回看多少天。
+            minutes_per_day = 240
+            days_needed = max(1, (limit + minutes_per_day - 1) // minutes_per_day)
+            # Buffer 一天，避免因停牌/缺数导致返回不足 limit。
+            start_date = end_date - timedelta(days=days_needed)
+        if start_date > end_date:
+            return []
+
+        # Why: FastAPI list query params通常用重复参数传递，但前端/脚本也常用逗号拼接。
+        # 为避免“10:00,10:30”被当作一个无效时间点，这里做一次扁平化拆分。
+        normalized_times: list[str] = []
+        for item in timer_times or []:
+            for part in str(item).split(","):
+                part = part.strip()
+                if part:
+                    normalized_times.append(part)
+        timer_times = normalized_times or None
+        bars = await asyncio.to_thread(
+            self._query_market_klines_minute,
+            symbol,
+            start_date,
+            end_date,
+            limit,
+            timer_times,
+        )
+        if bars:
+            return bars
 
         raw = await qmt_gateway.get_kline_minute(symbol, start_date, end_date)
-        return [self._qmt_kline_to_bar(k) for k in raw]
+        bars_qmt = [self._qmt_kline_to_bar(k) for k in raw]
+        if timer_times:
+            wanted: set[int] = set()
+            for text in timer_times:
+                try:
+                    h, m, *_ = str(text).split(":")
+                    wanted.add(int(h) * 60 + int(m))
+                except Exception:
+                    continue
+            if wanted:
+                filtered: list[KlineBar] = []
+                for bar in bars_qmt:
+                    if isinstance(bar.datetime, datetime):
+                        minute = bar.datetime.hour * 60 + bar.datetime.minute
+                        if minute in wanted:
+                            filtered.append(bar)
+                bars_qmt = filtered
+        bars_qmt.sort(key=lambda b: b.datetime, reverse=True)
+        return bars_qmt[:limit]
 
     # ─── 财务数据 ─────────────────────────────────────────
 
@@ -342,7 +402,7 @@ class DataSkill:
         if rows:
             return [self._financial_model_to_report(r) for r in rows]
 
-        quarters = await qmt_gateway._fetch_financial_data(symbol, report_count)
+        quarters = await qmt_gateway.get_financial_quarters(symbol, report_count)
         return [self._financial_quarter_to_report(q) for q in quarters]
 
     async def get_financial_batch(
@@ -383,11 +443,11 @@ class DataSkill:
         missing = [s for s in symbols if s not in found_symbols]
         for symbol in missing:
             try:
-                quarters = await qmt_gateway._fetch_financial_data(symbol, report_count)
+                quarters = await qmt_gateway.get_financial_quarters(symbol, report_count)
                 if quarters:
                     result[symbol] = [self._financial_quarter_to_report(q) for q in quarters]
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("DataSkill.get_financial_batch: QMT fetch failed for {}: {}", symbol, exc)
 
         return result
 
@@ -419,7 +479,7 @@ class DataSkill:
 
     # ─── 指标查询 ──────────────────────────────────────────
 
-    def get_indicator(
+    async def get_indicator(
         self,
         symbol: str,
         indicator_name: str,
@@ -433,45 +493,66 @@ class DataSkill:
             trade_date: 交易日期，None 则取最新
         """
         symbol = normalize_security_symbol(symbol) or symbol
+
         from app.data_stores import get_indicator_store
 
         store = get_indicator_store()
-        if trade_date:
-            df = store.load_cross_section([indicator_name], trade_date, [symbol])
-        else:
-            latest_date = store.latest_trade_date([indicator_name], [symbol])
-            df = (
-                store.load_cross_section([indicator_name], latest_date, [symbol])
-                if latest_date
-                else store.load_cross_section([indicator_name], date.today(), [symbol])
-            )
-        if df.empty:
-            # Fallback to existing ClickHouse path
+
+        def _load_from_store() -> float | None:
+            try:
+                if trade_date:
+                    df = store.load_cross_section([indicator_name], trade_date, [symbol])
+                else:
+                    latest_date = store.latest_trade_date([indicator_name], [symbol])
+                    if latest_date is None:
+                        return None
+                    df = store.load_cross_section([indicator_name], latest_date, [symbol])
+                if df.empty:
+                    return None
+                val = df["value"].iloc[0]
+                return float(val) if val is not None else None
+            except Exception as exc:
+                logger.warning("DataSkill.get_indicator: store query failed: {}", exc)
+                return None
+
+        value = await asyncio.to_thread(_load_from_store)
+        if value is not None:
+            return value
+
+        # Parquet-first mode should not require ClickHouse; only attempt CH when explicitly enabled.
+        if not settings.clickhouse_enabled:
+            return None
+
+        def _load_from_clickhouse() -> float | None:
             ch = get_ch_client()
-            if trade_date:
-                rows = ch.execute(
-                    "SELECT value FROM stock_indicators "
-                    "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                    "AND trade_date = %(dt)s ORDER BY updated_at DESC LIMIT 1",
-                    {"sym": symbol, "name": indicator_name, "dt": trade_date},
-                )
-            else:
-                rows = ch.execute(
-                    "SELECT value FROM stock_indicators "
-                    "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                    "ORDER BY trade_date DESC LIMIT 1",
-                    {"sym": symbol, "name": indicator_name},
-                )
-            if rows and rows[0][0] is not None:
+            try:
+                if trade_date:
+                    rows = ch.execute(
+                        "SELECT value FROM stock_indicators "
+                        "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
+                        "AND trade_date = %(dt)s ORDER BY updated_at DESC LIMIT 1",
+                        {"sym": symbol, "name": indicator_name, "dt": trade_date},
+                    )
+                else:
+                    rows = ch.execute(
+                        "SELECT value FROM stock_indicators "
+                        "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
+                        "ORDER BY trade_date DESC LIMIT 1",
+                        {"sym": symbol, "name": indicator_name},
+                    )
+            except Exception:
+                return None
+            if rows and rows[0] and rows[0][0] is not None:
                 return float(rows[0][0])
             return None
-        val = df["value"].iloc[0]
-        return float(val) if val is not None else None
 
-    def get_indicators_batch(
+        return await asyncio.to_thread(_load_from_clickhouse)
+
+    async def get_indicators_batch(
         self,
         symbols: list[str],
         trade_date: date | None = None,
+        names: list[str] | None = None,
     ) -> list[dict[str, Any]]:
         """批量查询截面指标
 
@@ -481,38 +562,182 @@ class DataSkill:
         symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in symbols]
         if not symbols:
             return []
-        from app.data_stores import get_indicator_store
         from datetime import date as dt_date
 
+        from app.data_stores import get_indicator_store
+
         store = get_indicator_store()
-        target_date = trade_date or store.latest_trade_date(None, symbols) or dt_date.today()
-        df = store.load_cross_section([], target_date, symbols)
-        if df.empty:
-            # Fallback to ClickHouse
+
+        def _load_df_from_store():
+            try:
+                target = trade_date or store.latest_trade_date(names, symbols) or dt_date.today()
+                df_local = store.load_cross_section(names or [], target, symbols)
+                return target, df_local
+            except Exception as exc:
+                logger.warning("DataSkill.get_indicators_batch: store query failed: {}", exc)
+                return trade_date or dt_date.today(), None
+
+        target_date, df = await asyncio.to_thread(_load_df_from_store)
+        if df is not None and not df.empty:
+            return [
+                {
+                    "symbol": r["symbol"],
+                    "indicator_name": r["indicator_name"],
+                    "value": float(r["value"]) if r["value"] is not None else None,
+                    "trade_date": r.get("trade_date", target_date),
+                }
+                for _, r in df.iterrows()
+            ]
+
+        if not settings.clickhouse_enabled:
+            return []
+
+        def _load_rows_from_clickhouse():
             ch = get_ch_client()
-            if trade_date:
-                rows = ch.execute(
-                    "SELECT symbol, indicator_name, value, trade_date "
-                    "FROM stock_indicators WHERE symbol IN %(syms)s AND trade_date = %(dt)s "
-                    "ORDER BY symbol, indicator_name",
-                    {"syms": symbols, "dt": trade_date},
-                )
-            else:
-                rows = ch.execute(
+            try:
+                if trade_date:
+                    return ch.execute(
+                        "SELECT symbol, indicator_name, value, trade_date "
+                        "FROM stock_indicators WHERE symbol IN %(syms)s AND trade_date = %(dt)s "
+                        "ORDER BY symbol, indicator_name",
+                        {"syms": symbols, "dt": trade_date},
+                    )
+                return ch.execute(
                     "SELECT symbol, indicator_name, value, trade_date "
                     "FROM stock_indicators WHERE symbol IN %(syms)s "
                     "ORDER BY symbol, indicator_name, trade_date DESC",
                     {"syms": symbols},
                 )
-            return [
-                {"symbol": r[0], "indicator_name": r[1], "value": float(r[2]) if r[2] is not None else None, "trade_date": r[3]}
-                for r in rows
-            ]
+            except Exception:
+                return []
+
+        rows = await asyncio.to_thread(_load_rows_from_clickhouse)
         return [
-            {"symbol": r["symbol"], "indicator_name": r["indicator_name"],
-             "value": float(r["value"]) if r["value"] is not None else None,
-             "trade_date": r.get("trade_date", target_date)}
-            for _, r in df.iterrows()
+            {
+                "symbol": r[0],
+                "indicator_name": r[1],
+                "value": float(r[2]) if r[2] is not None else None,
+                "trade_date": r[3],
+            }
+            for r in (rows or [])
+        ]
+
+    async def get_indicator_timeseries(
+        self,
+        symbol: str,
+        names: list[str],
+        start_date: date,
+        end_date: date,
+        limit: int = 5000,
+    ) -> list[dict[str, Any]]:
+        """查询单只股票的指标时序数据（Parquet/ClickHouse 指标库优先）"""
+        symbol = normalize_security_symbol(symbol) or symbol
+        return await self.get_indicators_timeseries_batch(
+            symbols=[symbol],
+            names=names,
+            start_date=start_date,
+            end_date=end_date,
+            limit=limit,
+        )
+
+    async def get_indicators_timeseries_batch(
+        self,
+        symbols: list[str],
+        names: list[str],
+        start_date: date,
+        end_date: date,
+        limit: int = 200_000,
+    ) -> list[dict[str, Any]]:
+        """批量查询指标时序数据
+
+        Returns:
+            [{symbol, indicator_name, datetime, value, updated_at?}, ...]
+        """
+        symbols = [normalize_security_symbol(symbol) or str(symbol).strip().upper() for symbol in (symbols or [])]
+        symbols = [s for s in symbols if s]
+        if not symbols or not names or limit <= 0:
+            return []
+        if start_date > end_date:
+            return []
+
+        # Why: 同 get_kline_minute(timer_times)，兼容逗号拼接的 names 参数。
+        normalized_names: list[str] = []
+        for item in names:
+            for part in str(item).split(","):
+                part = part.strip()
+                if part:
+                    normalized_names.append(part)
+        names = normalized_names
+        if not names:
+            return []
+
+        from app.data_stores import get_indicator_store
+
+        store = get_indicator_store()
+
+        def _load_from_store():
+            try:
+                return store.load_timeseries(names, start_date, end_date, symbols)
+            except Exception as exc:
+                logger.warning("DataSkill.get_indicators_timeseries_batch: store query failed: {}", exc)
+                return None
+
+        df = await asyncio.to_thread(_load_from_store)
+        if df is not None and not df.empty:
+            df = df.sort_values(["symbol", "indicator_name", "datetime"])
+            if len(df) > limit:
+                df = df.tail(limit)
+            result: list[dict[str, Any]] = []
+            for _, r in df.iterrows():
+                result.append(
+                    {
+                        "symbol": r.get("symbol"),
+                        "indicator_name": r.get("indicator_name"),
+                        "datetime": r.get("datetime"),
+                        "value": float(r["value"]) if r.get("value") is not None else None,
+                        "updated_at": r.get("updated_at"),
+                    }
+                )
+            return result
+
+        if not settings.clickhouse_enabled:
+            return []
+
+        def _load_rows_from_clickhouse():
+            ch = get_ch_client()
+            try:
+                return ch.execute(
+                    "SELECT symbol, indicator_name, datetime, value, updated_at "
+                    "FROM indicator_timeseries "
+                    "WHERE symbol IN %(syms)s "
+                    "AND indicator_name IN %(names)s "
+                    "AND datetime >= %(start)s AND datetime < %(end_plus)s "
+                    "ORDER BY symbol, indicator_name, datetime",
+                    {
+                        "syms": tuple(symbols),
+                        "names": tuple(names),
+                        "start": datetime.combine(start_date, datetime.min.time()),
+                        "end_plus": datetime.combine(end_date, datetime.min.time()) + timedelta(days=1),
+                    },
+                )
+            except Exception as exc:
+                logger.warning("DataSkill.get_indicators_timeseries_batch: ClickHouse query failed: {}", exc)
+                return []
+
+        rows = await asyncio.to_thread(_load_rows_from_clickhouse)
+        if not rows:
+            return []
+        if len(rows) > limit:
+            rows = rows[-limit:]
+        return [
+            {
+                "symbol": r[0],
+                "indicator_name": r[1],
+                "datetime": r[2],
+                "value": float(r[3]) if r[3] is not None else None,
+                "updated_at": r[4] if len(r) > 4 else None,
+            }
+            for r in rows
         ]
 
     # ─── 股票列表 ──────────────────────────────────────────
@@ -540,18 +765,42 @@ class DataSkill:
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def _get_latest_financial(self, symbol: str) -> FinancialData | None:
+        stmt = (
+            select(FinancialData)
+            .where(FinancialData.symbol == symbol)
+            .order_by(FinancialData.report_date.desc())
+            .limit(1)
+        )
+        return (await self.session.execute(stmt)).scalar_one_or_none()
+
+    async def _get_latest_financial_map(self, symbols: list[str]) -> dict[str, FinancialData]:
+        if not symbols:
+            return {}
+        stmt = (
+            select(FinancialData)
+            .where(FinancialData.symbol.in_(symbols))
+            .order_by(FinancialData.symbol, FinancialData.report_date.desc())
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        latest: dict[str, FinancialData] = {}
+        for row in rows:
+            if row.symbol not in latest:
+                latest[row.symbol] = row
+        return latest
+
     async def _get_stock_from_qmt(self, symbol: str) -> StockSnapshot | None:
         try:
             info = await qmt_gateway.get_stock_full_info(symbol)
             if info:
                 return self._qmt_stock_info_to_snapshot(info)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("DataSkill._get_stock_from_qmt failed for {}: {}", symbol, exc)
         return None
 
     @staticmethod
-    def _stock_to_snapshot(s: Stock) -> StockSnapshot:
-        return StockSnapshot(
+    def _stock_to_snapshot(s: Stock, financial: FinancialData | None = None) -> StockSnapshot:
+        snapshot = StockSnapshot(
             symbol=s.symbol,
             name=s.name or "",
             exchange=s.exchange,
@@ -591,6 +840,37 @@ class DataSkill:
             security_type=s.security_type,
             product_class=s.product_class,
         )
+        # Why: stocks 表以“快照”为主，financial_data 以“季度”为主。策略侧通常需要“尽量新”的财务字段，
+        # 但 stocks 未必包含同比/毛利率等列，因此在存在财务季度数据时，用其补齐/覆盖。
+        if financial is not None:
+            snapshot.report_date = financial.report_date
+            snapshot.report_type = financial.report_type
+            snapshot.eps = financial.eps if financial.eps is not None else snapshot.eps
+            snapshot.bvps = financial.bvps if financial.bvps is not None else snapshot.bvps
+            snapshot.roe = financial.roe if financial.roe is not None else snapshot.roe
+            snapshot.pe_ttm = financial.pe_ttm if financial.pe_ttm is not None else snapshot.pe_ttm
+            snapshot.pb = financial.pb if financial.pb is not None else snapshot.pb
+            snapshot.revenue = financial.revenue if financial.revenue is not None else snapshot.revenue
+            snapshot.net_profit = financial.net_profit if financial.net_profit is not None else snapshot.net_profit
+            snapshot.revenue_yoy = financial.revenue_yoy
+            snapshot.profit_yoy = financial.profit_yoy
+            snapshot.gross_margin = financial.gross_margin
+            snapshot.total_assets = financial.total_assets if financial.total_assets is not None else snapshot.total_assets
+            snapshot.total_liability = (
+                financial.total_liability if financial.total_liability is not None else snapshot.total_liability
+            )
+            snapshot.total_equity = financial.total_equity if financial.total_equity is not None else snapshot.total_equity
+            snapshot.total_shares = financial.total_shares if financial.total_shares is not None else snapshot.total_shares
+            snapshot.float_shares = financial.float_shares if financial.float_shares is not None else snapshot.float_shares
+            snapshot.a_float_shares = (
+                financial.a_float_shares if financial.a_float_shares is not None else snapshot.a_float_shares
+            )
+            snapshot.limit_sell_shares = (
+                financial.limit_sell_shares if financial.limit_sell_shares is not None else snapshot.limit_sell_shares
+            )
+            snapshot.total_mv = financial.total_mv if financial.total_mv is not None else snapshot.total_mv
+            snapshot.circ_mv = financial.circ_mv if financial.circ_mv is not None else snapshot.circ_mv
+        return snapshot
 
     @staticmethod
     def _qmt_stock_info_to_snapshot(info) -> StockSnapshot:
@@ -719,13 +999,14 @@ class DataSkill:
         start_date: date | None,
         end_date: date | None,
         limit: int,
+        timer_times: list[str] | None = None,
     ) -> list[KlineBar]:
         store = get_market_data_store()
         sd = start_date or date(2000, 1, 1)
         ed = end_date or date.today()
         dt_start = datetime.combine(sd, datetime.min.time())
         dt_end = datetime.combine(ed, datetime.min.time()) + timedelta(days=1)
-        df = store.load_minute([symbol], dt_start, dt_end)
+        df = store.load_minute([symbol], dt_start, dt_end, timer_times=timer_times)
         if df.empty:
             return []
         df = df.sort_index(ascending=False).head(limit)

@@ -568,11 +568,10 @@ async def _run_sync_task(
     full_sync: bool,
 ) -> None:
     """在后台运行同步任务（使用独立的数据库会话）"""
-    from datetime import datetime
-    from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
     from app.core.config import settings
-    from app.services.sync_service import SyncProgress, SyncService
+    from app.services.sync_service import SyncService
 
     engine = create_async_engine(settings.database_url)
     async_session = async_sessionmaker(engine, expire_on_commit=False)

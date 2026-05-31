@@ -10,7 +10,6 @@ import pandas as pd
 from app.backtest.config import BacktestResult
 from app.services.index_catalog import get_index_item
 
-
 DEFAULT_BENCHMARK_SYMBOL = "000300.SH"
 
 

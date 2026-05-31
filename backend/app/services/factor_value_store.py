@@ -553,7 +553,7 @@ class FactorValueStore:
             total += len(part_body)
         return total
 
-    def batch_writer(self, *, batch_size: int = DEFAULT_PRECOMPUTE_BATCH_ROWS) -> "FactorValueBatchWriter":
+    def batch_writer(self, *, batch_size: int = DEFAULT_PRECOMPUTE_BATCH_ROWS) -> FactorValueBatchWriter:
         return FactorValueBatchWriter(self, batch_size=batch_size)
 
     def load(

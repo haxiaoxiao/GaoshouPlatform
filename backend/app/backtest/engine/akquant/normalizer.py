@@ -12,7 +12,7 @@ from app.backtest.config import BacktestResult
 from app.backtest.engine.akquant import AKQUANT_AVAILABLE
 
 if AKQUANT_AVAILABLE:
-    import akquant as aq
+    pass
 
 
 def _safe_float(val: Any, default: float = 0.0) -> float:

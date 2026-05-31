@@ -6,8 +6,9 @@ def _get_theme_annotation(symbol: str) -> dict | None:
     """从SQLite读取主题标注"""
     try:
         from sqlalchemy import create_engine, select
-        from app.db.models.stock import ThemeAnnotation
+
         from app.core.config import settings
+        from app.db.models.stock import ThemeAnnotation
 
         sync_url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(sync_url)

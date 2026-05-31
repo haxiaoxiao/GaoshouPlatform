@@ -2,14 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict, deque
 import gc
 import hashlib
 import os
 import pickle
 import shutil
-import textwrap
 import time
+from collections import defaultdict, deque
 from datetime import date, timedelta
 from typing import Any, Callable
 
@@ -23,9 +22,7 @@ from app.backtest.engine.interface import IBacktestEngine, IDataProvider
 if AKQUANT_AVAILABLE:
     import akquant as aq
     from akquant.config import BacktestConfig as AQBacktestConfig
-    from akquant.config import InstrumentConfig
-    from akquant.config import RiskConfig
-    from akquant.config import StrategyConfig
+    from akquant.config import InstrumentConfig, RiskConfig, StrategyConfig
 
 from app.backtest.engine.akquant.adapter import ClickHouseFeedAdapter
 from app.backtest.engine.akquant.normalizer import normalize_result

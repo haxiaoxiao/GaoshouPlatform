@@ -96,6 +96,7 @@ def _resolve_symbols(
 
 def _sqlite_db_path():
     from pathlib import Path
+
     from app.core.config import settings
 
     return Path(settings.data_dir) / "gaoshou.db"
@@ -348,26 +349,15 @@ def precompute_small_cap_core_features(
     report(0.08, "加载股票池", symbols=len(symbol_list))
 
     factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
     created_at = datetime.now()
-    rows: list[dict[str, Any]] = []
-    by_feature: dict[str, int] = {}
-    written = 0
     direct_dates: set[date] = set()
 
     def add_feature_row(row: dict[str, Any]) -> None:
-        nonlocal rows
-        rows.append(row)
-        factor_name = str(row["factor_name"])
-        by_feature[factor_name] = by_feature.get(factor_name, 0) + 1
-        if len(rows) >= 250_000:
-            flush_rows()
+        writer.add(row)
 
     def flush_rows() -> None:
-        nonlocal rows, written
-        if not rows:
-            return
-        written += factor_store.write(pd.DataFrame(rows))
-        rows = []
+        writer.flush()
 
     # Daily market cap and universe rank.
     report(0.14, "加载市值数据", factor_name="market_cap")
@@ -486,7 +476,7 @@ def precompute_small_cap_core_features(
                 current_date=day.isoformat(),
                 current_day=day_index,
                 total_days=total_days,
-                rows_buffered=len(rows),
+                rows_buffered=writer.rows_buffered,
             )
         st_symbols = _st_symbols_from_reference(st_stocks, st_changes, day)
         for symbol in symbol_list:
@@ -578,7 +568,7 @@ def precompute_small_cap_core_features(
                     add_feature_row({**common, "factor_name": "indicator_buy_signal", "params_hash": factor_params_hash({}), "value": buy_signal})
                     add_feature_row({**common, "factor_name": "v4gv_dead_cross", "params_hash": factor_params_hash({}), "value": dead_cross})
 
-    report(0.88, "写入核心因子", rows_buffered=len(rows))
+    report(0.88, "写入核心因子", rows_buffered=writer.rows_buffered)
     flush_rows()
 
     high_volume_result = None
@@ -600,14 +590,14 @@ def precompute_small_cap_core_features(
             ),
         )
 
-    total_written = written + int((high_volume_result or {}).get("rows_written") or 0)
+    total_written = writer.written + int((high_volume_result or {}).get("rows_written") or 0)
     report(1.0, "完成", rows_written=total_written)
     return {
         "symbols": len(symbol_list),
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "as_of_time": timer_time,
-        "rows": {**by_feature, **((high_volume_result or {}).get("rows") or {})},
+        "rows": {**writer.counts, **((high_volume_result or {}).get("rows") or {})},
         "rows_written": total_written,
         "high_volume": high_volume_result,
     }
@@ -676,7 +666,8 @@ def precompute_high_volume_features(
             "No klines_minute_cum_timer data found. Run build_minute_cum_timer_parquet.py first."
         )
 
-    rows: list[dict[str, Any]] = []
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
     params_base = {
         "time": as_of_time,
         "window": window,
@@ -686,6 +677,12 @@ def precompute_high_volume_features(
     hash_base = factor_params_hash(params_base)
     hash_signal = factor_params_hash(signal_params)
     created_at = datetime.now()
+
+    def add_feature_rows(items: list[dict[str, Any]]) -> None:
+        writer.extend(items)
+
+    def flush_rows() -> None:
+        writer.flush()
 
     daily_by_symbol = {
         symbol: frame[["trade_date", "volume"]].sort_values("trade_date").reset_index(drop=True)
@@ -700,7 +697,7 @@ def precompute_high_volume_features(
                 "计算放量因子",
                 current=row_index,
                 total=total_timer_rows,
-                rows_buffered=len(rows),
+                rows_buffered=writer.rows_buffered,
             )
         symbol = str(timer_row.symbol)
         trade_date = timer_row.trade_date
@@ -724,43 +721,37 @@ def precompute_high_volume_features(
             "source": "precompute.high_volume",
             "created_at": created_at,
         }
-        rows.extend(
-            [
-                {
-                    **common,
-                    "factor_name": "cum_volume_at_time",
-                    "params_hash": factor_params_hash({"time": as_of_time}),
-                    "value": current_volume,
-                },
-                {
-                    **common,
-                    "factor_name": "rolling_max_volume",
-                    "params_hash": hash_base,
-                    "value": max_volume,
-                },
-                {
-                    **common,
-                    "factor_name": "high_volume_ratio",
-                    "params_hash": hash_base,
-                    "value": ratio,
-                },
-                {
-                    **common,
-                    "factor_name": "high_volume_signal",
-                    "params_hash": hash_signal,
-                    "value": signal,
-                },
-            ]
-        )
+        add_feature_rows([
+            {
+                **common,
+                "factor_name": "cum_volume_at_time",
+                "params_hash": factor_params_hash({"time": as_of_time}),
+                "value": current_volume,
+            },
+            {
+                **common,
+                "factor_name": "rolling_max_volume",
+                "params_hash": hash_base,
+                "value": max_volume,
+            },
+            {
+                **common,
+                "factor_name": "high_volume_ratio",
+                "params_hash": hash_base,
+                "value": ratio,
+            },
+            {
+                **common,
+                "factor_name": "high_volume_signal",
+                "params_hash": hash_signal,
+                "value": signal,
+            },
+        ])
 
-    report(0.92, "写入放量因子", rows_buffered=len(rows))
-    factor_store = store or get_factor_value_store()
-    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
-    by_feature: dict[str, int] = {}
-    for row in rows:
-        by_feature[row["factor_name"]] = by_feature.get(row["factor_name"], 0) + 1
+    report(0.92, "写入放量因子", rows_buffered=writer.rows_buffered)
+    flush_rows()
 
-    report(1.0, "完成", rows_written=written)
+    report(1.0, "完成", rows_written=writer.written)
     return {
         "symbols": len(symbol_list),
         "start_date": start.isoformat(),
@@ -768,6 +759,6 @@ def precompute_high_volume_features(
         "as_of_time": as_of_time,
         "window": window,
         "threshold": threshold,
-        "rows": by_feature,
-        "rows_written": written,
+        "rows": writer.counts,
+        "rows_written": writer.written,
     }

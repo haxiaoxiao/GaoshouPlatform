@@ -1,7 +1,6 @@
 """Lightweight AKQuant integration tests."""
 from __future__ import annotations
 
-import asyncio
 from datetime import date, datetime
 from decimal import Decimal
 
@@ -15,8 +14,8 @@ from app.backtest.api import (
     router,
 )
 from app.backtest.config import BacktestConfig
-from app.backtest.engine.akquant.engine import AkquantEngine
 from app.backtest.engine.akquant.capabilities import get_akquant_capabilities
+from app.backtest.engine.akquant.engine import AkquantEngine
 from app.backtest.engine.data_provider import ClickHouseDataProvider, StoreDataProvider
 from app.services.akquant_optimize import _load_optimization_data
 from app.services.optimization_result_store import save_optimization_result

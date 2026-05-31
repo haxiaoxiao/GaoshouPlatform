@@ -10,7 +10,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.services.factor_precompute import precompute_high_volume_features, precompute_small_cap_core_features
+from app.services.factor_precompute import (
+    precompute_high_volume_features,
+    precompute_small_cap_core_features,
+)
 
 
 def _symbols(text: str | None) -> list[str] | None:

@@ -33,7 +33,6 @@ from app.core.config import settings
 from app.db.clickhouse import get_ch_client
 from app.engines.qmt_gateway import qmt_gateway
 
-
 JQ_SYMBOL_RE = re.compile(r"\b([036]\d{5})\.(XSHG|XSHE|SH|SZ)\b")
 DEFAULT_JQ_SOURCE = Path(r"C:\Users\Albert\Downloads\jq源码.py")
 DEFAULT_JQ_LOG_ZIP = Path(r"C:\Users\Albert\Downloads\log.zip")
@@ -521,14 +520,13 @@ def sync_tushare_name_changes(db_path: Path, symbols: set[str], pause: float = 0
         known = {
             r[0]
             for r in conn.execute(
-                "SELECT DISTINCT symbol FROM stock_name_changes WHERE symbol IN (%s)"
-                % ",".join("?" for _ in symbols),
+                "SELECT DISTINCT symbol FROM stock_name_changes WHERE symbol IN ({})".format(",".join("?" for _ in symbols)),
                 tuple(sorted(symbols)),
             ).fetchall()
         } if symbols else set()
     for symbol in sorted(symbols - known):
         df = None
-        for attempt in range(3):
+        for _attempt in range(3):
             try:
                 df = pro.namechange(
                     ts_code=symbol,
@@ -714,7 +712,7 @@ def fetch_akshare_meta(symbol: str, bars: list[DailyBar]) -> StockMeta | None:
     try:
         df = ak.stock_individual_info_em(symbol=code)
         if df is not None and not df.empty:
-            info = dict(zip(df["item"], df["value"]))
+            info = dict(zip(df["item"], df["value"], strict=False))
     except Exception:
         info = {}
 

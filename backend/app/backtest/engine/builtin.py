@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from loguru import logger
-
 from app.backtest.config import BacktestConfig, BacktestResult
 from app.backtest.engine import EngineRegistry
 from app.backtest.engine.interface import IBacktestEngine, IDataProvider

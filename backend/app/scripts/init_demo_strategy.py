@@ -3,12 +3,9 @@
 import asyncio
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.db.models import Strategy
 from app.db.sqlite import async_session_factory, engine
-
 
 # 双均线策略代码
 DOUBLE_MA_STRATEGY_CODE = '''

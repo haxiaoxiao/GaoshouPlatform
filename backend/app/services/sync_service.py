@@ -3,20 +3,20 @@
 import asyncio
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta as td
+from datetime import date, datetime
+from datetime import timedelta as td
 from pathlib import Path
 from typing import Any
 
 from loguru import logger
-
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.retry import async_retry
-from app.db.clickhouse import get_ch_client
-from app.data_stores import get_market_data_store
 from app.core.config import settings as app_settings
+from app.core.retry import async_retry
+from app.data_stores import get_market_data_store
+from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
@@ -24,7 +24,6 @@ from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
 from app.services.index_components import ensure_index_components
 from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
-
 
 QMT_MINUTE_BATCH_SIZE = int(os.getenv("QMT_MINUTE_BATCH_SIZE", "100"))
 QMT_DAILY_BATCH_SIZE = int(os.getenv("QMT_DAILY_BATCH_SIZE", "50"))
@@ -254,11 +253,11 @@ def _normalize_index_daily_rows(
         rows.append(
             {
                 "symbol": item.symbol,
-                "trade_date": getattr(row, "trade_date"),
-                "open": float(getattr(row, "open")) if getattr(row, "open", None) is not None else None,
-                "high": float(getattr(row, "high")) if getattr(row, "high", None) is not None else None,
-                "low": float(getattr(row, "low")) if getattr(row, "low", None) is not None else None,
-                "close": float(getattr(row, "close")) if getattr(row, "close", None) is not None else None,
+                "trade_date": row.trade_date,
+                "open": float(row.open) if getattr(row, "open", None) is not None else None,
+                "high": float(row.high) if getattr(row, "high", None) is not None else None,
+                "low": float(row.low) if getattr(row, "low", None) is not None else None,
+                "close": float(row.close) if getattr(row, "close", None) is not None else None,
                 "volume": float(volume) * 100 if volume is not None else None,
                 "amount": float(amount) * 1000 if amount is not None else None,
             }
@@ -3189,7 +3188,7 @@ class SyncService:
                             symbols_with_cash.add(symbol)
 
                     progress.success_count += 1
-                except Exception as e:
+                except Exception:
                     progress.failed_count += 1
                     if failure_strategy == "stop":
                         raise
@@ -3257,7 +3256,7 @@ class SyncService:
                     trailing_sum = 0.0
                     left = 0
 
-                    for right, (ex_date, cash) in enumerate(zip(dates, values)):
+                    for right, (ex_date, cash) in enumerate(zip(dates, values, strict=False)):
                         trailing_sum += cash
                         # Shrink window: remove entries older than 365 days
                         while left <= right and (ex_date - dates[left]).days > 365:
@@ -3280,7 +3279,7 @@ class SyncService:
                             "trade_date": dates[right],
                             "value": round(div_yield, 4),
                         })
-                except Exception as e:
+                except Exception:
                     if failure_strategy == "stop":
                         raise
                     continue

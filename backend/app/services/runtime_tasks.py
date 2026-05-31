@@ -11,7 +11,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-
 TERMINAL_STATUSES = {"done", "failed", "completed", "cancelled"}
 _TASK_TTL_SECONDS = 6 * 3600
 _MAX_TASKS = 300

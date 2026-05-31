@@ -1,6 +1,6 @@
 """Tests for async_retry utility."""
-import asyncio
 import pytest
+
 from app.core.retry import async_retry
 
 

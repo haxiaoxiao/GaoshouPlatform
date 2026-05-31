@@ -10,7 +10,6 @@ from app.backtest.strategies.multi_factor_akquant import (
     MULTI_FACTOR_STRATEGY_CODE,
 )
 
-
 _STYLE_ROTATION_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
     {
         "name": "paper_size_rotation_score",

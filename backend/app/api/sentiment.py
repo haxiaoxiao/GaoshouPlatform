@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.sqlite import get_async_session
 from app.services.sentiment import (
+    DEFAULT_SOURCE_ORDER,
     SentimentIngestService,
     SentimentService,
+    ordered_sentiment_sources,
     parse_sources,
     serialize_post,
 )
@@ -19,13 +21,35 @@ router = APIRouter()
 
 
 class IngestRunRequest(BaseModel):
-    source: str = Field(..., description="xueqiu_spyder or flocktrader; legacy aliases xueqiu/nga are accepted")
-    symbol: str = Field(..., description="Security symbol, e.g. 600519.SH")
+    source: str | None = Field(None, description="Single sentiment source for backward compatibility")
+    sources: list[str] | None = Field(None, description="Optional source list; defaults to all configured sources")
+    symbol: str | None = Field(None, description="Security symbol for source-specific crawlers like xueqiu_spyder")
     max_pages: int = Field(3, ge=1, le=30)
     min_reply: int = Field(20, ge=0, le=10000)
     start_date: date | None = Field(None, description="NGA daily crawl/cache start date")
     end_date: date | None = Field(None, description="NGA daily crawl/cache end date")
     force_refresh: bool = Field(False, description="Re-crawl NGA daily files even when cached")
+
+
+def _resolve_ingest_sources(request: IngestRunRequest) -> list[str]:
+    if request.sources:
+        return ordered_sentiment_sources(request.sources)
+    if request.source:
+        return ordered_sentiment_sources([request.source])
+    return list(DEFAULT_SOURCE_ORDER)
+
+
+@router.get("/overview", summary="Get unified sentiment module overview")
+async def get_sentiment_overview(
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,flocktrader"),
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    try:
+        parsed_sources = parse_sources(sources)
+        data = await SentimentService(session).overview(parsed_sources)
+        return {"code": 0, "data": data}
+    except ValueError as exc:
+        return {"code": 1, "message": str(exc)}
 
 
 @router.get("/summary/{symbol}", summary="Get cached sentiment summary")
@@ -69,15 +93,28 @@ async def run_sentiment_ingest(
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
-        result = await SentimentIngestService(session).run(
-            request.source,
-            request.symbol,
-            max_pages=request.max_pages,
-            min_reply=request.min_reply,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            force_refresh=request.force_refresh,
-        )
+        sources = _resolve_ingest_sources(request)
+        ingest_service = SentimentIngestService(session)
+        if request.source and not request.sources and len(sources) == 1:
+            result = await ingest_service.run(
+                sources[0],
+                request.symbol,
+                max_pages=request.max_pages,
+                min_reply=request.min_reply,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                force_refresh=request.force_refresh,
+            )
+        else:
+            result = await ingest_service.run_many(
+                request.symbol,
+                sources=sources,
+                max_pages=request.max_pages,
+                min_reply=request.min_reply,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                force_refresh=request.force_refresh,
+            )
         return {"code": 0, "data": result}
     except Exception as exc:
         return {"code": 1, "message": str(exc)}

@@ -12,34 +12,14 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 
-from app.backtest.config import BacktestConfig, BacktestResult
+from app.backtest.config import BacktestConfig
 from app.backtest.engine import EngineRegistry
 from app.backtest.engine.data_provider import StoreDataProvider
-from app.db.models.strategy import Strategy
-from app.db.sqlite import async_session_factory
-from app.models.factor import FactorConfig, BtConfig
-from app.services.factor_backtest import factor_backtest_service
-from app.services.index_catalog import get_index_item, list_index_items
-from app.services.index_components import (
-    KNOWN_INDEX_POOLS,
-    index_pool_summary,
-    load_index_symbols,
-    normalize_index_symbol,
-)
-from app.services.timer_minute_sync import (
-    find_earliest_timer_coverage_date,
-    sync_timer_minute_points,
-    timer_times_from_params,
-    parse_timer_times,
-)
-from app.services.optimization_result_store import save_optimization_result
-from app.services.runtime_tasks import register_task, update_task
-from app.services.benchmark_series import benchmark_summary, resolve_benchmark_symbol
-from sqlalchemy import select
 from app.backtest.strategies.builtin_templates import (
     DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
     DEFAULT_DUAL_STOCK_GRID_PARAMS,
@@ -48,8 +28,25 @@ from app.backtest.strategies.builtin_templates import (
     DUAL_STOCK_GRID_STRATEGY_CODE,
     DUAL_STOCK_GRID_SYMBOLS,
     MULTI_FACTOR_STRATEGY_CODE,
-    get_builtin_strategy_template,
-    list_builtin_strategy_templates,
+)
+from app.db.models.strategy import Strategy
+from app.db.sqlite import async_session_factory
+from app.models.factor import BtConfig, FactorConfig
+from app.services.benchmark_series import benchmark_summary, resolve_benchmark_symbol
+from app.services.factor_backtest import factor_backtest_service
+from app.services.index_catalog import get_index_item, list_index_items
+from app.services.index_components import (
+    index_pool_summary,
+    load_index_symbols,
+    normalize_index_symbol,
+)
+from app.services.optimization_result_store import save_optimization_result
+from app.services.runtime_tasks import register_task, update_task
+from app.services.timer_minute_sync import (
+    find_earliest_timer_coverage_date,
+    parse_timer_times,
+    sync_timer_minute_points,
+    timer_times_from_params,
 )
 
 router = APIRouter()
@@ -863,6 +860,7 @@ async def create_multi_factor_strategy(req: BuiltinStrategyCreateRequest):
 async def optimize_grid(req: OptimizeRequest):
     """Run AKQuant Grid Search asynchronously and return a task id."""
     from datetime import date as date_cls
+
     from app.services.akquant_optimize import run_grid_search
 
     _cleanup_tasks()
@@ -1008,6 +1006,7 @@ async def optimize_grid(req: OptimizeRequest):
 async def optimize_walk_forward(req: WalkForwardRequest):
     """Run AKQuant Walk-forward Validation asynchronously and return a task id."""
     from datetime import date as date_cls
+
     from app.services.akquant_optimize import run_walk_forward
 
     _cleanup_tasks()
@@ -1247,7 +1246,7 @@ async def validate_strategy_params_payload(req: StrategyParamsValidateRequest):
 @router.get("/report/{task_id}")
 async def get_report(task_id: str):
     """Return quantstats HTML report."""
-    from app.backtest.engine.akquant.reporter import get_report_path, serve_report
+    from app.backtest.engine.akquant.reporter import serve_report
 
     _cleanup_tasks()
     task = _tasks.get(task_id)
@@ -1264,7 +1263,7 @@ async def get_report(task_id: str):
     if result and result.get("report_path"):
         path = result["report_path"]
         try:
-            with open(path, "r", encoding="utf-8") as f:
+            with open(path, encoding="utf-8") as f:
                 from fastapi.responses import HTMLResponse
                 return HTMLResponse(content=f.read())
         except FileNotFoundError:
@@ -1291,9 +1290,10 @@ async def get_pool_symbols(pool_name: str):
         return {"code": 0, "data": {"symbols": _POOL_CACHE[pool_name]}}
 
     if pool_name == "all":
-        from app.db.models.stock import Stock
-        from app.core.config import settings
         from sqlalchemy import create_engine, select
+
+        from app.core.config import settings
+        from app.db.models.stock import Stock
         url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(url)
         with engine.connect() as conn:
@@ -1409,6 +1409,7 @@ async def get_timer_coverage(
 async def get_backtest_data_coverage(req: RunBacktestRequest):
     """Check market and factor data coverage for a backtest request."""
     from datetime import date as date_cls
+
     from app.data_stores import get_market_data_store
 
     start_date = date_cls.fromisoformat(req.start_date)
@@ -1523,8 +1524,9 @@ async def get_stock_names(symbols: str = ""):
         sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
         if not sym_list:
             return {"code": 0, "data": {}}
-        from app.core.config import settings
         from sqlalchemy import create_engine, select
+
+        from app.core.config import settings
         from app.db.models.stock import Stock
         url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(url)

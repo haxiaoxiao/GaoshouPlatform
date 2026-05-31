@@ -1,5 +1,5 @@
 """事件驱动回测引擎 — 逐日/逐分钟信号触发"""
-from typing import Any, Callable
+from typing import Callable
 
 import numpy as np
 import pandas as pd

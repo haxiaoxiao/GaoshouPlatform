@@ -5,7 +5,7 @@ from fastapi import APIRouter
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.models.factor import FactorConfig, EvalConfig, BoardQuery
+from app.models.factor import BoardQuery, EvalConfig, FactorConfig
 from app.services.factor_evaluation import FactorEvaluationService, get_evaluation_service
 
 router = APIRouter()

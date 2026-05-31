@@ -36,7 +36,7 @@ class FactorSpec:
     alias: str | None = None
 
     @classmethod
-    def from_raw(cls, raw: "FactorSpec | dict[str, Any]") -> "FactorSpec":
+    def from_raw(cls, raw: FactorSpec | dict[str, Any]) -> FactorSpec:
         if isinstance(raw, cls):
             return raw
         return cls(
@@ -74,7 +74,7 @@ class FilterSpec:
     params: dict[str, Any] | None = None
 
     @classmethod
-    def from_raw(cls, raw: "FilterSpec | dict[str, Any]") -> "FilterSpec":
+    def from_raw(cls, raw: FilterSpec | dict[str, Any]) -> FilterSpec:
         if isinstance(raw, cls):
             return raw
         return cls(

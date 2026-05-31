@@ -36,7 +36,7 @@ class FactorDataView:
         as_of_time: str | None = None,
         frequency: str = "1d",
         data_policy: dict[str, Any] | None = None,
-    ) -> "FactorDataView":
+    ) -> FactorDataView:
         return cls(
             data={str(symbol): frame.copy() for symbol, frame in data.items()},
             metadata=dict(metadata or {}),

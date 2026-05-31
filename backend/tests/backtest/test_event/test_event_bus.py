@@ -1,7 +1,6 @@
 """EventBus 单元测试"""
-import pytest
-from app.backtest.event.events import Event, EventType
 from app.backtest.event.event_bus import EventBus
+from app.backtest.event.events import Event, EventType
 
 
 class TestEventBus:

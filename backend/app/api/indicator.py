@@ -3,13 +3,14 @@
 from datetime import date
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path as FPath, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import Path as FPath
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.financial import FinancialData
 from app.db.sqlite import get_async_session
 from app.indicators import IndicatorRegistry
-from sqlalchemy import select, func
 
 router = APIRouter()
 
@@ -106,11 +107,10 @@ async def query_indicators(
             return {"code": 0, "message": "success", "data": {"trade_date": target_date, "items": [
                 {"symbol": s, "name": None, "indicators": {n: None for n in name_list}} for s in symbol_list
             ]}}
-        rows = list(df.itertuples(index=False))
+        list(df.itertuples(index=False))
     except Exception:
-        rows = []
+        pass
 
-    import pandas as pd
 
     items = []
     if df is not None and not df.empty:

@@ -11,6 +11,7 @@ python-multipart>=0.0.6
 pytest>=7.0.0
 pytest-asyncio>=0.21.0
 httpx>=0.25.0
+requests>=2.31.0
 ruff>=0.1.0
 
 # Redis cache
@@ -26,6 +27,7 @@ loguru>=0.7.0
 # Trading data dependencies
 apscheduler>=3.10.0
 clickhouse-driver>=0.2.6
+playwright>=1.60.0
 
 # Optional local integrations. Install manually when you need live QMT,
 # VeighNa trading adapters, or native TA libraries:

@@ -24,7 +24,6 @@ from app.backtest.engine.data_provider import StoreDataProvider
 from app.services.index_components import load_index_symbols
 from app.services.timer_minute_sync import find_earliest_timer_coverage_date, parse_timer_times
 
-
 DEFAULT_TIMER_TIMES = ["09:15", "10:00", "10:30", "14:30", "14:50", "15:10"]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 

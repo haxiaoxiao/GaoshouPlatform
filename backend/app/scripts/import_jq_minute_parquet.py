@@ -27,7 +27,6 @@ from pathlib import Path
 import duckdb
 from loguru import logger
 
-
 DEFAULT_SOURCE = Path(
     r"E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版\01_数据文件"
 )

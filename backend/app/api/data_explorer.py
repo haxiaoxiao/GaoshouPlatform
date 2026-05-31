@@ -1,13 +1,14 @@
 # backend/app/api/data_explorer.py
 """Data explorer API for ClickHouse or local Parquet/DuckDB."""
+from typing import Any
+
 from fastapi import APIRouter, Body, HTTPException, Query
 from pydantic import BaseModel, Field
-from typing import Any
 
 from app.core.config import settings
 from app.data_stores.parquet_store import ParquetMarketDataStore
-from app.db.duckdb import get_duckdb
 from app.db.clickhouse import get_ch_client
+from app.db.duckdb import get_duckdb
 
 router = APIRouter()
 

@@ -1,7 +1,6 @@
 """Parquet + DuckDB 行情数据存储实现"""
 from __future__ import annotations
 
-import os
 import shutil
 import uuid
 from datetime import date, datetime
@@ -13,7 +12,6 @@ from loguru import logger
 
 from app.data_stores.base import MarketDataStore
 from app.db.duckdb import get_duckdb
-
 
 _DAILY_COLS = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
 _MINUTE_COLS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]

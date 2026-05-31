@@ -1,7 +1,7 @@
 """事件类型与事件数据结构"""
 from dataclasses import dataclass, field
-from enum import auto, Enum
 from datetime import datetime
+from enum import Enum
 from typing import Any
 
 

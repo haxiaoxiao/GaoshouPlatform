@@ -1,5 +1,6 @@
 import socket
 from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -63,8 +64,8 @@ class Settings(BaseSettings):
     qmt_daily_compute_indicators_after_sync: bool = False
     qmt_minute_clean_cache_after_sync: bool = False
     qmt_minute_compute_indicators_after_sync: bool = False
-    sync_service_url: str = "http://127.0.0.1:8810"
-    sync_service_port: int = 8810
+    sync_service_url: str = "http://127.0.0.1:18810"
+    sync_service_port: int = 18810
     enable_sync_scheduler: bool = True
     indevs_tushare_api_key: str = ""
     indevs_tushare_base_urls: str = (
@@ -80,11 +81,20 @@ class Settings(BaseSettings):
     qmt_account_id: str = ""
     qmt_account_type: str = "STOCK"
     qmt_trader_path: str = ""
+    xueqiu_chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    xueqiu_debug_port: int = 9222
+    xueqiu_user_data_dir: str = str(_DATA_DIR / "sentiment" / "xueqiu-profile")
+    xueqiu_spyder_dir: str = r"E:\Projects\xueqiu-spyder"
+    xueqiu_cookie: str = ""
+    flocktrader_dir: str = r"E:\Projects\flocktrader"
+    nga_cookie: str = ""
+    nga_data_dir: str = str(_DATA_DIR / "sentiment" / "NGAdata")
+    nga_board_fid: int = 706
 
     # API 配置
     api_prefix: str = "/api"
-    backend_port: int = 8800
-    frontend_port: int = 3500
+    backend_port: int = 18800
+    frontend_port: int = 13500
 
     @property
     def base_dir(self) -> Path:

@@ -1,14 +1,13 @@
 import asyncio
-import json
 import os
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 from loguru import logger
-
 
 QMT_MINUTE_CALL_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_CALL_TIMEOUT_SECONDS", "45"))
 QMT_MINUTE_BATCH_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_BATCH_TIMEOUT_SECONDS", "300"))
@@ -368,7 +367,6 @@ class QMTGateway:
             financial_data = await self._fetch_financial_data(symbol)
 
             eps = bvps = roe = revenue = net_profit = None
-            revenue_yoy = profit_yoy = gross_margin = None
             total_assets = total_liability = total_equity = None
             total_shares = float_shares = a_float_shares = limit_sell_shares = None
             pe_ttm = pb = None
@@ -380,9 +378,6 @@ class QMTGateway:
                 roe = fq.roe
                 revenue = fq.revenue
                 net_profit = fq.net_profit
-                revenue_yoy = fq.revenue_yoy
-                profit_yoy = fq.profit_yoy
-                gross_margin = fq.gross_margin
                 total_assets = fq.total_assets
                 total_liability = fq.total_liability
                 total_equity = fq.total_equity
@@ -1185,7 +1180,7 @@ class QMTGateway:
     async def get_realtime_quotes(self, symbols: list[str]) -> list[dict[str, Any]]:
         """获取实时行情"""
         xt = self._get_xt()
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
 
         try:
             ticks = await _run_blocking_with_timeout(
@@ -1342,7 +1337,6 @@ class QMTGateway:
         Returns:
             {"deleted": 删除文件数, "freed_mb": 释放MB}
         """
-        import glob as glob_mod
 
         data_dir = self._get_data_dir()
         if not data_dir or not os.path.isdir(data_dir):

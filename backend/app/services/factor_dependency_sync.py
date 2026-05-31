@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import duckdb
 from loguru import logger
@@ -18,9 +18,16 @@ from app.services.factor_catalog import (
     RESEARCH_FACTOR_SPECS,
     TA_FACTOR_SPECS,
 )
-from app.services.factor_value_store import get_factor_definition, get_factor_group, normalize_factor_time
-from app.services.index_components import ensure_index_components, load_index_symbols, normalize_index_symbol
-
+from app.services.factor_value_store import (
+    get_factor_definition,
+    get_factor_group,
+    normalize_factor_time,
+)
+from app.services.index_components import (
+    ensure_index_components,
+    load_index_symbols,
+    normalize_index_symbol,
+)
 
 CORE_FACTORS = {
     "market_cap",

@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 def get_clickhouse_client():
     from clickhouse_driver import Client
+
     from app.core.config import settings
 
     return Client(
@@ -41,6 +42,7 @@ def get_clickhouse_client():
 
 def get_redis_client():
     import redis
+
     from app.core.config import settings
 
     r = redis.Redis(

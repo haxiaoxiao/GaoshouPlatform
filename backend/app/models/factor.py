@@ -13,7 +13,6 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-
 # ── Enums ────────────────────────────────────────────────────────────────────
 
 class StockPool(str, Enum):
@@ -169,8 +168,14 @@ class BoardQuery(BaseModel):
     transfer_fee_rate: float | None = Field(default=None, ge=0, le=0.05)
     slippage: float | None = Field(default=None, ge=0, le=0.05)
     filter_limit_up: bool = True
+    filter_limit_down: bool = True
+    group_count: int = Field(5, ge=2, le=20)
+    direction: FactorDirection = FactorDirection.DESC
     pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
     factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
+    outlier_handling: Literal["none", "winsorize"] = "none"
+    industry_neutralization: bool = False
+    standardize: bool = False
     sort_by: str = "ic_mean"
     sort_order: Literal["asc", "desc"] = "desc"
     page: int = Field(1, ge=1)

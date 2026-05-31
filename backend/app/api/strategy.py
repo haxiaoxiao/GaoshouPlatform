@@ -5,15 +5,14 @@ import tempfile
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, Depends, File, Query, UploadFile
 from loguru import logger
 from pydantic import BaseModel
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.strategy import Strategy, Backtest
+from app.db.models.strategy import Backtest, Strategy
 from app.db.models.watchlist import WatchlistGroup, WatchlistStock
 from app.db.sqlite import get_async_session
 from app.strategies.trend_capital import TrendCapitalStrategy
@@ -105,7 +104,7 @@ async def get_daily_signals(
         sig_list = []
         triggered = 0
         composite = 0
-        for sym, sig in day_sigs.items():
+        for _sym, sig in day_sigs.items():
             if sig.signal_a_triggered or sig.signal_b_triggered or sig.signal_c_triggered:
                 triggered += 1
             if sig.composite_triggered:
@@ -336,7 +335,7 @@ async def strategy_from_report(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        from app.services.report_to_strategy import parse_report, generate_strategy
+        from app.services.report_to_strategy import generate_strategy, parse_report
         text = await asyncio.to_thread(parse_report, tmp_path)
         if not text or text.startswith("PDF"):
             return {"code": 1, "message": f"文本提取失败: {text}", "data": None}
@@ -386,8 +385,8 @@ async def create_chat_session(file: UploadFile = File(...)):
         tmp_path = tmp.name
 
     try:
-        from app.services.report_to_strategy import parse_report
         from app.services.llm_strategy import create_chat_session as do_create
+        from app.services.report_to_strategy import parse_report
 
         text = await asyncio.to_thread(parse_report, tmp_path)
         if not text or text.startswith("PDF 解析失败"):

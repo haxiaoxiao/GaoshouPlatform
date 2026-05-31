@@ -5,12 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from app.backtest.strategies.dual_stock_grid_akquant import (
-    DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
-    DEFAULT_DUAL_STOCK_GRID_PARAMS,
-    DUAL_STOCK_GRID_STRATEGY_CODE,
-    DUAL_STOCK_GRID_SYMBOLS,
-)
 from app.backtest.strategies.cn_paper_factor_akquant import (
     CN_PAPER_FACTOR_STRATEGY_CODE,
     DEFAULT_CN_PAPER_FACTOR_PARAMS,
@@ -23,6 +17,12 @@ from app.backtest.strategies.cn_paper_style_rotation_akquant import (
     DEFAULT_CN_PAPER_DEFENSIVE_ALLOCATION_RISK_CONFIG,
     DEFAULT_CN_PAPER_STYLE_ROTATION_PARAMS,
     DEFAULT_CN_PAPER_STYLE_ROTATION_RISK_CONFIG,
+)
+from app.backtest.strategies.dual_stock_grid_akquant import (
+    DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
+    DEFAULT_DUAL_STOCK_GRID_PARAMS,
+    DUAL_STOCK_GRID_STRATEGY_CODE,
+    DUAL_STOCK_GRID_SYMBOLS,
 )
 from app.backtest.strategies.multi_factor_akquant import (
     DEFAULT_MULTI_FACTOR_PARAMS,

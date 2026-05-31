@@ -10,7 +10,6 @@ import pandas as pd
 from app.services.factor_catalog import CN_PAPER_FACTOR_SPECS
 from app.services.factor_value_store import FactorValueStore, get_factor_value_store
 
-
 CN_PAPER_EXPERIMENT_SPECS: list[dict[str, Any]] = [
     {
         "paper_ids": [32],

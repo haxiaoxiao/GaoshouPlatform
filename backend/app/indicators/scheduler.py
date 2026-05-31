@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
-from app.core.config import settings as app_settings
 from app.indicators.base import IndicatorContext, IndicatorRegistry
 
 
@@ -170,10 +169,11 @@ class IndicatorScheduler:
         return ordered
 
     def _load_stock_info_map(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        from sqlalchemy import create_engine, select, func
-        from app.db.models.stock import Stock
-        from app.db.models.financial import FinancialData
+        from sqlalchemy import create_engine, func, select
+
         from app.core.config import settings
+        from app.db.models.financial import FinancialData
+        from app.db.models.stock import Stock
 
         sync_url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(sync_url)
@@ -220,8 +220,10 @@ class IndicatorScheduler:
         return info_map
 
     def _load_kline_map(self, symbols: list[str], limit: int = 120) -> dict[str, list[dict[str, Any]]]:
+        from datetime import date as dt_date
+        from datetime import timedelta
+
         from app.data_stores import get_market_data_store
-        from datetime import date as dt_date, timedelta
         store = get_market_data_store()
         end = dt_date.today()
         start = end - timedelta(days=limit * 2)
@@ -240,8 +242,9 @@ class IndicatorScheduler:
 
     def _get_all_symbols(self) -> list[str]:
         from sqlalchemy import create_engine, select
-        from app.db.models.stock import Stock
+
         from app.core.config import settings
+        from app.db.models.stock import Stock
 
         sync_url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(sync_url)
@@ -284,6 +287,7 @@ class IndicatorScheduler:
     ) -> None:
         try:
             import pandas as pd
+
             from app.data_stores import get_indicator_store
 
             df = pd.DataFrame(

@@ -1,13 +1,12 @@
 """策略加载器 — 表达式信号模式 + 订单 API"""
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any
 
 import pandas as pd
 from loguru import logger
 
-from app.backtest.event.events import Event, EventType
 from app.backtest.event.event_source import Bar, BarEventSource
+from app.backtest.event.events import Event, EventType
 from app.backtest.portfolio.account import Account
 from app.backtest.portfolio.position import PositionManager
 
@@ -123,7 +122,7 @@ class ExpressionSignalStrategy:
 
     def _on_bar(self, event: Event) -> None:
         bar_dict = event.data.get("bar_dict")
-        date_val = event.data.get("date")
+        event.data.get("date")
         source = self._ctx.event_source
 
         if source is None or bar_dict is None:

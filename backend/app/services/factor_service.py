@@ -1,7 +1,7 @@
 # backend/app/services/factor_service.py
 """因子管理服务"""
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -9,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.models import Factor, FactorAnalysis
-from app.engines.factor_engine import FactorConfig, FactorEngine, get_factor_engine
 
 CUSTOM_FACTOR_CATEGORY = "custom"
 
@@ -55,14 +54,6 @@ class FactorService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
-        self._engine: FactorEngine | None = None
-
-    @property
-    def engine(self) -> FactorEngine:
-        """获取因子引擎"""
-        if self._engine is None:
-            self._engine = get_factor_engine()
-        return self._engine
 
     async def create_factor(self, data: FactorCreate) -> Factor:
         """
@@ -190,90 +181,6 @@ class FactorService:
         await self.session.delete(factor)
         await self.session.flush()
         return True
-
-    def calculate_factor(
-        self,
-        symbols: list[str] | None = None,
-        start_date: date | None = None,
-        end_date: date | None = None,
-        config: FactorConfig | None = None,
-    ) -> dict[str, Any]:
-        """
-        计算因子值
-
-        Args:
-            symbols: 股票代码列表
-            start_date: 开始日期
-            end_date: 结束日期
-            config: 因子配置
-
-        Returns:
-            dict: 计算结果
-        """
-        return self.engine.run_factor_analysis(
-            symbols=symbols,
-            start_date=start_date,
-            end_date=end_date,
-            config=config,
-        )
-
-    async def run_analysis(
-        self,
-        factor_id: int,
-        start_date: date,
-        end_date: date,
-        symbols: list[str] | None = None,
-        config: FactorConfig | None = None,
-    ) -> FactorAnalysis:
-        """
-        运行因子分析并保存结果
-
-        Args:
-            factor_id: 因子ID
-            start_date: 分析开始日期
-            end_date: 分析结束日期
-            symbols: 股票代码列表
-            config: 因子配置
-
-        Returns:
-            FactorAnalysis: 分析结果记录
-        """
-        # 获取因子
-        factor = await self.get_factor(factor_id)
-        if factor is None:
-            raise ValueError(f"Factor {factor_id} not found")
-
-        # 合并参数
-        if config is None:
-            config = FactorConfig()
-
-        if factor.parameters:
-            # 用因子默认参数覆盖
-            if "normalize_window" in factor.parameters:
-                config.normalize_window = factor.parameters["normalize_window"]
-            if "factor_window" in factor.parameters:
-                config.factor_window = factor.parameters["factor_window"]
-            if "forward_period" in factor.parameters:
-                config.forward_period = factor.parameters["forward_period"]
-
-        # 运行分析
-        result = self.calculate_factor(symbols, start_date, end_date, config)
-
-        # 保存分析结果
-        analysis = FactorAnalysis(
-            factor_id=factor_id,
-            start_date=start_date,
-            end_date=end_date,
-            ic_mean=result.get("ic_mean"),
-            ic_std=result.get("ic_std"),
-            ir=result.get("information_ratio"),
-            turnover_rate=None,  # TODO: 计算换手率
-            details=result,
-        )
-        self.session.add(analysis)
-        await self.session.flush()
-
-        return analysis
 
     async def get_analysis(self, analysis_id: int) -> FactorAnalysis | None:
         """

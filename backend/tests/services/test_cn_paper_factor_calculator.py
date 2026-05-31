@@ -6,15 +6,49 @@ import numpy as np
 import pandas as pd
 
 import app.services.cn_paper_factor_calculator as module
+from app.services.factor_value_store import FactorValueBatchWriter
 
 
 class DummyFactorStore:
     def __init__(self) -> None:
         self.frame = pd.DataFrame()
 
-    def write(self, frame: pd.DataFrame) -> int:
+    def append(self, frame: pd.DataFrame) -> int:
         self.frame = pd.concat([self.frame, frame], ignore_index=True)
         return len(frame)
+
+    def write(self, frame: pd.DataFrame) -> int:
+        return self.append(frame)
+
+    def batch_writer(self, *, batch_size: int = 50_000) -> FactorValueBatchWriter:
+        return FactorValueBatchWriter(self, batch_size=batch_size)
+
+
+class TinyBatchFactorStore(DummyFactorStore):
+    def batch_writer(self, *, batch_size: int = 50_000) -> FactorValueBatchWriter:
+        return FactorValueBatchWriter(self, batch_size=3)
+
+
+def test_factor_batch_writer_splits_large_frames() -> None:
+    store = TinyBatchFactorStore()
+    writer = store.batch_writer()
+    frame = pd.DataFrame({
+        "symbol": [f"00000{index}.SZ" for index in range(6)],
+        "trade_date": [date(2024, 1, 2)] * 6,
+        "as_of_time": [""] * 6,
+        "factor_name": ["paper_pb_roe_residual"] * 6,
+        "params_hash": ["empty"] * 6,
+        "value": [float(index) for index in range(6)],
+        "source": ["test"] * 6,
+        "created_at": [pd.Timestamp("2024-01-02")] * 6,
+    })
+
+    written = writer.write_frame(frame)
+
+    assert written == 6
+    assert writer.written == 6
+    assert writer.counts["paper_pb_roe_residual"] == 6
+    assert len(store.frame) == 6
 
 
 def _paper_daily_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:

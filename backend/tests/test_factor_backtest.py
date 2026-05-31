@@ -1,7 +1,7 @@
 """Tests for factor backtest service."""
 from datetime import date
 
-from app.models.factor import FactorConfig, BtConfig, StockPool, PortfolioType
+from app.models.factor import BtConfig, FactorConfig, PortfolioType, StockPool
 from app.services.factor_backtest import FactorBacktestService
 
 

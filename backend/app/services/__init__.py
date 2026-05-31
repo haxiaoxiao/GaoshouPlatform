@@ -13,10 +13,12 @@ from .data_service import (
 from .data_skill import (
     DataSkill,
     FinancialReport,
-    IndustryInfo as SkillIndustryInfo,
     KlineBar,
     ScreenResult,
     StockSnapshot,
+)
+from .data_skill import (
+    IndustryInfo as SkillIndustryInfo,
 )
 from .sync_service import SyncProgress, SyncService
 

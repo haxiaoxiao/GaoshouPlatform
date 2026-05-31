@@ -1,7 +1,8 @@
 """Tests for factor templates service."""
 import pytest
-from app.services.factor_templates import FactorTemplatesService, TEMPLATES
+
 from app.models.factor import TemplateType
+from app.services.factor_templates import TEMPLATES, FactorTemplatesService
 
 
 class TestFactorTemplatesService:

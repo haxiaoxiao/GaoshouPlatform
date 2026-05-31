@@ -6,8 +6,8 @@ import json
 import zlib
 from typing import Any
 
-from loguru import logger
 import redis
+from loguru import logger
 
 from app.cache.redis_cache import get_redis_client
 from app.core.config import settings

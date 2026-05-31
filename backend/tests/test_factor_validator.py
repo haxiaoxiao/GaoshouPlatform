@@ -1,5 +1,4 @@
 """Tests for factor validator service."""
-import pytest
 from app.services.factor_validator import FactorValidator
 
 

@@ -38,12 +38,6 @@ const router = createRouter({
       meta: { title: '因子研究' },
       children: [
         {
-          path: 'analysis/:id',
-          name: 'FactorAnalysis',
-          component: () => import('@/views/FactorResearch/FactorAnalysis.vue'),
-          meta: { title: '因子分析' },
-        },
-        {
           path: 'analysis-new/:id',
           name: 'FactorAnalysisNew',
           component: () => import('@/views/FactorResearch/FactorAnalysisNew.vue'),

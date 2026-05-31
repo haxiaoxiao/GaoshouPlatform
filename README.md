@@ -67,7 +67,6 @@ GaoshouPlatform/
 │   │   │   └── system.py        # 系统状态 API
 │   │   ├── engines/
 │   │   │   ├── qmt_gateway.py   # ⭐ QMT 数据网关（核心，封装 xtquant）
-│   │   │   ├── factor_engine.py # 因子计算引擎
 │   │   │   └── vn_engine.py     # VeighNa 回测引擎
 │   │   ├── db/
 │   │   │   ├── sqlite.py        # SQLite async 连接
@@ -168,22 +167,29 @@ docker exec clickhouse-server clickhouse-client -q "CREATE DATABASE IF NOT EXIST
 
 ### 4. 启动服务
 
+端口必须按环境隔离，避免 dev/prod 互相代理或重启错服务：
+
+| 环境 | 根目录 | 后端 API | 同步服务 | 前端 |
+|---|---|---:|---:|---:|
+| dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
+| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3500` |
+
 **后端：**
 ```powershell
-cd E:\projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-dev\backend
 .venv\Scripts\activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 18800
 ```
 
 **前端：**
 ```powershell
-cd E:\projects\GaoshouPlatform\frontend
-npm run dev
+cd E:\Projects\GaoshouPlatform-dev\frontend
+npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
-- 后端 API 文档：http://localhost:8000/docs
-- 前端页面：http://localhost:5173
-- 健康检查：http://localhost:8000/health
+- 后端 API 文档：http://localhost:18800/docs
+- 前端页面：http://localhost:13500
+- 健康检查：http://localhost:18800/health
 
 > 后端启动时会自动创建 SQLite 表和 ClickHouse 表。
 
@@ -348,7 +354,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 ## 数据浏览器
 
-访问 `http://localhost:5173/explorer` 可以浏览 ClickHouse 中的数据：
+dev 环境访问 `http://localhost:13500/explorer` 可以浏览 ClickHouse 中的数据：
 - 自动列出所有表和行数
 - 动态展示表结构（不硬编码字段）
 - 支持 WHERE 过滤、排序、分页
@@ -435,7 +441,7 @@ chore: 构建/工具
 | 文件 | 说明 |
 |------|------|
 | `backend/app/core/config.py` | 后端配置（DB绝对路径、ClickHouse端口） |
-| `frontend/vite.config.ts` | 前端代理（指向 localhost:8000） |
+| `frontend/vite.config.ts` | 前端代理（dev 默认指向 localhost:18800） |
 | `frontend/src/styles/design-system.css` | 暗色主题变量 |
 
 ### 代码风格

@@ -38,8 +38,8 @@ def test_multi_factor_strategy_code_executes():
     strategy = strategy_cls()
     assert strategy.top_n > 0
     assert strategy.scorer_type == "linear"
-    assert callable(getattr(strategy, "on_bar"))
-    assert callable(getattr(strategy, "on_timer"))
+    assert callable(strategy.on_bar)
+    assert callable(strategy.on_timer)
 
 
 def test_cn_paper_factor_strategy_preset_executes():

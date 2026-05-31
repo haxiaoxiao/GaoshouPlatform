@@ -1,5 +1,5 @@
 """交易日历 — 基于 MarketDataStore klines_daily"""
-from datetime import date, timedelta
+from datetime import date
 
 from loguru import logger
 
@@ -27,6 +27,7 @@ class TradingCalendar:
     ) -> "TradingCalendar":
         """从行情存储加载唯一交易日 (线程池中执行)"""
         import asyncio
+
         from app.data_stores import get_market_data_store
 
         def _load():

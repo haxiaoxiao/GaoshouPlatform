@@ -233,6 +233,23 @@ def test_alpha101_precompute_continues_after_factor_error(monkeypatch) -> None:
             self.frame = pd.concat([self.frame, frame], ignore_index=True)
             return len(frame)
 
+        def batch_writer(self):
+            class Writer:
+                def __init__(self, store: DummyStore) -> None:
+                    self.store = store
+                    self.counts: dict[str, int] = {}
+                    self.written = 0
+
+                def write_frame(self, frame: pd.DataFrame) -> int:
+                    if "factor_name" in frame.columns:
+                        for factor_name, count in frame["factor_name"].astype(str).value_counts().items():
+                            self.counts[str(factor_name)] = self.counts.get(str(factor_name), 0) + int(count)
+                    written = self.store.append(frame)
+                    self.written += written
+                    return written
+
+            return Writer(self)
+
     panel = _alpha_input_frame(periods=20)
 
     def fake_build_frame(*args, **kwargs) -> pd.DataFrame:

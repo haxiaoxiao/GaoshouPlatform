@@ -16,11 +16,14 @@ from loguru import logger
 from app.core.config import settings
 from app.services.index_catalog import (
     get_index_item,
-    jq_index_symbol as catalog_jq_index_symbol,
     list_index_items,
+)
+from app.services.index_catalog import (
+    jq_index_symbol as catalog_jq_index_symbol,
+)
+from app.services.index_catalog import (
     normalize_index_symbol as catalog_normalize_index_symbol,
 )
-
 
 KNOWN_INDEX_POOLS = [
     {
