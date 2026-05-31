@@ -1,6 +1,4 @@
 """向量化回测引擎 — 因子分组回测"""
-from datetime import date
-from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -100,7 +98,7 @@ class VectorizedBacktestEngine:
             nav = (1 + returns).cumprod()
             group_navs[f"group_{g + 1}"] = [
                 {"date": str(d.date()), "nav": float(v)}
-                for d, v in zip(nav_dates, nav)
+                for d, v in zip(nav_dates, nav, strict=False)
             ]
 
         long_returns = pd.Series(group_daily_returns[n_groups - 1])
@@ -142,7 +140,7 @@ class VectorizedBacktestEngine:
 
         nav_series = [
             {"date": str(d.date()), "nav": float(v)}
-            for d, v in zip(nav_dates, nav)
+            for d, v in zip(nav_dates, nav, strict=False)
         ]
 
         return BacktestResult(

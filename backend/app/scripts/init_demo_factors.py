@@ -1,5 +1,5 @@
 # backend/app/scripts/init_demo_factors.py
-"""Seed two typical expression-based demo factors and run initial analysis.
+r"""Seed two typical expression-based demo factors and run initial analysis.
 
 Factors:
   1. momentum_20d  — 20-day price momentum (classic cross-sectional factor)
@@ -16,9 +16,7 @@ import asyncio
 from datetime import date
 from decimal import Decimal
 
-import pandas as pd
 from loguru import logger
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models import Factor, FactorAnalysis
@@ -39,7 +37,7 @@ DEMO_FACTORS = [
     {
         "name": "volume_anomaly_20d",
         "category": "情绪类因子",
-        "expression": "$volume / Mean($volume, 20) - 1",
+        "expression": "$volume / ts_mean($volume, 20) - 1",
         "stock_pool": "hs300",
         "description": (
             "20日成交量异常因子。当日成交量相对于过去20日均值的偏离度。\n"
@@ -150,7 +148,9 @@ async def run_analysis(
 
 async def resolve_symbols(stock_pool: str = "hs300") -> list[str]:
     """Resolve stock pool name to a list of symbols from market data."""
-    from datetime import date as dt_date, timedelta
+    from datetime import date as dt_date
+    from datetime import timedelta
+
     from app.data_stores import get_market_data_store
 
     store = get_market_data_store()

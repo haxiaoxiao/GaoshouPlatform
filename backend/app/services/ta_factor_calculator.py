@@ -9,7 +9,12 @@ import pandas as pd
 from app.compute.operators.ta_ops import _call_ta
 from app.data_stores import get_market_data_store
 from app.services.factor_catalog import TA_FACTOR_SPECS
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_precompute_runtime import release_precompute_memory, symbol_chunks
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 def _build_daily_frame(symbols: Sequence[str], start_date: date, end_date: date, lookback_days: int) -> pd.DataFrame:
@@ -82,9 +87,9 @@ def _compute_factor(frame: pd.DataFrame, factor_name: str) -> np.ndarray:
     close = frame["close"].to_numpy(dtype=np.float64)
     high = frame["high"].to_numpy(dtype=np.float64)
     low = frame["low"].to_numpy(dtype=np.float64)
-    open_ = frame["open"].to_numpy(dtype=np.float64)
+    frame["open"].to_numpy(dtype=np.float64)
     volume = frame["volume"].fillna(0.0).to_numpy(dtype=np.float64)
-    amount = frame["amount"].fillna(0.0).to_numpy(dtype=np.float64)
+    frame["amount"].fillna(0.0).to_numpy(dtype=np.float64)
 
     if factor_name == "ta_sma_20":
         return np.asarray(_call_ta("SMA", close, timeperiod=20), dtype=np.float64)
@@ -144,51 +149,58 @@ def precompute_ta_factors(
 
     lookback = max(int(TA_FACTOR_SPECS.get(name, {}).get("lookback") or 0) for name in factor_names) if factor_names else 60
     report(0.02, "parse")
-    daily = _build_daily_frame(symbols, start_date, end_date, max(lookback, 60))
-    if daily.empty:
-        raise RuntimeError("No daily data available for TA factor precompute")
-    rows: list[dict[str, Any]] = []
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
     created_at = datetime.now()
     empty_hash = factor_params_hash({})
-    grouped = list(daily.groupby("symbol", sort=False))
-    total = max(len(grouped) * max(len(factor_names), 1), 1)
+    chunks = symbol_chunks(symbols)
+    total = max(len(symbols) * max(len(factor_names), 1), 1)
     current = 0
-    for symbol, frame in grouped:
-        frame = frame.sort_values("trade_date").reset_index(drop=True)
-        for factor_name in factor_names:
-            current += 1
-            report(0.08 + 0.82 * (current / total), "ta_lib", current=current, total=total, factor_name=factor_name, symbol=symbol)
-            values = _compute_factor(frame, factor_name)
-            factor_frame = pd.DataFrame({
-                "trade_date": frame["trade_date"],
-                "value": pd.to_numeric(values, errors="coerce"),
-            })
-            factor_frame = factor_frame[(factor_frame["trade_date"] >= start_date) & (factor_frame["trade_date"] <= end_date)]
-            factor_frame = factor_frame.dropna(subset=["value"])
-            if factor_frame.empty:
-                continue
-            for item in factor_frame.itertuples(index=False):
-                rows.append({
+    loaded_any = False
+
+    def flush_rows() -> None:
+        writer.flush()
+
+    for chunk_index, symbol_chunk in enumerate(chunks, start=1):
+        report(0.04 + 0.04 * (chunk_index / max(len(chunks), 1)), "ta_load_daily", current=chunk_index, total=len(chunks), symbols=len(symbol_chunk))
+        daily = _build_daily_frame(symbol_chunk, start_date, end_date, max(lookback, 60))
+        if daily.empty:
+            continue
+        loaded_any = True
+        for symbol, frame in daily.groupby("symbol", sort=False):
+            frame = frame.sort_values("trade_date").reset_index(drop=True)
+            for factor_name in factor_names:
+                current += 1
+                report(0.08 + 0.82 * (current / total), "ta_lib", current=current, total=total, factor_name=factor_name, symbol=symbol)
+                values = _compute_factor(frame, factor_name)
+                factor_frame = pd.DataFrame({
                     "symbol": str(symbol),
-                    "trade_date": item.trade_date,
+                    "trade_date": frame["trade_date"],
                     "as_of_time": "",
                     "factor_name": factor_name,
                     "params_hash": empty_hash,
-                    "value": float(item.value),
+                    "value": pd.to_numeric(values, errors="coerce"),
                     "source": "precompute.ta_lib",
                     "created_at": created_at,
                 })
-    report(0.94, "write", rows_buffered=len(rows))
-    factor_store = store or get_factor_value_store()
-    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["factor_name"]] = counts.get(row["factor_name"], 0) + 1
-    report(1.0, "done", rows_written=written)
+                factor_frame = factor_frame[(factor_frame["trade_date"] >= start_date) & (factor_frame["trade_date"] <= end_date)]
+                factor_frame = factor_frame.dropna(subset=["value"])
+                if factor_frame.empty:
+                    continue
+                writer.write_frame(factor_frame)
+                del values, factor_frame
+        flush_rows()
+        del daily
+        release_precompute_memory()
+    if not loaded_any:
+        raise RuntimeError("No daily data available for TA factor precompute")
+    report(0.94, "write", rows_buffered=writer.rows_buffered)
+    flush_rows()
+    report(1.0, "done", rows_written=writer.written)
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "rows": counts,
-        "rows_written": written,
+        "rows": writer.counts,
+        "rows_written": writer.written,
     }

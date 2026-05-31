@@ -1,5 +1,6 @@
 import socket
 from pathlib import Path
+
 from pydantic_settings import BaseSettings
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -38,7 +39,7 @@ class Settings(BaseSettings):
     debug: bool = True
 
     # 数据库配置
-    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH}"
+    database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"
 
     # ClickHouse 配置
     clickhouse_host: str = "localhost"
@@ -55,12 +56,45 @@ class Settings(BaseSettings):
 
     # 行情数据存储配置
     market_data_backend: str = "parquet"  # parquet | clickhouse
-    parquet_data_dir: str = "E:/Projects/GaoshouPlatform/data/parquet"
+    parquet_data_dir: str = str(_DATA_DIR / "parquet")
     duckdb_path: str = ":memory:"
     clickhouse_enabled: bool = False
+    parquet_minute_append_only: bool = True
+    qmt_daily_clean_cache_after_sync: bool = False
+    qmt_daily_compute_indicators_after_sync: bool = False
+    qmt_minute_clean_cache_after_sync: bool = False
+    qmt_minute_compute_indicators_after_sync: bool = False
+    sync_service_url: str = "http://127.0.0.1:18810"
+    sync_service_port: int = 18810
+    enable_sync_scheduler: bool = True
+    indevs_tushare_api_key: str = ""
+    indevs_tushare_base_urls: str = (
+        "http://127.0.0.1:8000/tushare/pro,"
+        "https://ai-tool.indevs.in/tushare/pro,"
+        "https://tushare.indevs.in/tushare/pro"
+    )
+    indevs_tushare_rps: float = 1.0
+    indevs_tushare_timeout_seconds: int = 30
+
+    # 网格交易信号配置
+    grid_trading_enable_order_submit: bool = False
+    qmt_account_id: str = ""
+    qmt_account_type: str = "STOCK"
+    qmt_trader_path: str = ""
+    xueqiu_chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+    xueqiu_debug_port: int = 9222
+    xueqiu_user_data_dir: str = str(_DATA_DIR / "sentiment" / "xueqiu-profile")
+    xueqiu_spyder_dir: str = r"E:\Projects\xueqiu-spyder"
+    xueqiu_cookie: str = ""
+    flocktrader_dir: str = r"E:\Projects\flocktrader"
+    nga_cookie: str = ""
+    nga_data_dir: str = str(_DATA_DIR / "sentiment" / "NGAdata")
+    nga_board_fid: int = 706
 
     # API 配置
     api_prefix: str = "/api"
+    backend_port: int = 18800
+    frontend_port: int = 13500
 
     @property
     def base_dir(self) -> Path:
@@ -82,6 +116,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = _ENV_FILES
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 settings = Settings()

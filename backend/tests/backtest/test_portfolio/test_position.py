@@ -1,6 +1,8 @@
 """Position FIFO 仓位管理单元测试"""
-import pytest
 from datetime import date
+
+import pytest
+
 from app.backtest.portfolio.position import Position, PositionLot, PositionManager
 
 

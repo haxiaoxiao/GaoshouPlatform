@@ -4,7 +4,7 @@ VeighNa 回测引擎封装
 提供简洁的回测接口，从 ClickHouse 加载数据
 """
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 from typing import Any
 

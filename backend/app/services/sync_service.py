@@ -1,24 +1,44 @@
 # backend/app/services/sync_service.py
 """数据同步服务"""
 import asyncio
+import os
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta as td
+from datetime import date, datetime
+from datetime import timedelta as td
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
-
 from sqlalchemy import delete, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.retry import async_retry
-from app.db.clickhouse import get_ch_client
-from app.data_stores import get_market_data_store
 from app.core.config import settings as app_settings
+from app.core.retry import async_retry
+from app.data_stores import get_market_data_store
+from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
+from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
+from app.services.index_components import ensure_index_components
+from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
+
+QMT_MINUTE_BATCH_SIZE = int(os.getenv("QMT_MINUTE_BATCH_SIZE", "100"))
+QMT_DAILY_BATCH_SIZE = int(os.getenv("QMT_DAILY_BATCH_SIZE", "50"))
+QMT_WEEKLY_BATCH_SIZE = int(os.getenv("QMT_WEEKLY_BATCH_SIZE", "100"))
+QMT_FINANCIAL_BATCH_SIZE = int(os.getenv("QMT_FINANCIAL_BATCH_SIZE", "200"))
+QMT_DIVIDEND_BATCH_SIZE = int(os.getenv("QMT_DIVIDEND_BATCH_SIZE", "100"))
+QMT_STOCK_INFO_TIMEOUT_SECONDS = int(os.getenv("QMT_STOCK_INFO_TIMEOUT_SECONDS", "45"))
+QMT_STOCK_INFO_COMMIT_BATCH_SIZE = int(os.getenv("QMT_STOCK_INFO_COMMIT_BATCH_SIZE", "50"))
+QMT_STOCK_FULL_MARKET_BATCH_SIZE = int(os.getenv("QMT_STOCK_FULL_MARKET_BATCH_SIZE", "50"))
+SYNC_STOCK_INFO_COMPUTE_INDICATORS = os.getenv("SYNC_STOCK_INFO_COMPUTE_INDICATORS", "false").lower() in {"1", "true", "yes"}
+DATASYNC_INITIAL_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_DAILY_DAYS", "30"))
+DATASYNC_INITIAL_INDEX_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_INDEX_DAILY_DAYS", "30"))
+DATASYNC_INITIAL_MINUTE_DAYS = int(os.getenv("DATASYNC_INITIAL_MINUTE_DAYS", "7"))
+TUSHARE_INDEX_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_INDEX_DAILY_PAUSE_SECONDS", "0.2"))
+TUSHARE_SW_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_SW_DAILY_PAUSE_SECONDS", "61"))
 
 
 def _should_write_clickhouse() -> bool:
@@ -65,6 +85,214 @@ def _write_store_minute(rows: list[dict[str, Any]], *, dataset: str = "klines_mi
     store.write_minute(pd.DataFrame(rows), dataset=dataset)
 
 
+def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
+    from app.db.duckdb import get_duckdb
+
+    root = Path(app_settings.parquet_data_dir) / dataset
+    if not root.exists() or not any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
+        return None
+
+    pattern = str(root / "year=*" / "month=??" / "*.parquet")
+    if not any(root.glob("year=*/month=??/*.parquet")):
+        pattern = str(root / "**" / "*.parquet")
+    pattern = pattern.replace("\\", "/")
+
+    row = get_duckdb().execute(
+        f"SELECT max({date_column}) FROM read_parquet(?, hive_partitioning=true)",
+        [pattern],
+    ).fetchone()
+    value = row[0] if row else None
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)).date()
+
+
+def _latest_clickhouse_date(table: str, date_column: str) -> date | None:
+    ch_client = get_ch_client()
+    try:
+        row = ch_client.execute(f"SELECT max({date_column}) FROM {table}")
+    finally:
+        try:
+            ch_client.disconnect()
+        except Exception:
+            pass
+
+    value = row[0][0] if row and row[0] else None
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)).date()
+
+
+def _latest_market_date(dataset: str) -> date | None:
+    date_column = "datetime" if "minute" in dataset else "trade_date"
+    if app_settings.market_data_backend == "parquet":
+        return _latest_parquet_date(dataset, date_column)
+    table = "klines_minute" if "minute" in dataset else "klines_daily"
+    return _latest_clickhouse_date(table, date_column)
+
+
+def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | None:
+    if not symbols:
+        return None
+
+    date_column = "datetime" if "minute" in dataset else "trade_date"
+    if app_settings.market_data_backend == "parquet":
+        from app.db.duckdb import get_duckdb
+
+        root = Path(app_settings.parquet_data_dir) / dataset
+        if not root.exists() or not any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
+            return None
+
+        pattern = str(root / "year=*" / "month=??" / "*.parquet")
+        if not any(root.glob("year=*/month=??/*.parquet")):
+            pattern = str(root / "**" / "*.parquet")
+        pattern = pattern.replace("\\", "/")
+        placeholders = ", ".join("?" for _ in symbols)
+        rows = get_duckdb().execute(
+            f"""
+            SELECT symbol, max({date_column})
+            FROM read_parquet(?, hive_partitioning=true)
+            WHERE symbol IN ({placeholders})
+            GROUP BY symbol
+            """,
+            [pattern, *symbols],
+        ).fetchall()
+    else:
+        table = "klines_minute" if "minute" in dataset else "klines_daily"
+        ch_client = get_ch_client()
+        try:
+            rows = ch_client.execute(
+                f"SELECT symbol, max({date_column}) FROM {table} WHERE symbol IN %(symbols)s GROUP BY symbol",
+                {"symbols": tuple(symbols)},
+            )
+        finally:
+            try:
+                ch_client.disconnect()
+            except Exception:
+                pass
+
+    by_symbol = {row[0]: row[1] for row in rows if row and row[1] is not None}
+    if len(by_symbol) != len(set(symbols)):
+        return None
+
+    latest_values: list[date] = []
+    for value in by_symbol.values():
+        if isinstance(value, datetime):
+            latest_values.append(value.date())
+        elif isinstance(value, date):
+            latest_values.append(value)
+        else:
+            latest_values.append(datetime.fromisoformat(str(value)).date())
+    return min(latest_values) if latest_values else None
+
+
+def _next_sync_start(latest_date: date | None, end_date: date, initial_days: int) -> date:
+    if latest_date is None:
+        return end_date - td(days=initial_days)
+    return latest_date + td(days=1)
+
+
+def _tushare_token() -> str | None:
+    import tushare as ts
+
+    return os.getenv("TUSHARE_TOKEN") or os.getenv("TS_TOKEN") or ts.get_token()
+
+
+def _is_tushare_rate_limit_error(error: Exception | str) -> bool:
+    text = str(error)
+    markers = (
+        "频率超限",
+        "rate limit",
+        "too many requests",
+        "1次/小时",
+    )
+    return any(marker in text.lower() if marker.isascii() else marker in text for marker in markers)
+
+
+def _exchange_from_symbol(symbol: str) -> str:
+    upper = symbol.upper()
+    if upper.endswith(".SH"):
+        return "SH"
+    if upper.endswith(".SZ"):
+        return "SZ"
+    if upper.endswith(".SI"):
+        return "SI"
+    if upper.endswith(".CSI"):
+        return "CSI"
+    return ""
+
+
+def _normalize_index_daily_rows(
+    item: IndexCatalogItem,
+    dataframe: Any,
+) -> list[dict[str, Any]]:
+    import pandas as pd
+
+    if dataframe is None or dataframe.empty:
+        return []
+
+    frame = dataframe.copy()
+    frame["trade_date"] = pd.to_datetime(frame["trade_date"], format="%Y%m%d", errors="coerce").dt.date
+    frame = frame[frame["trade_date"].notna()]
+    if frame.empty:
+        return []
+    frame.sort_values("trade_date", inplace=True)
+
+    rows: list[dict[str, Any]] = []
+    for row in frame.itertuples(index=False):
+        volume = getattr(row, "vol", None)
+        amount = getattr(row, "amount", None)
+        rows.append(
+            {
+                "symbol": item.symbol,
+                "trade_date": row.trade_date,
+                "open": float(row.open) if getattr(row, "open", None) is not None else None,
+                "high": float(row.high) if getattr(row, "high", None) is not None else None,
+                "low": float(row.low) if getattr(row, "low", None) is not None else None,
+                "close": float(row.close) if getattr(row, "close", None) is not None else None,
+                "volume": float(volume) * 100 if volume is not None else None,
+                "amount": float(amount) * 1000 if amount is not None else None,
+            }
+        )
+    return rows
+
+
+def _fetch_tushare_index_daily_rows(
+    item: IndexCatalogItem,
+    start_date: date,
+    end_date: date,
+) -> list[dict[str, Any]]:
+    import tushare as ts
+
+    token = _tushare_token()
+    if not token:
+        raise RuntimeError("Tushare token is not configured")
+    ts.set_token(token)
+    pro = ts.pro_api()
+
+    params = {
+        "ts_code": item.provider_symbol,
+        "start_date": start_date.strftime("%Y%m%d"),
+        "end_date": end_date.strftime("%Y%m%d"),
+    }
+    if item.provider == "tushare.sw_daily":
+        dataframe = pro.sw_daily(**params)
+    elif item.provider == "tushare.index_daily":
+        dataframe = pro.index_daily(**params)
+    else:
+        raise RuntimeError(f"Unsupported index provider: {item.provider}")
+
+    return _normalize_index_daily_rows(item, dataframe)
+
+
 @dataclass
 class SyncProgress:
     """同步进度信息"""
@@ -84,6 +312,8 @@ class SyncProgress:
     def progress_percent(self) -> float:
         """计算进度百分比"""
         if self.total == 0:
+            if self.status == "completed":
+                return 100.0
             return 0.0
         return round(self.current / self.total * 100, 2)
 
@@ -108,6 +338,10 @@ class SyncProgress:
 _current_sync: SyncProgress | None = None
 
 
+def _sync_cancelled(progress: SyncProgress) -> bool:
+    return _current_sync is not progress or progress.status == "cancelled"
+
+
 class SyncService:
     """数据同步服务"""
 
@@ -122,6 +356,41 @@ class SyncService:
             SyncProgress | None: 当前同步进度，无同步任务时返回 None
         """
         return _current_sync
+
+    async def get_persisted_sync_status(self) -> dict[str, Any] | None:
+        run = await get_current_sync_run(self.session)
+        return run_to_status(run) if run is not None else None
+
+    async def persist_sync_progress(
+        self,
+        progress: SyncProgress,
+        *,
+        run_id: str | None = None,
+        request: dict[str, Any] | None = None,
+        sync_task_id: int | None = None,
+        commit: bool = True,
+    ) -> None:
+        target_run_id = run_id or str(progress.details.get("run_id") or "")
+        if not target_run_id:
+            return
+        await upsert_sync_run(
+            self.session,
+            run_id=target_run_id,
+            sync_type=progress.sync_type,
+            status=progress.status,
+            total=progress.total,
+            current=progress.current,
+            success_count=progress.success_count,
+            failed_count=progress.failed_count,
+            progress_percent=progress.progress_percent,
+            start_time=progress.start_time,
+            end_time=progress.end_time,
+            error_message=progress.error_message,
+            request=request,
+            details=progress.details,
+            sync_task_id=sync_task_id,
+            commit=commit,
+        )
 
     async def create_sync_log(
         self,
@@ -170,6 +439,337 @@ class SyncService:
         await self.session.flush()
         return log
 
+    async def _upsert_index_catalog_entries(self, items: list[IndexCatalogItem]) -> None:
+        if not items:
+            return
+
+        rows: list[dict[str, Any]] = []
+        for item in items:
+            list_date = None
+            if item.available_from:
+                try:
+                    list_date = date.fromisoformat(item.available_from)
+                except ValueError:
+                    list_date = None
+            rows.append(
+                {
+                    "symbol": item.symbol,
+                    "name": item.display_name,
+                    "exchange": _exchange_from_symbol(item.symbol),
+                    "sector": "指数",
+                    "industry": "指数",
+                    "is_st": 0,
+                    "is_delist": 0,
+                    "is_suspend": 0,
+                    "list_date": list_date,
+                    "security_type": "index",
+                    "product_class": item.market_family,
+                    "updated_at": datetime.now(),
+                }
+            )
+
+        stmt = insert(Stock).values(rows)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["symbol"],
+            set_={
+                "name": stmt.excluded.name,
+                "exchange": stmt.excluded.exchange,
+                "sector": stmt.excluded.sector,
+                "industry": stmt.excluded.industry,
+                "list_date": stmt.excluded.list_date,
+                "security_type": stmt.excluded.security_type,
+                "product_class": stmt.excluded.product_class,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        )
+        await self.session.execute(stmt)
+
+    async def build_datasync_plan(self, end_date: date | None = None) -> dict[str, Any]:
+        target_end = end_date or date.today()
+
+        latest_daily = _latest_market_date("klines_daily")
+        latest_minute = _latest_market_date("klines_minute")
+        daily_start = _next_sync_start(latest_daily, target_end, DATASYNC_INITIAL_DAILY_DAYS)
+        index_daily_start = target_end - td(days=DATASYNC_INITIAL_INDEX_DAILY_DAYS)
+        minute_start = _next_sync_start(latest_minute, target_end, DATASYNC_INITIAL_MINUTE_DAYS)
+
+        plan = {
+            "end_date": target_end.isoformat(),
+            "market_data_backend": app_settings.market_data_backend,
+            "latest": {
+                "kline_daily": latest_daily.isoformat() if latest_daily else None,
+                "kline_minute": latest_minute.isoformat() if latest_minute else None,
+            },
+            "ranges": {
+                "kline_daily": {
+                    "start_date": daily_start.isoformat(),
+                    "end_date": target_end.isoformat(),
+                    "will_sync": daily_start <= target_end,
+                },
+                "index_daily": {
+                    "start_date": index_daily_start.isoformat(),
+                    "end_date": target_end.isoformat(),
+                    "will_sync": index_daily_start <= target_end,
+                },
+                "kline_minute": {
+                    "start_date": minute_start.isoformat(),
+                    "end_date": target_end.isoformat(),
+                    "will_sync": minute_start <= target_end,
+                },
+            },
+            "steps": ["stock_info", "stock_full", "financial_data", "kline_daily", "index_daily", "kline_minute", "realtime_mv"],
+        }
+        if _should_write_clickhouse():
+            plan["steps"].append("dividends")
+        else:
+            plan["skipped"] = {
+                "dividends": "requires ClickHouse stock_indicators",
+            }
+        return plan
+
+    async def sync_datasync(
+        self,
+        symbols: list[str] | None = None,
+        end_date: date | None = None,
+        task_id: int | None = None,
+        run_id: str | None = None,
+        failure_strategy: str = "skip",
+        full_sync: bool = False,
+    ) -> SyncProgress:
+        global _current_sync
+
+        plan = await self.build_datasync_plan(end_date=end_date)
+        progress = SyncProgress(
+            sync_type="datasync",
+            status="running",
+            total=len(plan["steps"]),
+            start_time=datetime.now(),
+            details={"run_id": run_id, "plan": plan, "step_results": []},
+        )
+        _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        try:
+            for step in plan["steps"]:
+                if _sync_cancelled(progress):
+                    progress.status = "cancelled"
+                    progress.end_time = datetime.now()
+                    progress.error_message = "User cancelled"
+                    return progress
+
+                progress.details["current_step"] = step
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+                if step == "stock_info":
+                    step_progress = await self.sync_stock_info(
+                        task_id=task_id,
+                        failure_strategy=failure_strategy,
+                        full_sync=full_sync,
+                    )
+                elif step == "stock_full":
+                    step_progress = await self.sync_stock_full(
+                        task_id=task_id,
+                        run_id=run_id,
+                        failure_strategy=failure_strategy,
+                    )
+                elif step == "financial_data":
+                    step_progress = await self.sync_financial_data(
+                        task_id=task_id,
+                        failure_strategy=failure_strategy,
+                    )
+                elif step == "kline_daily":
+                    daily_range = plan["ranges"]["kline_daily"]
+                    if not daily_range["will_sync"]:
+                        step_progress = SyncProgress(sync_type=step, status="completed")
+                        step_progress.details = {"skipped": "already up to date", **daily_range}
+                    else:
+                        step_progress = await self.sync_kline_daily(
+                            symbols=symbols,
+                            start_date=date.fromisoformat(daily_range["start_date"]),
+                            end_date=date.fromisoformat(daily_range["end_date"]),
+                            task_id=task_id,
+                            run_id=run_id,
+                            failure_strategy=failure_strategy,
+                            full_sync=full_sync,
+                        )
+                elif step == "index_daily":
+                    index_daily_range = plan["ranges"]["index_daily"]
+                    if not index_daily_range["will_sync"]:
+                        step_progress = SyncProgress(sync_type=step, status="completed")
+                        step_progress.details = {"skipped": "already up to date", **index_daily_range}
+                    else:
+                        step_progress = await self.sync_index_daily(
+                            start_date=date.fromisoformat(index_daily_range["start_date"]),
+                            end_date=date.fromisoformat(index_daily_range["end_date"]),
+                            task_id=task_id,
+                            run_id=run_id,
+                            failure_strategy=failure_strategy,
+                            full_sync=full_sync,
+                        )
+                elif step == "kline_minute":
+                    minute_range = plan["ranges"]["kline_minute"]
+                    if not minute_range["will_sync"]:
+                        step_progress = SyncProgress(sync_type=step, status="completed")
+                        step_progress.details = {"skipped": "already up to date", **minute_range}
+                    else:
+                        step_progress = await self.sync_kline_minute(
+                            symbols=symbols,
+                            start_date=date.fromisoformat(minute_range["start_date"]),
+                            end_date=date.fromisoformat(minute_range["end_date"]),
+                            task_id=task_id,
+                            run_id=run_id,
+                            failure_strategy=failure_strategy,
+                            full_sync=full_sync,
+                        )
+                elif step == "realtime_mv":
+                    step_progress = await self.sync_realtime_mv(
+                        symbols=symbols,
+                        task_id=task_id,
+                        failure_strategy=failure_strategy,
+                    )
+                elif step == "dividends":
+                    step_progress = await self.sync_dividends(
+                        symbols=symbols,
+                        end_date=date.fromisoformat(plan["end_date"]),
+                        task_id=task_id,
+                        failure_strategy=failure_strategy,
+                    )
+                else:
+                    continue
+
+                progress.details["step_results"].append({
+                    "sync_type": step_progress.sync_type,
+                    "status": step_progress.status,
+                    "total": step_progress.total,
+                    "success_count": step_progress.success_count,
+                    "failed_count": step_progress.failed_count,
+                    "error_message": step_progress.error_message,
+                    "details": step_progress.details,
+                })
+                progress.current += 1
+                progress.success_count += step_progress.success_count
+                progress.failed_count += step_progress.failed_count
+
+                if step_progress.status == "failed" and failure_strategy == "stop":
+                    raise RuntimeError(step_progress.error_message or f"{step} failed")
+
+                _current_sync = progress
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            await self.create_sync_log(
+                sync_type="datasync",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+        except Exception as exc:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(exc)
+            await self.create_sync_log(
+                sync_type="datasync",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(exc),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_factor_dependency(
+        self,
+        plan: dict[str, Any] | None,
+        task_id: int | None = None,
+        run_id: str | None = None,
+        failure_strategy: str = "stop",
+    ) -> SyncProgress:
+        """Sync data dependencies required by factor precompute."""
+        global _current_sync
+
+        from app.services.factor_dependency_sync import execute_factor_dependency_sync
+
+        if not plan or not isinstance(plan, dict):
+            raise ValueError("factor_sync_plan is required")
+        steps = [step for step in plan.get("steps") or [] if isinstance(step, dict)]
+        progress = SyncProgress(
+            sync_type="factor_dependency",
+            status="running",
+            total=len(steps),
+            start_time=datetime.now(),
+            details={"run_id": run_id, "plan": plan, "step_results": []},
+        )
+        _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        try:
+            results = await execute_factor_dependency_sync(
+                self,
+                plan,
+                run_id=run_id,
+                task_id=task_id,
+                failure_strategy=failure_strategy,
+                progress=progress,
+            )
+            progress.details["step_results"] = results
+            progress.status = "completed"
+            progress.current = progress.total
+            progress.end_time = datetime.now()
+            await self.create_sync_log(
+                sync_type="factor_dependency",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+        except Exception as exc:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(exc)
+            await self.create_sync_log(
+                sync_type="factor_dependency",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(exc),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
     async def sync_stock_info(
         self,
         task_id: int | None = None,
@@ -199,7 +799,10 @@ class SyncService:
 
         try:
             # 从 QMT 获取股票列表
-            stocks = await qmt_gateway.get_stock_list()
+            stocks = await asyncio.wait_for(
+                qmt_gateway.get_stock_list(),
+                timeout=QMT_STOCK_INFO_TIMEOUT_SECONDS,
+            )
             progress.total = len(stocks)
             progress.details = {"total_stocks": len(stocks), "full_sync": full_sync}
 
@@ -272,8 +875,10 @@ class SyncService:
                     progress.success_count += 1
 
                     # 每 100 条提交一次
-                    if (i + 1) % 100 == 0:
+                    if (i + 1) % QMT_STOCK_INFO_COMMIT_BATCH_SIZE == 0:
                         await self.session.commit()
+                        await self.persist_sync_progress(progress, commit=True)
+                        await asyncio.sleep(0)
 
                 except Exception as e:
                     progress.failed_count += 1
@@ -322,8 +927,11 @@ class SyncService:
             await self.session.commit()
 
             # 触发指标计算
-            synced_symbols = [s.symbol for s in stocks]
-            indicator_scheduler.run_after_sync("stock_info", symbols=synced_symbols, trade_date=date.today())
+            if SYNC_STOCK_INFO_COMPUTE_INDICATORS:
+                synced_symbols = [s.symbol for s in stocks]
+                indicator_scheduler.run_after_sync("stock_info", symbols=synced_symbols, trade_date=date.today())
+            else:
+                progress.details["indicator_compute"] = "skipped"
 
             # 更新进度
             progress.status = "completed"
@@ -372,6 +980,7 @@ class SyncService:
     async def sync_stock_full(
         self,
         task_id: int | None = None,
+        run_id: str | None = None,
         failure_strategy: str = "skip",
     ) -> SyncProgress:
         """全量同步: 基础信息(已有) + 批量财务数据 + 批量市值"""
@@ -381,14 +990,16 @@ class SyncService:
             sync_type="stock_full",
             status="running",
             start_time=datetime.now(),
+            details={"run_id": run_id},
         )
         _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
         try:
             # 阶段1: 用已有 stock_list 做基础 upsert (复用 sync_stock_info)
             stocks = await qmt_gateway.get_stock_list()
             progress.total = len(stocks)
-            progress.details = {"total_stocks": len(stocks), "phase": "basic_info"}
+            progress.details.update({"total_stocks": len(stocks), "phase": "basic_info"})
             failed_stocks: list[dict[str, str]] = []
 
             for i, stock in enumerate(stocks):
@@ -421,6 +1032,7 @@ class SyncService:
                     progress.success_count += 1
                     if (i + 1) % 100 == 0:
                         await self.session.commit()
+                        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
                 except Exception as e:
                     progress.failed_count += 1
                     failed_stocks.append({"symbol": stock.symbol, "error": str(e)})
@@ -465,6 +1077,7 @@ class SyncService:
             await self.session.commit()
 
             # 阶段2: 批量获取市值
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
             progress.details["phase"] = "market_value"
             progress.current = 0
             progress.success_count = 0
@@ -473,14 +1086,16 @@ class SyncService:
             symbols = [s.symbol for s in stocks]
             quote_dict: dict[str, dict] = {}
 
-            for batch_start in range(0, len(symbols), 200):
-                batch = symbols[batch_start:batch_start + 200]
+            market_batch_size = max(1, QMT_STOCK_FULL_MARKET_BATCH_SIZE)
+            progress.details["market_batch_size"] = market_batch_size
+            for batch_start in range(0, len(symbols), market_batch_size):
+                batch = symbols[batch_start:batch_start + market_batch_size]
                 try:
                     quotes = await qmt_gateway.get_realtime_quotes(batch)
                     for q in quotes:
                         quote_dict[q["symbol"]] = q
-                except Exception:
-                    pass
+                except Exception as exc:
+                    progress.details["last_market_value_error"] = str(exc)[:200]
 
                 for symbol in batch:
                     try:
@@ -505,10 +1120,12 @@ class SyncService:
                         progress.current += 1
                         if progress.current % 100 == 0:
                             await self.session.commit()
+                            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
                     except Exception:
                         progress.failed_count += 1
 
             await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 阶段3: 读取本地已缓存的财务数据(不触发download，用户需在QMT客户端手动下载)
             progress.details["phase"] = "financial_query"
@@ -516,6 +1133,29 @@ class SyncService:
             progress.success_count = 0
             progress.failed_count = 0
             fin_success = 0
+
+            progress.details["financial_query"] = "disabled_per_symbol_qmt_call"
+            progress.details["financial_note"] = "Use financial_data sync for QMT financial download/query"
+            progress.current = progress.total
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["failed_stocks"] = failed_stocks[:100]
+            progress.details["fin_success"] = fin_success
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            await self.create_sync_log(
+                sync_type="stock_full",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            return progress
 
             for symbol in symbols:
                 try:
@@ -591,6 +1231,7 @@ class SyncService:
                 progress.current += 1
                 if progress.current % 50 == 0:
                     await self.session.commit()
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             await self.session.commit()
 
@@ -606,6 +1247,7 @@ class SyncService:
             progress.end_time = datetime.now()
             progress.details["failed_stocks"] = failed_stocks[:100]
             progress.details["fin_success"] = fin_success
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             await self.create_sync_log(
                 sync_type="stock_full",
@@ -624,6 +1266,7 @@ class SyncService:
             progress.status = "failed"
             progress.end_time = datetime.now()
             progress.error_message = str(e)
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
             await self.create_sync_log(
                 sync_type="stock_full",
                 status="failed",
@@ -927,14 +1570,269 @@ class SyncService:
 
         return progress
 
+    async def sync_index_daily(
+        self,
+        index_symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        task_id: int | None = None,
+        run_id: str | None = None,
+        failure_strategy: str = "skip",
+        full_sync: bool = False,
+    ) -> SyncProgress:
+        global _current_sync
+
+        if end_date is None:
+            end_date = date.today()
+        if start_date is None:
+            start_date = end_date - td(days=365)
+
+        requested_symbols = index_symbols or [item.symbol for item in list_index_items(benchmark_only=True)]
+        invalid_symbols: list[str] = []
+        items: list[IndexCatalogItem] = []
+        seen: set[str] = set()
+        for raw_symbol in requested_symbols:
+            item = get_index_item(raw_symbol)
+            if item is None:
+                invalid_symbols.append(str(raw_symbol))
+                continue
+            if not item.requires_daily_market_data or item.symbol in seen:
+                continue
+            seen.add(item.symbol)
+            items.append(item)
+
+        progress = SyncProgress(
+            sync_type="index_daily",
+            status="running",
+            total=len(items),
+            start_time=datetime.now(),
+            details={
+                "run_id": run_id,
+                "start_date": start_date.isoformat(),
+                "end_date": end_date.isoformat(),
+                "full_sync": full_sync,
+                "requested_symbols": requested_symbols,
+                "invalid_symbols": invalid_symbols,
+            },
+        )
+        _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        if not items:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = "No valid index symbols resolved for index_daily sync"
+            await self.create_sync_log(
+                sync_type="index_daily",
+                status="failed",
+                total_count=0,
+                success_count=0,
+                failed_count=len(invalid_symbols),
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            return progress
+
+        await self._upsert_index_catalog_entries(items)
+        await self.session.commit()
+
+        write_ch = _should_write_clickhouse()
+        ch_client = get_ch_client() if write_ch else None
+        empty_symbols: list[str] = []
+        failed_symbols: list[dict[str, str]] = []
+        skipped_symbols: list[str] = []
+        blocked_providers: dict[str, str] = {}
+        total_rows = 0
+        synced_symbols: list[str] = []
+        component_results: list[dict[str, Any]] = []
+        component_failed_symbols: list[dict[str, str]] = []
+
+        try:
+            for index, item in enumerate(items, start=1):
+                if _sync_cancelled(progress):
+                    progress.status = "cancelled"
+                    progress.end_time = datetime.now()
+                    progress.error_message = "User cancelled"
+                    return progress
+
+                progress.details["current_symbol"] = item.symbol
+                progress.details["current_index"] = item.symbol
+                progress.details["current_display_name"] = item.display_name
+
+                if item.provider in blocked_providers:
+                    skipped_symbols.append(item.symbol)
+                    progress.current = index
+                    progress.details["blocked_provider"] = item.provider
+                    progress.details["blocked_reason"] = blocked_providers[item.provider]
+                    progress.details["skipped_symbols"] = skipped_symbols[:200]
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                    continue
+
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+                async def _fetch_one() -> list[dict[str, Any]]:
+                    return await asyncio.to_thread(_fetch_tushare_index_daily_rows, item, start_date, end_date)
+
+                provider_blocked_now = False
+                try:
+                    rows = await _fetch_one()
+                except Exception as exc:
+                    rate_limited = _is_tushare_rate_limit_error(exc)
+                    if failure_strategy == "retry":
+                        try:
+                            rows = await async_retry(_fetch_one, max_retries=3, base_delay=1.0)
+                        except Exception as retry_exc:
+                            progress.failed_count += 1
+                            failed_symbols.append({"symbol": item.symbol, "error": str(retry_exc)})
+                            if _is_tushare_rate_limit_error(retry_exc) and item.provider == "tushare.sw_daily":
+                                blocked_providers[item.provider] = str(retry_exc)
+                                progress.details["blocked_provider"] = item.provider
+                                progress.details["blocked_reason"] = str(retry_exc)
+                                provider_blocked_now = True
+                            if failure_strategy == "stop":
+                                raise
+                            rows = []
+                    else:
+                        progress.failed_count += 1
+                        failed_symbols.append({"symbol": item.symbol, "error": str(exc)})
+                        if rate_limited and item.provider == "tushare.sw_daily":
+                            blocked_providers[item.provider] = str(exc)
+                            progress.details["blocked_provider"] = item.provider
+                            progress.details["blocked_reason"] = str(exc)
+                            provider_blocked_now = True
+                        if failure_strategy == "stop":
+                            raise
+                        rows = []
+
+                if rows:
+                    if full_sync and ch_client is not None:
+                        ch_client.execute(
+                            "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
+                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
+                            {"symbol": item.symbol, "start_date": start_date, "end_date": end_date},
+                        )
+                    _write_ch_daily(ch_client, rows)
+                    _write_store_daily(rows)
+                    total_rows += len(rows)
+                    progress.success_count += 1
+                    synced_symbols.append(item.symbol)
+                elif not any(entry["symbol"] == item.symbol for entry in failed_symbols):
+                    empty_symbols.append(item.symbol)
+
+                if item.pool_enabled and item.requires_components_when_pool:
+                    try:
+                        component_result = await ensure_index_components(item.symbol, start_date, end_date)
+                        component_results.append(component_result)
+                    except Exception as exc:
+                        component_failed_symbols.append({"symbol": item.symbol, "error": str(exc)})
+                        logger.warning("Index component sync failed for {}: {}", item.symbol, exc)
+                        if failure_strategy == "stop":
+                            raise
+
+                progress.current = index
+                progress.details["component_results"] = component_results[-100:]
+                progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+                if provider_blocked_now:
+                    continue
+
+                pause_seconds = (
+                    TUSHARE_SW_DAILY_PAUSE_SECONDS
+                    if item.provider == "tushare.sw_daily"
+                    else TUSHARE_INDEX_DAILY_PAUSE_SECONDS
+                )
+                if pause_seconds > 0 and index < len(items):
+                    await asyncio.sleep(pause_seconds)
+
+            progress.details["empty_symbols"] = empty_symbols
+            progress.details["failed_symbols"] = failed_symbols[:100]
+            progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
+            progress.details["total_rows"] = total_rows
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+            if synced_symbols and app_settings.qmt_daily_compute_indicators_after_sync:
+                progress.details["post_sync_step"] = "compute_indicators"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            indicator_scheduler.run_after_sync,
+                            "kline_daily",
+                            symbols=synced_symbols,
+                            trade_date=end_date,
+                        ),
+                        timeout=300,
+                    )
+                    progress.details["indicator_compute"] = "completed"
+                except Exception as exc:
+                    progress.details["indicator_compute_error"] = str(exc)
+            else:
+                progress.details["indicator_compute"] = "skipped"
+
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            await self.create_sync_log(
+                sync_type="index_daily",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+        except Exception as exc:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(exc)
+            progress.details["failed_symbols"] = failed_symbols[:100]
+            progress.details["skipped_symbols"] = skipped_symbols[:200]
+            progress.details["component_results"] = component_results[-100:]
+            progress.details["component_failed_symbols"] = component_failed_symbols[-100:]
+            await self.create_sync_log(
+                sync_type="index_daily",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(exc),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            if ch_client is not None:
+                try:
+                    ch_client.disconnect()
+                except Exception:
+                    pass
+            _current_sync = None
+
+        return progress
+
     async def sync_kline_daily(
         self,
         symbols: list[str] | None = None,
         start_date: date | None = None,
         end_date: date | None = None,
         task_id: int | None = None,
+        run_id: str | None = None,
         failure_strategy: str = "skip",
         full_sync: bool = False,
+        auto_incremental: bool = False,
     ) -> SyncProgress:
         """
         同步日K线数据
@@ -958,18 +1856,62 @@ class SyncService:
         if start_date is None:
             start_date = end_date - td(days=30)
 
+        requested_start_date = start_date
+        requested_end_date = end_date
+        incremental_latest_date: date | None = None
+        if auto_incremental and not full_sync:
+            if symbols:
+                incremental_latest_date = _latest_market_date_for_symbols("klines_daily", symbols)
+            else:
+                incremental_latest_date = _latest_market_date("klines_daily")
+            if incremental_latest_date is not None:
+                start_date = max(start_date, incremental_latest_date + td(days=1))
+
         # 初始化进度
         progress = SyncProgress(
             sync_type="kline_daily",
             status="running",
             start_time=datetime.now(),
             details={
+                "run_id": run_id,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "requested_start_date": requested_start_date.isoformat(),
+                "requested_end_date": requested_end_date.isoformat(),
                 "full_sync": full_sync,
+                "auto_incremental": auto_incremental,
+                "latest_local_date": incremental_latest_date.isoformat() if incremental_latest_date else None,
             },
         )
         _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        if start_date > end_date:
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details.update(
+                {
+                    "skipped": True,
+                    "skip_reason": "already up to date",
+                    "total_klines": 0,
+                    "failed_symbols": [],
+                }
+            )
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            await self.create_sync_log(
+                sync_type="kline_daily",
+                status="completed",
+                total_count=0,
+                success_count=0,
+                failed_count=0,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            _current_sync = None
+            return progress
 
         # ClickHouse is optional. In parquet mode without clickhouse_enabled,
         # sync writes directly to Parquet and does not require Docker/CH.
@@ -984,6 +1926,7 @@ class SyncService:
                 symbols = [row[0] for row in result.all()]
 
             progress.total = len(symbols)
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 全量同步时先删除已有数据
             if full_sync and symbols:
@@ -1003,61 +1946,78 @@ class SyncService:
             failed_symbols: list[dict[str, str]] = []
             total_klines = 0
 
-            # 逐个股票同步K线
-            for i, symbol in enumerate(symbols):
+            batch_size = max(1, QMT_DAILY_BATCH_SIZE)
+            progress.details["batch_size"] = batch_size
+            for offset in range(0, len(symbols), batch_size):
+                if _sync_cancelled(progress):
+                    progress.status = "cancelled"
+                    progress.end_time = datetime.now()
+                    progress.error_message = "User cancelled"
+                    return progress
+
+                batch_symbols = symbols[offset: offset + batch_size]
+                progress.details["current_batch"] = {
+                    "from": batch_symbols[0],
+                    "to": batch_symbols[-1],
+                    "size": len(batch_symbols),
+                }
+
                 try:
-                    # 从 QMT 获取K线数据
-                    klines = await qmt_gateway.get_kline_daily(
-                        symbol, start_date, end_date
+                    batch_data = await qmt_gateway.get_kline_daily_batch(
+                        batch_symbols, start_date, end_date
                     )
+                    batch_rows: list[dict[str, Any]] = []
+                    batch_success = 0
+                    for symbol in batch_symbols:
+                        klines = batch_data.get(symbol, [])
+                        if not klines:
+                            continue
+                        batch_rows.extend(
+                            {
+                                "symbol": kline.symbol,
+                                "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
+                                "open": kline.open,
+                                "high": kline.high,
+                                "low": kline.low,
+                                "close": kline.close,
+                                "volume": kline.volume,
+                                "amount": kline.amount,
+                            }
+                            for kline in klines
+                        )
+                        batch_success += 1
 
-                    if not klines:
-                        progress.current = i + 1
-                        continue
-
-                    # 批量插入K线数据到 ClickHouse
-                    # ClickHouse 驱动需要 Python date 对象
-                    rows = [
-                        {
-                            "symbol": kline.symbol,
-                            "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
-                            "open": kline.open,
-                            "high": kline.high,
-                            "low": kline.low,
-                            "close": kline.close,
-                            "volume": kline.volume,
-                            "amount": kline.amount,
-                        }
-                        for kline in klines
-                    ]
-
-                    if rows:
-                        _write_ch_daily(ch_client, rows)
+                    if batch_rows:
+                        _write_ch_daily(ch_client, batch_rows)
                         try:
-                            _write_store_daily(rows)
+                            _write_store_daily(batch_rows)
                         except Exception as e:
-                            logger.warning(f"Parquet write failed for {symbol}: {e}")
-                        total_klines += len(rows)
+                            logger.warning(f"Parquet daily write failed for batch {offset // batch_size + 1}: {e}")
+                        total_klines += len(batch_rows)
 
-                    progress.current = i + 1
-                    progress.success_count += 1
+                    progress.success_count += batch_success
+                    progress.current = min(offset + len(batch_symbols), progress.total)
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                    await asyncio.sleep(0)
 
                 except Exception as e:
-                    progress.failed_count += 1
-                    failed_symbols.append({
-                        "symbol": symbol,
-                        "error": str(e),
-                    })
+                    progress.failed_count += len(batch_symbols)
+                    failed_symbols.extend({"symbol": symbol, "error": str(e)} for symbol in batch_symbols)
 
                     if failure_strategy == "stop":
                         raise
                     elif failure_strategy == "retry":
                         async def _retry_kline_insert():
-                            klines = await qmt_gateway.get_kline_daily(
-                                symbol, start_date, end_date
+                            retry_data = await qmt_gateway.get_kline_daily_batch(
+                                batch_symbols, start_date, end_date
                             )
-                            if klines:
-                                rows = [
+                            retry_rows: list[dict[str, Any]] = []
+                            retry_success = 0
+                            for symbol in batch_symbols:
+                                klines = retry_data.get(symbol, [])
+                                if not klines:
+                                    continue
+                                retry_rows.extend(
                                     {
                                         "symbol": kline.symbol,
                                         "trade_date": kline.datetime if isinstance(kline.datetime, date) else date.fromisoformat(str(kline.datetime)),
@@ -1069,41 +2029,75 @@ class SyncService:
                                         "amount": kline.amount,
                                     }
                                     for kline in klines
-                                ]
-                                if rows:
-                                    retry_ch = get_ch_client() if write_ch else None
-                                    try:
-                                        _write_ch_daily(retry_ch, rows)
-                                    finally:
-                                        if retry_ch is not None:
-                                            try:
-                                                retry_ch.disconnect()
-                                            except Exception:
-                                                pass
-                                    _write_store_daily(rows)
-                                    nonlocal total_klines
-                                    total_klines += len(rows)
+                                )
+                                retry_success += 1
+                            if retry_rows:
+                                retry_ch = get_ch_client() if write_ch else None
+                                try:
+                                    _write_ch_daily(retry_ch, retry_rows)
+                                finally:
+                                    if retry_ch is not None:
+                                        try:
+                                            retry_ch.disconnect()
+                                        except Exception:
+                                            pass
+                                _write_store_daily(retry_rows)
+                                nonlocal total_klines
+                                total_klines += len(retry_rows)
+                            return retry_success
 
                         try:
-                            await async_retry(_retry_kline_insert, max_retries=3, base_delay=1.0)
-                            progress.success_count += 1
-                            progress.failed_count -= 1
-                            failed_symbols.pop()
+                            retry_success = await async_retry(_retry_kline_insert, max_retries=3, base_delay=1.0)
+                            progress.success_count += retry_success
+                            progress.failed_count = max(0, progress.failed_count - retry_success)
+                            if retry_success:
+                                del failed_symbols[-retry_success:]
                         except Exception:
                             pass
-
+                    progress.current = min(offset + len(batch_symbols), progress.total)
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
             # 更新进度
-            try:
-                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
-                progress.details["cache_cleaned"] = cleaned
-            except Exception:
-                pass
+            if app_settings.qmt_daily_clean_cache_after_sync:
+                progress.details["post_sync_step"] = "clean_local_cache"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    cleaned = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            qmt_gateway.clean_local_cache,
+                            symbols=symbols,
+                            data_type="kline",
+                        ),
+                        timeout=120,
+                    )
+                    progress.details["cache_cleaned"] = cleaned
+                except Exception as exc:
+                    progress.details["cache_clean_error"] = str(exc)
+            else:
+                progress.details["cache_cleaned"] = "skipped"
 
-            indicator_scheduler.run_after_sync("kline_daily", symbols=symbols, trade_date=end_date)
+            if app_settings.qmt_daily_compute_indicators_after_sync:
+                progress.details["post_sync_step"] = "compute_indicators"
+                await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                try:
+                    await asyncio.wait_for(
+                        asyncio.to_thread(
+                            indicator_scheduler.run_after_sync,
+                            "kline_daily",
+                            symbols=symbols,
+                            trade_date=end_date,
+                        ),
+                        timeout=300,
+                    )
+                    progress.details["indicator_compute"] = "completed"
+                except Exception as exc:
+                    progress.details["indicator_compute_error"] = str(exc)
+            else:
+                progress.details["indicator_compute"] = "skipped"
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
             progress.details["failed_symbols"] = failed_symbols[:100]
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 记录日志
             await self.create_sync_log(
@@ -1125,6 +2119,7 @@ class SyncService:
             progress.error_message = str(e)
             progress.details["error"] = str(e)[:500]
             progress.details["error_type"] = type(e).__name__
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
             logger.opt(exception=True).error(f"sync_kline_daily failed: {e}")
             await self.create_sync_log(
                 sync_type="kline_daily",
@@ -1155,6 +2150,7 @@ class SyncService:
         start_date: date | None = None,
         end_date: date | None = None,
         task_id: int | None = None,
+        run_id: str | None = None,
         failure_strategy: str = "skip",
         full_sync: bool = False,
     ) -> SyncProgress:
@@ -1186,12 +2182,14 @@ class SyncService:
             status="running",
             start_time=datetime.now(),
             details={
+                "run_id": run_id,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
                 "full_sync": full_sync,
             },
         )
         _current_sync = progress
+        await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
         # ClickHouse is optional. In parquet mode without clickhouse_enabled,
         # sync writes directly to Parquet and does not require Docker/CH.
@@ -1206,6 +2204,7 @@ class SyncService:
                 symbols = [row[0] for row in result.all()]
 
             progress.total = len(symbols)
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 全量同步时先删除已有数据
             if full_sync and symbols:
@@ -1225,107 +2224,147 @@ class SyncService:
             failed_symbols: list[dict[str, str]] = []
             total_klines = 0
 
-            # 逐个股票同步K线
-            for i, symbol in enumerate(symbols):
+            def _minute_rows(klines: list[Any]) -> list[dict[str, Any]]:
+                return [
+                    {
+                        "symbol": kline.symbol,
+                        "datetime": kline.datetime if isinstance(kline.datetime, datetime) else datetime.fromisoformat(str(kline.datetime)),
+                        "open": kline.open,
+                        "high": kline.high,
+                        "low": kline.low,
+                        "close": kline.close,
+                        "volume": kline.volume,
+                        "amount": kline.amount,
+                    }
+                    for kline in klines
+                ]
+
+            async def _sync_minute_symbol(symbol: str) -> bool:
+                nonlocal total_klines
+                klines = await qmt_gateway.get_kline_minute(symbol, start_date, end_date)
+                if not klines:
+                    return False
+                rows = _minute_rows(klines)
+                if rows:
+                    _write_ch_minute(ch_client, rows)
+                    _write_store_minute(rows)
+                    total_klines += len(rows)
+                return True
+
+            batch_size = max(1, QMT_MINUTE_BATCH_SIZE)
+            progress.details["batch_size"] = batch_size
+
+            for offset in range(0, len(symbols), batch_size):
+                if _sync_cancelled(progress):
+                    progress.status = "cancelled"
+                    progress.end_time = datetime.now()
+                    progress.error_message = "User cancelled"
+                    return progress
+
+                batch_symbols = symbols[offset: offset + batch_size]
+                progress.details["current_batch"] = {
+                    "from": batch_symbols[0],
+                    "to": batch_symbols[-1],
+                    "size": len(batch_symbols),
+                }
+
                 try:
-                    # 从 QMT 获取分钟K线数据
-                    klines = await qmt_gateway.get_kline_minute(
-                        symbol, start_date, end_date
+                    batch_klines = await qmt_gateway.get_kline_minute_batch(
+                        batch_symbols,
+                        start_date,
+                        end_date,
                     )
-
-                    if not klines:
-                        progress.current = i + 1
-                        continue
-
-                    # 批量插入K线数据到 ClickHouse
-                    # ClickHouse 驱动需要 Python datetime 对象
-                    rows = [
-                        {
-                            "symbol": kline.symbol,
-                            "datetime": kline.datetime if isinstance(kline.datetime, datetime) else datetime.fromisoformat(str(kline.datetime)),
-                            "open": kline.open,
-                            "high": kline.high,
-                            "low": kline.low,
-                            "close": kline.close,
-                            "volume": kline.volume,
-                            "amount": kline.amount,
-                        }
-                        for kline in klines
-                    ]
+                    rows: list[dict[str, Any]] = []
+                    successful_symbols = 0
+                    for symbol in batch_symbols:
+                        klines = batch_klines.get(symbol, [])
+                        if not klines:
+                            continue
+                        successful_symbols += 1
+                        rows.extend(_minute_rows(klines))
 
                     if rows:
                         _write_ch_minute(ch_client, rows)
                         try:
                             _write_store_minute(rows)
                         except Exception as e:
-                            logger.warning(f"Parquet write failed for {symbol}: {e}")
+                            logger.warning(
+                                f"Parquet write failed for minute batch "
+                                f"{batch_symbols[0]}..{batch_symbols[-1]}: {e}"
+                            )
                         total_klines += len(rows)
 
-                    progress.current = i + 1
-                    progress.success_count += 1
+                    progress.current = min(offset + len(batch_symbols), progress.total)
+                    progress.success_count += successful_symbols
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
                 except Exception as e:
-                    progress.failed_count += 1
-                    failed_symbols.append({
-                        "symbol": symbol,
-                        "error": str(e),
-                    })
-
+                    logger.warning(
+                        f"QMT minute batch sync failed for "
+                        f"{batch_symbols[0]}..{batch_symbols[-1]}, fallback to single-symbol: {e}"
+                    )
                     if failure_strategy == "stop":
                         raise
-                    elif failure_strategy == "retry":
-                        async def _retry_minute_insert():
-                            klines = await qmt_gateway.get_kline_minute(
-                                symbol, start_date, end_date
-                            )
-                            if klines:
-                                rows = [
-                                    {
-                                        "symbol": kline.symbol,
-                                        "datetime": kline.datetime if isinstance(kline.datetime, datetime) else datetime.fromisoformat(str(kline.datetime)),
-                                        "open": kline.open,
-                                        "high": kline.high,
-                                        "low": kline.low,
-                                        "close": kline.close,
-                                        "volume": kline.volume,
-                                        "amount": kline.amount,
-                                    }
-                                    for kline in klines
-                                ]
-                                if rows:
-                                    retry_ch = get_ch_client() if write_ch else None
-                                    try:
-                                        _write_ch_minute(retry_ch, rows)
-                                    finally:
-                                        if retry_ch is not None:
-                                            try:
-                                                retry_ch.disconnect()
-                                            except Exception:
-                                                pass
-                                    _write_store_minute(rows)
-                                    nonlocal total_klines
-                                    total_klines += len(rows)
+
+                    for symbol in batch_symbols:
+                        if _sync_cancelled(progress):
+                            progress.status = "cancelled"
+                            progress.end_time = datetime.now()
+                            progress.error_message = "User cancelled"
+                            return progress
 
                         try:
-                            await async_retry(_retry_minute_insert, max_retries=3, base_delay=1.0)
-                            progress.success_count += 1
-                            progress.failed_count -= 1
-                            failed_symbols.pop()
-                        except Exception:
-                            pass
+                            ok = await _sync_minute_symbol(symbol)
+                            if ok:
+                                progress.success_count += 1
+                        except Exception as symbol_error:
+                            progress.failed_count += 1
+                            failed_symbols.append({
+                                "symbol": symbol,
+                                "error": str(symbol_error),
+                            })
+
+                            if failure_strategy == "stop":
+                                raise
+                            elif failure_strategy == "retry":
+                                try:
+                                    ok = await async_retry(
+                                        lambda: _sync_minute_symbol(symbol),
+                                        max_retries=3,
+                                        base_delay=1.0,
+                                    )
+                                    if ok:
+                                        progress.success_count += 1
+                                    progress.failed_count -= 1
+                                    failed_symbols.pop()
+                                except Exception:
+                                    pass
+
+                        progress.current += 1
+                        if progress.current % 10 == 0 or progress.current >= progress.total:
+                            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 更新进度
-            try:
-                cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
-                progress.details["cache_cleaned"] = cleaned
-            except Exception:
-                pass
+            if app_settings.qmt_minute_clean_cache_after_sync:
+                progress.details["post_sync_step"] = "clean_local_cache"
+                try:
+                    cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
+                    progress.details["cache_cleaned"] = cleaned
+                except Exception as exc:
+                    progress.details["cache_clean_error"] = str(exc)
+            else:
+                progress.details["cache_cleaned"] = "skipped"
 
-            indicator_scheduler.run_after_sync("kline_minute", symbols=symbols, trade_date=end_date)
+            if app_settings.qmt_minute_compute_indicators_after_sync:
+                progress.details["post_sync_step"] = "compute_indicators"
+                indicator_scheduler.run_after_sync("kline_minute", symbols=symbols, trade_date=end_date)
+            else:
+                progress.details["indicator_compute"] = "skipped"
             progress.status = "completed"
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
             progress.details["failed_symbols"] = failed_symbols[:100]
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 记录日志
             await self.create_sync_log(
@@ -1345,6 +2384,7 @@ class SyncService:
             progress.status = "failed"
             progress.end_time = datetime.now()
             progress.error_message = str(e)
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 记录失败日志
             await self.create_sync_log(
@@ -1540,6 +2580,321 @@ class SyncService:
             await self.session.commit()
             raise
 
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_tushare_relay(
+        self,
+        relay_datasets: list[str] | None = None,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        relay_options: dict[str, Any] | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        """Sync structured Indevs Tushare Relay datasets into local Parquet."""
+        from app.services.tushare_relay_sync import run_tushare_relay_sync
+
+        global _current_sync
+        progress = SyncProgress(
+            sync_type="tushare_relay",
+            status="running",
+            start_time=datetime.now(),
+            details={"run_id": run_id} if run_id else {},
+        )
+        _current_sync = progress
+
+        try:
+            await run_tushare_relay_sync(
+                self.session,
+                progress,
+                relay_datasets=relay_datasets,
+                symbols=symbols,
+                start_date=start_date,
+                end_date=end_date,
+                relay_options=relay_options,
+                failure_strategy=failure_strategy,
+            )
+            await self.create_sync_log(
+                sync_type="tushare_relay",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            logger.opt(exception=True).error(f"sync_tushare_relay failed: {e}")
+            await self.create_sync_log(
+                sync_type="tushare_relay",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_ths_concept(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        relay_options: dict[str, Any] | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        """Sync Tonghuashun concepts and derive SQLite memberships."""
+        from app.services.tushare_relay_sync import run_tushare_relay_sync
+
+        global _current_sync
+        options = {
+            "derive_ths_concepts": True,
+            "ths_member_limit": 1000,
+            "limit": 1000,
+            **dict(relay_options or {}),
+        }
+        progress = SyncProgress(
+            sync_type="ths_concept",
+            status="running",
+            start_time=datetime.now(),
+            details={"run_id": run_id} if run_id else {},
+        )
+        _current_sync = progress
+
+        try:
+            await run_tushare_relay_sync(
+                self.session,
+                progress,
+                relay_datasets=["ths_index", "ths_member"],
+                symbols=None,
+                start_date=start_date,
+                end_date=end_date,
+                relay_options=options,
+                failure_strategy=failure_strategy,
+            )
+            await self.create_sync_log(
+                sync_type="ths_concept",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            progress.details["error_type"] = type(e).__name__
+            logger.opt(exception=True).error(f"sync_ths_concept failed: {e}")
+            await self.create_sync_log(
+                sync_type="ths_concept",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_sentiment_xueqiu(
+        self,
+        symbols: list[str] | None = None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import SentimentIngestService
+
+        global _current_sync
+        symbol_list = [str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()]
+        progress = SyncProgress(
+            sync_type="sentiment_xueqiu",
+            status="running",
+            start_time=datetime.now(),
+            total=len(symbol_list),
+            details={"run_id": run_id, "source": "xueqiu_spyder"},
+        )
+        _current_sync = progress
+
+        try:
+            if not symbol_list:
+                raise ValueError("sentiment_xueqiu requires at least one symbol")
+
+            ingest = SentimentIngestService(self.session)
+            results: list[dict[str, Any]] = []
+            for index, symbol in enumerate(symbol_list, start=1):
+                try:
+                    result = await ingest.run(
+                        "xueqiu_spyder",
+                        symbol,
+                        max_pages=3,
+                        min_reply=5,
+                        start_date=start_date,
+                        end_date=end_date,
+                    )
+                    results.append(result)
+                    progress.success_count += 1
+                except Exception as exc:
+                    progress.failed_count += 1
+                    results.append({"source": "xueqiu_spyder", "symbol": symbol, "error": str(exc)})
+                    if failure_strategy == "stop":
+                        raise
+                progress.current = index
+                progress.details["results"] = results
+                progress.details["symbol_count"] = len(symbol_list)
+                if run_id:
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+            progress.status = "completed" if progress.failed_count == 0 else "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = None if progress.failed_count == 0 else "Some Xueqiu symbols failed"
+            await self.create_sync_log(
+                sync_type="sentiment_xueqiu",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            logger.opt(exception=True).error("sync_sentiment_xueqiu failed: {}", e)
+            await self.create_sync_log(
+                sync_type="sentiment_xueqiu",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
+
+        return progress
+
+    async def sync_sentiment_nga(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import SentimentIngestService
+
+        global _current_sync
+        progress = SyncProgress(
+            sync_type="sentiment_nga",
+            status="running",
+            start_time=datetime.now(),
+            total=1,
+            details={"run_id": run_id, "source": "flocktrader"},
+        )
+        _current_sync = progress
+
+        try:
+            ingest = SentimentIngestService(self.session)
+            result = await ingest.run(
+                "flocktrader",
+                None,
+                max_pages=3,
+                min_reply=0,
+                start_date=start_date,
+                end_date=end_date,
+                force_refresh=True,
+            )
+            progress.current = 1
+            progress.success_count = 1
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details["result"] = result
+            await self.create_sync_log(
+                sync_type="sentiment_nga",
+                status="completed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+        except Exception as e:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(e)
+            progress.details["error"] = str(e)[:500]
+            logger.opt(exception=True).error("sync_sentiment_nga failed: {}", e)
+            await self.create_sync_log(
+                sync_type="sentiment_nga",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(e),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
         finally:
             _current_sync = None
 
@@ -1833,7 +3188,7 @@ class SyncService:
                             symbols_with_cash.add(symbol)
 
                     progress.success_count += 1
-                except Exception as e:
+                except Exception:
                     progress.failed_count += 1
                     if failure_strategy == "stop":
                         raise
@@ -1901,7 +3256,7 @@ class SyncService:
                     trailing_sum = 0.0
                     left = 0
 
-                    for right, (ex_date, cash) in enumerate(zip(dates, values)):
+                    for right, (ex_date, cash) in enumerate(zip(dates, values, strict=False)):
                         trailing_sum += cash
                         # Shrink window: remove entries older than 365 days
                         while left <= right and (ex_date - dates[left]).days > 365:
@@ -1924,7 +3279,7 @@ class SyncService:
                             "trade_date": dates[right],
                             "value": round(div_yield, 4),
                         })
-                except Exception as e:
+                except Exception:
                     if failure_strategy == "stop":
                         raise
                     continue

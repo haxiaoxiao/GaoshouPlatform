@@ -1,13 +1,13 @@
-import sqlite3
-import json
 import os
-import zlib
+import sqlite3
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import akquant as aq
 import akquant.talib as aq_talib
 import numpy as np
+
+from app.services.security_symbols import normalize_security_symbol, to_jq_symbol
 
 
 class IntradayCumulativeVolumeIndicator:
@@ -34,7 +34,7 @@ class IntradayCumulativeVolumeIndicator:
         if cache_key in self._cache:
             return self._cache[cache_key]
 
-        value = self._load_from_feature_store(symbol, trade_date, current_dt)
+        value = self._load_from_factor_cache(symbol, trade_date, current_dt)
         if value is None:
             value = self._load_from_market_store(symbol, current_dt)
         if value is None:
@@ -53,10 +53,10 @@ class IntradayCumulativeVolumeIndicator:
             return {}
         missing = [symbol for symbol in symbols if (symbol, as_of) not in self._cache]
         if missing:
-            feature_values = self._load_feature_store_batch(missing, trade_date, as_of)
+            factor_values = self._load_factor_cache_batch(missing, trade_date, as_of)
             unresolved = []
             for symbol in missing:
-                value = feature_values.get(symbol)
+                value = factor_values.get(symbol)
                 if value is None:
                     unresolved.append(symbol)
                 else:
@@ -78,18 +78,18 @@ class IntradayCumulativeVolumeIndicator:
     def _feature_params(self, as_of):
         return {"time": as_of.strftime("%H:%M")}
 
-    def _load_from_feature_store(self, symbol, trade_date, as_of):
-        values = self._load_feature_store_batch([symbol], trade_date, as_of)
+    def _load_from_factor_cache(self, symbol, trade_date, as_of):
+        values = self._load_factor_cache_batch([symbol], trade_date, as_of)
         return values.get(symbol)
 
-    def _load_feature_store_batch(self, symbols, trade_date, as_of):
-        if not getattr(self.strategy, "enable_feature_store", True):
+    def _load_factor_cache_batch(self, symbols, trade_date, as_of):
+        if not getattr(self.strategy, "enable_factor_value_cache", True):
             return {}
         try:
-            from app.services.feature_store import get_feature_store
+            from app.services.factor_value_store import get_factor_value_store
 
             data_symbols = [self.strategy._store_data_symbol(symbol) for symbol in symbols]
-            values = get_feature_store().load_cross_section(
+            values = get_factor_value_store().load_cross_section(
                 "cum_volume_at_time",
                 trade_date,
                 symbols=data_symbols,
@@ -213,6 +213,29 @@ class V4TechnicalSignalIndicator:
         )
 
 
+DEFAULT_SMALL_CAP_PARAMS = {
+    "index_symbol": "399101.SZ",
+    "pass_april": True,
+    "run_stoploss": True,
+    "stock_num": 5,
+    "enable_indicator": True,
+    "enable_indicator_exit": True,
+    "v4_indicator_mode": "robust",
+    "enable_indicator_redis": False,
+    "HV_control": True,
+    "daily_volume_to_share_multiplier": 100.0,
+    "high_volume_check_time": "14:30",
+    "timer_price_adjustment_mode": "previous_close_ratio",
+    "limit_price_source": "table",
+    "execution_plan_mode": "timer",
+    "max_industry_weight": 0.3,
+    "enable_industry_filter": True,
+    "industry_mode": "local",
+    "filter_st": True,
+    "cash_buffer_rate": 0.01,
+}
+
+
 class SmallCapV4Strategy(aq.Strategy):
     """AKQuant port of the JoinQuant "small-cap V4" strategy.
 
@@ -225,6 +248,24 @@ class SmallCapV4Strategy(aq.Strategy):
 
     index_symbol = "399101.SZ"
     jq_index_symbol = "399101.XSHE"
+    pass_april = DEFAULT_SMALL_CAP_PARAMS["pass_april"]
+    run_stoploss = DEFAULT_SMALL_CAP_PARAMS["run_stoploss"]
+    stock_num = DEFAULT_SMALL_CAP_PARAMS["stock_num"]
+    enable_indicator = DEFAULT_SMALL_CAP_PARAMS["enable_indicator"]
+    enable_indicator_exit = DEFAULT_SMALL_CAP_PARAMS["enable_indicator_exit"]
+    v4_indicator_mode = DEFAULT_SMALL_CAP_PARAMS["v4_indicator_mode"]
+    enable_indicator_redis = DEFAULT_SMALL_CAP_PARAMS["enable_indicator_redis"]
+    HV_control = DEFAULT_SMALL_CAP_PARAMS["HV_control"]
+    daily_volume_to_share_multiplier = DEFAULT_SMALL_CAP_PARAMS["daily_volume_to_share_multiplier"]
+    high_volume_check_time = DEFAULT_SMALL_CAP_PARAMS["high_volume_check_time"]
+    timer_price_adjustment_mode = DEFAULT_SMALL_CAP_PARAMS["timer_price_adjustment_mode"]
+    limit_price_source = DEFAULT_SMALL_CAP_PARAMS["limit_price_source"]
+    execution_plan_mode = DEFAULT_SMALL_CAP_PARAMS["execution_plan_mode"]
+    max_industry_weight = DEFAULT_SMALL_CAP_PARAMS["max_industry_weight"]
+    enable_industry_filter = DEFAULT_SMALL_CAP_PARAMS["enable_industry_filter"]
+    industry_mode = DEFAULT_SMALL_CAP_PARAMS["industry_mode"]
+    filter_st = DEFAULT_SMALL_CAP_PARAMS["filter_st"]
+    cash_buffer_rate = DEFAULT_SMALL_CAP_PARAMS["cash_buffer_rate"]
 
     def on_start(self):
         if getattr(self, "_v4_initialized", False):
@@ -255,10 +296,8 @@ class SmallCapV4Strategy(aq.Strategy):
         self.HV_duration = int(getattr(self, "HV_duration", 120))
         self.HV_ratio = float(getattr(self, "HV_ratio", 0.9))
         self.high_volume_mode = str(getattr(self, "high_volume_mode", "daily_include_now"))
-        self.enable_feature_store = getattr(self, "enable_feature_store", True)
-        self.high_volume_feature_name = str(
-            getattr(self, "high_volume_feature_name", "high_volume_signal")
-        )
+        self.enable_factor_value_cache = getattr(self, "enable_factor_value_cache", True)
+        self.high_volume_factor_name = str(getattr(self, "high_volume_factor_name", "high_volume_signal"))
         self.daily_volume_to_share_multiplier = float(
             getattr(self, "daily_volume_to_share_multiplier", 100.0)
         )
@@ -683,7 +722,7 @@ class SmallCapV4Strategy(aq.Strategy):
             feature_signal = feature_signals.get(stock) if feature_signals is not None else None
             if feature_signal is not None:
                 if feature_signal:
-                    self._event_log(f"[{stock}]鏀鹃噺(FeatureStore)，卖出")
+                    self._event_log(f"[{stock}]放量(FactorValueStore)，卖出")
                     self.close_position_(stock, "high_volume")
                 continue
             if self.high_volume_mode == "minute_to_now" and volume_as_of is not None:
@@ -1827,12 +1866,12 @@ class SmallCapV4Strategy(aq.Strategy):
         return self._intraday_volume_indicator.get(symbol, as_of=as_of)
 
     def _high_volume_feature_signal_map(self, symbols, as_of):
-        if not getattr(self, "enable_feature_store", True) or as_of is None:
+        if not getattr(self, "enable_factor_value_cache", True) or as_of is None:
             return None
         if str(getattr(self, "high_volume_mode", "daily_include_now")) != "minute_to_now":
             return None
-        feature_name = str(getattr(self, "high_volume_feature_name", "high_volume_signal"))
-        if feature_name != "high_volume_signal":
+        factor_name = str(getattr(self, "high_volume_factor_name", "high_volume_signal"))
+        if factor_name != "high_volume_signal":
             return None
         trade_date = self._current_trade_date()
         if trade_date is None:
@@ -1849,7 +1888,7 @@ class SmallCapV4Strategy(aq.Strategy):
         if not symbols:
             return None
         cache_key = (
-            "__feature_high_volume_signal_map__",
+            "__factor_high_volume_signal_map__",
             tuple(sorted(symbols)),
             trade_date,
             tuple(sorted(params.items())),
@@ -1857,10 +1896,10 @@ class SmallCapV4Strategy(aq.Strategy):
         if cache_key in self._daily_cache:
             return self._daily_cache[cache_key]
         try:
-            from app.services.feature_store import get_feature_store
+            from app.services.factor_value_store import get_factor_value_store
 
-            values = get_feature_store().load_cross_section(
-                feature_name,
+            values = get_factor_value_store().load_cross_section(
+                factor_name,
                 trade_date,
                 symbols=[self._store_data_symbol(symbol) for symbol in symbols],
                 as_of_time=params["time"],
@@ -2151,19 +2190,16 @@ class SmallCapV4Strategy(aq.Strategy):
                 self._set_redis_daily_frame(redis_key, sym_rows)
 
     def _normalize_data_symbol(self, symbol):
-        if symbol == self.index_symbol:
+        normalized = normalize_security_symbol(symbol) or symbol
+        if normalized == self.index_symbol:
             return self.jq_index_symbol
-        return symbol
+        return normalized
 
     def _store_data_symbol(self, symbol):
-        if symbol == self.jq_index_symbol:
+        normalized = normalize_security_symbol(symbol) or symbol
+        if normalized == self.index_symbol:
             return self.index_symbol
-        if isinstance(symbol, str):
-            if symbol.endswith(".XSHE"):
-                return f"{symbol[:-5]}.SZ"
-            if symbol.endswith(".XSHG"):
-                return f"{symbol[:-5]}.SH"
-        return symbol
+        return normalized
 
     def _current_trade_date(self):
         current_time = None
@@ -2272,15 +2308,11 @@ class SmallCapV4Strategy(aq.Strategy):
 
     @staticmethod
     def _normalize_index_symbol(symbol):
-        if symbol == "399101.XSHE":
-            return "399101.SZ"
-        return symbol
+        return normalize_security_symbol(symbol) or symbol
 
     @staticmethod
     def _to_jq_index_symbol(symbol):
-        if symbol == "399101.SZ":
-            return "399101.XSHE"
-        return symbol
+        return to_jq_symbol(symbol) or symbol
 
     def _sort_by_market_cap(self, symbols, trade_date=None):
         as_of = self._market_cap_as_of_date(trade_date)
@@ -2629,7 +2661,7 @@ class SmallCapV4Strategy(aq.Strategy):
     @staticmethod
     def _is_bad_stock_name(name):
         text = str(name or "").upper()
-        return "ST" in text or "*" in text or "退" in text or "閫€" in text
+        return "ST" in text or "*" in text or "退" in text
 
     @staticmethod
     def _parse_date(value):

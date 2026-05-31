@@ -1,6 +1,5 @@
 # backend/app/api/factor.py
 """因子研究 API 接口"""
-from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
@@ -8,7 +7,6 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.sqlite import get_async_session
-from app.engines.factor_engine import FactorConfig
 from app.services.factor_service import FactorCreate, FactorService, FactorUpdate
 
 router = APIRouter()
@@ -51,32 +49,6 @@ class FactorResponse(BaseModel):
     description: str | None
     created_at: str | None
     updated_at: str | None
-
-
-class FactorAnalysisRequest(BaseModel):
-    """因子分析请求"""
-
-    start_date: date = Field(description="分析起始日期")
-    end_date: date = Field(description="分析结束日期")
-    symbols: list[str] | None = Field(default=None, description="股票代码列表")
-    normalize_window: int = Field(default=5, description="标准化窗口")
-    factor_window: int = Field(default=20, description="因子计算窗口")
-    forward_period: int = Field(default=20, description="收益前瞻期")
-
-
-class FactorAnalysisResponse(BaseModel):
-    """因子分析响应"""
-
-    id: int
-    factor_id: int
-    factor_name: str | None
-    start_date: str
-    end_date: str
-    ic_mean: float | None
-    ic_std: float | None
-    ir: float | None
-    details: dict[str, Any] | None
-    created_at: str
 
 
 # ============== Factor Endpoints ==============
@@ -246,56 +218,6 @@ async def delete_factor(
     await session.commit()
 
     return {"code": 0, "message": "success", "data": {"deleted": True}}
-
-
-@router.post("/factors/{factor_id}/analyze", summary="运行因子分析")
-async def run_factor_analysis(
-    factor_id: int = Path(description="因子ID"),
-    request: FactorAnalysisRequest = Body(description="分析参数"),
-    session: AsyncSession = Depends(get_async_session),
-) -> dict[str, Any]:
-    """
-    运行因子分析
-
-    计算 IC、分组收益等指标
-    """
-    service = FactorService(session)
-
-    config = FactorConfig(
-        normalize_window=request.normalize_window,
-        factor_window=request.factor_window,
-        forward_period=request.forward_period,
-    )
-
-    try:
-        analysis = await service.run_analysis(
-            factor_id=factor_id,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            symbols=request.symbols,
-            config=config,
-        )
-        await session.commit()
-
-        return {
-            "code": 0,
-            "message": "success",
-            "data": {
-                "id": analysis.id,
-                "factor_id": analysis.factor_id,
-                "start_date": analysis.start_date.isoformat(),
-                "end_date": analysis.end_date.isoformat(),
-                "ic_mean": float(analysis.ic_mean) if analysis.ic_mean else None,
-                "ic_std": float(analysis.ic_std) if analysis.ic_std else None,
-                "ir": float(analysis.ir) if analysis.ir else None,
-                "details": analysis.details,
-                "created_at": analysis.created_at.isoformat() if analysis.created_at else None,
-            },
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"分析失败: {str(e)}")
 
 
 # ============== Analysis Endpoints ==============

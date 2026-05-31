@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sqlite3
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any, Callable, Iterable
 
 import pandas as pd
@@ -16,7 +16,9 @@ from app.core.config import settings
 from app.data_stores import get_market_data_store
 from app.db.clickhouse import get_ch_client
 from app.engines.qmt_gateway import qmt_gateway
+from app.services.backtest_redis_cache import get_backtest_cache
 from app.services.index_components import normalize_index_symbol
+from app.services.security_symbols import normalize_security_symbol
 
 DEFAULT_TIMER_TIMES = ("10:00", "10:30", "14:30", "14:50")
 MARKET_BAR_START = time(9, 30)
@@ -67,12 +69,7 @@ def _bar_timer_times(timer_times: tuple[time, ...]) -> tuple[time, ...]:
 
 
 def _normalize_symbol(symbol: str) -> str:
-    symbol = symbol.strip().upper()
-    if symbol.endswith(".XSHG"):
-        return symbol.replace(".XSHG", ".SH")
-    if symbol.endswith(".XSHE"):
-        return symbol.replace(".XSHE", ".SZ")
-    return symbol
+    return normalize_security_symbol(symbol) or ""
 
 
 def _should_use_clickhouse() -> bool:
@@ -422,12 +419,27 @@ def find_earliest_timer_coverage_date(
     if index_symbol:
         all_symbols.extend(_index_symbols(index_symbol, start, end))
     all_symbols = sorted(set(all_symbols))
+    redis_key = _timer_coverage_cache_key(
+        all_symbols,
+        index_symbol,
+        start,
+        end,
+        timer_times,
+        min_symbol_coverage,
+        min_point_coverage,
+    )
+    redis_cache = get_backtest_cache()
+    cached = redis_cache.get_json(redis_key) if redis_key else None
+    if isinstance(cached, dict):
+        cached["cache_hit"] = True
+        return cached
     if not all_symbols or not timer_times:
         return {
             "earliest_date": None,
             "symbols": len(all_symbols),
             "timer_times": [t.strftime("%H:%M") for t in timer_times],
             "coverage": [],
+            "cache_hit": False,
         }
 
     timer_minutes = tuple(t.hour * 60 + t.minute for t in timer_times)
@@ -502,7 +514,7 @@ def find_earliest_timer_coverage_date(
         if earliest is None and point_ratio >= min_point_coverage:
             earliest = d
 
-    return {
+    result = {
         "earliest_date": earliest.isoformat() if hasattr(earliest, "isoformat") else None,
         "symbols": len(all_symbols),
         "required_symbols": required_symbols,
@@ -510,7 +522,43 @@ def find_earliest_timer_coverage_date(
         "min_symbol_coverage": min_symbol_coverage,
         "min_point_coverage": min_point_coverage,
         "coverage": coverage[:60],
+        "cache_hit": False,
     }
+    if redis_key:
+        redis_cache.set_json(redis_key, result, ttl=86400)
+    return result
+
+
+def _timer_coverage_cache_key(
+    symbols: list[str],
+    index_symbol: str | None,
+    start: date,
+    end: date,
+    timer_times: tuple[time, ...],
+    min_symbol_coverage: float,
+    min_point_coverage: float,
+) -> str | None:
+    try:
+        import hashlib
+
+        payload = json.dumps(
+            {
+                "symbols": symbols,
+                "index_symbol": normalize_index_symbol(index_symbol) if index_symbol else None,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+                "timer_times": [t.strftime("%H:%M") for t in timer_times],
+                "min_symbol_coverage": min_symbol_coverage,
+                "min_point_coverage": min_point_coverage,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+        return get_backtest_cache().key("timer_coverage", digest)
+    except Exception:
+        return None
 
 
 async def sync_timer_minute_points(

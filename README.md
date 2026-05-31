@@ -1,5 +1,7 @@
 # GaoshouPlatform - 量化投研平台
 
+Last updated: 2026-05-25.
+
 基于 Vue 3 + FastAPI 的 A 股量化投研平台，支持数据管理、因子研究、策略回测和实盘交易。
 
 ---
@@ -11,7 +13,7 @@
 - 策略数据模式：支持 `daily`、`minute`、`minute_timer`。只需要固定盘中时点的策略应优先用 `minute_timer`，从 Parquet 或 ClickHouse 读取稀疏分钟数据。
 - **无需 ClickHouse**：默认 `MARKET_DATA_BACKEND=parquet`，零运维启动。切换 `MARKET_DATA_BACKEND=clickhouse` 可启用 ClickHouse。
 - 指数池：回测可通过 `index_symbol` 使用动态指数成分池，例如中小综指 `399101.SZ`，避免用当前自选股静态替代历史股票池。
-- 因子能力：既有指标注册体系，也有表达式 Compute Engine；AKQuant/Polars 因子引擎已通过 `engine="akquant"` 接入。
+- 因子能力：既有指标注册体系，也有表达式 Compute Engine；Factor Value Store 已承载 TA-Lib、研究因子、小市值因子和 Alpha101 缓存；Alpha101 101 个公式已接入宽表向量化批量计算。
 
 关键文档：
 
@@ -21,9 +23,12 @@
 | `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare、AKShare 的优先级和适用场景 |
 | `docs/local-data-onboarding.md` | 本地数据接入配置：SQLite + Parquet/DuckDB + 前端验证流程 |
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
-| `docs/akquant-integration-todo.md` | AKQuant 集成状态、验证命令和后续 P0-P3 规划 |
+| `docs/tushare-relay-ingestion.md` | Tushare Relay 接入：配置、同步目录、首批 Parquet 数据集、新闻公告护栏和轻量因子 |
+| `docs/akquant-integration-todo.md` | AKQuant 当前集成状态、验证命令和仍需跟进事项 |
 | `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：参数、数据口径、已对齐节点和剩余差异 |
-| `docs/feature-store.md` | 因子研究 Feature Store：通用特征定义、覆盖率、预计算和 ID=43 接入方式 |
+| `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算、Relay 结构化因子和 ID=43 接入方式 |
+| `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
+| `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |
 | `AGENTS.md` | AI coding agent 项目指南和关键约束 |
 
 ---
@@ -62,7 +67,6 @@ GaoshouPlatform/
 │   │   │   └── system.py        # 系统状态 API
 │   │   ├── engines/
 │   │   │   ├── qmt_gateway.py   # ⭐ QMT 数据网关（核心，封装 xtquant）
-│   │   │   ├── factor_engine.py # 因子计算引擎
 │   │   │   └── vn_engine.py     # VeighNa 回测引擎
 │   │   ├── db/
 │   │   │   ├── sqlite.py        # SQLite async 连接
@@ -108,8 +112,9 @@ GaoshouPlatform/
 │   │       └── design-system.css# 暗色主题变量
 │   └── package.json
 └── docs/
-    ├── clickhouse-installation.md
-    └── plans/                   # 设计/计划文档
+    ├── user-manual.md
+    ├── factor-value-store.md
+    └── archive/                 # 过期计划/specs/调研报告
 ```
 
 ---
@@ -162,22 +167,29 @@ docker exec clickhouse-server clickhouse-client -q "CREATE DATABASE IF NOT EXIST
 
 ### 4. 启动服务
 
+端口必须按环境隔离，避免 dev/prod 互相代理或重启错服务：
+
+| 环境 | 根目录 | 后端 API | 同步服务 | 前端 |
+|---|---|---:|---:|---:|
+| dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
+| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3500` |
+
 **后端：**
 ```powershell
-cd E:\projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-dev\backend
 .venv\Scripts\activate
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 18800
 ```
 
 **前端：**
 ```powershell
-cd E:\projects\GaoshouPlatform\frontend
-npm run dev
+cd E:\Projects\GaoshouPlatform-dev\frontend
+npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
-- 后端 API 文档：http://localhost:8000/docs
-- 前端页面：http://localhost:5173
-- 健康检查：http://localhost:8000/health
+- 后端 API 文档：http://localhost:18800/docs
+- 前端页面：http://localhost:13500
+- 健康检查：http://localhost:18800/health
 
 > 后端启动时会自动创建 SQLite 表和 ClickHouse 表。
 
@@ -209,6 +221,7 @@ QMT Server → download_financial_data2()/download_history_data()
 | `kline_daily` | 日 K 线 | `download_history_data` + `get_market_data_ex` | Parquet / ClickHouse |
 | `kline_minute` | 分钟 K 线 | `download_history_data` + `get_market_data_ex` | Parquet / ClickHouse |
 | `realtime_mv` | 实时市值 | `get_full_tick` | SQLite |
+| `tushare_relay` | Relay 增强数据 | Indevs Tushare Relay | Parquet (`adj_factors`/`moneyflow`/`auction_replay`/`ths_index`/`ths_member`/`block_moneyflow`) |
 
 固定时间点分钟线策略推荐链路：
 
@@ -237,18 +250,18 @@ AKQuant bar_type="minute_timer" 回测
 
 ## AKQuant 回测入口
 
-后端 V2 回测 API 位于 `/api/v2/backtest/*`：
+后端统一回测 API 位于 `/api/backtest/*`：
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/v2/backtest/capabilities` | 查看 AKQuant 是否可用、版本、TA-Lib 函数数、可选模块 |
-| `POST /api/v2/backtest/run` | 运行回测，`engine="akquant"` 使用 AKQuant 引擎 |
-| `POST /api/v2/backtest/optimize/grid` | AKQuant Grid Search |
-| `POST /api/v2/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
-| `POST /api/v2/backtest/strategy-params/schema` | 读取策略参数 schema |
-| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 |
-| `GET /api/v2/backtest/index-pools/{index_symbol}` | 查询动态指数池覆盖情况 |
-| `GET /api/v2/backtest/timer-coverage` | 查询稀疏 timer 分钟数据覆盖率 |
+| `GET /api/backtest/capabilities` | 查看 AKQuant 是否可用、版本、TA-Lib 函数数、可选模块 |
+| `POST /api/backtest/run` | 运行回测，`engine="akquant"` 使用 AKQuant 引擎 |
+| `POST /api/backtest/optimize/grid` | AKQuant Grid Search |
+| `POST /api/backtest/optimize/walk-forward` | AKQuant Walk-forward Validation |
+| `POST /api/backtest/strategy-params/schema` | 读取策略参数 schema |
+| `POST /api/backtest/strategy-params/validate` | 校验策略参数 |
+| `GET /api/backtest/index-pools/{index_symbol}` | 查询动态指数池覆盖情况 |
+| `GET /api/backtest/timer-coverage` | 查询稀疏 timer 分钟数据覆盖率 |
 
 参数原则：
 
@@ -341,7 +354,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 ## 数据浏览器
 
-访问 `http://localhost:5173/explorer` 可以浏览 ClickHouse 中的数据：
+dev 环境访问 `http://localhost:13500/explorer` 可以浏览 ClickHouse 中的数据：
 - 自动列出所有表和行数
 - 动态展示表结构（不硬编码字段）
 - 支持 WHERE 过滤、排序、分页
@@ -428,7 +441,7 @@ chore: 构建/工具
 | 文件 | 说明 |
 |------|------|
 | `backend/app/core/config.py` | 后端配置（DB绝对路径、ClickHouse端口） |
-| `frontend/vite.config.ts` | 前端代理（指向 localhost:8000） |
+| `frontend/vite.config.ts` | 前端代理（dev 默认指向 localhost:18800） |
 | `frontend/src/styles/design-system.css` | 暗色主题变量 |
 
 ### 代码风格

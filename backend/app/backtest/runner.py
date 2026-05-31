@@ -1,9 +1,7 @@
 """回测统一入口"""
 import uuid
 from datetime import date, datetime
-from typing import Any
 
-import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -53,18 +51,26 @@ class BacktestRunner:
 
     async def _run_event_driven(self, config: BacktestConfig, task_store: dict | None = None) -> BacktestResult:
         """事件驱动回测 — 使用 EventBus + Portfolio + Risk + Analysis 完整管线"""
+        from app.backtest.analysis import OrderCollector, TradeCollector
+        from app.backtest.analysis.metrics import compute_metrics
         from app.backtest.event import (
-            Event, EventBus, EventType, BarEventSource,
-            TradingCalendar, EventDrivenExecutor,
+            BarEventSource,
+            Event,
+            EventBus,
+            EventDrivenExecutor,
+            EventType,
+            TradingCalendar,
         )
         from app.backtest.portfolio import (
-            Account, PositionManager, Portfolio,
-            CashValidator, PriceValidator, PositionLimitValidator,
+            Account,
+            CashValidator,
+            Portfolio,
+            PositionLimitValidator,
+            PositionManager,
+            PriceValidator,
         )
-        from app.backtest.analysis import TradeCollector, OrderCollector
-        from app.backtest.analysis.metrics import compute_metrics
-        from app.backtest.strategy_loader import ExpressionSignalStrategy, StrategyContext
         from app.backtest.strategy.user_script import UserContext
+        from app.backtest.strategy_loader import ExpressionSignalStrategy, StrategyContext
 
         symbols = config.symbols
         start = config.start_date or date(2020, 1, 1)
@@ -211,7 +217,7 @@ class BacktestRunner:
             order_id = order.get("order_id", "")
             symbol = order.get("symbol", "")
             direction = order.get("direction", "buy")
-            price = order.get("price", bar.close)
+            order.get("price", bar.close)
             quantity = order.get("quantity", 0)
 
             # 标记订单为 ACTIVE

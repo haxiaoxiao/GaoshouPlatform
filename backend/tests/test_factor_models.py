@@ -5,15 +5,14 @@ import pytest
 from pydantic import ValidationError
 
 from app.models.factor import (
-    FactorConfig,
-    EvalConfig,
-    BtConfig,
-    FactorReport,
     BacktestReport,
-    StockPool,
-    FactorDirection,
     BoardQuery,
-    ValidateRequest,
+    BtConfig,
+    EvalConfig,
+    FactorConfig,
+    FactorDirection,
+    FactorReport,
+    StockPool,
     ValidateResponse,
 )
 

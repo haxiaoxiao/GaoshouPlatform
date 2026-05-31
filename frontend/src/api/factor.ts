@@ -13,43 +13,6 @@ export interface Factor {
   updated_at: string | null
 }
 
-export interface FactorAnalysis {
-  id: number
-  factor_id: number
-  factor_name: string | null
-  start_date: string
-  end_date: string
-  ic_mean: number | null
-  ic_std: number | null
-  ir: number | null
-  details: FactorAnalysisDetails | null
-  created_at: string
-}
-
-export interface FactorAnalysisDetails {
-  ic_mean: number
-  ic_std: number
-  icir: number
-  annual_icir: number
-  annual_return: number
-  annual_vol: number
-  information_ratio: number
-  win_rate: number
-  max_drawdown: number
-  total_stocks: number
-  total_dates: number
-  ic_series: Array<{ trade_date: string; ic: number }>
-  group_returns: Array<{
-    trade_date: string
-    group_1: number
-    group_2: number
-    group_3: number
-    group_4: number
-    group_5: number
-    long_short: number
-  }>
-}
-
 export interface FactorCreateRequest {
   name: string
   category?: string
@@ -66,15 +29,6 @@ export interface FactorUpdateRequest {
   code?: string
   parameters?: Record<string, unknown>
   description?: string
-}
-
-export interface FactorAnalyzeRequest {
-  start_date: string
-  end_date: string
-  symbols?: string[]
-  normalize_window?: number
-  factor_window?: number
-  forward_period?: number
 }
 
 export const factorApi = {
@@ -98,15 +52,4 @@ export const factorApi = {
   delete: (id: number) =>
     request.delete<{ deleted: boolean }>(`/factor/factors/${id}`),
 
-  // 运行因子分析
-  analyze: (factorId: number, data: FactorAnalyzeRequest) =>
-    request.post<FactorAnalysis>(`/factor/factors/${factorId}/analyze`, data),
-
-  // 获取分析记录列表
-  getAnalyses: (params?: { factor_id?: number; limit?: number }) =>
-    request.get<FactorAnalysis[]>('/factor/analyses', { params }),
-
-  // 获取分析详情
-  getAnalysis: (analysisId: number) =>
-    request.get<FactorAnalysis>(`/factor/analyses/${analysisId}`),
 }

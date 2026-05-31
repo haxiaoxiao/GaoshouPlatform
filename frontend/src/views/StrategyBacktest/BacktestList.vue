@@ -53,13 +53,20 @@
           {{ row.start_date }} ~ {{ row.end_date }}
         </template>
       </el-table-column>
+      <el-table-column label="类型" width="120">
+        <template #default="{ row }">
+          <el-tag v-if="isOptimizationBacktest(row)" size="small" type="warning">
+            {{ optimizationBacktestType(row) === 'walk_forward' ? 'WFO' : 'Grid Search' }}
+          </el-tag>
+          <span v-else style="color:#909399;font-size:12px">普通回测</span>
+        </template>
+      </el-table-column>
       <el-table-column label="参数" width="160">
         <template #default="{ row }">
           <template v-if="row.parameters">
             <el-tooltip :content="JSON.stringify(row.parameters)">
               <span style="font-size:12px;color:#909399">
-                {{ row.parameters.pool_label || row.parameters.mode || '-' }}
-                {{ row.parameters.symbol_count ? ' / ' + row.parameters.symbol_count + '只' : '' }}
+                {{ parameterSummary(row) }}
               </span>
             </el-tooltip>
           </template>
@@ -74,7 +81,7 @@
       <el-table-column label="操作" width="160" fixed="right">
         <template #default="{ row }">
           <el-button type="success" link :disabled="row.status !== 'completed'" @click="handleViewReport(row)">
-            报告
+            {{ isOptimizationBacktest(row) ? '优化结果' : '报告' }}
           </el-button>
           <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
         </template>
@@ -157,13 +164,16 @@
 
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
 import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/backtest'
 import BacktestReport from './BacktestReport.vue'
 import { formatDateTime, getStatusType, getStatusLabel } from '@/utils/format'
+import { isOptimizationRecord, optimizationType } from '@/utils/optimizationReport'
 
 // 状态
+const router = useRouter()
 const loading = ref(false)
 const backtestList = ref<Backtest[]>([])
 const total = ref(0)
@@ -294,9 +304,28 @@ const handleCreateSubmit = async () => {
 
 // 查看报告
 const handleViewReport = (row: Backtest) => {
+  if (isOptimizationBacktest(row)) {
+    router.push(`/backtest/optimization/${row.id}`)
+    return
+  }
   selectedBacktestId.value = row.id
   reportDialogVisible.value = true
 }
+
+const parameterSummary = (row: Backtest): string => {
+  if (isOptimizationBacktest(row)) {
+    const type = optimizationBacktestType(row) === 'walk_forward' ? 'WFO' : 'Grid'
+    const count = row.result?.row_count ?? row.result?.count
+    return `${type}${count ? ` / ${count}行` : ''}`
+  }
+  return `${row.parameters?.pool_label || row.parameters?.mode || '-'}${row.parameters?.symbol_count ? ` / ${row.parameters.symbol_count}只` : ''}`
+}
+
+const isOptimizationBacktest = (row: Backtest) =>
+  isOptimizationRecord(row.parameters, row.result as Record<string, unknown> | null)
+
+const optimizationBacktestType = (row: Backtest) =>
+  optimizationType(row.parameters, row.result as Record<string, unknown> | null)
 
 // 分页变化
 const handlePageChange = (page: number) => {

@@ -1,6 +1,6 @@
 """数据收集器 — 监听事件，汇聚交易/订单记录"""
-from dataclasses import dataclass, field
-from datetime import date, datetime
+from dataclasses import dataclass
+from datetime import date
 
 from app.backtest.event.events import Event, EventType
 

@@ -1,13 +1,9 @@
 """因子评估 API 测试"""
-from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import numpy as np
-import pandas as pd
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.backtest.config import BacktestResult
 from app.main import app
 
 

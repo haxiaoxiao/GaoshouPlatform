@@ -1,5 +1,5 @@
 """账户 — 资金管理"""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass

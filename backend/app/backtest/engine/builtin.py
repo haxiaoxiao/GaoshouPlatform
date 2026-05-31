@@ -3,11 +3,10 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from loguru import logger
-
 from app.backtest.config import BacktestConfig, BacktestResult
 from app.backtest.engine import EngineRegistry
 from app.backtest.engine.interface import IBacktestEngine, IDataProvider
+from app.services.benchmark_series import attach_benchmark_result
 
 
 @EngineRegistry.register
@@ -31,6 +30,21 @@ class BuiltinEngine(IBacktestEngine):
 
         runner = BacktestRunner()
         result = await runner.run(config, task_store=task_store)
+        if config.benchmark_symbol and config.start_date and config.end_date:
+            benchmark_returns = None
+            benchmark_warning = None
+            try:
+                benchmark_returns = await data_provider.load_benchmark(
+                    config.benchmark_symbol, config.start_date, config.end_date
+                )
+            except Exception as exc:
+                benchmark_warning = f"Benchmark data load failed for {config.benchmark_symbol}: {exc}"
+            attach_benchmark_result(
+                result,
+                benchmark_symbol=config.benchmark_symbol,
+                benchmark_returns=benchmark_returns,
+                warning=benchmark_warning,
+            )
 
         if progress_callback:
             progress_callback(1.0, task_store.get("live"))

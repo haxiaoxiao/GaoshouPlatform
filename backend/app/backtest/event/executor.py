@@ -3,9 +3,9 @@ from datetime import date, datetime
 
 from loguru import logger
 
-from app.backtest.event.events import Event, EventType
 from app.backtest.event.event_bus import EventBus
-from app.backtest.event.event_source import Bar, BarDict, BarEventSource
+from app.backtest.event.event_source import BarDict, BarEventSource
+from app.backtest.event.events import Event, EventType
 
 
 class EventDrivenExecutor:

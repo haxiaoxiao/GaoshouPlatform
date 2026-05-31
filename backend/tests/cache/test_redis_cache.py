@@ -7,7 +7,6 @@ import pytest
 
 from app.cache.redis_cache import RedisClient, get_redis_client, reset_redis_client
 
-
 # ---------- fixtures ----------
 
 @pytest.fixture(autouse=True)
@@ -21,7 +20,7 @@ def _reset_singleton():
 @pytest.fixture
 def mock_redis():
     """模拟 redis.Redis 实例"""
-    with patch("app.cache.redis_cache.redis.ConnectionPool") as mock_pool, \
+    with patch("app.cache.redis_cache.redis.ConnectionPool"), \
          patch("app.cache.redis_cache.redis.Redis") as mock_redis_cls:
         mock_instance = MagicMock()
         mock_instance.ping.return_value = True
@@ -50,7 +49,7 @@ class TestRedisClientInit:
         """ping 失败时应标记 available=False"""
         mock_redis.ping.side_effect = ConnectionError("timeout")
         # 需要让 ConnectionPool 创建成功，但 ping 失败
-        with patch("app.cache.redis_cache.redis.ConnectionPool") as mock_pool:
+        with patch("app.cache.redis_cache.redis.ConnectionPool"):
             with patch("app.cache.redis_cache.redis.Redis") as mock_cls:
                 mock_instance = MagicMock()
                 mock_instance.ping.side_effect = ConnectionError("timeout")
@@ -196,7 +195,7 @@ class TestConnectionPool:
     def test_pool_created(self, mock_redis):
         """初始化时应创建连接池"""
         with patch("app.cache.redis_cache.redis.ConnectionPool") as mock_pool:
-            client = RedisClient(host="localhost", port=6379, db=0)
+            RedisClient(host="localhost", port=6379, db=0)
             mock_pool.assert_called_once_with(
                 host="localhost",
                 port=6379,
@@ -233,10 +232,10 @@ class TestSingleton:
 
     def test_reset_redis_client_creates_new_instance(self, mock_redis):
         """reset_redis_client 后应创建新实例"""
-        c1 = get_redis_client()
+        get_redis_client()
         reset_redis_client()
         with patch("app.cache.redis_cache.RedisClient") as mock_cls:
-            c2 = get_redis_client()
+            get_redis_client()
             # 应创建新实例
             mock_cls.assert_called_once()
 

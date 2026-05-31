@@ -29,12 +29,45 @@ async def test_non_v2_factor_template_route_is_registered():
 
 
 @pytest.mark.asyncio
-async def test_non_v2_feature_definitions_route_is_registered():
+async def test_factor_value_definitions_route_is_registered_and_features_route_removed():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/features/definitions")
+        resp = await client.get("/api/factor-values/definitions")
+        old_resp = await client.get("/api/features/definitions")
 
     assert resp.status_code == 200
     assert isinstance(resp.json()["data"], list)
+    assert old_resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_akquant_compute_evaluate_api_level(monkeypatch):
+    async def fake_evaluate(expression, symbols, start_date, end_date):
+        assert expression == "Rank(Ts_Mean(Close, 5))"
+        assert symbols == ["000001.SZ"]
+        return {
+            "000001.SZ": [
+                {"trade_date": "2025-01-02", "value": 1.0},
+            ]
+        }
+
+    monkeypatch.setattr("app.services.akquant_factor.evaluate_akquant_factor", fake_evaluate)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/compute/evaluate",
+            json={
+                "engine": "akquant",
+                "expression": "Rank(Ts_Mean(Close, 5))",
+                "symbols": ["000001.SZ"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-31",
+            },
+        )
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["code"] == 0
+    assert body["meta"]["engine"] == "akquant"
+    assert body["data"]["000001.SZ"][0]["value"] == 1.0
 
 
 @pytest.mark.asyncio

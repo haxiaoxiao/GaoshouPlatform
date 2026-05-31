@@ -1,9 +1,4 @@
-"""Point-in-time index constituent cache.
-
-The backtest UI can select an index as the stock pool. The engine still needs
-all symbols preloaded for the whole run, but strategies must choose the actual
-pool at each rebalance date from a point-in-time constituent snapshot.
-"""
+"""Point-in-time index constituent cache."""
 
 from __future__ import annotations
 
@@ -19,32 +14,40 @@ import pandas as pd
 from loguru import logger
 
 from app.core.config import settings
-
+from app.services.index_catalog import (
+    get_index_item,
+    list_index_items,
+)
+from app.services.index_catalog import (
+    jq_index_symbol as catalog_jq_index_symbol,
+)
+from app.services.index_catalog import (
+    normalize_index_symbol as catalog_normalize_index_symbol,
+)
 
 KNOWN_INDEX_POOLS = [
     {
-        "symbol": "399101.SZ",
-        "jq_symbol": "399101.XSHE",
-        "name": "中小综指",
-        "source": "tushare.index_weight",
-    },
+        "symbol": item.symbol,
+        "jq_symbol": item.jq_symbol or item.symbol,
+        "name": item.display_name,
+        "source": "derived.union" if item.component_mode == "derived_union" else "tushare.index_weight",
+        "component_mode": item.component_mode,
+        "pool_enabled": item.pool_enabled,
+    }
+    for item in list_index_items(pool_only=True)
 ]
+
+DERIVED_INDEX_COMPONENT_SOURCES: dict[str, tuple[str, ...]] = {
+    "000906.SH": ("000300.SH", "000905.SH"),
+}
 
 
 def normalize_index_symbol(symbol: str | None) -> str | None:
-    if not symbol:
-        return None
-    text = symbol.strip().upper()
-    if text == "399101.XSHE":
-        return "399101.SZ"
-    return text
+    return catalog_normalize_index_symbol(symbol)
 
 
 def jq_index_symbol(symbol: str) -> str:
-    normalized = normalize_index_symbol(symbol) or symbol
-    if normalized == "399101.SZ":
-        return "399101.XSHE"
-    return normalized
+    return catalog_jq_index_symbol(symbol)
 
 
 def _db_path() -> Path:
@@ -121,8 +124,6 @@ def _has_snapshot_covering(index_symbol: str, start: date, end: date) -> bool:
         ).fetchone()
     snapshot_count = int(row[0] or 0)
     latest_snapshot = date.fromisoformat(row[1]) if row[1] else None
-    # Index weights are periodic snapshots, not daily rows. A cache is fresh
-    # enough when the latest snapshot is near the backtest end.
     return bool(before and snapshot_count and latest_snapshot and latest_snapshot >= end - timedelta(days=45))
 
 
@@ -135,6 +136,12 @@ def _tushare_token() -> str | None:
 def _fetch_tushare_index_weight(index_symbol: str, start: date, end: date) -> pd.DataFrame:
     import tushare as ts
 
+    item = get_index_item(index_symbol)
+    if item is None:
+        raise RuntimeError(f"Unsupported index symbol: {index_symbol}")
+    if not item.pool_enabled:
+        raise RuntimeError(f"Index {item.symbol} is market-only and cannot be used as a historical stock pool")
+
     token = _tushare_token()
     if not token:
         raise RuntimeError("Tushare token is not configured")
@@ -144,7 +151,7 @@ def _fetch_tushare_index_weight(index_symbol: str, start: date, end: date) -> pd
     frames = []
     for chunk_start, chunk_end in _month_ranges(start, end):
         df = pro.index_weight(
-            index_code=index_symbol,
+            index_code=item.provider_symbol,
             start_date=chunk_start.strftime("%Y%m%d"),
             end_date=chunk_end.strftime("%Y%m%d"),
         )
@@ -156,7 +163,7 @@ def _fetch_tushare_index_weight(index_symbol: str, start: date, end: date) -> pd
     return combined.drop_duplicates(subset=["index_code", "con_code", "trade_date"])
 
 
-def _upsert_components(index_symbol: str, df: pd.DataFrame) -> int:
+def _upsert_components(index_symbol: str, df: pd.DataFrame, *, source_name: str = "tushare.index_weight") -> int:
     if df.empty:
         return 0
     idx = normalize_index_symbol(index_symbol) or index_symbol
@@ -174,7 +181,7 @@ def _upsert_components(index_symbol: str, df: pd.DataFrame) -> int:
                 str(row["con_code"]).upper(),
                 trade_date,
                 float(row["weight"]) if pd.notna(row.get("weight")) else None,
-                "tushare.index_weight",
+                source_name,
                 now,
             )
         )
@@ -198,14 +205,85 @@ def _upsert_components(index_symbol: str, df: pd.DataFrame) -> int:
     return len(rows)
 
 
-async def ensure_index_components(index_symbol: str, start: date, end: date) -> dict[str, Any]:
-    """Ensure local snapshots exist around the requested backtest window."""
+def _derive_union_components(index_symbol: str, start: date, end: date) -> int:
     idx = normalize_index_symbol(index_symbol) or index_symbol
+    source_symbols = DERIVED_INDEX_COMPONENT_SOURCES.get(idx)
+    if not source_symbols:
+        return 0
+
+    init_index_component_table()
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    jq_idx = jq_index_symbol(idx)
+    placeholders = ",".join("?" for _ in source_symbols)
+    with _connect() as conn:
+        source_rows = conn.execute(
+            f"""
+            SELECT DISTINCT trade_date, symbol
+            FROM index_components
+            WHERE index_symbol IN ({placeholders})
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY trade_date, symbol
+            """,
+            [*source_symbols, start.isoformat(), end.isoformat()],
+        ).fetchall()
+        if not source_rows:
+            return 0
+
+        rows = [
+            (
+                idx,
+                jq_idx,
+                str(row["symbol"]).upper(),
+                str(row["trade_date"]),
+                None,
+                "derived.union",
+                now,
+            )
+            for row in source_rows
+        ]
+        conn.executemany(
+            """
+            INSERT INTO index_components (
+                index_symbol, jq_index_symbol, symbol, trade_date, weight, source, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(index_symbol, trade_date, symbol) DO UPDATE SET
+                jq_index_symbol = excluded.jq_index_symbol,
+                weight = excluded.weight,
+                source = excluded.source,
+                updated_at = excluded.updated_at
+            """,
+            rows,
+        )
+        conn.commit()
+    return len(rows)
+
+
+async def ensure_index_components(index_symbol: str, start: date, end: date) -> dict[str, Any]:
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    item = get_index_item(idx)
+    if item is None:
+        raise ValueError(f"Unsupported index symbol: {index_symbol}")
+    if not item.pool_enabled:
+        raise ValueError(f"Index {item.symbol} is not enabled as a historical stock pool: market_only_index")
+
     fetch_start = start - timedelta(days=370)
     if _has_snapshot_covering(idx, start, end):
         return {"index_symbol": idx, "inserted": 0, "source": "cache"}
-    if _has_any_snapshot(idx, start, end):
-        return {"index_symbol": idx, "inserted": 0, "source": "partial_cache"}
+
+    if item.component_mode == "derived_union":
+        def _sync_derived() -> dict[str, Any]:
+            inserted = _derive_union_components(idx, fetch_start, end)
+            logger.info("Index components derived: {} rows for {}", inserted, idx)
+            return {"index_symbol": idx, "inserted": inserted, "source": "derived.union"}
+
+        result = await asyncio.to_thread(_sync_derived)
+        if _has_snapshot_covering(idx, start, end):
+            return result
+        raise RuntimeError(
+            f"Strict historical constituent snapshots are missing for {idx}; cannot derive union coverage"
+        )
 
     def _sync() -> dict[str, Any]:
         df = _fetch_tushare_index_weight(idx, fetch_start, end)
@@ -233,31 +311,104 @@ def _has_any_snapshot(index_symbol: str, start: date, end: date) -> bool:
     return bool(row and int(row[0] or 0) > 0)
 
 
+def _query_symbols_between(index_symbol: str, start: date, end: date) -> list[str]:
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    with _connect() as conn:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM index_components
+            WHERE index_symbol = ?
+              AND trade_date >= ?
+              AND trade_date <= ?
+            ORDER BY symbol
+            """,
+            (idx, start.isoformat(), end.isoformat()),
+        ).fetchall()
+    return [str(row["symbol"]).upper() for row in rows]
+
+
+def _query_latest_snapshot_symbols(index_symbol: str) -> tuple[str | None, list[str]]:
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    with _connect() as conn:
+        latest = conn.execute(
+            """
+            SELECT MAX(trade_date)
+            FROM index_components
+            WHERE index_symbol = ?
+            """,
+            (idx,),
+        ).fetchone()
+        latest_date = str(latest[0]) if latest and latest[0] else None
+        if latest_date is None:
+            return None, []
+        rows = conn.execute(
+            """
+            SELECT DISTINCT symbol
+            FROM index_components
+            WHERE index_symbol = ? AND trade_date = ?
+            ORDER BY symbol
+            """,
+            (idx, latest_date),
+        ).fetchall()
+    return latest_date, [str(row["symbol"]).upper() for row in rows]
+
+
 async def load_index_symbols(index_symbol: str, start: date, end: date) -> list[str]:
-    """Return the union of symbols required to preload data for a date window."""
-    await ensure_index_components(index_symbol, start, end)
+    ensure_error: Exception | None = None
+    try:
+        await ensure_index_components(index_symbol, start, end)
+    except Exception as exc:
+        ensure_error = exc
+        logger.warning("Index component sync failed for {} in {}..{}: {}", index_symbol, start, end, exc)
+
     idx = normalize_index_symbol(index_symbol) or index_symbol
     lookback = start - timedelta(days=370)
+    symbols = await asyncio.to_thread(_query_symbols_between, idx, lookback, end)
+    if symbols:
+        return symbols
 
-    def _query() -> list[str]:
-        with _connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT symbol
-                FROM index_components
-                WHERE index_symbol = ?
-                  AND trade_date >= ?
-                  AND trade_date <= ?
-                ORDER BY symbol
-                """,
-                (idx, lookback.isoformat(), end.isoformat()),
-            ).fetchall()
-        return [r["symbol"] for r in rows]
+    # Some newer thematic pools have incomplete historical constituent files.
+    # Factor research can still run on a stable universe by using the latest
+    # snapshot while future syncs keep recording point-in-time history.
+    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
+    if latest_symbols:
+        logger.info(
+            "Index components fallback to latest snapshot {} for {} requested {}..{}",
+            latest_date,
+            idx,
+            start,
+            end,
+        )
+        return latest_symbols
 
-    return await asyncio.to_thread(_query)
+    today = date.today()
+    if end < today or start < today:
+        try:
+            await ensure_index_components(idx, today, today)
+        except Exception as exc:
+            if ensure_error is None:
+                ensure_error = exc
+            logger.warning("Index component current fallback sync failed for {}: {}", idx, exc)
+
+    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
+    if latest_symbols:
+        logger.info(
+            "Index components fallback to current/latest snapshot {} for {} requested {}..{}",
+            latest_date,
+            idx,
+            start,
+            end,
+        )
+        return latest_symbols
+
+    if ensure_error is not None:
+        raise ensure_error
+    return []
 
 
 async def index_pool_summary(index_symbol: str, start: date, end: date) -> dict[str, Any]:
+    item = get_index_item(index_symbol)
     symbols = await load_index_symbols(index_symbol, start, end)
     idx = normalize_index_symbol(index_symbol) or index_symbol
 
@@ -278,10 +429,15 @@ async def index_pool_summary(index_symbol: str, start: date, end: date) -> dict[
     min_date, max_date, snapshot_count = await asyncio.to_thread(_query_dates)
     return {
         "index_symbol": idx,
+        "display_name": item.display_name if item else idx,
         "jq_symbol": jq_index_symbol(idx),
         "symbol_count": len(symbols),
         "snapshot_count": snapshot_count,
         "min_snapshot_date": min_date,
         "max_snapshot_date": max_date,
         "symbols": symbols,
+        "component_mode": item.component_mode if item else "snapshot",
+        "pool_enabled": bool(item.pool_enabled) if item else False,
+        "component_status": "available",
+        "reason": None,
     }

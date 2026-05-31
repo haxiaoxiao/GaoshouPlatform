@@ -1,11 +1,11 @@
 """Minute Bar / BarEventSource 分钟数据单元测试"""
-import pytest
 from datetime import date, datetime
 
 import pandas as pd
+import pytest
 
-from app.backtest.event.event_source import Bar, BarEventSource
 from app.backtest.event.calendar import TradingCalendar
+from app.backtest.event.event_source import Bar, BarEventSource
 
 
 class TestMinuteBar:
@@ -35,7 +35,7 @@ def minute_data():
         rows = []
         for day_offset in [0, 1]:
             for minute in range(0, 240, 30):  # 每30分钟一根bar
-                ts = base + pd.Timedelta(days=day_offset, minutes=minute)
+                base + pd.Timedelta(days=day_offset, minutes=minute)
                 rows.append({
                     "open": 10 + day_offset * 0.5 + minute * 0.01,
                     "high": 10.2 + day_offset * 0.5 + minute * 0.01,
@@ -56,7 +56,7 @@ def daily_data():
     data: dict[str, pd.DataFrame] = {}
     for sym in symbols:
         rows = []
-        for i, dt in enumerate(dates):
+        for i, _dt in enumerate(dates):
             base_price = 10 + i * 0.5
             rows.append({
                 "open": base_price,

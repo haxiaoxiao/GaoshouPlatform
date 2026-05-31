@@ -32,14 +32,23 @@
       </el-form-item>
       <el-form-item label="日期范围">
         <el-date-picker
-          v-model="dateRange"
-          type="daterange"
+          v-model="queryParams.start_date"
+          type="date"
           range-separator="至"
           start-placeholder="开始日期"
           end-placeholder="结束日期"
           format="YYYY-MM-DD"
           value-format="YYYY-MM-DD"
-          style="width: 260px"
+          style="width: 130px"
+        />
+        <span class="date-separator">至</span>
+        <el-date-picker
+          v-model="queryParams.end_date"
+          type="date"
+          placeholder="结束日期"
+          format="YYYY-MM-DD"
+          value-format="YYYY-MM-DD"
+          style="width: 130px"
         />
       </el-form-item>
       <el-form-item>
@@ -82,75 +91,21 @@
       <template #header>
         <div class="card-header">
           <span>K线图</span>
-          <el-checkbox v-model="showMA" label="显示均线" />
         </div>
       </template>
-      <div ref="chartRef" class="kline-chart"></div>
+      <KlineChart :data="chartData" />
     </el-card>
 
     <!-- 数据表格 -->
-    <el-card class="table-card" shadow="never">
-      <el-table
+    <el-card ref="tableCardRef" class="table-card" shadow="never">
+      <el-table-v2
         :data="tableData"
+        :columns="tableColumns"
         v-loading="loading"
-        stripe
-        border
-        max-height="400"
-        @sort-change="handleSortChange"
-      >
-        <el-table-column prop="trade_date" label="交易日期" width="120" sortable="custom" fixed />
-        <el-table-column prop="open" label="开盘价" width="100" align="right">
-          <template #default="{ row }">
-            {{ row.open?.toFixed(2) || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="high" label="最高价" width="100" align="right">
-          <template #default="{ row }">
-            {{ row.high?.toFixed(2) || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="low" label="最低价" width="100" align="right">
-          <template #default="{ row }">
-            {{ row.low?.toFixed(2) || '-' }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="close" label="收盘价" width="100" align="right">
-          <template #default="{ row }">
-            <span :class="getPriceClass(row)">{{ row.close?.toFixed(2) || '-' }}</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="change_pct" label="涨跌幅" width="100" align="right">
-          <template #default="{ row, $index }">
-            <span v-if="$index < tableData.length - 1" :class="getChangeClass(row, tableData[$index + 1])">
-              {{ calcChange(row, tableData[$index + 1]) }}
-            </span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="volume" label="成交量" width="120" align="right">
-          <template #default="{ row }">
-            {{ formatVolume(row.volume) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="amount" label="成交额" width="140" align="right">
-          <template #default="{ row }">
-            {{ formatAmount(row.amount) }}
-          </template>
-        </el-table-column>
-        <el-table-column prop="amplitude" label="振幅" width="90" align="right">
-          <template #default="{ row, $index }">
-            <span v-if="$index < tableData.length - 1">
-              {{ calcAmplitude(row, tableData[$index + 1]) }}
-            </span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column prop="turnover" label="换手率" width="90" align="right">
-          <template #default="{ row }">
-            {{ row.turnover ? row.turnover.toFixed(2) + '%' : '-' }}
-          </template>
-        </el-table-column>
-      </el-table>
+        :width="tableWidth"
+        :height="400"
+        fixed
+      />
     </el-card>
 
     <!-- 分页 -->
@@ -169,11 +124,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, onMounted, h } from 'vue'
+import { useResizeObserver } from '@vueuse/core'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
-import * as echarts from 'echarts'
 import request from '@/api/request'
+import KlineChart from './KlineChart.vue'
+import type { Column } from 'element-plus'
 
 interface KlineRow {
   symbol: string
@@ -192,20 +149,21 @@ interface StockOption {
   name: string
 }
 
+type KlineCellParams = {
+  rowData: KlineRow
+  rowIndex: number
+}
+
 const loading = ref(false)
 const tableData = ref<KlineRow[]>([])
 const total = ref(0)
-const showMA = ref(true)
+const tableWidth = ref(1180)
+const tableCardRef = ref<HTMLElement | null>(null)
 
 // 股票搜索
 const stockSearchLoading = ref(false)
 const stockOptions = ref<StockOption[]>([])
 
-// 图表
-const chartRef = ref<HTMLDivElement | null>(null)
-let chartInstance: echarts.ECharts | null = null
-
-const dateRange = ref<string[]>([])
 const queryParams = reactive({
   symbol: '',
   period: 'daily',
@@ -226,14 +184,25 @@ const priceRange = computed(() => {
   }
 })
 
+const chartData = computed(() =>
+  tableData.value.map((row) => ({
+    datetime: row.trade_date,
+    open: row.open,
+    high: row.high,
+    low: row.low,
+    close: row.close,
+    volume: row.volume,
+    amount: row.amount,
+  }))
+)
+
 // 设置默认日期范围
 const setDateRange = (days: number) => {
   const end = new Date()
   const start = new Date()
   start.setDate(start.getDate() - days)
-  dateRange.value = [formatDate(start), formatDate(end)]
-  queryParams.start_date = dateRange.value[0]
-  queryParams.end_date = dateRange.value[1]
+  queryParams.start_date = formatDate(start)
+  queryParams.end_date = formatDate(end)
 }
 
 const formatDate = (date: Date): string => {
@@ -264,7 +233,7 @@ const searchStocks = async (query: string) => {
 
 // 股票选择变化
 const handleSymbolChange = () => {
-  if (queryParams.symbol && dateRange.value.length === 0) {
+  if (queryParams.symbol && (!queryParams.start_date || !queryParams.end_date)) {
     setDateRange(365)
   }
 }
@@ -276,11 +245,6 @@ const handleQuery = async () => {
   }
 
   // 更新日期参数
-  if (dateRange.value && dateRange.value.length === 2) {
-    queryParams.start_date = dateRange.value[0]
-    queryParams.end_date = dateRange.value[1]
-  }
-
   loading.value = true
   try {
     const params: Record<string, unknown> = {
@@ -304,10 +268,6 @@ const handleQuery = async () => {
     tableData.value = response.items || []
     total.value = response.total || 0
 
-    // 更新图表
-    nextTick(() => {
-      updateChart()
-    })
   } catch (error: unknown) {
     const err = error as { response?: { data?: { detail?: string } } }
     ElMessage.error(err.response?.data?.detail || '查询失败')
@@ -316,10 +276,6 @@ const handleQuery = async () => {
   } finally {
     loading.value = false
   }
-}
-
-const handleSortChange = ({ prop, order }: { prop: string; order: string }) => {
-  console.log('Sort:', prop, order)
 }
 
 const handleExport = () => {
@@ -394,174 +350,64 @@ const getPriceClass = (row: KlineRow): string => {
   return row.close >= row.open ? 'change-up' : 'change-down'
 }
 
-// 初始化图表
-const initChart = () => {
-  if (!chartRef.value) return
-
-  chartInstance = echarts.init(chartRef.value)
-}
-
-// 更新图表
-const updateChart = () => {
-  if (!chartInstance || tableData.value.length === 0) return
-
-  // 数据按日期升序排列
-  const sortedData = [...tableData.value].sort((a, b) =>
-    new Date(a.trade_date).getTime() - new Date(b.trade_date).getTime()
-  )
-
-  const dates = sortedData.map(d => d.trade_date)
-  const klineData = sortedData.map(d => [d.open, d.close, d.low, d.high])
-  const volumeData = sortedData.map(d => d.volume)
-
-  // 计算均线
-  const calcMA = (data: number[], period: number): (number | null)[] => {
-    const result: (number | null)[] = []
-    for (let i = 0; i < data.length; i++) {
-      if (i < period - 1) {
-        result.push(null)
-      } else {
-        const sum = data.slice(i - period + 1, i + 1).reduce((a, b) => a + b, 0)
-        result.push(sum / period)
-      }
-    }
-    return result
-  }
-
-  const closes = sortedData.map(d => d.close)
-  const ma5 = calcMA(closes, 5)
-  const ma10 = calcMA(closes, 10)
-  const ma20 = calcMA(closes, 20)
-  const ma60 = calcMA(closes, 60)
-
-  const option: echarts.EChartsOption = {
-    animation: false,
-    legend: {
-      data: showMA.value ? ['K线', 'MA5', 'MA10', 'MA20', 'MA60', '成交量'] : ['K线', '成交量'],
-      bottom: 10,
+const tableColumns = computed<Column<unknown>[]>(() => [
+  { key: 'trade_date', dataKey: 'trade_date', title: '交易日期', width: 130, fixed: true },
+  { key: 'open', dataKey: 'open', title: '开盘价', width: 100, align: 'right', cellRenderer: (params: KlineCellParams) => h('span', formatPrice(params.rowData.open)) },
+  { key: 'high', dataKey: 'high', title: '最高价', width: 100, align: 'right', cellRenderer: (params: KlineCellParams) => h('span', formatPrice(params.rowData.high)) },
+  { key: 'low', dataKey: 'low', title: '最低价', width: 100, align: 'right', cellRenderer: (params: KlineCellParams) => h('span', formatPrice(params.rowData.low)) },
+  {
+    key: 'close',
+    dataKey: 'close',
+    title: '收盘价',
+    width: 100,
+    align: 'right',
+    cellRenderer: (params: KlineCellParams) => h('span', { class: getPriceClass(params.rowData) }, formatPrice(params.rowData.close)),
+  },
+  {
+    key: 'change_pct',
+    dataKey: 'change_pct',
+    title: '涨跌幅',
+    width: 100,
+    align: 'right',
+    cellRenderer: (params: KlineCellParams) => {
+      const previous = tableData.value[params.rowIndex + 1]
+      return previous
+        ? h('span', { class: getChangeClass(params.rowData, previous) }, calcChange(params.rowData, previous))
+        : h('span', '-')
     },
-    tooltip: {
-      trigger: 'axis',
-      axisPointer: { type: 'cross' },
-      formatter: (params: unknown) => {
-        const items = Array.isArray(params) ? params as Array<{ seriesName: string; axisValue: string; dataIndex: number }> : []
-        if (!items || items.length === 0) return ''
-        const date = items[0].axisValue
-        const idx = items[0].dataIndex
-        if (idx < 0 || idx >= sortedData.length) return ''
-        const d = sortedData[idx]
-        const open = d.open
-        const close = d.close
-        const high = d.high
-        const low = d.low
-        const change = close - open
-        const pct = open !== 0 ? ((change / open) * 100).toFixed(2) : '0.00'
-        const color = change >= 0 ? 'color:#f56c6c' : 'color:#67c23a'
-        const vol = d.volume
-        const fmtVol = (v: number) => v >= 1e8 ? (v / 1e8).toFixed(2) + '亿' : v >= 1e4 ? (v / 1e4).toFixed(2) + '万' : String(Math.round(v))
-        return `<div style="font-size:13px;line-height:1.8">
-          <b>${date}</b><br/>
-          开盘: <b>${open.toFixed(2)}</b><br/>
-          收盘: <b style="${color}">${close.toFixed(2)}</b><br/>
-          最高: ${high.toFixed(2)}<br/>
-          最低: ${low.toFixed(2)}<br/>
-          涨跌: <b style="${color}">${change >= 0 ? '+' : ''}${pct}%</b><br/>
-          成交量: ${fmtVol(vol)}
-        </div>`
-      },
+  },
+  { key: 'volume', dataKey: 'volume', title: '成交量', width: 130, align: 'right', cellRenderer: (params: KlineCellParams) => h('span', formatVolume(params.rowData.volume)) },
+  { key: 'amount', dataKey: 'amount', title: '成交额', width: 150, align: 'right', cellRenderer: (params: KlineCellParams) => h('span', formatAmount(params.rowData.amount)) },
+  {
+    key: 'amplitude',
+    dataKey: 'amplitude',
+    title: '振幅',
+    width: 100,
+    align: 'right',
+    cellRenderer: (params: KlineCellParams) => {
+      const previous = tableData.value[params.rowIndex + 1]
+      return h('span', previous ? calcAmplitude(params.rowData, previous) : '-')
     },
-    grid: [
-      { left: '8%', right: '3%', top: '5%', height: '55%' },
-      { left: '8%', right: '3%', top: '68%', height: '18%' },
-    ],
-    xAxis: [
-      {
-        type: 'category',
-        data: dates,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        splitLine: { show: false },
-        min: 'dataMin',
-        max: 'dataMax',
-        axisLabel: { formatter: (v: string) => v.substring(5) },
-      },
-      {
-        type: 'category',
-        gridIndex: 1,
-        data: dates,
-        boundaryGap: false,
-        axisLine: { onZero: false },
-        axisTick: { show: false },
-        splitLine: { show: false },
-        axisLabel: { show: false },
-        min: 'dataMin',
-        max: 'dataMax',
-      },
-    ],
-    yAxis: [
-      { scale: true, splitArea: { show: true } },
-      { scale: true, gridIndex: 1, splitNumber: 2, axisLabel: { formatter: formatVolume } },
-    ],
-    dataZoom: [
-      { type: 'inside', xAxisIndex: [0, 1], start: 50, end: 100 },
-      { show: true, xAxisIndex: [0, 1], type: 'slider', bottom: 0, start: 50, end: 100, height: 20 },
-    ],
-    series: [
-      {
-        name: 'K线',
-        type: 'candlestick',
-        data: klineData,
-        itemStyle: {
-          color: '#f56c6c',
-          color0: '#67c23a',
-          borderColor: '#f56c6c',
-          borderColor0: '#67c23a',
-        },
-      },
-      ...(showMA.value ? [
-        { name: 'MA5', type: 'line' as const, data: ma5, smooth: true, lineStyle: { width: 1 }, symbol: 'none' },
-        { name: 'MA10', type: 'line' as const, data: ma10, smooth: true, lineStyle: { width: 1 }, symbol: 'none' },
-        { name: 'MA20', type: 'line' as const, data: ma20, smooth: true, lineStyle: { width: 1 }, symbol: 'none' },
-        { name: 'MA60', type: 'line' as const, data: ma60, smooth: true, lineStyle: { width: 1 }, symbol: 'none' },
-      ] : []),
-      {
-        name: '成交量',
-        type: 'bar',
-        xAxisIndex: 1,
-        yAxisIndex: 1,
-        data: volumeData,
-        itemStyle: {
-          color: (params: { dataIndex: number }) => {
-            const item = sortedData[params.dataIndex]
-            return item.close >= item.open ? '#f56c6c' : '#67c23a'
-          },
-        },
-      },
-    ],
-  }
+  },
+  {
+    key: 'turnover',
+    dataKey: 'turnover',
+    title: '换手率',
+    width: 100,
+    align: 'right',
+    cellRenderer: (params: KlineCellParams) => h('span', params.rowData.turnover ? `${params.rowData.turnover.toFixed(2)}%` : '-'),
+  },
+])
 
-  chartInstance.setOption(option, true)
-}
-
-// 监听均线显示
-watch(showMA, () => {
-  updateChart()
-})
-
-// 窗口大小变化
-const handleResize = () => {
-  chartInstance?.resize()
-}
+const formatPrice = (value?: number) => value === undefined || value === null ? '-' : value.toFixed(2)
 
 onMounted(() => {
   setDateRange(365)
-  initChart()
-  window.addEventListener('resize', handleResize)
 })
 
-onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
-  chartInstance?.dispose()
+useResizeObserver(tableCardRef, ([entry]) => {
+  const width = Math.floor(entry.contentRect.width)
+  if (width > 0) tableWidth.value = Math.max(760, width - 2)
 })
 </script>
 
@@ -575,8 +421,9 @@ onUnmounted(() => {
 
 .query-form {
   padding: 16px;
-  background: #f5f7fa;
-  border-radius: 4px;
+  background: linear-gradient(180deg, #121b26 0%, #0c141d 100%);
+  border: 1px solid rgba(136, 160, 190, 0.28);
+  border-radius: 8px;
   flex-shrink: 0;
 }
 
@@ -584,6 +431,58 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   flex-shrink: 0;
+}
+
+.date-separator {
+  margin: 0 8px;
+  color: var(--text-secondary);
+}
+
+.chart-card,
+.table-card {
+  border-color: rgba(136, 160, 190, 0.24);
+  background: #0d141e;
+}
+
+:deep(.el-form-item__label) {
+  color: var(--text-label);
+}
+
+:deep(.el-card__header) {
+  color: var(--text-bright);
+  background: #101923;
+  border-bottom-color: rgba(136, 160, 190, 0.22);
+}
+
+:deep(.el-table-v2) {
+  --el-table-v2-row-hover-bg-color: #1b3142;
+  --el-table-v2-row-bg-color: #0f1823;
+  --el-table-v2-header-bg-color: #121d2a;
+  --el-table-v2-header-text-color: #c9d5e6;
+  --el-table-v2-border-color: rgba(119, 146, 176, 0.46);
+  color: #edf3fa;
+  background: #0b1018;
+}
+
+:deep(.el-table-v2__main),
+:deep(.el-table-v2__left),
+:deep(.el-table-v2__right),
+:deep(.el-table-v2__header),
+:deep(.el-table-v2__body),
+:deep(.el-table-v2__row),
+:deep(.el-table-v2__row-cell) {
+  background: transparent;
+  color: #edf3fa;
+}
+
+:deep(.el-table-v2__header-cell) {
+  color: #c9d5e6;
+  background: #121d2a;
+  font-weight: 700;
+}
+
+:deep(.el-table-v2__row:hover .el-table-v2__row-cell) {
+  background: #1b3142;
 }
 
 .chart-card {

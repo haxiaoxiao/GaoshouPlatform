@@ -1,10 +1,9 @@
-"""动量类指标"""
-import math
+"""动量类指标。"""
 from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
 def _calc_return(kline_data: list[dict], n: int) -> float | None:
-    """计算N日涨幅"""
+    """计算 N 日涨幅。"""
     if not kline_data or len(kline_data) < 2:
         return None
     if len(kline_data) <= n:
@@ -75,7 +74,7 @@ class MA5Slope(IndicatorBase):
     data_type = "时序"
     is_precomputed = True
     dependencies = []
-    description = "MA5线性回��斜率"
+    description = "MA5 线性回归斜率"
     unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:

@@ -7,10 +7,16 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_precompute_runtime import precompute_memory_policy, release_precompute_memory
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 class Alphas:
@@ -47,9 +53,8 @@ class Alphas:
 
     def _scale(self, x: pd.Series, a: float = 1.0) -> pd.Series:
         """rescaled x such that sum(abs(x)) = a (the default is a = 1)"""
-        return x.groupby("symbol").transform(
-            lambda s: s * a / (s.abs().sum() + self.eps)
-        )
+        denom = x.abs().groupby("date").transform("sum")
+        return x * a / (denom + self.eps)
 
     def _delta(self, x: pd.Series, d: int) -> pd.Series:
         """today's value of x minus the value of x d days ago"""
@@ -800,14 +805,14 @@ class Alphas:
         scale(rank(ts_argmax(close, 10))))))"""
         left = 2 * self._scale(
             self._rank(
-                (
+
                     (
                         (self.data["close"] - self.data["low"])
                         - (self.data["high"] - self.data["close"])
                     )
                     / (self.data["high"] - self.data["low"] + self.eps)
                     * self.data["volume"]
-                )
+
             )
         )
         right = self._scale(self._rank(self._ts_argmax(self.data["close"], 10)))
@@ -1546,14 +1551,14 @@ class Alphas:
             self._ind_neutralize(
                 self._ind_neutralize(
                     self._rank(
-                        (
+
                             (
                                 (self.data["close"] - self.data["low"])
                                 - (self.data["high"] - self.data["close"])
                             )
                             / (self.data["high"] - self.data["low"] + self.eps)
                             * self.data["volume"]
-                        )
+
                     )
                 )
             )
@@ -1628,7 +1633,19 @@ def build_alpha101_input_frame(
     for column in ("open", "high", "low", "close", "volume", "amount"):
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
     frame = frame.dropna(subset=["symbol", "trade_date", "open", "high", "low", "close"])
-    frame["vwap"] = np.where(frame["volume"].fillna(0.0) > 0, frame["amount"] / frame["volume"].replace(0, np.nan), frame["close"])
+    volume = frame["volume"].where(frame["volume"].fillna(0.0) > 0)
+    raw_vwap = frame["amount"] / volume
+    raw_ratio = (raw_vwap / frame["close"].replace(0, np.nan)).replace([np.inf, -np.inf], np.nan)
+    median_raw_ratio = raw_ratio.dropna().median()
+    # QMT/JQ daily volume is commonly stored in lots while amount is in CNY.
+    # Infer the multiplier from amount / volume / close to avoid hardcoding a
+    # data-source-specific unit when alternate daily feeds are imported later.
+    volume_to_shares = 100.0 if pd.notna(median_raw_ratio) and float(median_raw_ratio) > 20.0 else 1.0
+    frame["vwap"] = np.where(
+        frame["volume"].fillna(0.0) > 0,
+        frame["amount"] / (frame["volume"].replace(0, np.nan) * volume_to_shares),
+        frame["close"],
+    )
     frame["vwap"] = pd.to_numeric(frame["vwap"], errors="coerce").fillna(frame["close"])
     frame = frame.sort_values(["symbol", "trade_date"]).reset_index(drop=True)
     frame["return"] = frame.groupby("symbol")["close"].pct_change()
@@ -1680,13 +1697,34 @@ def precompute_alpha101_factors(
     panel = build_alpha101_input_frame(symbols, start_date, end_date)
     if panel.empty:
         raise RuntimeError("No daily data available for Alpha101 precompute")
-    rows: list[dict[str, Any]] = []
     created_at = datetime.now()
     empty_hash = factor_params_hash({})
     total = max(len(factor_names), 1)
+    errors: dict[str, str] = {}
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
+    from app.services.alpha101_wide_calculator import WideAlphas, is_alpha101_wide_supported
+
+    # Wide matrices are faster for small universes, but they multiply the panel
+    # into several dense DataFrames and can blow RAM on large pools. Fall back to
+    # the long Series implementation when the input panel is already large.
+    panel_rows = len(panel)
+    policy = precompute_memory_policy()
+    use_wide = any(is_alpha101_wide_supported(str(name)) for name in factor_names) and panel_rows <= policy.wide_panel_max_rows
+    wide_calculator = WideAlphas(panel) if use_wide else None
+    if not use_wide:
+        logger.info("Alpha101 precompute using long-form calculator for {} rows and {} factors", panel_rows, len(factor_names))
     for index, factor_name in enumerate(factor_names, start=1):
         report(0.10 + 0.78 * (index / total), "alpha101", current=index, total=total, factor_name=factor_name)
-        series = compute_alpha101_factor_series(panel, factor_name)
+        try:
+            if wide_calculator is not None and is_alpha101_wide_supported(str(factor_name)):
+                series = wide_calculator.compute_series(str(factor_name))
+            else:
+                series = compute_alpha101_factor_series(panel, factor_name)
+        except Exception as exc:
+            logger.exception("Alpha101 precompute failed for {}", factor_name)
+            errors[str(factor_name)] = str(exc)
+            continue
         if series.empty:
             continue
         factor_frame = series.rename("value").reset_index()
@@ -1696,28 +1734,34 @@ def precompute_alpha101_factors(
         factor_frame = factor_frame.dropna(subset=["value"])
         if factor_frame.empty:
             continue
-        for item in factor_frame.itertuples(index=False):
-            rows.append({
-                "symbol": str(item.symbol),
-                "trade_date": item.date,
-                "as_of_time": "",
-                "factor_name": factor_name,
-                "params_hash": empty_hash,
-                "value": float(item.value),
-                "source": "precompute.alpha101",
-                "created_at": created_at,
-            })
-    report(0.92, "write", rows_buffered=len(rows))
-    factor_store = store or get_factor_value_store()
-    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["factor_name"]] = counts.get(row["factor_name"], 0) + 1
-    report(1.0, "done", rows_written=written)
+        factor_frame = factor_frame.rename(columns={"date": "trade_date"})
+        factor_frame["symbol"] = factor_frame["symbol"].astype(str)
+        factor_frame["as_of_time"] = ""
+        factor_frame["factor_name"] = factor_name
+        factor_frame["params_hash"] = empty_hash
+        factor_frame["source"] = "precompute.alpha101"
+        factor_frame["created_at"] = created_at
+        writer.write_frame(factor_frame[[
+            "symbol",
+            "trade_date",
+            "as_of_time",
+            "factor_name",
+            "params_hash",
+            "value",
+            "source",
+            "created_at",
+        ]])
+        report(0.10 + 0.78 * (index / total), "alpha101", current=index, total=total, factor_name=factor_name, rows_written=writer.written)
+        del series, factor_frame
+        release_precompute_memory()
+    report(0.92, "write", rows_written=writer.written)
+    report(1.0, "done", rows_written=writer.written)
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "rows": counts,
-        "rows_written": written,
+        "rows": {str(name): writer.counts.get(str(name), 0) for name in factor_names},
+        "rows_written": writer.written,
+        "failed_factor_names": list(errors),
+        "errors": errors,
     }

@@ -112,6 +112,7 @@ class IndicatorRegistry:
     def auto_discover(cls) -> None:
         import importlib
         import pkgutil
+
         from app import indicators as pkg
 
         for _importer, modname, _ispkg in pkgutil.iter_modules(pkg.__path__):

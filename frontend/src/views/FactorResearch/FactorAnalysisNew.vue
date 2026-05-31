@@ -56,12 +56,29 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import * as echarts from 'echarts'
+import * as echarts from '@/lib/echarts'
 import { evaluationApi } from '@/api/factorResearch'
-import type { FactorReport } from '@/types/factor'
+import type { FactorReport, StockPool } from '@/types/factor'
 
 const route = useRoute()
 const factorName = ref(String(route.params.id || ''))
+const stockPoolOptions: StockPool[] = [
+  'hs300',
+  'zz500',
+  'zz800',
+  'zz1000',
+  'chinext',
+  'chinext50',
+  'chinext_composite',
+  'star50',
+  'star100',
+]
+const queryStockPool = String(route.query.stock_pool || 'hs300')
+const stockPool = ref<StockPool>(
+  stockPoolOptions.includes(queryStockPool as StockPool)
+    ? queryStockPool as StockPool
+    : 'hs300',
+)
 const report = ref<FactorReport | null>(null)
 const loading = ref(false)
 
@@ -161,7 +178,7 @@ async function fetchReport() {
   try {
     report.value = await evaluationApi.report({
       expression: factorName.value,
-      stock_pool: 'hs300',
+      stock_pool: stockPool.value,
       start_date: '2020-01-01',
       end_date: '2025-12-31',
     })

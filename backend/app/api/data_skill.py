@@ -1,13 +1,16 @@
 # backend/app/api/data_skill.py
 """数据技能 API — 为策略模块提供统一数据查询接口"""
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Path, Query
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.models import Stock
 from app.db.sqlite import get_async_session
 from app.services.data_skill import DataSkill
+from app.services.security_symbols import normalize_security_symbol
 
 router = APIRouter()
 
@@ -56,6 +59,139 @@ async def get_stock_snapshot(
     if snapshot is None:
         return {"code": 1, "message": f"未找到股票 {symbol}"}
     return {"code": 0, "data": _serialize_snapshot(snapshot)}
+
+
+def _serialize_sql_row(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    d: dict[str, Any] = {}
+    for key, value in row._mapping.items():
+        if isinstance(value, date):
+            value = value.isoformat()
+        elif isinstance(value, datetime):
+            value = value.isoformat()
+        d[key] = value
+    return d
+
+
+def _serialize_stock_model(stock: Stock) -> dict[str, Any]:
+    fields = [
+        "symbol", "name", "exchange", "industry", "industry2", "industry3",
+        "sector", "concept", "list_date", "delist_date", "is_st",
+        "is_delist", "is_suspend", "total_shares", "float_shares",
+        "a_float_shares", "limit_sell_shares", "total_mv", "circ_mv",
+        "company_name", "province", "city", "business_scope",
+        "main_business", "website", "employees", "eps", "bvps", "roe",
+        "pe_ttm", "pb", "total_assets", "total_liability", "total_equity",
+        "net_profit", "revenue", "security_type", "product_class",
+    ]
+    d: dict[str, Any] = {}
+    for field in fields:
+        value = getattr(stock, field, None)
+        if isinstance(value, date):
+            value = value.isoformat()
+        elif isinstance(value, datetime):
+            value = value.isoformat()
+        d[field] = value
+    return d
+
+
+@router.get("/review/{symbol}", summary="A-share review context")
+async def get_stock_review_context(
+    symbol: str = Path(description="Stock symbol, e.g. 600051.SH"),
+    as_of_date: date | None = Query(None, description="Review date YYYY-MM-DD"),
+    lookback_days: int = Query(60, ge=1, le=365, description="Status lookback days"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    normalized = normalize_security_symbol(symbol) or symbol.strip().upper()
+    stock = (
+        await session.execute(select(Stock).where(Stock.symbol == normalized))
+    ).scalar_one_or_none()
+    if stock is None:
+        return {"code": 1, "message": f"未找到股票 {symbol}"}
+
+    end_date = as_of_date or date.today()
+    start_date = end_date - timedelta(days=lookback_days)
+    params = {
+        "symbol": normalized,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+    }
+    daily_basic = (
+        await session.execute(
+            text(
+                """
+                SELECT symbol, trade_date, total_share, float_share, total_mv,
+                       circ_mv, turnover_rate, pe_ttm, pb, source, updated_at
+                FROM stock_daily_basic
+                WHERE symbol = :symbol AND trade_date <= :end_date
+                ORDER BY trade_date DESC
+                LIMIT 1
+                """
+            ),
+            params,
+        )
+    ).first()
+    limit_prices = (
+        await session.execute(
+            text(
+                """
+                SELECT symbol, trade_date, up_limit, down_limit, source, updated_at
+                FROM stock_limit_prices
+                WHERE symbol = :symbol
+                  AND trade_date >= :start_date
+                  AND trade_date <= :end_date
+                ORDER BY trade_date DESC
+                LIMIT 10
+                """
+            ),
+            params,
+        )
+    ).all()
+    name_changes = (
+        await session.execute(
+            text(
+                """
+                SELECT symbol, name, start_date, end_date, change_reason, source, updated_at
+                FROM stock_name_changes
+                WHERE symbol = :symbol
+                  AND start_date <= :end_date
+                  AND (end_date IS NULL OR end_date >= :start_date)
+                ORDER BY start_date DESC
+                LIMIT 10
+                """
+            ),
+            params,
+        )
+    ).all()
+    name_text = str(stock.name or "").upper()
+    status = {
+        "is_st": int(stock.is_st or 0),
+        "is_delist": int(stock.is_delist or 0),
+        "is_suspend": int(stock.is_suspend or 0),
+        "name_has_st_marker": "ST" in name_text or "*" in name_text,
+        "risk_warning_flag": bool(stock.is_st or "ST" in name_text or "*" in name_text),
+        "suspension_flag": bool(stock.is_suspend),
+    }
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {
+            "symbol": normalized,
+            "as_of_date": end_date.isoformat(),
+            "lookback_start": start_date.isoformat(),
+            "stock": _serialize_stock_model(stock),
+            "status": status,
+            "daily_basic_latest": _serialize_sql_row(daily_basic),
+            "limit_prices_recent": [_serialize_sql_row(row) for row in limit_prices],
+            "name_changes": [_serialize_sql_row(row) for row in name_changes],
+            "data_quality": {
+                "daily_basic_present": daily_basic is not None,
+                "limit_price_rows": len(limit_prices),
+                "name_change_rows": len(name_changes),
+            },
+        },
+    }
 
 
 @router.post("/stocks/batch", summary="批量获取股票快照")
@@ -115,10 +251,11 @@ async def get_kline_minute(
     start_date: date | None = Query(None, description="起始日期 YYYY-MM-DD"),
     end_date: date | None = Query(None, description="结束日期 YYYY-MM-DD"),
     limit: int = Query(500, ge=1, le=5000, description="最大条数"),
+    timer_times: list[str] | None = Query(None, description="分钟时间点过滤，如 10:00,10:30,14:50"),
     session: AsyncSession = Depends(get_async_session),
 ):
     skill = DataSkill(session)
-    bars = await skill.get_kline_minute(symbol, start_date, end_date, limit)
+    bars = await skill.get_kline_minute(symbol, start_date, end_date, limit, timer_times=timer_times)
     return {"code": 0, "data": [_serialize_bar(b) for b in bars]}
 
 
@@ -206,5 +343,65 @@ async def get_indicator(
     session: AsyncSession = Depends(get_async_session),
 ):
     skill = DataSkill(session)
-    value = skill.get_indicator(symbol, name, trade_date)
-    return {"code": 0, "data": {"symbol": symbol, "indicator": name, "value": value, "trade_date": trade_date.isoformat() if trade_date else None}}
+    value = await skill.get_indicator(symbol, name, trade_date)
+    return {
+        "code": 0,
+        "data": {
+            "symbol": symbol,
+            "indicator": name,
+            "value": value,
+            "trade_date": trade_date.isoformat() if trade_date else None,
+        },
+    }
+
+
+@router.post("/indicator/batch", summary="批量查询截面指标")
+async def get_indicators_batch(
+    symbols: list[str] = Query(description="股票代码列表"),
+    names: list[str] | None = Query(None, description="指标名称列表（可选，不传表示返回该日期该股票的所有指标）"),
+    trade_date: date | None = Query(None, description="交易日期（可选，不传表示取 store 可用的最新日期）"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicators_batch(symbols=symbols, trade_date=trade_date, names=names)
+    return {"code": 0, "data": rows}
+
+
+@router.get("/indicator/timeseries/{symbol}", summary="查询股票指标时序数据")
+async def get_indicator_timeseries(
+    symbol: str = Path(description="股票代码"),
+    names: list[str] = Query(..., description="指标名称列表，如 pe_ttm,pb"),
+    start_date: date = Query(..., description="起始日期 YYYY-MM-DD"),
+    end_date: date = Query(..., description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(5000, ge=1, le=200000, description="最大返回行数"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicator_timeseries(
+        symbol=symbol,
+        names=names,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    return {"code": 0, "data": rows}
+
+
+@router.post("/indicator/timeseries/batch", summary="批量查询指标时序数据")
+async def get_indicators_timeseries_batch(
+    symbols: list[str] = Query(description="股票代码列表"),
+    names: list[str] = Query(..., description="指标名称列表，如 pe_ttm,pb"),
+    start_date: date = Query(..., description="起始日期 YYYY-MM-DD"),
+    end_date: date = Query(..., description="结束日期 YYYY-MM-DD"),
+    limit: int = Query(200000, ge=1, le=500000, description="最大返回行数"),
+    session: AsyncSession = Depends(get_async_session),
+):
+    skill = DataSkill(session)
+    rows = await skill.get_indicators_timeseries_batch(
+        symbols=symbols,
+        names=names,
+        start_date=start_date,
+        end_date=end_date,
+        limit=limit,
+    )
+    return {"code": 0, "data": rows}

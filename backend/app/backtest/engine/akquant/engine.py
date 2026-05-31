@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import asyncio
-from collections import defaultdict, deque
 import gc
 import hashlib
 import os
+import pickle
 import shutil
-import textwrap
+import time
+from collections import defaultdict, deque
 from datetime import date, timedelta
 from typing import Any, Callable
 
@@ -21,13 +22,12 @@ from app.backtest.engine.interface import IBacktestEngine, IDataProvider
 if AKQUANT_AVAILABLE:
     import akquant as aq
     from akquant.config import BacktestConfig as AQBacktestConfig
-    from akquant.config import InstrumentConfig
-    from akquant.config import RiskConfig
-    from akquant.config import StrategyConfig
+    from akquant.config import InstrumentConfig, RiskConfig, StrategyConfig
 
 from app.backtest.engine.akquant.adapter import ClickHouseFeedAdapter
 from app.backtest.engine.akquant.normalizer import normalize_result
 from app.backtest.engine.akquant.reporter import REPORTS_DIR, generate_report
+from app.services.benchmark_series import attach_benchmark_result
 from app.services.timer_minute_sync import timer_times_from_params, timer_times_to_strings
 
 _DYNAMIC_STRATEGY_REGISTRY: dict[str, type] = {}
@@ -43,15 +43,45 @@ _TRANSIENT_STATE_KEYS = {
 }
 _TRANSIENT_EXTENSION_TYPES = {
     ("builtins", "Bar"),
+    ("builtins", "Fill"),
+    ("builtins", "Order"),
+    ("builtins", "Position"),
     ("builtins", "Tick"),
+    ("builtins", "Trade"),
     ("builtins", "StrategyContext"),
 }
+
+
+def _format_elapsed(seconds: float) -> str:
+    total = max(0, int(seconds))
+    minutes, sec = divmod(total, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}小时{minutes}分钟"
+    if minutes:
+        return f"{minutes}分钟{sec}秒"
+    return f"{sec}秒"
+
+
+def _bar_type_label(bar_type: str) -> str:
+    text = str(bar_type or "daily").lower()
+    if text == "minute_timer":
+        return "定时分钟Bar"
+    if text == "minute":
+        return "分钟Bar"
+    return "日线Bar"
 
 
 def _timer_strings_from_strategy_param(value: Any) -> tuple[str, ...]:
     if value in (None, "", []):
         return ()
     return timer_times_to_strings(timer_times_from_params({"timer_times": value}))
+
+
+def _timer_strings_from_config(config: BacktestConfig) -> tuple[str, ...]:
+    if config.timer_times:
+        return timer_times_to_strings(timer_times_from_params({"timer_times": config.timer_times}))
+    return timer_times_to_strings(timer_times_from_params(config.strategy_params))
 
 
 def _smart_keep_index_symbols(config: BacktestConfig) -> tuple[str, ...]:
@@ -85,8 +115,16 @@ class AkquantEngine(IBacktestEngine):
         start_date = config.start_date or date(2020, 1, 1)
         end_date = config.end_date or date(2025, 12, 31)
 
+        self._emit_progress(
+            progress_callback,
+            0.01,
+            current_date=start_date,
+            phase="loading_market_data",
+            message="正在加载行情数据",
+            config=config,
+        )
         timer_times = (
-            timer_times_to_strings(timer_times_from_params(config.strategy_params))
+            _timer_strings_from_config(config)
             if config.bar_type == "minute_timer"
             else None
         )
@@ -109,21 +147,49 @@ class AkquantEngine(IBacktestEngine):
         await adapter.preload()
 
         if not adapter.has_any_data:
+            self._emit_progress(
+                progress_callback,
+                1.0,
+                current_date=end_date,
+                phase="no_market_data",
+                message="没有加载到可用行情数据",
+                config=config,
+            )
             logger.warning("AkquantEngine: no data loaded, returning empty result")
             return BacktestResult(initial_capital=config.initial_capital)
 
+        self._emit_progress(
+            progress_callback,
+            0.05,
+            current_date=start_date,
+            phase="market_data_loaded",
+            message="行情数据加载完成，正在加载策略",
+            config=config,
+        )
         strategy_code = config.strategy_code or config.factor_expression or ""
-        strategy = _build_strategy(strategy_code, config)
-        _apply_strategy_params(strategy, config)
+        strategy = _apply_strategy_params(_build_strategy(strategy_code, config), config)
 
+        self._emit_progress(
+            progress_callback,
+            0.08,
+            current_date=start_date,
+            phase="strategy_loaded",
+            message="策略加载完成，正在准备基准数据",
+            config=config,
+        )
         benchmark_returns = None
+        benchmark_warning = None
         if config.benchmark_symbol:
-            benchmark_returns = await data_provider.load_benchmark(
-                config.benchmark_symbol, start_date, end_date
-            )
+            try:
+                benchmark_returns = await data_provider.load_benchmark(
+                    config.benchmark_symbol, start_date, end_date
+                )
+            except Exception as exc:
+                benchmark_warning = f"Benchmark data load failed for {config.benchmark_symbol}: {exc}"
 
         history_depth = self._history_depth(config)
-        if self._should_run_chunked(config, start_date, end_date):
+        chunked_run = self._should_run_chunked(config, start_date, end_date)
+        if chunked_run:
             raw_result = await self._run_chunked(
                 config=config,
                 data_provider=data_provider,
@@ -151,13 +217,33 @@ class AkquantEngine(IBacktestEngine):
                 )
 
             loop = asyncio.get_running_loop()
-            raw_result = await loop.run_in_executor(None, _run_sync)
+            raw_result = await self._run_sync_with_heartbeat(
+                loop=loop,
+                run_func=_run_sync,
+                config=config,
+                start_date=start_date,
+                end_date=end_date,
+                adapter=adapter,
+                progress_callback=progress_callback,
+            )
 
         result = normalize_result(
             raw_result,
             start_date=start_date,
             end_date=end_date,
             initial_capital=config.initial_capital,
+        )
+        if not chunked_run:
+            config._warm_start_runtime = {
+                "enabled": False,
+                "mode": self._warm_start_options(config)["mode"],
+            }
+        result.warm_start = config._warm_start_runtime
+        attach_benchmark_result(
+            result,
+            benchmark_symbol=config.benchmark_symbol,
+            benchmark_returns=benchmark_returns,
+            warning=benchmark_warning,
         )
 
         try:
@@ -192,6 +278,7 @@ class AkquantEngine(IBacktestEngine):
                 },
                 "metadata": {
                     "phase": "completed",
+                    "progress_message": "AKQuant 回测完成",
                     "bar_type": config.bar_type,
                     "symbol_count": len(config.symbols),
                 },
@@ -199,6 +286,106 @@ class AkquantEngine(IBacktestEngine):
             progress_callback(1.0, live_data)
 
         return result
+
+    def _emit_progress(
+        self,
+        progress_callback: Callable[[float, dict | None], None] | None,
+        pct: float,
+        *,
+        current_date: date,
+        phase: str,
+        message: str,
+        config: BacktestConfig,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        if not progress_callback:
+            return
+        metadata = {
+            "phase": phase,
+            "progress_message": message,
+            "bar_type": config.bar_type,
+            "symbol_count": len(config.symbols),
+        }
+        if extra_metadata:
+            metadata.update(extra_metadata)
+        progress_callback(
+            max(0.0, min(1.0, float(pct))),
+            {
+                "current_date": str(current_date),
+                "events": [
+                    {
+                        "type": phase,
+                        "timestamp": time.time(),
+                        "message": message,
+                    }
+                ],
+                "positions": {},
+                "metrics_snapshot": {},
+                "metadata": metadata,
+            },
+        )
+
+    async def _run_sync_with_heartbeat(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        run_func: Callable[[], Any],
+        config: BacktestConfig,
+        start_date: date,
+        end_date: date,
+        adapter: ClickHouseFeedAdapter,
+        progress_callback: Callable[[float, dict | None], None] | None,
+    ) -> Any:
+        self._emit_progress(
+            progress_callback,
+            0.10,
+            current_date=start_date,
+            phase="akquant_running",
+            message="AKQuant 引擎已启动",
+            config=config,
+        )
+        future = loop.run_in_executor(None, run_func)
+        started_at = time.monotonic()
+        estimate_seconds = max(60, int(os.getenv("AKQUANT_PROGRESS_ESTIMATE_SECONDS", "900")))
+        while True:
+            try:
+                return await asyncio.wait_for(asyncio.shield(future), timeout=5.0)
+            except asyncio.TimeoutError:
+                elapsed = time.monotonic() - started_at
+                snapshot = adapter.progress_snapshot
+                bar_ratio = float(snapshot.get("bar_progress_ratio") or 0.0)
+                if bar_ratio > 0:
+                    estimated_pct = min(0.97, 0.10 + bar_ratio * 0.87)
+                    bar_label = _bar_type_label(str(snapshot.get("bar_type") or config.bar_type))
+                    served_bars = int(snapshot.get("served_bars") or 0)
+                    total_bars = int(snapshot.get("total_bars") or 0)
+                    if total_bars > 0 and served_bars >= total_bars:
+                        message = (
+                            f"{bar_label}已全部回放，AKQuant 正在执行策略收尾/组合结算"
+                        )
+                    else:
+                        message = (
+                            f"{bar_label}进度 {bar_ratio * 100:.1f}% "
+                            f"({served_bars:,}/{total_bars:,})"
+                        )
+                else:
+                    estimated_pct = min(0.95, 0.10 + elapsed / estimate_seconds * 0.85)
+                    message = f"AKQuant 引擎运行中，已运行 {_format_elapsed(elapsed)}"
+                elapsed_text = _format_elapsed(elapsed)
+                self._emit_progress(
+                    progress_callback,
+                    estimated_pct,
+                    current_date=end_date,
+                    phase="akquant_running",
+                    message=message,
+                    config=config,
+                    extra_metadata={
+                        "elapsed_seconds": round(elapsed, 1),
+                        "elapsed_text": elapsed_text,
+                        "estimated": bar_ratio <= 0,
+                        **snapshot,
+                    },
+                )
 
     def _build_aq_config(
         self,
@@ -263,19 +450,41 @@ class AkquantEngine(IBacktestEngine):
         start_date: date,
         end_date: date,
     ) -> bool:
+        options = self._warm_start_options(config)
+        mode = options["mode"]
+        if mode == "off":
+            return False
         if config.bar_type not in {"minute", "minute_timer"}:
             return False
+        # The current checkpoint adapter is only safe for full minute streams.
         if config.bar_type == "minute_timer":
             return False
-        if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"}:
+        if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"} and mode != "always":
             return False
+        if mode == "always":
+            return True
         days = (end_date - start_date).days + 1
         threshold_days = int(os.getenv("AKQUANT_CHUNK_THRESHOLD_DAYS", "45"))
         threshold_symbols = int(os.getenv("AKQUANT_CHUNK_THRESHOLD_SYMBOLS", "100"))
         return days > threshold_days or len(config.symbols) > threshold_symbols
 
-    def _chunk_dates(self, start_date: date, end_date: date) -> list[tuple[date, date]]:
-        chunk_days = max(1, int(os.getenv("AKQUANT_CHUNK_DAYS", "30")))
+    def _warm_start_options(self, config: BacktestConfig) -> dict[str, Any]:
+        raw = dict(config.warm_start or {})
+        mode = str(raw.get("mode") or "auto").strip().lower()
+        if mode not in {"auto", "always", "off"}:
+            mode = "auto"
+        try:
+            chunk_days = int(raw.get("chunk_days") or os.getenv("AKQUANT_CHUNK_DAYS", "30"))
+        except (TypeError, ValueError):
+            chunk_days = 30
+        return {
+            "mode": mode,
+            "chunk_days": max(1, chunk_days),
+            "keep_checkpoints": bool(raw.get("keep_checkpoints", False)),
+        }
+
+    def _chunk_dates(self, start_date: date, end_date: date, config: BacktestConfig) -> list[tuple[date, date]]:
+        chunk_days = self._warm_start_options(config)["chunk_days"]
         chunks: list[tuple[date, date]] = []
         current = start_date
         while current <= end_date:
@@ -295,7 +504,8 @@ class AkquantEngine(IBacktestEngine):
         timer_times: tuple[str, ...] | None = None,
         progress_callback: Callable[[float, dict | None], None] | None = None,
     ) -> Any:
-        chunks = self._chunk_dates(start_date, end_date)
+        warm_options = self._warm_start_options(config)
+        chunks = self._chunk_dates(start_date, end_date, config)
         task_id = getattr(config, "_task_id", "manual")
         checkpoint_dir = REPORTS_DIR / "checkpoints" / str(task_id)
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -307,8 +517,17 @@ class AkquantEngine(IBacktestEngine):
             len(config.symbols),
             (end_date - start_date).days + 1,
             len(chunks),
-            os.getenv("AKQUANT_CHUNK_DAYS", "30"),
+            warm_options["chunk_days"],
         )
+        keep_env = os.getenv("AKQUANT_KEEP_CHECKPOINTS", "").lower() in {"1", "true", "yes"}
+        config._warm_start_runtime = {
+            "enabled": True,
+            "mode": warm_options["mode"],
+            "chunk_days": warm_options["chunk_days"],
+            "chunks": len(chunks),
+            "checkpoint_retained": bool(warm_options["keep_checkpoints"] or keep_env),
+            "checkpoint_dir": str(checkpoint_dir) if warm_options["keep_checkpoints"] or keep_env else None,
+        }
 
         loop = asyncio.get_running_loop()
         try:
@@ -430,7 +649,10 @@ class AkquantEngine(IBacktestEngine):
                             start_time=str(chunk_start),
                             end_time=str(chunk_end),
                         )
-                    aq.save_snapshot(result.engine, result.strategy, str(checkpoint_path))
+                    try:
+                        aq.save_snapshot(result.engine, result.strategy, str(checkpoint_path))
+                    except Exception as exc:
+                        raise RuntimeError(f"AKQuant checkpoint serialization failed: {exc}") from exc
                     return result
 
                 raw_result = await loop.run_in_executor(None, _run_segment)
@@ -473,8 +695,7 @@ class AkquantEngine(IBacktestEngine):
                 raise RuntimeError("No AKQuant chunks were executed")
             return raw_result
         finally:
-            keep = os.getenv("AKQUANT_KEEP_CHECKPOINTS", "").lower()
-            if keep not in {"1", "true", "yes"}:
+            if not (warm_options["keep_checkpoints"] or keep_env):
                 shutil.rmtree(checkpoint_dir, ignore_errors=True)
 
     def validate_config(self, config: BacktestConfig) -> list[str]:
@@ -585,7 +806,7 @@ def _build_slippage_policy(slippage: Any) -> Any:
     return slippage
 
 
-def _apply_strategy_params(strategy: Any, config: BacktestConfig) -> None:
+def _apply_strategy_params(strategy: Any, config: BacktestConfig) -> Any:
     params = dict(config.strategy_params or {})
     if config.index_symbol:
         params.setdefault("index_symbol", config.index_symbol)
@@ -594,13 +815,46 @@ def _apply_strategy_params(strategy: Any, config: BacktestConfig) -> None:
         params.setdefault("backtest_start_date", config.start_date)
     if config.end_date:
         params.setdefault("backtest_end_date", config.end_date)
-    for key, value in params.items():
+    clean_params = {key: value for key, value in params.items() if not str(key).startswith("_")}
+    if isinstance(strategy, type):
+        base_class = strategy
+        base_name = getattr(base_class, "__name__", "StrategyWithParams")
+        params_digest = hashlib.sha1(
+            repr(sorted(clean_params.items(), key=lambda item: str(item[0]))).encode("utf-8")
+        ).hexdigest()[:12]
+        wrapper_name = f"{base_name}_Params_{params_digest}"
+
+        class StrategyWithParams(base_class):  # type: ignore[misc, valid-type]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                try:
+                    super().__init__(*args, **kwargs)
+                except TypeError as exc:
+                    try:
+                        super().__init__()
+                    except TypeError:
+                        raise exc
+                for key, value in clean_params.items():
+                    try:
+                        setattr(self, key, value)
+                    except Exception:
+                        logger.debug("Failed to apply strategy param {}={}", key, value)
+
+        StrategyWithParams.__name__ = wrapper_name
+        StrategyWithParams.__qualname__ = wrapper_name
+        StrategyWithParams.__module__ = __name__
+        _install_dynamic_strategy_pickle_hooks(StrategyWithParams)
+        globals()[wrapper_name] = StrategyWithParams
+        _DYNAMIC_STRATEGY_REGISTRY[wrapper_name] = StrategyWithParams
+        return StrategyWithParams
+
+    for key, value in clean_params.items():
         if key.startswith("_"):
             continue
         try:
             setattr(strategy, key, value)
         except Exception:
             logger.debug("Failed to apply strategy param {}={}", key, value)
+    return strategy
 
 
 def _load_strategy_class(code: str) -> Any:
@@ -766,6 +1020,19 @@ def _sanitize_strategy_state(value: Any) -> Any:
             ),
             maxlen=value.maxlen,
         )
+
+    if value_type.__module__ == "builtins" and value_type.__name__ not in {
+        "NoneType",
+        "bool",
+        "int",
+        "float",
+        "str",
+        "bytes",
+    }:
+        try:
+            pickle.dumps(value)
+        except Exception:
+            return _DROP_STATE_VALUE
 
     return value
 

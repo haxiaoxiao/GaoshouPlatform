@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from datetime import date
-from typing import Any, Callable, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable
 
 import pandas as pd
 
@@ -59,14 +59,14 @@ class IBacktestEngine(ABC):
     @abstractmethod
     async def run(
         self,
-        config: "BacktestConfig",
+        config: BacktestConfig,
         data_provider: IDataProvider,
         progress_callback: Callable[[float, dict | None], None] | None = None,
-    ) -> "BacktestResult":
+    ) -> BacktestResult:
         """执行回测，返回统一的 BacktestResult"""
         ...
 
-    def validate_config(self, config: "BacktestConfig") -> list[str]:
+    def validate_config(self, config: BacktestConfig) -> list[str]:
         """校验配置，返回错误列表。默认无错误。"""
         return []
 

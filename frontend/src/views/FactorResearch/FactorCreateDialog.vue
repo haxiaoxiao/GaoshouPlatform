@@ -10,8 +10,17 @@
       />
     </div>
 
-    <!-- 模板选择 -->
+    <!-- 编写模式 -->
     <div class="step-section">
+      <h4>编写模式</h4>
+      <el-radio-group v-model="sourceType" @change="onSourceTypeChange">
+        <el-radio value="dsl">DSL 表达式</el-radio>
+        <el-radio value="python">Python 代码（本地可信执行）</el-radio>
+      </el-radio-group>
+    </div>
+
+    <!-- 模板选择 (仅 DSL 模式) -->
+    <div class="step-section" v-if="sourceType === 'dsl'">
       <h4>选择模板</h4>
       <div class="template-grid">
         <div
@@ -27,8 +36,8 @@
       </div>
     </div>
 
-    <!-- 表达式编辑 -->
-    <div class="step-section" v-if="selectedTemplate">
+    <!-- 表达式编辑 (DSL 模式) -->
+    <div class="step-section" v-if="sourceType === 'dsl' && selectedTemplate">
       <div class="expr-header">
         <h4>因子表达式</h4>
         <el-button size="small" text @click="showRef = !showRef">
@@ -38,12 +47,12 @@
       </div>
       <div class="expression-layout" :class="{ 'has-ref': showRef }">
         <div class="expression-main">
-          <el-input
+          <CodeEditor
             v-model="expression"
-            type="textarea"
-            :rows="4"
-            placeholder="输入因子表达式，例如 Mean($close, 20) / Std($close, 20)"
+            language="expression"
+            :min-height="140"
             class="expression-input"
+            placeholder="输入因子表达式，例如 ts_mean($close, 20) / ts_std($close, 20)"
           />
           <div class="validate-row">
             <el-button size="small" @click="doValidate" :loading="validating">
@@ -80,6 +89,34 @@
       </div>
     </div>
 
+    <!-- Python 代码编辑 -->
+    <div class="step-section" v-if="sourceType === 'python'">
+      <div class="expr-header">
+        <h4>Python 代码</h4>
+        <span class="python-hint">函数签名: <code>def compute(data, context) -> pd.DataFrame</code></span>
+      </div>
+      <CodeEditor
+        v-model="pythonCode"
+        language="python"
+        :min-height="300"
+        class="python-input"
+        placeholder="def compute(data, context):
+    &quot;&quot;&quot;
+    data: dict[str, pd.DataFrame] — daily / stock_info / financial / factor_values
+    context: dict — symbols / start_date / end_date / params / stock_pool / benchmark / trading_calendar
+    return: pd.DataFrame with columns [symbol, trade_date, value]
+    &quot;&quot;&quot;
+    ..."
+      />
+      <div class="validate-row" style="margin-top: 10px">
+        <el-tag type="warning" size="small">本地可信执行 — 代码将在后端服务器上运行，请确保代码安全</el-tag>
+        <el-button size="small" @click="doPythonTest" :loading="pythonTesting">
+          试运行
+        </el-button>
+        <span v-if="pythonTestResult" class="test-result">{{ pythonTestResult }}</span>
+      </div>
+    </div>
+
     <!-- 参数配置 -->
     <div class="step-section" v-if="selectedTemplate">
       <h4>参数配置</h4>
@@ -87,11 +124,12 @@
         <el-form-item label="股票池">
           <el-select v-model="params.stock_pool">
             <el-option-group label="指数股票池">
-              <el-option label="沪深300" value="hs300" />
-              <el-option label="中证500" value="zz500" />
-              <el-option label="中证800" value="zz800" />
-              <el-option label="中证1000" value="zz1000" />
-              <el-option label="中证全指" value="zz_quanzhi" />
+              <el-option
+                v-for="pool in stockPoolOptions"
+                :key="pool.value"
+                :label="pool.label"
+                :value="pool.value"
+              />
             </el-option-group>
             <el-option-group v-if="props.watchlistGroups?.length" label="自选股分组">
               <el-option
@@ -105,11 +143,18 @@
         </el-form-item>
         <el-form-item label="日期范围">
           <el-date-picker
-            v-model="dateRange"
-            type="daterange"
+            v-model="startDate"
+            type="date"
             range-separator="至"
             start-placeholder="开始日期"
             end-placeholder="结束日期"
+            value-format="YYYY-MM-DD"
+          />
+          <span class="date-separator">至</span>
+          <el-date-picker
+            v-model="endDate"
+            type="date"
+            placeholder="结束日期"
             value-format="YYYY-MM-DD"
           />
         </el-form-item>
@@ -134,6 +179,7 @@ import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowRight } from '@element-plus/icons-vue'
 import { factorApi, computeApi } from '@/api/factorResearch'
+import CodeEditor from '@/components/CodeEditor.vue'
 import type { FactorTemplate } from '@/types/factor'
 
 interface WatchlistGroup { id: number; name: string }
@@ -147,11 +193,16 @@ const visible = computed({
 })
 
 const factorName = ref('')
+const sourceType = ref<'dsl' | 'python'>('dsl')
+const pythonCode = ref('')
+const pythonTesting = ref(false)
+const pythonTestResult = ref('')
 const templates = ref<FactorTemplate[]>([])
 const selectedTemplate = ref<FactorTemplate | null>(null)
 const expression = ref('')
 const params = ref({ stock_pool: 'hs300', direction: 'desc' })
-const dateRange = ref<[string, string]>(['2020-01-01', '2025-12-31'])
+const startDate = ref('2020-01-01')
+const endDate = ref('2025-12-31')
 const validating = ref(false)
 const validationDone = ref(false)
 const valid = ref(false)
@@ -160,10 +211,25 @@ const showRef = ref(false)
 
 const operators = ref<{ name: string; signature: string; description: string; level: number; category: string }[]>([])
 const loadingRef = ref(false)
+const stockPoolOptions = [
+  { label: '沪深300', value: 'hs300' },
+  { label: '中证500', value: 'zz500' },
+  { label: '中证800', value: 'zz800' },
+  { label: '中证1000', value: 'zz1000' },
+  { label: '创业板指', value: 'chinext' },
+  { label: '创业板50', value: 'chinext50' },
+  { label: '创业板综', value: 'chinext_composite' },
+  { label: '科创50', value: 'star50' },
+  { label: '科创100', value: 'star100' },
+]
 
-const canCreate = computed(() =>
-  factorName.value.trim() && selectedTemplate.value && expression.value.trim() && validationDone.value && valid.value
-)
+const canCreate = computed(() => {
+  if (!factorName.value.trim()) return false
+  if (sourceType.value === 'python') {
+    return pythonCode.value.trim().length > 0
+  }
+  return selectedTemplate.value && expression.value.trim() && validationDone.value && valid.value
+})
 
 const rawFields = computed(() => operators.value.filter(o => o.level === 0))
 const operatorGroups = computed(() => {
@@ -180,6 +246,29 @@ const operatorGroups = computed(() => {
   }
   return Object.values(groups).filter(g => g.items.length)
 })
+
+function onSourceTypeChange() {
+  validationDone.value = false
+  valid.value = false
+  pythonTestResult.value = ''
+}
+
+async function doPythonTest() {
+  pythonTesting.value = true
+  pythonTestResult.value = ''
+  try {
+    const res = await factorApi.validatePython({ code: pythonCode.value } as any)
+    if (res.valid) {
+      pythonTestResult.value = '✓ 校验通过'
+    } else {
+      pythonTestResult.value = '✗ ' + (res.error || '校验失败')
+    }
+  } catch (e: any) {
+    pythonTestResult.value = '✗ ' + (e?.response?.data?.detail || e?.message || '校验失败')
+  } finally {
+    pythonTesting.value = false
+  }
+}
 
 function selectTemplate(tpl: FactorTemplate) {
   selectedTemplate.value = tpl
@@ -227,17 +316,46 @@ async function doValidate() {
 async function doCreate() {
   if (!canCreate.value) return
   try {
-    await factorApi.create({
-      name: factorName.value.trim(),
-      expression: expression.value,
-      stock_pool: params.value.stock_pool,
-      category: selectedTemplate.value?.category,
-      params: {
-        ...params.value,
-        kind: selectedTemplate.value?.type === 'technical' ? 'indicator' : 'factor',
+    if (sourceType.value === 'python') {
+      await factorApi.create({
+        name: factorName.value.trim(),
+        expression: pythonCode.value,
+        source_type: 'python',
+        engine: 'python',
+        stock_pool: params.value.stock_pool,
+        direction: params.value.direction,
+        default_stock_pool: params.value.stock_pool,
+        default_benchmark: '000905.SH',
+        cache_enabled: true,
+        category: 'custom',
+        description: '',
+        params: {
+          ...params.value,
+          kind: 'factor',
+          engine: 'python',
+          source_type: 'python',
+        },
+      } as any)
+    } else {
+      await factorApi.create({
+        name: factorName.value.trim(),
+        expression: expression.value,
+        source_type: 'dsl',
         engine: 'builtin',
-      },
-    } as any)
+        stock_pool: params.value.stock_pool,
+        direction: params.value.direction,
+        default_stock_pool: params.value.stock_pool,
+        default_benchmark: '000905.SH',
+        cache_enabled: true,
+        category: 'custom',
+        params: {
+          ...params.value,
+          kind: selectedTemplate.value?.type === 'technical' ? 'indicator' : 'factor',
+          engine: 'builtin',
+          source_type: 'dsl',
+        },
+      } as any)
+    }
     ElMessage.success(`因子"${factorName.value}"创建成功`)
     emit('created')
     visible.value = false
@@ -267,6 +385,11 @@ onMounted(async () => {
 <style scoped>
 .step-section { margin-bottom: 24px; }
 .step-section h4 { font-size: 13px; font-weight: 600; margin-bottom: 10px; color: var(--text-bright); }
+
+.date-separator {
+  margin: 0 8px;
+  color: var(--text-secondary);
+}
 
 .template-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .template-card {
@@ -300,7 +423,13 @@ onMounted(async () => {
 .expression-layout.has-ref { display: grid; grid-template-columns: 1fr 280px; gap: 20px; }
 
 .expression-main { min-width: 0; }
-.expression-input { font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+.expression-input,
+.python-input {
+  width: 100%;
+}
+.python-hint { font-size: 11px; color: var(--text-ghost); }
+.python-hint code { background: var(--bg-surface); padding: 2px 6px; border-radius: 3px; font-size: 11px; }
+.test-result { font-size: 12px; color: var(--text-bright); }
 .validate-row { margin-top: 10px; display: flex; align-items: center; gap: 12px; }
 .error-msg { font-size: 12px; color: var(--color-red); }
 

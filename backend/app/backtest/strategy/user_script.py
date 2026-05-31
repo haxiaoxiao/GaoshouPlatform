@@ -10,20 +10,17 @@
   - get_open_orders / cancel_order
   - history_bars / current_snapshot / get_history
 """
-import uuid
-import numpy as np
-import pandas as pd
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from typing import Any
 
+import numpy as np
+import pandas as pd
 from loguru import logger
 
-from app.backtest.event.events import Event, EventType
 from app.backtest.event.event_source import Bar, BarEventSource
+from app.backtest.event.events import Event, EventType
 from app.backtest.portfolio.account import Account
-from app.backtest.portfolio.position import PositionManager, Position
-
+from app.backtest.portfolio.position import Position, PositionManager
 
 # ── Order ──
 
@@ -500,8 +497,9 @@ class UserContext:
     def get_all_symbols(self) -> list[str]:
         """获取全量A股列表（非ST、非退市）"""
         from sqlalchemy import create_engine, select
-        from app.db.models.stock import Stock
+
         from app.core.config import settings
+        from app.db.models.stock import Stock
         url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(url)
         with engine.connect() as conn:
@@ -549,8 +547,8 @@ class UserContext:
     def get_trading_dates(self, start_date: str, end_date: str) -> list[date]:
         """获取交易日列表"""
         from datetime import datetime as dt
-        s = dt.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
-        e = dt.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
+        dt.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+        dt.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
         return list(self._event_source.iter_trading_dates())
 
     # ── 日志 ──

@@ -36,8 +36,8 @@ class FactorBacktestService:
             return BacktestReport(logs=[f"Validation error: {e}" for e in errors])
 
         try:
-            from app.backtest.runner import get_backtest_runner
             from app.backtest.config import BacktestConfig as V2BacktestConfig
+            from app.backtest.runner import get_backtest_runner
 
             runner = get_backtest_runner()
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
-from typing import Iterator, TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 import numpy as np
 import pandas as pd
@@ -32,7 +32,7 @@ class Bar:
 
     __slots__ = ("_data", "_source", "_symbol", "_trade_date")
 
-    def __init__(self, symbol: str, trade_date: "date | datetime", data: dict, source: "BarEventSource | None" = None):
+    def __init__(self, symbol: str, trade_date: date | datetime, data: dict, source: BarEventSource | None = None):
         self._symbol = symbol
         self._trade_date = trade_date
         self._data = data
@@ -177,7 +177,7 @@ class Bar:
             raise KeyError(key)
 
     @classmethod
-    def from_row(cls, symbol: str, trade_date: "date | datetime", row: dict, source: "BarEventSource | None" = None) -> "Bar":
+    def from_row(cls, symbol: str, trade_date: date | datetime, row: dict, source: BarEventSource | None = None) -> Bar:
         return cls(symbol=symbol, trade_date=trade_date, data=dict(row), source=source)
 
 
@@ -249,7 +249,7 @@ class BarEventSource:
         end_date: date,
         calendar: TradingCalendar,
         bar_type: str = "daily",
-    ) -> "BarEventSource":
+    ) -> BarEventSource:
         """从行情存储加载日线/分钟数据 (线程池中执行, 不阻塞事件循环)"""
         from app.data_stores import get_market_data_store
 
@@ -259,7 +259,7 @@ class BarEventSource:
             store = get_market_data_store()
             df = store.load_daily(symbols, start_date, end_date)
             if df.empty:
-                raise ValueError(f"No kline data")
+                raise ValueError("No kline data")
 
             for sym, grp in df.groupby("symbol"):
                 source._data[sym] = grp
@@ -276,7 +276,7 @@ class BarEventSource:
         data: dict[str, pd.DataFrame],
         calendar: TradingCalendar,
         minute_data: dict[str, pd.DataFrame] | None = None,
-    ) -> "BarEventSource":
+    ) -> BarEventSource:
         """从已有 DataFrame 创建（测试用）"""
         source = cls(symbols=list(data.keys()), start_date=date(2000, 1, 1),
                      end_date=date(2099, 12, 31), calendar=calendar)
@@ -354,5 +354,4 @@ class BarEventSource:
 
     def iter_trading_dates(self) -> Iterator[date]:
         """按交易日历迭代日期"""
-        for d in self.calendar.get_date_range(self.start_date, self.end_date):
-            yield d
+        yield from self.calendar.get_date_range(self.start_date, self.end_date)

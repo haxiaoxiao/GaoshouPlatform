@@ -1,7 +1,7 @@
 """绩效度量计算 — Sharpe, Sortino, Alpha, Beta, MaxDD, IR, Calmar"""
+from dataclasses import dataclass
+
 import numpy as np
-import pandas as pd
-from dataclasses import dataclass, field
 
 
 @dataclass

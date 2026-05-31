@@ -210,11 +210,20 @@
       <div class="kline-dialog-content">
         <div class="kline-toolbar">
           <el-date-picker
-            v-model="klineDateRange"
-            type="daterange"
+            v-model="klineStartDate"
+            type="date"
             range-separator="至"
             start-placeholder="开始日期"
             end-placeholder="结束日期"
+            format="YYYY-MM-DD"
+            value-format="YYYY-MM-DD"
+            @change="loadKlineData"
+          />
+          <span class="date-separator">至</span>
+          <el-date-picker
+            v-model="klineEndDate"
+            type="date"
+            placeholder="结束日期"
             format="YYYY-MM-DD"
             value-format="YYYY-MM-DD"
             @change="loadKlineData"
@@ -297,7 +306,8 @@ const klineDialogVisible = ref(false)
 const klineLoading = ref(false)
 const currentStock = ref<StockInfo | null>(null)
 const klineData = ref<KlineDataDisplay[]>([])
-const klineDateRange = ref<string[]>([])
+const klineStartDate = ref('')
+const klineEndDate = ref('')
 
 const quickRanges = [
   { label: '1月', days: 30 },
@@ -396,23 +406,21 @@ const setDateRange = (days: number) => {
   const end = new Date()
   const start = new Date()
   start.setDate(start.getDate() - days)
-  klineDateRange.value = [
-    start.toISOString().slice(0, 10),
-    end.toISOString().slice(0, 10)
-  ]
+  klineStartDate.value = start.toISOString().slice(0, 10)
+  klineEndDate.value = end.toISOString().slice(0, 10)
   // 不在这里清空数据，让图表保持显示直到新数据到达
   loadKlineData()
 }
 
 const loadKlineData = async () => {
-  if (!currentStock.value || klineDateRange.value.length !== 2) return
+  if (!currentStock.value || !klineStartDate.value || !klineEndDate.value) return
   klineLoading.value = true
   try {
     const response = await request.get<{ items: KlineDataRaw[] }>('/data/klines', {
       params: {
         symbol: currentStock.value.symbol,
-        start_date: klineDateRange.value[0],
-        end_date: klineDateRange.value[1],
+        start_date: klineStartDate.value,
+        end_date: klineEndDate.value,
         page_size: 1000
       }
     })
@@ -462,6 +470,10 @@ onMounted(() => {
   align-items: center;
   gap: var(--space-4);
   flex-wrap: wrap;
+}
+
+.date-separator {
+  color: var(--text-secondary);
 }
 
 .filter-bar__left {

@@ -12,13 +12,10 @@ import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
-
 _BACKEND = Path(__file__).resolve().parent.parent.parent
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
 
-from loguru import logger
 
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.clickhouse import get_ch_client
@@ -139,8 +136,8 @@ def validate_minute_timer(
     ch_count = ch.execute(f"SELECT COUNT(*) FROM klines_minute {where}", params)[0][0]
     pq_count = 0
     if symbols and start_date and end_date:
-        pq_start = datetime.combine(start_date, datetime.min.time())
-        pq_end = datetime.combine(end_date, datetime.min.time()) + timedelta(days=1)
+        datetime.combine(start_date, datetime.min.time())
+        datetime.combine(end_date, datetime.min.time()) + timedelta(days=1)
         info = store.coverage(symbols, start_date, end_date, dataset="klines_minute_timer", timer_times=timer_times)
         pq_count = info["total_rows"]
 
@@ -164,7 +161,7 @@ def main():
     parser.add_argument("--end", type=str, default=None)
     parser.add_argument("--symbols", type=str, default=None)
     parser.add_argument("--timer-times", type=str, default=None)
-    parser.add_argument("--parquet-dir", type=str, default="E:/Projects/GaoshouPlatform/data/parquet")
+    parser.add_argument("--parquet-dir", type=str, default=None, help="Parquet 目录（默认使用配置的 parquet_data_dir）")
     parser.add_argument("--sample-size", type=int, default=5)
     args = parser.parse_args()
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
 import pytest

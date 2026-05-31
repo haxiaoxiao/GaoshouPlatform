@@ -1,4 +1,5 @@
 """Parquet 数据浏览器 API — /api/explorer/parquet"""
+import asyncio
 from datetime import date
 
 from fastapi import APIRouter, Query
@@ -15,8 +16,8 @@ _DATASETS = [
     "klines_minute_timer",
     "klines_minute_cum_timer",
     "factor_cache",
+    "factor_values",
     "stock_indicators",
-    "feature_values",
     "indicator_timeseries",
 ]
 
@@ -98,7 +99,8 @@ async def dataset_coverage(
     if not store._exists(dataset):
         return {"code": 1, "message": f"Dataset '{dataset}' not found"}
     sym_list = [s.strip() for s in symbols.split(",") if s.strip()]
-    info = store.coverage(
+    info = await asyncio.to_thread(
+        store.coverage,
         sym_list if sym_list else [],
         date.fromisoformat(start),
         date.fromisoformat(end),

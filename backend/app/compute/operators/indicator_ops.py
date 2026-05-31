@@ -1,5 +1,5 @@
 """L1 指标算子 — 从 stock_indicators 表获取因子数据"""
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import pandas as pd
 from clickhouse_driver import Client
@@ -51,7 +51,7 @@ class IndicatorOp(Operator):
             )
 
             if result:
-                symbols, values = zip(*result)
+                symbols, values = zip(*result, strict=False)
                 self._cache[cache_key] = pd.Series(values, index=symbols)
             else:
                 self._cache[cache_key] = pd.Series(dtype=float)

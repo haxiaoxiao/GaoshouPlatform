@@ -2,7 +2,11 @@
 
 本文记录 ID=43 小市值策略对齐聚宽过程中验证过的数据源经验。平台默认仍以 miniQMT/xtquant 为主数据源；Tushare 和 AKShare 用作补历史缺口、指数成分和退市股数据的兜底。
 
-Last updated: 2026-05-16.
+Last updated: 2026-05-25.
+
+Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。第一批接入 `adj_factor`、`moneyflow`、`ths_index`、`ths_member`、`block_moneyflow`、`stk_auction_replay`，统一落到本地 Parquet；新闻、公告、研报保留为受限补充源，默认不做全量抓取。
+
+当前默认运行方式是 `MARKET_DATA_BACKEND=parquet`：同步和补数仍以 miniQMT/xtquant、Tushare、Indevs/Tushare Replay 等数据源为入口，但回测、因子研究和 DataSkill 应优先读取本地 SQLite + Parquet/DuckDB。策略运行时不要反复访问外部数据源。
 
 ## 总体优先级
 
@@ -17,6 +21,7 @@ Last updated: 2026-05-16.
 | 财务/股本/历史市值 | Tushare `daily_basic` | miniQMT 财务缓存 / AKShare 个股信息 | 退市股股本和市值用 Tushare 更完整。 |
 | 固定时间点分钟线 | Parquet/DuckDB 或 ClickHouse 已落库分钟线 | miniQMT 本地缓存 | 回测只读本地列式库；不要在策略运行时反复打 QMT。 |
 | 完整历史 1 分钟线 | 本地 JQ 分钟文件 → Parquet `klines_minute` | miniQMT/Indevs 补缺口 | 已导入 2005-01-04 至 2026-05-15 全 A 分钟线，适合回测和 timer 抽点。 |
+| 因子值缓存 | Parquet `factor_values` | 重新预计算 | 当前因子研究、Alpha101、TA-Lib 和小市值因子统一写入 Factor Value Store。 |
 
 ## miniQMT / xtquant
 
@@ -71,7 +76,7 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
 覆盖率检查：
 
 ```text
-GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
+GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
 ```
 
 ## 本地 JQ 1 分钟数据 → Parquet
@@ -201,9 +206,9 @@ $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版
 
 - 缺失日线/元数据补数脚本：`backend/app/scripts/fill_small_cap_missing_data.py`
 - 指数成分缓存服务：`backend/app/services/index_components.py`
-- 指数池接口：`GET /api/v2/backtest/index-pools/{index_symbol}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
+- 指数池接口：`GET /api/backtest/index-pools/{index_symbol}?start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`
 - 稀疏 timer 分钟线同步脚本：`backend/app/scripts/sync_timer_minute_points.py`
-- timer 覆盖探测接口：`GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50`
+- timer 覆盖探测接口：`GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50`
 - ID=43 连续区间调试脚本：`backend/app/scripts/run_small_cap_full_debug.py --start auto`
 - ID=43 年度对比调试脚本：`backend/app/scripts/run_small_cap_yearly_debug.py`
 - JQ 日志对比脚本：`backend/app/scripts/compare_small_cap_logs.py`

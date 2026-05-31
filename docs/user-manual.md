@@ -1,6 +1,6 @@
 # GaoshouPlatform 使用手册
 
-Last updated: 2026-05-15.
+Last updated: 2026-05-25.
 
 本文面向平台使用者和策略调试者，覆盖启动、数据同步、AKQuant 回测、ID=43 小市值策略和常用排错流程。
 
@@ -28,6 +28,8 @@ npm run dev
 | `http://localhost:5173` | 前端 |
 | `http://localhost:8000/docs` | FastAPI Swagger |
 | `http://localhost:8000/health` | 健康检查 |
+
+本机桌面脚本或开发会话可能使用 `3500`/`8800` 端口；以启动脚本输出和 `/api/system/health` 为准。
 
 ClickHouse 默认端口：
 
@@ -95,23 +97,39 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
 覆盖率检查：
 
 ```text
-GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
+GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50
 ```
 
-## 5. AKQuant 回测
+## 5. 因子研究与 Alpha101
 
-前端回测页选择 AKQuant 引擎后，后端走 `/api/v2/backtest/*`。
+因子研究页包含因子值缓存、因子看板、详情页和分析流程。因子值缓存统一走 `/api/factor-values/*`，支持单因子预计算和集合预计算。
+
+Alpha101 因子命名为 `alpha101_001` 到 `alpha101_101`。详情页会展示真实公式和中文解释；如果要批量落库，选择 Alpha101 集合并触发集合预计算。当前 101 个 Alpha 公式已接入宽表批量计算，预计算会复用同一个日线面板，避免每个公式重复构造 groupby 面板。集合任务逐个因子容错，单个公式异常不会中断整组，结果里可以查看 `written_factor_count`、`zero_row_factor_names`、`failed_factor_names` 和 `coverage_ranges`。
+
+使用时注意：
+
+- Alpha101 默认写入 `factor_values`，逻辑主键为 `symbol + trade_date + as_of_time + factor_name + params_hash`。
+- 内置 Alpha101 当前使用空参数 hash；因子研究的参数 hash 只用于匹配研究配置，不改变已落库的原始因子值。
+- VWAP 已按日线成交量单位自动识别“手/股”并归一到价格口径；`scale()` 已按当日横截面缩放。
+- 覆盖率低的因子不要直接比较 IC，例如 `alpha101_097` 这类长链路滚动相关公式在部分股票池里有效样本很少。
+- 平均 Rank IC 达到 `0.01` 左右才值得进入候选池，`0.02` 以上再结合 ICIR、分组收益和换手率判断是否可用；稳定负 IC 可以反向使用。
+
+更多公式解读、Alpha02 示例和排查方法见 `docs/alpha101-factor-guide.md`，因子缓存字段和 API 见 `docs/factor-value-store.md`。
+
+## 6. AKQuant 回测
+
+前端回测页选择 AKQuant 引擎后，后端走 `/api/backtest/*`。
 
 常用接口：
 
 | 接口 | 说明 |
 |---|---|
-| `GET /api/v2/backtest/capabilities` | AKQuant 能力探测 |
-| `POST /api/v2/backtest/run` | 运行回测 |
-| `POST /api/v2/backtest/optimize/grid` | Grid Search |
-| `POST /api/v2/backtest/optimize/walk-forward` | Walk-forward Validation |
-| `POST /api/v2/backtest/strategy-params/schema` | 获取策略参数 schema |
-| `POST /api/v2/backtest/strategy-params/validate` | 校验策略参数 |
+| `GET /api/backtest/capabilities` | AKQuant 能力探测 |
+| `POST /api/backtest/run` | 运行回测 |
+| `POST /api/backtest/optimize/grid` | Grid Search |
+| `POST /api/backtest/optimize/walk-forward` | Walk-forward Validation |
+| `POST /api/backtest/strategy-params/schema` | 获取策略参数 schema |
+| `POST /api/backtest/strategy-params/validate` | 校验策略参数 |
 
 参数原则：
 
@@ -121,7 +139,7 @@ GET /api/v2/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15
 - `minute_timer` 用于固定时间点盘中策略。
 - `minute` 仅用于必须连续处理分钟状态的策略。
 
-## 6. ID=43 小市值策略
+## 7. ID=43 小市值策略
 
 推荐设置：
 
@@ -156,7 +174,7 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
 .\backend\.venv\Scripts\python.exe backend/app/scripts/compare_small_cap_logs.py
 ```
 
-## 7. 开发验证
+## 8. 开发验证
 
 后端 AKQuant 集成测试：
 
@@ -178,7 +196,7 @@ npm run build
 - Vite 可能提示部分 chunk 超过 500 KB。
 - Pydantic 可能提示 class-based config deprecated。
 
-## 8. 常见排错
+## 9. 常见排错
 
 ### QMT 分钟线看起来下载了，但平台读不到
 

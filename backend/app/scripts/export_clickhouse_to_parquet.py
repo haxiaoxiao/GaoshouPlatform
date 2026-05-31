@@ -6,7 +6,7 @@
         --dataset klines_daily \
         --start 20250101 \
         --end 20251231 \
-        --output E:/Projects/GaoshouPlatform/data/parquet
+        --output /path/to/data/parquet
 
     python -m app.scripts.export_clickhouse_to_parquet \
         --dataset klines_minute_timer \
@@ -226,7 +226,7 @@ def main():
     parser.add_argument("--end", type=str, default=None, help="结束日期 YYYYMMDD")
     parser.add_argument("--symbols", type=str, default=None, help="股票代码，逗号分隔")
     parser.add_argument("--timer-times", type=str, default=None, help="分钟时间点，逗号分隔，如 10:00,10:30")
-    parser.add_argument("--output", type=str, default="E:/Projects/GaoshouPlatform/data/parquet", help="Parquet 输出目录")
+    parser.add_argument("--output", type=str, default=None, help="Parquet 输出目录（默认使用配置的 parquet_data_dir）")
     parser.add_argument("--overwrite", action="store_true", help="覆盖已有文件")
     args = parser.parse_args()
 

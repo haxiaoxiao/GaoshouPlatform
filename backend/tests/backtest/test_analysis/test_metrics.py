@@ -1,6 +1,7 @@
 """Metrics 绩效计算单元测试"""
 import numpy as np
-from app.backtest.analysis.metrics import compute_metrics, PerformanceMetrics
+
+from app.backtest.analysis.metrics import PerformanceMetrics, compute_metrics
 
 
 def generate_simple_nav(start=1.0, rets=None):

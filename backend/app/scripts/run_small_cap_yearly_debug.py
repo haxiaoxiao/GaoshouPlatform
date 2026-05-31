@@ -9,7 +9,6 @@ import io
 import json
 import logging
 import sqlite3
-import sys
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import date
@@ -22,7 +21,6 @@ from app.backtest.config import BacktestConfig
 from app.backtest.engine.akquant.engine import AkquantEngine
 from app.backtest.engine.data_provider import StoreDataProvider
 from app.services.index_components import load_index_symbols
-
 
 DEFAULT_TIMER_TIMES = ["09:15", "10:00", "10:30", "14:30", "14:50", "15:10"]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]

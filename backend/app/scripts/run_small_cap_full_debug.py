@@ -24,7 +24,6 @@ from app.backtest.engine.data_provider import StoreDataProvider
 from app.services.index_components import load_index_symbols
 from app.services.timer_minute_sync import find_earliest_timer_coverage_date, parse_timer_times
 
-
 DEFAULT_TIMER_TIMES = ["09:15", "10:00", "10:30", "14:30", "14:50", "15:10"]
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -128,8 +127,8 @@ async def _run(args: argparse.Namespace, start: date, end: date, out_dir: Path) 
             "HV_duration": args.hv_duration,
             "HV_ratio": args.hv_ratio,
             "high_volume_mode": args.high_volume_mode,
-            "enable_feature_store": args.enable_feature_store,
-            "high_volume_feature_name": args.high_volume_feature_name,
+            "enable_factor_value_cache": args.enable_factor_value_cache,
+            "high_volume_factor_name": args.high_volume_factor_name,
             "daily_volume_to_share_multiplier": args.daily_volume_to_share_multiplier,
             "limit_price_source": args.limit_price_source,
             "timer_price_adjustment_mode": args.timer_price_adjustment_mode,
@@ -198,8 +197,8 @@ async def _run(args: argparse.Namespace, start: date, end: date, out_dir: Path) 
             "HV_duration": args.hv_duration,
             "HV_ratio": args.hv_ratio,
             "high_volume_mode": args.high_volume_mode,
-            "enable_feature_store": args.enable_feature_store,
-            "high_volume_feature_name": args.high_volume_feature_name,
+            "enable_factor_value_cache": args.enable_factor_value_cache,
+            "high_volume_factor_name": args.high_volume_factor_name,
             "daily_volume_to_share_multiplier": args.daily_volume_to_share_multiplier,
             "limit_price_source": args.limit_price_source,
             "timer_price_adjustment_mode": args.timer_price_adjustment_mode,
@@ -270,8 +269,8 @@ async def main() -> int:
         default="daily_include_now",
         choices=["minute_to_now", "daily_include_now"],
     )
-    parser.add_argument("--enable-feature-store", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--high-volume-feature-name", default="high_volume_signal")
+    parser.add_argument("--enable-factor-value-cache", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--high-volume-factor-name", default="high_volume_signal")
     parser.add_argument("--daily-volume-to-share-multiplier", type=float, default=100.0)
     parser.add_argument("--limit-price-source", default="table", choices=["table", "minute_prev_close", "daily_prev_close", "auto"])
     parser.add_argument(

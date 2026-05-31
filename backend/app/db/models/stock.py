@@ -1,7 +1,7 @@
 # backend/app/db/models/stock.py
 from datetime import date
 
-from sqlalchemy import Date, Float, Integer, String, Text
+from sqlalchemy import Boolean, Date, Float, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base, TimestampMixin
@@ -67,3 +67,30 @@ class Stock(Base, TimestampMixin):
     # === 其他属性 ===
     security_type: Mapped[str | None] = mapped_column(String(20), comment="证券类型")
     product_class: Mapped[str | None] = mapped_column(String(50), comment="产品类别")
+
+
+class StockConceptMembership(Base, TimestampMixin):
+    """Point-in-time concept membership derived from external classification feeds."""
+
+    __tablename__ = "stock_concept_memberships"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "snapshot_date",
+            "concept_code",
+            "symbol",
+            name="uq_stock_concept_membership",
+        ),
+        Index("ix_stock_concept_symbol_snapshot", "symbol", "snapshot_date"),
+        Index("ix_stock_concept_code_snapshot", "concept_code", "snapshot_date"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(50), default="indevs_tushare_relay", nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    concept_code: Mapped[str] = mapped_column(String(40), nullable=False)
+    concept_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    in_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    out_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_new: Mapped[bool | None] = mapped_column(Boolean, nullable=True)

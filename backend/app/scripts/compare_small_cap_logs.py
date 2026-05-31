@@ -16,7 +16,6 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
 SYMBOL_RE = re.compile(r"\b\d{6}\.(?:XSHE|XSHG|SZ|SH)\b")

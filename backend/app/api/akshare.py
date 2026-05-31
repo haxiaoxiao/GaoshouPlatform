@@ -4,8 +4,7 @@
 """
 
 import asyncio
-from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Query
@@ -172,8 +171,9 @@ async def get_stock_list():
         return result
 
     def _fetch_sqlite():
-        from app.core.config import settings
         from sqlalchemy import create_engine, text
+
+        from app.core.config import settings
         url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(url)
         with engine.connect() as conn:
@@ -207,7 +207,7 @@ async def get_stock_info(symbol: str):
         info = ak.stock_individual_info_em(symbol=ak_sym[2:])  # 纯数字，如 600000
         if info.empty:
             return {}
-        return dict(zip(info["item"], info["value"]))
+        return dict(zip(info["item"], info["value"], strict=False))
 
     try:
         info = await asyncio.to_thread(_fetch)

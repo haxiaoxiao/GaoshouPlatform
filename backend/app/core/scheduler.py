@@ -233,7 +233,7 @@ async def load_enabled_tasks() -> None:
     """
     async with async_session_factory() as session:
         result = await session.execute(
-            select(SyncTask).where(SyncTask.enabled == True)
+            select(SyncTask).where(SyncTask.enabled)
         )
         tasks = result.scalars().all()
 

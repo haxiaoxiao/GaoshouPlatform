@@ -10,7 +10,12 @@ import pandas as pd
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_value_store import FactorValueStore, factor_params_hash, get_factor_value_store
+from app.services.factor_precompute_runtime import release_precompute_memory
+from app.services.factor_value_store import (
+    FactorValueStore,
+    factor_params_hash,
+    get_factor_value_store,
+)
 
 
 def _sqlite_db_path() -> Path:
@@ -155,44 +160,42 @@ def precompute_research_factors(
     financial = _load_financial(symbols)
     frame = _align_financial_asof(daily, financial)
     market_return = _cross_sectional_market_returns(frame)
-    rows: list[dict[str, Any]] = []
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
     created_at = datetime.now()
     empty_hash = factor_params_hash({})
     total = max(len(factor_names), 1)
+
+    def flush_rows() -> None:
+        writer.flush()
+
     for index, factor_name in enumerate(factor_names, start=1):
         report(0.10 + 0.80 * (index / total), "research", current=index, total=total, factor_name=factor_name)
         values = pd.to_numeric(_compute_research_factor(frame, factor_name, market_return), errors="coerce")
         factor_frame = pd.DataFrame({
             "symbol": frame["symbol"].astype(str),
             "trade_date": frame["trade_date"],
+            "as_of_time": "",
+            "factor_name": factor_name,
+            "params_hash": empty_hash,
             "value": values,
+            "source": "precompute.research",
+            "created_at": created_at,
         })
         factor_frame = factor_frame[(factor_frame["trade_date"] >= start_date) & (factor_frame["trade_date"] <= end_date)]
         factor_frame = factor_frame.dropna(subset=["value"])
         if factor_frame.empty:
             continue
-        for item in factor_frame.itertuples(index=False):
-            rows.append({
-                "symbol": str(item.symbol),
-                "trade_date": item.trade_date,
-                "as_of_time": "",
-                "factor_name": factor_name,
-                "params_hash": empty_hash,
-                "value": float(item.value),
-                "source": "precompute.research",
-                "created_at": created_at,
-            })
-    report(0.94, "write", rows_buffered=len(rows))
-    factor_store = store or get_factor_value_store()
-    written = factor_store.write(pd.DataFrame(rows)) if rows else 0
-    counts: dict[str, int] = {}
-    for row in rows:
-        counts[row["factor_name"]] = counts.get(row["factor_name"], 0) + 1
-    report(1.0, "done", rows_written=written)
+        writer.write_frame(factor_frame)
+        del values, factor_frame
+        release_precompute_memory()
+    report(0.94, "write", rows_buffered=writer.rows_buffered)
+    flush_rows()
+    report(1.0, "done", rows_written=writer.written)
     return {
         "symbols": len(symbols),
         "start_date": start_date.isoformat(),
         "end_date": end_date.isoformat(),
-        "rows": counts,
-        "rows_written": written,
+        "rows": writer.counts,
+        "rows_written": writer.written,
     }

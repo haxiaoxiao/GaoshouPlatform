@@ -2,8 +2,8 @@
 数据同步脚本 - 同步股票行情数据到 ClickHouse
 """
 import asyncio
-import sys
 import io
+import sys
 from datetime import date, datetime
 from pathlib import Path
 
@@ -15,6 +15,7 @@ sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='repla
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from clickhouse_driver import Client
+
 from app.engines.qmt_gateway import qmt_gateway
 
 
@@ -108,7 +109,7 @@ class DataSyncer:
                 self.failed_stocks.append((symbol, str(e)))
                 print(f"\n[X] {symbol} 同步失败: {e}")
 
-        print(f"\n\n=== 同步完成 ===")
+        print("\n\n=== 同步完成 ===")
         print(f"成功: {self.synced_stocks}/{self.total_stocks}")
         print(f"总行数: {self.total_rows}")
         if self.failed_stocks:

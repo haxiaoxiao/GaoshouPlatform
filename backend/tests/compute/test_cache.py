@@ -3,7 +3,8 @@ import json
 from unittest.mock import patch
 
 import pandas as pd
-from app.compute.cache import LRUCache, ComputeCache, get_compute_cache, reset_compute_cache
+
+from app.compute.cache import ComputeCache, LRUCache, get_compute_cache, reset_compute_cache
 
 
 class TestLRUCache:

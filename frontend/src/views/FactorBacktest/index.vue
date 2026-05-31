@@ -61,8 +61,8 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import * as echarts from 'echarts'
-import { backtestV2Api } from '@/api/v2'
+import * as echarts from '@/lib/echarts'
+import { factorBacktestApi } from '@/api/v2'
 import type { BacktestReport, BtConfig } from '@/types/factor'
 
 const route = useRoute()
@@ -97,7 +97,7 @@ const metricsList = computed(() => {
 async function runBacktest() {
   loading.value = true
   try {
-    report.value = await backtestV2Api.runFactor({
+    report.value = await factorBacktestApi.runFactor({
       expression: factorName.value,
       stock_pool: 'hs300',
       start_date: '2020-01-01',

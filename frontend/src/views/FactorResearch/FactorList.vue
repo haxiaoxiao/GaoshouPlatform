@@ -23,10 +23,9 @@
           {{ formatDateTime(row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="200" fixed="right">
+      <el-table-column label="操作" width="150" fixed="right">
         <template #default="{ row }">
           <el-button-group>
-            <el-button size="small" @click="handleAnalyze(row)">分析</el-button>
             <el-button size="small" @click="handleEdit(row)">编辑</el-button>
             <el-button size="small" type="danger" @click="handleDelete(row)">删除</el-button>
           </el-button-group>
@@ -46,10 +45,7 @@
         </el-form-item>
         <el-form-item label="分类" prop="category">
           <el-select v-model="formData.category" placeholder="选择分类" clearable>
-            <el-option label="技术因子" value="技术因子" />
-            <el-option label="基本面因子" value="基本面因子" />
-            <el-option label="情绪因子" value="情绪因子" />
-            <el-option label="其他" value="其他" />
+            <el-option label="自定义因子库" value="custom" />
           </el-select>
         </el-form-item>
         <el-form-item label="来源" prop="source">
@@ -59,20 +55,21 @@
           </el-select>
         </el-form-item>
         <el-form-item label="因子代码" prop="code">
-          <el-input
-            v-model="formData.code"
-            type="textarea"
-            :rows="5"
+          <CodeEditor
+            v-model="factorCode"
+            language="expression"
+            :min-height="180"
             placeholder="请输入因子计算代码"
           />
         </el-form-item>
         <el-form-item label="参数配置" prop="parameters">
-          <el-input
+          <CodeEditor
             v-model="parametersJson"
-            type="textarea"
-            :rows="3"
-            placeholder='{"normalize_window": 5, "factor_window": 20}'
+            language="json"
+            :min-height="130"
+            placeholder='{"source_type": "dsl"}'
           />
+          <div v-if="parametersJsonError" class="json-error">{{ parametersJsonError }}</div>
         </el-form-item>
         <el-form-item label="描述" prop="description">
           <el-input
@@ -88,55 +85,16 @@
         <el-button type="primary" @click="handleSubmit" :loading="submitting">确定</el-button>
       </template>
     </el-dialog>
-
-    <!-- 因子分析对话框 -->
-    <el-dialog v-model="analyzeDialogVisible" title="因子分析" width="500px">
-      <el-form :model="analyzeForm" label-width="120px">
-        <el-form-item label="分析起始日期">
-          <el-date-picker
-            v-model="analyzeForm.start_date"
-            type="date"
-            placeholder="选择日期"
-            value-format="YYYY-MM-DD"
-          />
-        </el-form-item>
-        <el-form-item label="分析结束日期">
-          <el-date-picker
-            v-model="analyzeForm.end_date"
-            type="date"
-            placeholder="选择日期"
-            value-format="YYYY-MM-DD"
-          />
-        </el-form-item>
-        <el-form-item label="标准化窗口">
-          <el-input-number v-model="analyzeForm.normalize_window" :min="1" :max="60" />
-        </el-form-item>
-        <el-form-item label="因子计算窗口">
-          <el-input-number v-model="analyzeForm.factor_window" :min="1" :max="120" />
-        </el-form-item>
-        <el-form-item label="收益前瞻期">
-          <el-input-number v-model="analyzeForm.forward_period" :min="1" :max="60" />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="analyzeDialogVisible = false">取消</el-button>
-        <el-button type="primary" @click="submitAnalyze" :loading="analyzing">
-          开始分析
-        </el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
 import { Plus } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { FormInstance, FormRules } from 'element-plus'
 import { factorApi, type Factor, type FactorCreateRequest } from '@/api/factor'
-
-const router = useRouter()
+import CodeEditor from '@/components/CodeEditor.vue'
 
 // 状态
 const loading = ref(false)
@@ -145,6 +103,7 @@ const dialogVisible = ref(false)
 const submitting = ref(false)
 const editingFactor = ref<Factor | null>(null)
 const formRef = ref<FormInstance>()
+const parametersJsonError = ref('')
 
 // 表单数据
 const formData = ref<FactorCreateRequest>({
@@ -161,27 +120,23 @@ const parametersJson = computed({
   set: (val: string) => {
     try {
       formData.value.parameters = JSON.parse(val)
+      parametersJsonError.value = ''
     } catch {
-      // 忽略解析错误
+      parametersJsonError.value = 'JSON 格式错误，修正后才能保存'
     }
+  },
+})
+
+const factorCode = computed({
+  get: () => formData.value.code || '',
+  set: (val: string) => {
+    formData.value.code = val
   },
 })
 
 const formRules: FormRules = {
   name: [{ required: true, message: '请输入因子名称', trigger: 'blur' }],
 }
-
-// 分析对话框
-const analyzeDialogVisible = ref(false)
-const analyzing = ref(false)
-const analyzingFactor = ref<Factor | null>(null)
-const analyzeForm = ref({
-  start_date: '',
-  end_date: '',
-  normalize_window: 5,
-  factor_window: 20,
-  forward_period: 20,
-})
 
 // 加载因子列表
 const loadFactors = async () => {
@@ -235,6 +190,10 @@ const handleSubmit = async () => {
 
   await formRef.value.validate(async (valid) => {
     if (!valid) return
+    if (parametersJsonError.value) {
+      ElMessage.warning(parametersJsonError.value)
+      return
+    }
 
     submitting.value = true
     try {
@@ -272,50 +231,6 @@ const handleDelete = async (factor: Factor) => {
   }
 }
 
-// 打开分析对话框
-const handleAnalyze = (factor: Factor) => {
-  analyzingFactor.value = factor
-  // 设置默认日期范围
-  const end = new Date()
-  const start = new Date()
-  start.setFullYear(start.getFullYear() - 1)
-  analyzeForm.value = {
-    start_date: formatDate(start),
-    end_date: formatDate(end),
-    normalize_window: factor.parameters?.normalize_window as number || 5,
-    factor_window: factor.parameters?.factor_window as number || 20,
-    forward_period: factor.parameters?.forward_period as number || 20,
-  }
-  analyzeDialogVisible.value = true
-}
-
-// 提交分析
-const submitAnalyze = async () => {
-  if (!analyzingFactor.value) return
-
-  analyzing.value = true
-  try {
-    const result = await factorApi.analyze(analyzingFactor.value.id, analyzeForm.value)
-    ElMessage.success('分析完成')
-    analyzeDialogVisible.value = false
-    // 跳转到分析结果页面
-    router.push(`/factor/analysis/${result.id}`)
-  } catch (error: unknown) {
-    const err = error as { response?: { data?: { detail?: string } } }
-    ElMessage.error(err.response?.data?.detail || '分析失败')
-  } finally {
-    analyzing.value = false
-  }
-}
-
-// 格式化日期
-const formatDate = (date: Date): string => {
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `${year}-${month}-${day}`
-}
-
 // 格式化日期时间
 const formatDateTime = (datetime: string | null): string => {
   if (!datetime) return '-'
@@ -335,5 +250,12 @@ onMounted(() => {
 
 .header {
   margin-bottom: 20px;
+}
+
+.json-error {
+  margin-top: 6px;
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 1.4;
 }
 </style>

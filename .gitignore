@@ -16,6 +16,7 @@ htmlcov/
 # IDE
 .idea/
 .vscode/
+.DS_Store
 *.swp
 *.swo
 
@@ -53,6 +54,11 @@ data/tmp_*/
 # Generated runtime artifacts
 .tmp/
 .tmp_*
+*.tmp.*
+%TEMP%/
+logs/
+.tools/
+.codegraph/
 .playwright-mcp/
 .superpowers/
 app/reports/
@@ -60,3 +66,6 @@ backend/app/reports/
 backend/backend/app/reports/
 backend/logs/
 backend/tmp_*.txt
+
+# External local crawler checkouts / secrets-backed browser profiles
+tools/external/

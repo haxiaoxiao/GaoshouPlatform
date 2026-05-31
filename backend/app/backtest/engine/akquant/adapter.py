@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from collections import OrderedDict
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 from loguru import logger
 
 from app.backtest.engine.akquant import AKQUANT_AVAILABLE
@@ -67,6 +68,11 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
         self._has_any_data = False
         self._loaded = False
         self._bulk_minute_timer_loaded = False
+        self._progress_lock = threading.Lock()
+        self._total_rows = 0
+        self._served_rows = 0
+        self._served_requests = 0
+        self._served_symbols: set[str] = set()
 
     async def preload(self) -> None:
         if self._loaded:
@@ -116,6 +122,7 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
             self._cache[sym_str] = grp.copy()
 
         self._has_any_data = bool(self._cache)
+        self._total_rows = int(len(df_all))
         self._loaded = True
         logger.info(
             "MarketDataFeedAdapter: loaded {} symbols, {} total rows",
@@ -123,7 +130,7 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
             len(df_all),
         )
 
-    def load(self, request: "FeedSlice") -> pd.DataFrame:
+    def load(self, request: FeedSlice) -> pd.DataFrame:
         if not self._loaded:
             return pd.DataFrame()
 
@@ -141,7 +148,29 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
             self._cache.move_to_end(sym)
 
         normalized = self.normalize(df.copy(), sym)
-        return self._clip_time_range(normalized, request.start_time, request.end_time)
+        clipped = self._clip_time_range(normalized, request.start_time, request.end_time)
+        self._record_served(sym, len(clipped))
+        return clipped
+
+    @property
+    def progress_snapshot(self) -> dict[str, int | float | str]:
+        with self._progress_lock:
+            total_rows = int(self._total_rows or 0)
+            served_rows = int(self._served_rows or 0)
+            served_requests = int(self._served_requests or 0)
+            served_symbols = len(self._served_symbols)
+        row_ratio = min(1.0, served_rows / total_rows) if total_rows > 0 else 0.0
+        symbol_ratio = min(1.0, served_symbols / len(self._symbols)) if self._symbols else 0.0
+        return {
+            "bar_type": self._bar_type,
+            "total_bars": total_rows,
+            "served_bars": served_rows,
+            "served_requests": served_requests,
+            "served_symbols": served_symbols,
+            "total_symbols": len(self._symbols),
+            "bar_progress_ratio": round(row_ratio, 4),
+            "symbol_progress_ratio": round(symbol_ratio, 4),
+        }
 
     def clear_cache(self) -> None:
         self._cache.clear()
@@ -202,10 +231,23 @@ class ClickHouseFeedAdapter(BasePandasFeedAdapter):
 
         df = df_all.drop(columns=["symbol"], errors="ignore").copy()
         self._cache[symbol] = df
+        self._add_total_rows(len(df))
         self._cache.move_to_end(symbol)
         while len(self._cache) > self._max_cached_symbols:
             self._cache.popitem(last=False)
         return df
+
+    def _add_total_rows(self, rows: int) -> None:
+        if rows <= 0:
+            return
+        with self._progress_lock:
+            self._total_rows += int(rows)
+
+    def _record_served(self, symbol: str, rows: int) -> None:
+        with self._progress_lock:
+            self._served_requests += 1
+            self._served_symbols.add(str(symbol))
+            self._served_rows += max(0, int(rows or 0))
 
     def _filter_smart_minute_timer(self, df: pd.DataFrame) -> pd.DataFrame:
         if (

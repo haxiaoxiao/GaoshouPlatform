@@ -1,8 +1,8 @@
 """Lightweight AKQuant integration tests."""
 from __future__ import annotations
 
-import asyncio
 from datetime import date, datetime
+from decimal import Decimal
 
 import pandas as pd
 import pytest
@@ -13,9 +13,12 @@ from app.backtest.api import (
     _resolve_strategy_code,
     router,
 )
+from app.backtest.config import BacktestConfig
 from app.backtest.engine.akquant.capabilities import get_akquant_capabilities
+from app.backtest.engine.akquant.engine import AkquantEngine
 from app.backtest.engine.data_provider import ClickHouseDataProvider, StoreDataProvider
 from app.services.akquant_optimize import _load_optimization_data
+from app.services.optimization_result_store import save_optimization_result
 
 
 def test_akquant_capabilities_shape():
@@ -31,11 +34,12 @@ def test_akquant_capabilities_shape():
 def test_akquant_routes_registered():
     paths = {getattr(route, "path", "") for route in router.routes}
 
-    assert "/v2/backtest/capabilities" in paths
-    assert "/v2/backtest/optimize/grid" in paths
-    assert "/v2/backtest/optimize/walk-forward" in paths
-    assert "/v2/backtest/strategy-params/schema" in paths
-    assert "/v2/backtest/strategy-params/validate" in paths
+    assert "/capabilities" in paths
+    assert "/optimize/grid" in paths
+    assert "/optimize/walk-forward" in paths
+    assert "/strategy-params/schema" in paths
+    assert "/strategy-params/validate" in paths
+    assert "/presets/dual-stock-grid" in paths
 
 
 @pytest.mark.asyncio
@@ -75,7 +79,9 @@ async def test_prepare_backtest_config_resolves_index_and_strategy(monkeypatch):
         start_date="2025-01-01",
         end_date="2025-01-31",
         strategy_id=43,
-        strategy_params={"timer_times": ["10:30"]},
+        timer_times=["10:30"],
+        benchmark_symbol="zz500",
+        warm_start={"mode": "always", "chunk_days": 10, "keep_checkpoints": True},
     )
 
     config, error = await _prepare_backtest_config(
@@ -89,9 +95,34 @@ async def test_prepare_backtest_config_resolves_index_and_strategy(monkeypatch):
     assert config is not None
     assert config.symbols == ["000001.SZ", "000002.SZ"]
     assert config.index_symbol == "399101.SZ"
+    assert config.universe_mode == "index"
     assert config.strategy_code == "class S: pass"
-    assert config.strategy_params["universe_mode"] == "index"
+    assert config.timer_times == ["10:30"]
+    assert config.benchmark_symbol == "000905.SH"
+    assert config.warm_start == {"mode": "always", "chunk_days": 10, "keep_checkpoints": True}
     assert config._task_id == "task-x"
+
+
+def test_akquant_warm_start_options_control_chunking():
+    engine = AkquantEngine()
+    start = date(2025, 1, 1)
+    end = date(2025, 1, 20)
+    config = BacktestConfig(
+        symbols=["000001.SZ"],
+        start_date=start,
+        end_date=end,
+        bar_type="minute",
+        warm_start={"mode": "off", "chunk_days": 7},
+    )
+
+    assert engine._should_run_chunked(config, start, end) is False
+
+    config.warm_start = {"mode": "always", "chunk_days": 7}
+    assert engine._should_run_chunked(config, start, end) is True
+    assert engine._chunk_dates(start, end, config)[0] == (start, date(2025, 1, 7))
+
+    config.bar_type = "daily"
+    assert engine._should_run_chunked(config, start, end) is False
 
 
 @pytest.mark.asyncio
@@ -167,7 +198,7 @@ def test_optimization_data_uses_timer_minute_loader(monkeypatch):
         start_date=date(2025, 1, 1),
         end_date=date(2025, 1, 31),
         bar_type="minute_timer",
-        strategy_params={"timer_times": ["10:30", "14:50"]},
+        timer_times=["10:30", "14:50"],
     )
 
     data = _load_optimization_data(config, config.start_date, config.end_date)
@@ -204,3 +235,73 @@ def test_strategy_param_helpers_delegate_to_akquant(monkeypatch):
 
     assert schema["properties"]["n"]["type"] == "integer"
     assert validated == {"n": 3}
+
+
+@pytest.mark.asyncio
+async def test_save_optimization_result_persists_as_backtest(monkeypatch):
+    from app.backtest.config import BacktestConfig
+
+    saved: dict = {}
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def execute(self, stmt):
+            class Result:
+                def scalars(self):
+                    class Scalars:
+                        def first(self):
+                            return None
+
+                    return Scalars()
+
+            return Result()
+
+        def add(self, obj):
+            cls_name = obj.__class__.__name__
+            if cls_name == "Strategy":
+                obj.id = 101
+                saved["strategy"] = obj
+            elif cls_name == "Backtest":
+                obj.id = 202
+                saved["backtest"] = obj
+
+        async def flush(self):
+            return None
+
+        async def commit(self):
+            saved["committed"] = True
+
+    monkeypatch.setattr("app.services.optimization_result_store.async_session_factory", lambda: FakeSession())
+
+    config = BacktestConfig(
+        engine="akquant",
+        mode="event_driven",
+        symbols=["000001.SZ"],
+        start_date=date(2025, 1, 1),
+        end_date=date(2025, 1, 31),
+        initial_capital=123456.0,
+        bar_type="daily",
+        strategy_code="class MyStrategy: pass",
+    )
+    record_id = await save_optimization_result(
+        task_id="task-a",
+        optimization_type="grid_search",
+        config=config,
+        request_params={"param_grid": {"n": [1, 2]}},
+        result={"rows": [{"n": 1, "sharpe_ratio": 1.2}], "count": 1},
+        success=True,
+    )
+
+    backtest = saved["backtest"]
+    assert record_id == 202
+    assert saved["committed"] is True
+    assert backtest.status == "completed"
+    assert backtest.initial_capital == Decimal("123456.0")
+    assert backtest.parameters["record_type"] == "optimization"
+    assert backtest.parameters["optimization_type"] == "grid_search"
+    assert backtest.result["count"] == 1
