@@ -1,5 +1,7 @@
 """单因子评估服务 — 串联计算层和回测层"""
+import asyncio
 import calendar
+import inspect
 from datetime import date
 from datetime import timedelta
 from typing import Any
@@ -235,11 +237,8 @@ class FactorEvaluationService:
             total = len(rows)
             await self._attach_latest_research_runs(rows, query)
             if self._sort_uses_coverage(query.sort_by):
-                self._attach_board_coverage(rows, query)
-                rows = self._sort_and_page_rows(rows, query)
-            else:
-                rows = self._sort_and_page_rows(rows, query)
-                self._attach_missing_board_coverage(rows, query)
+                await self._maybe_await(self._attach_board_coverage(rows, query))
+            rows = self._sort_and_page_rows(rows, query)
             return BoardResponse(
                 rows=rows,
                 total=total,
@@ -291,11 +290,8 @@ class FactorEvaluationService:
         total = len(rows)
         await self._attach_latest_research_runs(rows, query)
         if self._sort_uses_coverage(query.sort_by):
-            self._attach_board_coverage(rows, query)
-            rows = self._sort_and_page_rows(rows, query)
-        else:
-            rows = self._sort_and_page_rows(rows, query)
-            self._attach_missing_board_coverage(rows, query)
+            await self._maybe_await(self._attach_board_coverage(rows, query))
+        rows = self._sort_and_page_rows(rows, query)
         return BoardResponse(
             rows=rows, total=total,
             page=query.page, page_size=query.page_size,
@@ -325,14 +321,35 @@ class FactorEvaluationService:
             stmt = select(Factor)
             result = await session.execute(stmt.order_by(Factor.created_at.desc()))
             factors = list(result.scalars().all())
-            for factor in factors:
-                analysis_result = await session.execute(
-                    select(FactorAnalysis)
-                    .where(FactorAnalysis.factor_id == factor.id)
-                    .order_by(FactorAnalysis.created_at.desc())
-                    .limit(1)
+            latest_analysis_by_factor_id: dict[int, FactorAnalysis] = {}
+            factor_ids = [int(factor.id) for factor in factors if factor.id is not None]
+            if factor_ids:
+                from sqlalchemy import func
+
+                ranked = (
+                    select(
+                        FactorAnalysis.id.label("analysis_id"),
+                        func.row_number().over(
+                            partition_by=FactorAnalysis.factor_id,
+                            order_by=FactorAnalysis.created_at.desc(),
+                        ).label("row_num"),
+                    )
+                    .where(FactorAnalysis.factor_id.in_(factor_ids))
+                    .subquery()
                 )
-                analysis = analysis_result.scalar_one_or_none()
+                latest_stmt = (
+                    select(FactorAnalysis)
+                    .join(ranked, FactorAnalysis.id == ranked.c.analysis_id)
+                    .where(ranked.c.row_num == 1)
+                )
+                latest_rows = (await session.execute(latest_stmt)).scalars().all()
+                latest_analysis_by_factor_id = {
+                    int(analysis.factor_id): analysis
+                    for analysis in latest_rows
+                    if analysis.factor_id is not None
+                }
+            for factor in factors:
+                analysis = latest_analysis_by_factor_id.get(int(factor.id))
                 details = analysis.details if analysis and analysis.details else {}
                 definition = definition_by_name.get(str(factor.name), {})
                 group = group_by_factor.get(str(factor.name))
@@ -408,12 +425,12 @@ class FactorEvaluationService:
         ).lower()
         return keyword in haystack
 
-    def _attach_missing_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
+    async def _attach_missing_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
         missing = [row for row in rows if row.coverage_status == "unknown"]
         if missing:
-            self._attach_board_coverage(missing, query)
+            await self._maybe_await(self._attach_board_coverage(missing, query))
 
-    def _attach_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
+    async def _attach_board_coverage(self, rows: list[BoardRow], query: BoardQuery) -> None:
         if not rows:
             return
         from app.services.factor_value_store import get_factor_value_store
@@ -423,7 +440,8 @@ class FactorEvaluationService:
         try:
             # Limit board coverage scans to the active research window so
             # sorting by latest metrics can stay responsive on large groups.
-            coverage_by_factor = store.coverage_many(
+            coverage_by_factor = await asyncio.to_thread(
+                store.coverage_many,
                 [row.factor_name for row in rows],
                 start_date=start_date,
                 end_date=end_date,
@@ -565,14 +583,15 @@ class FactorEvaluationService:
             "rebalance_period": "monthly",
             **costs,
             "filter_limit_up": bool(query.filter_limit_up),
-            "filter_limit_down": True,
-            "group_count": 5,
-            "direction": "desc",
+            "filter_limit_down": bool(query.filter_limit_down),
+            "group_count": int(query.group_count or 5),
+            "direction": getattr(query.direction, "value", str(query.direction)),
             "pool_membership_mode": query.pool_membership_mode,
             "factor_value_params_hash": factor_value_params_hash,
             "factor_value_params_hashes": {factor_name: factor_value_params_hash} if factor_value_params_hash else {},
-            "industry_neutralization": False,
-            "standardize": False,
+            "outlier_handling": query.outlier_handling,
+            "industry_neutralization": bool(query.industry_neutralization),
+            "standardize": bool(query.standardize),
         }
 
     @staticmethod
@@ -640,6 +659,12 @@ class FactorEvaluationService:
         if isinstance(value, (int, float)):
             return float(value)
         return str(value)
+
+    @staticmethod
+    async def _maybe_await(value: Any) -> Any:
+        if inspect.isawaitable(value):
+            return await value
+        return value
 
     # ------------------------------------------------------------------
     # Report helpers

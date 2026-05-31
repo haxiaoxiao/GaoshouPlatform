@@ -37,8 +37,10 @@ class FactorResearchRunRequest(BaseModel):
     pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
     factor_value_params_hash: str | None = Field(default=None, max_length=80)
     factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
+    outlier_handling: Literal["none", "winsorize"] = "none"
     industry_neutralization: bool = False
     standardize: bool = False
+    benchmark_symbol: str | None = Field(default=None, max_length=40)
     force: bool = False
 
     @field_validator("end_date")
@@ -73,8 +75,10 @@ class FactorResearchBatchRequest(BaseModel):
     direction: Literal["asc", "desc"] = "desc"
     pool_membership_mode: Literal["static_latest", "point_in_time", "union"] = "static_latest"
     factor_value_params_hashes: dict[str, str] = Field(default_factory=dict)
+    outlier_handling: Literal["none", "winsorize"] = "none"
     industry_neutralization: bool = False
     standardize: bool = False
+    benchmark_symbol: str | None = Field(default=None, max_length=40)
     force: bool = False
 
     @field_validator("factor_names")

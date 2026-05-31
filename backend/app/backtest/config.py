@@ -46,7 +46,8 @@ class BacktestConfig:
 
     # 引擎选择
     engine: str = "builtin"  # "builtin" | "akquant"
-    benchmark_symbol: str | None = None  # 基准指数，例如 "000300.SH"
+    benchmark_symbol: str | None = "000300.SH"  # 基准指数，例如 "000300.SH"
+    warm_start: dict[str, Any] | None = None
     strategy_id: int | None = None
     strategy_code: str | None = None  # akquant 策略代码
 
@@ -57,6 +58,7 @@ class BacktestConfig:
 
     # Runtime-only cache, not persisted as user config.
     _task_id: str | None = field(default=None, repr=False)
+    _warm_start_runtime: dict[str, Any] | None = field(default=None, repr=False)
     index_symbol: str | None = None
     universe_mode: str = "symbols"
 
@@ -86,6 +88,13 @@ class BacktestResult:
 
     nav_series: list[dict[str, Any]] = field(default_factory=list)
     daily_returns: list[dict[str, Any]] = field(default_factory=list)
+    benchmark_symbol: str | None = None
+    benchmark_name: str | None = None
+    benchmark_nav_series: list[dict[str, Any]] = field(default_factory=list)
+    benchmark_daily_returns: list[dict[str, Any]] = field(default_factory=list)
+    excess_nav_series: list[dict[str, Any]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    warm_start: dict[str, Any] | None = None
 
     group_navs: list[dict[str, Any]] | None = None
 
@@ -121,6 +130,13 @@ class BacktestResult:
             "turnover_rate": self.turnover_rate,
             "nav_series": self.nav_series,
             "daily_returns": self.daily_returns,
+            "benchmark_symbol": self.benchmark_symbol,
+            "benchmark_name": self.benchmark_name,
+            "benchmark_nav_series": self.benchmark_nav_series,
+            "benchmark_daily_returns": self.benchmark_daily_returns,
+            "excess_nav_series": self.excess_nav_series,
+            "warnings": self.warnings,
+            "warm_start": self.warm_start,
             "group_navs": self.group_navs,
             "trades": self.trades,
             "orders": self.orders,

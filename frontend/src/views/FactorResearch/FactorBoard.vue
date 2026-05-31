@@ -141,6 +141,15 @@
             <el-option label="Point-in-time" value="point_in_time" />
             <el-option label="Union" value="union" />
           </el-select>
+
+          <span class="filter-label filter-label--spaced">分组:</span>
+          <el-input-number v-model="filters.group_count" :min="2" :max="20" size="small" controls-position="right" class="group-count-input" />
+
+          <span class="filter-label filter-label--spaced">方向:</span>
+          <el-select v-model="filters.direction" size="small" style="width:110px">
+            <el-option label="降序" value="desc" />
+            <el-option label="升序" value="asc" />
+          </el-select>
         </div>
 
         <div class="filter-row">
@@ -187,6 +196,19 @@
 
           <span class="filter-label filter-label--spaced">过滤涨停:</span>
           <el-switch v-model="filters.filter_limit_up" size="small" />
+
+          <span class="filter-label filter-label--spaced">过滤跌停:</span>
+          <el-switch v-model="filters.filter_limit_down" size="small" />
+        </div>
+
+        <div class="filter-row">
+          <span class="filter-label">因子预处理:</span>
+          <el-select v-model="filters.outlier_handling" size="small" style="width:126px">
+            <el-option label="不去极值" value="none" />
+            <el-option label="Winsor 2.5%" value="winsorize" />
+          </el-select>
+          <el-checkbox v-model="filters.industry_neutralization" size="small">行业中性化</el-checkbox>
+          <el-checkbox v-model="filters.standardize" size="small">标准化</el-checkbox>
         </div>
       </div>
       <div class="toolbar">
@@ -372,6 +394,16 @@
             <el-option label="Union" value="union" />
           </el-select>
         </el-form-item>
+        <el-form-item label="基准">
+          <el-select v-model="batchForm.benchmark_symbol" filterable style="width:100%">
+            <el-option
+              v-for="item in benchmarkOptions"
+              :key="item.symbol"
+              :label="`${item.display_name} ${item.symbol}`"
+              :value="item.symbol"
+            />
+          </el-select>
+        </el-form-item>
         <el-form-item label="日期范围">
           <div class="date-range">
             <el-date-picker v-model="batchForm.start_date" value-format="YYYY-MM-DD" type="date" />
@@ -388,6 +420,16 @@
         </el-form-item>
         <el-form-item label="分组数">
           <el-input-number v-model="batchForm.group_count" :min="2" :max="20" />
+        </el-form-item>
+        <el-form-item label="因子预处理">
+          <div class="preprocess-controls">
+            <el-select v-model="batchForm.outlier_handling" style="width:126px">
+              <el-option label="不去极值" value="none" />
+              <el-option label="Winsor 2.5%" value="winsorize" />
+            </el-select>
+            <el-checkbox v-model="batchForm.industry_neutralization">行业中性化</el-checkbox>
+            <el-checkbox v-model="batchForm.standardize">标准化</el-checkbox>
+          </div>
         </el-form-item>
         <el-form-item label="交易成本">
           <div class="fee-toggle-group">
@@ -461,6 +503,7 @@ const categoryBuckets = [
 type BoardFilterState = BoardQuery & {
   use_commission_stamp: boolean
   use_slippage: boolean
+  benchmark_symbol?: string
 }
 
 const filters = reactive<BoardFilterState>({
@@ -476,7 +519,13 @@ const filters = reactive<BoardFilterState>({
   use_commission_stamp: true,
   use_slippage: true,
   filter_limit_up: true,
+  filter_limit_down: true,
+  group_count: 5,
+  direction: 'desc',
   pool_membership_mode: 'static_latest',
+  outlier_handling: 'none',
+  industry_neutralization: false,
+  standardize: false,
   sort_by: 'ic_mean',
   sort_order: 'desc',
   page: 1,
@@ -511,6 +560,9 @@ const batchResult = ref<Array<{
   icir?: number | null
 }>>([])
 const poolEnabledIndexes = computed(() => indexCatalog.value.filter(item => item.pool_enabled))
+const benchmarkOptions = computed(() =>
+  indexCatalog.value.filter(item => item.benchmark_enabled && (item.common_benchmark || item.pool_enabled))
+)
 const categoryOptions = computed(() => categoryBuckets)
 const rowsByFactorName = computed(() => new Map(rows.value.map(row => [row.factor_name, row])))
 const factorGroupByName = computed(() => new Map(factorGroups.value.map(group => [group.name, group])))
@@ -541,6 +593,7 @@ const todayText = new Date().toISOString().slice(0, 10)
 const batchForm = reactive({
   factor_group: '',
   stock_pool_value: 'zz500',
+  benchmark_symbol: '000300.SH',
   start_date: '2023-01-01',
   end_date: todayText,
   portfolio_type: 'long_only' as 'long_only' | 'long_short_i' | 'long_short_ii',
@@ -556,6 +609,7 @@ const batchForm = reactive({
   group_count: 5,
   direction: 'desc' as 'asc' | 'desc',
   pool_membership_mode: 'static_latest' as 'static_latest' | 'point_in_time' | 'union',
+  outlier_handling: 'none' as 'none' | 'winsorize',
   industry_neutralization: false,
   standardize: false,
 })
@@ -577,6 +631,7 @@ const combinationGroups = computed(() => combinationResult.value?.combo_groups |
 const combinationFacets = computed(() => combinationResult.value?.facets || {})
 const hasCombinationContext = computed(() => activeCombinationFactorNames.value.length > 0)
 const combinationFacetFields = [
+  { field: 'benchmark_symbol', label: '基准' },
   { field: 'factor_value_params_hash', label: '参数 Hash' },
   { field: 'stock_pool_value', label: '股票池' },
   { field: 'date_range', label: '日期区间' },
@@ -585,6 +640,9 @@ const combinationFacetFields = [
   { field: 'pool_membership_mode', label: '成分口径' },
   { field: 'group_count', label: '分组数' },
   { field: 'direction', label: '方向' },
+  { field: 'outlier_handling', label: '去极值' },
+  { field: 'industry_neutralization', label: '行业中性化' },
+  { field: 'standardize', label: '标准化' },
 ] as const
 
 function resolveDateRangeFromPeriod(period: string) {
@@ -843,6 +901,18 @@ function comboSettingString(settings: Record<string, unknown>, key: string) {
   return value === undefined || value === null ? '' : String(value)
 }
 
+function comboBooleanSetting(settings: Record<string, unknown>, key: string, fallback: boolean) {
+  const value = settings[key]
+  if (value === undefined || value === null || value === '') return fallback
+  if (typeof value === 'boolean') return value
+  return String(value).toLowerCase() === 'true'
+}
+
+function comboNumberSetting(settings: Record<string, unknown>, key: string, fallback: number) {
+  const value = Number(settings[key])
+  return Number.isFinite(value) ? value : fallback
+}
+
 function combinationGroupTitle(group: FactorResearchCombinationGroup) {
   const settings = group.settings
   return [
@@ -863,7 +933,13 @@ function applyCombinationGroup(group: FactorResearchCombinationGroup) {
   filters.end_date = comboSettingString(settings, 'end_date') || null
   filters.portfolio_type = (comboSettingString(settings, 'portfolio_type') || 'long_only') as BoardFilterState['portfolio_type']
   filters.pool_membership_mode = (comboSettingString(settings, 'pool_membership_mode') || 'static_latest') as BoardFilterState['pool_membership_mode']
-  filters.filter_limit_up = Boolean(settings.filter_limit_up)
+  filters.filter_limit_up = comboBooleanSetting(settings, 'filter_limit_up', true)
+  filters.filter_limit_down = comboBooleanSetting(settings, 'filter_limit_down', true)
+  filters.group_count = comboNumberSetting(settings, 'group_count', 5)
+  filters.direction = (comboSettingString(settings, 'direction') || 'desc') as BoardFilterState['direction']
+  filters.outlier_handling = (comboSettingString(settings, 'outlier_handling') || 'none') as BoardFilterState['outlier_handling']
+  filters.industry_neutralization = comboBooleanSetting(settings, 'industry_neutralization', false)
+  filters.standardize = comboBooleanSetting(settings, 'standardize', false)
   filters.fee_rate = Number(settings.fee_rate || 0)
   filters.stamp_tax_rate = Number(settings.stamp_tax_rate || 0)
   filters.transfer_fee_rate = Number(settings.transfer_fee_rate || 0)
@@ -881,6 +957,12 @@ function applyCombinationGroup(group: FactorResearchCombinationGroup) {
     batchForm.portfolio_type = filters.portfolio_type || batchForm.portfolio_type
     batchForm.pool_membership_mode = filters.pool_membership_mode || batchForm.pool_membership_mode
     batchForm.filter_limit_up = filters.filter_limit_up
+    batchForm.filter_limit_down = filters.filter_limit_down
+    batchForm.group_count = filters.group_count || batchForm.group_count
+    batchForm.direction = filters.direction || batchForm.direction
+    batchForm.outlier_handling = filters.outlier_handling || 'none'
+    batchForm.industry_neutralization = filters.industry_neutralization
+    batchForm.standardize = filters.standardize
     batchForm.use_commission_stamp = filters.use_commission_stamp
     batchForm.use_slippage = filters.use_slippage
   }
@@ -960,7 +1042,13 @@ function goToDetail(row: BoardRow) {
       slippage: String(costs.slippage),
       factor_value_params_hash: selectedFactorParamHashes[row.factor_name] || '',
       filter_limit_up: String(filters.filter_limit_up),
+      filter_limit_down: String(filters.filter_limit_down),
+      group_count: String(filters.group_count || 5),
+      direction: filters.direction || 'desc',
       pool_membership_mode: filters.pool_membership_mode,
+      outlier_handling: filters.outlier_handling || 'none',
+      industry_neutralization: String(Boolean(filters.industry_neutralization)),
+      standardize: String(Boolean(filters.standardize)),
     },
   })
 }
@@ -995,6 +1083,7 @@ function coverageTagType(status: BoardRow['coverage_status']) {
 }
 
 function coverageRangeText(row: BoardRow) {
+  if (row.coverage_status === 'unknown') return '按需加载'
   const rowsText = `${(row.coverage_total_rows || 0).toLocaleString()} 行`
   if (!row.coverage_min_date || !row.coverage_max_date) return rowsText
   return `${row.coverage_min_date} - ${row.coverage_max_date} / ${rowsText}`
@@ -1022,9 +1111,34 @@ async function openBatchDialog() {
   batchForm.use_commission_stamp = filters.use_commission_stamp
   batchForm.use_slippage = filters.use_slippage
   batchForm.filter_limit_up = Boolean(filters.filter_limit_up)
+  batchForm.filter_limit_down = Boolean(filters.filter_limit_down)
+  batchForm.group_count = Number(filters.group_count || 5)
+  batchForm.direction = (filters.direction || 'desc') as 'asc' | 'desc'
   batchForm.pool_membership_mode = filters.pool_membership_mode || 'static_latest'
+  batchForm.benchmark_symbol = filters.benchmark_symbol || '000300.SH'
+  batchForm.outlier_handling = (filters.outlier_handling || 'none') as 'none' | 'winsorize'
+  batchForm.industry_neutralization = Boolean(filters.industry_neutralization)
+  batchForm.standardize = Boolean(filters.standardize)
   showBatchDialog.value = true
   await loadCombinations()
+}
+
+function syncFiltersFromBatchForm() {
+  filters.stock_pool = batchForm.stock_pool_value
+  filters.start_date = batchForm.start_date
+  filters.end_date = batchForm.end_date
+  filters.portfolio_type = batchForm.portfolio_type
+  filters.pool_membership_mode = batchForm.pool_membership_mode
+  filters.benchmark_symbol = batchForm.benchmark_symbol
+  filters.use_commission_stamp = batchForm.use_commission_stamp
+  filters.use_slippage = batchForm.use_slippage
+  filters.filter_limit_up = batchForm.filter_limit_up
+  filters.filter_limit_down = batchForm.filter_limit_down
+  filters.group_count = batchForm.group_count
+  filters.direction = batchForm.direction
+  filters.outlier_handling = batchForm.outlier_handling
+  filters.industry_neutralization = batchForm.industry_neutralization
+  filters.standardize = batchForm.standardize
 }
 
 async function submitBatchRun() {
@@ -1041,6 +1155,7 @@ async function submitBatchRun() {
     const result = await factorResearchRunApi.batch({
       factor_names: group.factor_names,
       stock_pool_value: batchForm.stock_pool_value,
+      benchmark_symbol: batchForm.benchmark_symbol,
       start_date: batchForm.start_date,
       end_date: batchForm.end_date,
       portfolio_type: batchForm.portfolio_type,
@@ -1055,12 +1170,14 @@ async function submitBatchRun() {
       direction: batchForm.direction,
       pool_membership_mode: batchForm.pool_membership_mode,
       factor_value_params_hashes: selectedHashes,
+      outlier_handling: batchForm.outlier_handling,
       industry_neutralization: batchForm.industry_neutralization,
       standardize: batchForm.standardize,
       force: false,
     })
     batchResult.value = result.items
     ElMessage.success('批量计算已完成')
+    syncFiltersFromBatchForm()
     fetchBoard()
   } finally {
     batchLoading.value = false
@@ -1077,7 +1194,13 @@ watch(
     filters.use_commission_stamp,
     filters.use_slippage,
     filters.filter_limit_up,
+    filters.filter_limit_down,
+    filters.group_count,
+    filters.direction,
     filters.pool_membership_mode,
+    filters.outlier_handling,
+    filters.industry_neutralization,
+    filters.standardize,
     filters.factor_keyword || '',
     JSON.stringify(filters.categories || []),
     JSON.stringify(filters.factor_groups || []),
@@ -1209,7 +1332,19 @@ onMounted(() => {
   gap: 12px;
   min-height: 24px;
 }
+.group-count-input {
+  width: 92px;
+}
+.preprocess-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+}
 .fee-toggle-group :deep(.el-checkbox) {
+  margin-right: 0;
+}
+.preprocess-controls :deep(.el-checkbox) {
   margin-right: 0;
 }
 .batch-result-metric {

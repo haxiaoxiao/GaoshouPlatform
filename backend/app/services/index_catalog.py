@@ -204,6 +204,18 @@ INDEX_CATALOG: tuple[IndexCatalogItem, ...] = (
     _benchmark_item("801370.SI", "申万轻工制造", provider="tushare.sw_daily", market_family="sw_industry"),
 )
 
+COMMON_BENCHMARK_SYMBOLS: tuple[str, ...] = (
+    "000300.SH",
+    "000905.SH",
+    "000852.SH",
+    "000016.SH",
+    "000001.SH",
+    "399001.SZ",
+    "399006.SZ",
+    "000688.SH",
+    "399101.SZ",
+)
+
 
 _INDEX_BY_SYMBOL: dict[str, IndexCatalogItem] = {}
 _INDEX_BY_ALIAS: dict[str, IndexCatalogItem] = {}
@@ -271,6 +283,7 @@ def list_index_items(*, benchmark_only: bool | None = None, pool_only: bool | No
 
 def catalog_item_to_dict(item: IndexCatalogItem) -> dict[str, Any]:
     payload = asdict(item)
+    payload["common_benchmark"] = item.symbol in COMMON_BENCHMARK_SYMBOLS
     if item.pool_enabled:
         payload["component_status"] = "available"
         payload["reason"] = None

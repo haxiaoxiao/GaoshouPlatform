@@ -268,14 +268,17 @@ async def coverage(
     store = get_factor_value_store()
     effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
     if full_range:
-        data = store.coverage_many(
+        coverage_many = await asyncio.to_thread(
+            store.coverage_many,
             [factor_name],
             symbols=symbol_list,
             as_of_time=effective_as_of_time,
             params=params,
-        ).get(factor_name, store._empty_coverage(factor_name))
+        )
+        data = coverage_many.get(factor_name, store._empty_coverage(factor_name))
     else:
-        data = store.coverage(
+        data = await asyncio.to_thread(
+            store.coverage,
             factor_name=factor_name,
             start_date=start_date,
             end_date=end_date,

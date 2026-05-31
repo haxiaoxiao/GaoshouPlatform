@@ -22,6 +22,7 @@ def test_sync_catalog_exposes_relay_guardrails() -> None:
     presets = {item["name"]: item for item in catalog["presets"]}
 
     assert set(STRUCTURED_RELAY_DATASETS).issubset(dataset_names)
+    assert "ths_concept" in dataset_names
     assert "dividend" not in dataset_names
     assert presets["relay_structured"]["relay_datasets"] == list(STRUCTURED_RELAY_DATASETS)
     assert presets["relay_text"]["include_by_default"] is False

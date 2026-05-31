@@ -310,6 +310,39 @@ def test_filter_board_rows_matches_factor_cache_metadata() -> None:
     assert [row.factor_name for row in filtered] == ["paper_pb_roe_residual"]
 
 
+def test_board_research_payload_preserves_matching_settings() -> None:
+    service = FactorEvaluationService()
+    query = BoardQuery(
+        stock_pool="zz800",
+        start_date=date(2020, 1, 1),
+        end_date=date(2026, 5, 20),
+        fee_rate=0.003,
+        stamp_tax_rate=0.001,
+        transfer_fee_rate=0.0,
+        slippage=0.001,
+        filter_limit_up=True,
+        filter_limit_down=True,
+        group_count=5,
+        direction="desc",
+        pool_membership_mode="static_latest",
+        factor_value_params_hashes={"paper_pb_roe_residual": "bf21a9e8fbc5a384"},
+        outlier_handling="winsorize",
+        industry_neutralization=True,
+        standardize=True,
+    )
+
+    payload = service._board_research_payload("paper_pb_roe_residual", query)
+
+    assert payload["stock_pool_value"] == "zz800"
+    assert payload["factor_value_params_hash"] == "bf21a9e8fbc5a384"
+    assert payload["filter_limit_down"] is True
+    assert payload["group_count"] == 5
+    assert payload["direction"] == "desc"
+    assert payload["outlier_handling"] == "winsorize"
+    assert payload["industry_neutralization"] is True
+    assert payload["standardize"] is True
+
+
 @pytest.mark.asyncio
 async def test_board_query_sorts_after_latest_metrics_attached(monkeypatch) -> None:
     service = FactorEvaluationService()
@@ -450,7 +483,7 @@ async def test_board_query_attaches_paged_coverage_for_latest_sort(monkeypatch) 
     result = await service.board_query(query)
 
     assert [row.factor_name for row in result.rows] == ["alpha101_002", "alpha101_003"]
-    assert coverage_calls == [["alpha101_002", "alpha101_003"]]
+    assert coverage_calls == []
 
 
 def test_attach_research_snapshot_coverage_from_summary() -> None:

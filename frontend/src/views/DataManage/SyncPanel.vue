@@ -164,6 +164,7 @@
             <el-option label="全部" value="all" />
             <el-option label="核心" value="core" />
             <el-option label="行情" value="market" />
+            <el-option label="概念" value="concept" />
             <el-option label="Relay 结构化" value="relay_structured" />
             <el-option label="新闻公告" value="relay_text" />
           </el-select>
@@ -399,7 +400,7 @@ function isPresetQueued(preset: SyncPreset) {
 }
 
 function addTask(item: SyncCatalogItem, dedupe = true) {
-  const kind = item.requires_relay_key || item.category.startsWith('relay') ? 'relay' : 'core'
+  const kind = item.category.startsWith('relay') ? 'relay' : 'core'
   queue.value.push({
     id: `${kind}:${item.name}:${Date.now()}:${Math.random().toString(16).slice(2)}`,
     name: item.name,
@@ -527,6 +528,9 @@ function syncTypeLabel(type: string) {
     dividends: 'QMT 分红',
     factor_dependency: '因子依赖',
     tushare_relay: 'Tushare Relay',
+    ths_concept: '同花顺概念',
+    sentiment_xueqiu: '情绪 / 雪球',
+    sentiment_nga: '情绪 / NGA',
   }
   return map[type] || type
 }

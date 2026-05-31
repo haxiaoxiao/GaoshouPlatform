@@ -81,6 +81,13 @@ export interface BacktestResult {
   trades?: BacktestTrade[]
   nav_series?: Array<{ date: string; nav: number }>
   daily_returns?: Array<{ date: string; return: number }>
+  benchmark_symbol?: string | null
+  benchmark_name?: string | null
+  benchmark_nav_series?: Array<{ date: string; nav: number }>
+  benchmark_daily_returns?: Array<{ date: string; return: number }>
+  excess_nav_series?: Array<{ date: string; nav: number }>
+  warnings?: string[]
+  warm_start?: Record<string, unknown> | null
   start_date?: string
   end_date?: string
   initial_capital?: number
@@ -244,6 +251,7 @@ export interface BacktestDataCoverage {
   symbol_count: number
   ok: boolean
   warnings: string[]
+  benchmark_warnings?: string[]
   market: {
     dataset: string
     total_rows: number
@@ -261,6 +269,21 @@ export interface BacktestDataCoverage {
     warning: boolean
     items: BacktestDataCoverageFactorItem[]
   } | null
+  benchmark?: {
+    symbol: string
+    name?: string | null
+    covered_days: number
+    min_date: string | null
+    max_date: string | null
+    ok: boolean
+    warning?: string | null
+  } | null
+}
+
+export interface WarmStartConfig {
+  mode: 'auto' | 'always' | 'off'
+  chunk_days?: number
+  keep_checkpoints?: boolean
 }
 
 export const backtestEngines = {
@@ -318,6 +341,13 @@ export interface BacktestResultData {
   }>
   nav_series?: Array<{ date: string; nav: number }>
   daily_returns?: Array<{ date: string; return: number }>
+  benchmark_symbol?: string | null
+  benchmark_name?: string | null
+  benchmark_nav_series?: Array<{ date: string; nav: number }>
+  benchmark_daily_returns?: Array<{ date: string; return: number }>
+  excess_nav_series?: Array<{ date: string; nav: number }>
+  warnings?: string[]
+  warm_start?: Record<string, unknown> | null
   start_date?: string | null
   end_date?: string | null
   initial_capital?: number

@@ -304,11 +304,20 @@ async def get_industries(
 
 
 @router.get("/index-catalog", summary="获取指数目录")
-async def get_index_catalog() -> dict[str, Any]:
+async def get_index_catalog(
+    benchmark_only: bool = Query(default=False, description="Only return common benchmark indices"),
+    pool_only: bool = Query(default=False, description="Only return indices with constituent pools"),
+) -> dict[str, Any]:
+    items = list_index_catalog(
+        benchmark_only=True if benchmark_only else None,
+        pool_only=True if pool_only else None,
+    )
+    if benchmark_only:
+        items = [item for item in items if item.get("common_benchmark")]
     return {
         "code": 0,
         "message": "success",
-        "data": list_index_catalog(),
+        "data": items,
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import calendar
 import copy
@@ -12,13 +13,14 @@ from typing import Any, Iterable
 
 import pandas as pd
 from loguru import logger
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
-from app.db.models import Stock
+from app.db.models import Stock, StockConceptMembership
+from app.services.security_symbols import normalize_security_symbol
 from app.services.tushare_relay import TushareRelayClient, TushareRelayError, TushareRelayMeta
 
 
@@ -353,6 +355,44 @@ CORE_SYNC_CATALOG = [
         "description": "按因子预计算计划补齐必要的行情和基础数据。",
         "default_enabled": False,
     },
+    {
+        "name": "ths_concept",
+        "display_name": "同花顺概念分类",
+        "category": "concept",
+        "source": "Indevs Tushare Relay",
+        "storage_dataset": "ths_member",
+        "date_col": "snapshot_date",
+        "recommended_frequency": "weekly",
+        "requires_qmt": False,
+        "requires_relay_key": True,
+        "risk_level": "medium",
+        "description": "同步同花顺概念字典和成分，保留原始 Parquet，并派生 SQLite 概念成员表与 stocks.concept 展示字段。",
+        "default_enabled": False,
+    },
+    {
+        "name": "sentiment_xueqiu",
+        "display_name": "情绪 / 雪球个股讨论",
+        "category": "core",
+        "source": "Built-in",
+        "recommended_frequency": "on_demand",
+        "requires_qmt": False,
+        "requires_relay_key": False,
+        "risk_level": "medium",
+        "description": "按股票代码抓取雪球个股讨论帖，适合围绕重点标的补充情绪样本。",
+        "default_enabled": False,
+    },
+    {
+        "name": "sentiment_nga",
+        "display_name": "情绪 / NGA 大时代",
+        "category": "core",
+        "source": "Built-in",
+        "recommended_frequency": "on_demand",
+        "requires_qmt": False,
+        "requires_relay_key": False,
+        "risk_level": "medium",
+        "description": "按日期集中抓取 NGA 大时代版面（fid=706）帖子，并自动识别相关股票代码。",
+        "default_enabled": False,
+    },
 ]
 
 
@@ -578,6 +618,7 @@ async def run_tushare_relay_sync(
     )
 
     ths_index_rows: list[dict[str, Any]] = []
+    ths_member_rows: list[dict[str, Any]] = []
     for dataset_name in requested:
         spec = RELAY_DATASET_SPECS[dataset_name]
         dataset_rows: list[dict[str, Any]] = []
@@ -585,7 +626,7 @@ async def run_tushare_relay_sync(
         progress.details["current_dataset"] = dataset_name
         try:
             if dataset_name in {"adj_factor", "moneyflow", "stk_auction_replay"}:
-                dataset_rows, dataset_meta = _sync_symbol_date_dataset(
+                dataset_rows, dataset_meta = await _sync_symbol_date_dataset(
                     client,
                     spec,
                     symbols=resolved_symbols,
@@ -594,25 +635,31 @@ async def run_tushare_relay_sync(
                     progress=progress,
                 )
             elif dataset_name == "block_moneyflow":
-                dataset_rows, dataset_meta = _sync_block_moneyflow(client, spec, dates=dates, options=options, progress=progress)
+                dataset_rows, dataset_meta = await _sync_block_moneyflow(client, spec, dates=dates, options=options, progress=progress)
             elif dataset_name == "ths_index":
-                dataset_rows, dataset_meta = _sync_ths_index(client, spec, options=options, progress=progress)
+                dataset_rows, dataset_meta = await _sync_ths_index(client, spec, options=options, progress=progress)
                 ths_index_rows = dataset_rows
             elif dataset_name == "ths_member":
                 if not ths_index_rows:
-                    ths_index_rows, extra_meta = _sync_ths_index(client, RELAY_DATASET_SPECS["ths_index"], options=options, progress=progress)
+                    ths_index_rows, extra_meta = await _sync_ths_index(client, RELAY_DATASET_SPECS["ths_index"], options=options, progress=progress)
                     dataset_meta.extend(extra_meta)
-                dataset_rows, member_meta = _sync_ths_member(client, spec, ths_index_rows=ths_index_rows, options=options, progress=progress)
+                dataset_rows, member_meta = await _sync_ths_member(client, spec, ths_index_rows=ths_index_rows, options=options, progress=progress)
                 dataset_meta.extend(member_meta)
+                ths_member_rows = dataset_rows
             elif spec.text_source:
-                dataset_rows, dataset_meta = _sync_text_dataset(client, spec, dates=dates, options=options, progress=progress)
+                dataset_rows, dataset_meta = await _sync_text_dataset(client, spec, dates=dates, options=options, progress=progress)
 
             for row in dataset_rows:
                 row.setdefault("source_api", spec.api_name)
             frame = _normalize_dataset_rows(dataset_name, dataset_rows, options)
             written = 0
             if not frame.empty:
-                written = store.write_dataset(frame, dataset=spec.storage_dataset, date_col=spec.date_col)
+                written = await asyncio.to_thread(
+                    store.write_dataset,
+                    frame,
+                    dataset=spec.storage_dataset,
+                    date_col=spec.date_col,
+                )
             progress.success_count += 1
             progress.details["datasets"][dataset_name] = {
                 "rows_fetched": len(dataset_rows),
@@ -632,9 +679,126 @@ async def run_tushare_relay_sync(
             if failure_strategy == "stop":
                 raise
 
+    if options.get("derive_ths_concepts") and ths_member_rows:
+        try:
+            progress.details["ths_concept"] = await _derive_ths_concepts_to_sqlite(
+                session,
+                ths_index_rows=ths_index_rows,
+                ths_member_rows=ths_member_rows,
+            )
+        except Exception as exc:
+            progress.failed_count += 1
+            progress.details["ths_concept"] = {"error": str(exc)}
+            logger.opt(exception=True).warning("THS concept derivation failed: {}", exc)
+            if options.get("derive_ths_concepts") or failure_strategy == "stop":
+                raise
+
     progress.status = "failed" if progress.failed_count and progress.success_count == 0 else "completed"
     progress.end_time = datetime.now()
     return progress
+
+
+async def _derive_ths_concepts_to_sqlite(
+    session: AsyncSession,
+    *,
+    ths_index_rows: list[dict[str, Any]],
+    ths_member_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    source = "indevs_tushare_relay"
+    snapshot = date.today()
+    concept_names: dict[str, str] = {}
+    for row in ths_index_rows:
+        code = _first_text(row, "ts_code", "ths_code", "code")
+        if not code:
+            continue
+        concept_names[code] = _first_text(row, "name", "ths_name", "ts_name", "concept_name") or code
+
+    memberships: list[StockConceptMembership] = []
+    concepts_by_symbol: dict[str, list[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    for row in ths_member_rows:
+        concept_code = _first_text(row, "ts_code", "ths_code", "code")
+        raw_symbol = _first_text(row, "con_code", "symbol", "stock_code")
+        symbol = normalize_security_symbol(raw_symbol) or raw_symbol.upper()
+        if not concept_code or not symbol:
+            continue
+        key = (concept_code, symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        concept_name = concept_names.get(concept_code) or _first_text(row, "concept_name", "ths_name") or concept_code
+        concepts_by_symbol.setdefault(symbol, []).append(concept_name)
+        memberships.append(
+            StockConceptMembership(
+                source=source,
+                snapshot_date=snapshot,
+                concept_code=concept_code,
+                concept_name=concept_name,
+                symbol=symbol,
+                in_date=_parse_date_value(row.get("in_date")),
+                out_date=_parse_date_value(row.get("out_date")),
+                is_new=_parse_bool_value(row.get("is_new")),
+            )
+        )
+
+    await session.execute(
+        delete(StockConceptMembership).where(
+            StockConceptMembership.source == source,
+            StockConceptMembership.snapshot_date == snapshot,
+        )
+    )
+    if memberships:
+        session.add_all(memberships)
+
+    updated_stocks = 0
+    if concepts_by_symbol:
+        rows = await session.execute(select(Stock).where(Stock.symbol.in_(list(concepts_by_symbol))))
+        for stock in rows.scalars().all():
+            names = sorted({name for name in concepts_by_symbol.get(stock.symbol, []) if name})
+            stock.concept = ",".join(names)
+            updated_stocks += 1
+    await session.flush()
+    return {
+        "source": source,
+        "snapshot_date": snapshot.isoformat(),
+        "membership_rows": len(memberships),
+        "stock_updates": updated_stocks,
+        "concept_count": len({item.concept_code for item in memberships}),
+    }
+
+
+def _first_text(row: dict[str, Any], *names: str) -> str:
+    for name in names:
+        value = row.get(name)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text and text.lower() not in {"nan", "none", "nat"}:
+            return text
+    return ""
+
+
+def _parse_date_value(value: Any) -> date | None:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = pd.to_datetime(str(value), errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed.date()
+
+
+def _parse_bool_value(value: Any) -> bool | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "new", "是"}:
+        return True
+    if text in {"0", "false", "no", "n", "否"}:
+        return False
+    return None
 
 
 async def _resolve_symbols(session: AsyncSession, symbols: list[str] | None, *, allow_all: bool) -> list[str]:
@@ -675,7 +839,7 @@ def _estimate_total(names: list[str], dates: list[date], symbols: list[str], opt
     return max(total, 1)
 
 
-def _sync_symbol_date_dataset(
+async def _sync_symbol_date_dataset(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -694,7 +858,7 @@ def _sync_symbol_date_dataset(
             params = {"ts_code": symbol, "trade_date": current_date.strftime("%Y%m%d")}
             if spec.name == "stk_auction_replay":
                 params["mode"] = mode
-            result = client.request(spec.api_name, params)
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
             metas.append(_meta_dict(result.meta))
             for row in result.rows:
                 item = dict(row)
@@ -704,10 +868,11 @@ def _sync_symbol_date_dataset(
                     item["mode"] = mode
                 rows.append(item)
             progress.current = min(progress.current + 1, progress.total)
+            await asyncio.sleep(0)
     return rows, metas
 
 
-def _sync_block_moneyflow(
+async def _sync_block_moneyflow(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -721,14 +886,19 @@ def _sync_block_moneyflow(
     limit = min(max(limit, 1), 100)
     for current_date in dates:
         progress.details["current_date"] = current_date.isoformat()
-        result = client.request(spec.api_name, {"trade_date": current_date.strftime("%Y%m%d"), "limit": limit})
+        result = await asyncio.to_thread(
+            client.request,
+            spec.api_name,
+            {"trade_date": current_date.strftime("%Y%m%d"), "limit": limit},
+        )
         metas.append(_meta_dict(result.meta))
         rows.extend(result.rows)
         progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
     return rows, metas
 
 
-def _sync_ths_index(
+async def _sync_ths_index(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -741,12 +911,13 @@ def _sync_ths_index(
         "type": options.get("ths_type") or spec.default_params.get("type", "N"),
         "limit": min(max(limit, 1), 2000),
     }
-    result = client.request(spec.api_name, params)
+    result = await asyncio.to_thread(client.request, spec.api_name, params)
     progress.current = min(progress.current + 1, progress.total)
+    await asyncio.sleep(0)
     return result.rows, [_meta_dict(result.meta)]
 
 
-def _sync_ths_member(
+async def _sync_ths_member(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -763,17 +934,22 @@ def _sync_ths_member(
     metas: list[dict[str, Any]] = []
     for code in codes:
         progress.details["current_ths_code"] = code
-        result = client.request(spec.api_name, {"ts_code": code, "limit": _positive_int(options.get("limit")) or 1000})
+        result = await asyncio.to_thread(
+            client.request,
+            spec.api_name,
+            {"ts_code": code, "limit": _positive_int(options.get("limit")) or 1000},
+        )
         metas.append(_meta_dict(result.meta))
         for row in result.rows:
             item = dict(row)
             item.setdefault("ts_code", code)
             rows.append(item)
         progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
     return rows, metas
 
 
-def _sync_text_dataset(
+async def _sync_text_dataset(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -788,10 +964,11 @@ def _sync_text_dataset(
     for current_date in dates:
         progress.details["current_date"] = current_date.isoformat()
         params = _text_params(spec.name, current_date, daily_limit, options)
-        result = client.request(spec.api_name, params)
+        result = await asyncio.to_thread(client.request, spec.api_name, params)
         metas.append(_meta_dict(result.meta))
         rows.extend(result.rows[:daily_limit])
         progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
     return rows, metas
 
 

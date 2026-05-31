@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -24,6 +25,15 @@ from app.services.factor_evaluation import FactorEvaluationService
 from app.services.factor_value_store import get_factor_definition, get_factor_value_store
 from app.services.index_catalog import get_index_item
 from app.services.index_components import load_index_symbols
+from app.data_stores import get_market_data_store
+from app.services.benchmark_series import (
+    DEFAULT_BENCHMARK_SYMBOL,
+    benchmark_display_name,
+    excess_nav_points,
+    nav_points,
+    resolve_benchmark_symbol,
+    returns_to_nav_series,
+)
 
 
 DEFAULT_PARAMS: dict[str, Any] = {
@@ -40,8 +50,10 @@ DEFAULT_PARAMS: dict[str, Any] = {
     "pool_membership_mode": "static_latest",
     "factor_value_params_hash": None,
     "factor_value_params_hashes": {},
+    "outlier_handling": "none",
     "industry_neutralization": False,
     "standardize": False,
+    "benchmark_symbol": DEFAULT_BENCHMARK_SYMBOL,
 }
 
 _LATEST_SUMMARY_CACHE: dict[tuple[Any, ...], tuple[float, dict[str, dict[str, Any]]]] = {}
@@ -53,6 +65,7 @@ _COMBINATION_FACET_FIELDS = (
     "stock_pool_value",
     "date_range",
     "portfolio_type",
+    "benchmark_symbol",
     "fee_profile",
     "pool_membership_mode",
     "group_count",
@@ -60,6 +73,7 @@ _COMBINATION_FACET_FIELDS = (
     "filter_limit_up",
     "filter_limit_down",
     "rebalance_period",
+    "outlier_handling",
     "industry_neutralization",
     "standardize",
 )
@@ -105,12 +119,14 @@ class FactorResearchRunService:
             params_hash=research_params_hash(params),
         )
         factor_value_params_hash = self._factor_value_params_hash_for(str(payload["factor_name"]), params)
-        coverage = get_factor_value_store().coverage(
+        coverage = await asyncio.to_thread(
+            get_factor_value_store().coverage,
             str(payload["factor_name"]),
             start_date=start_date,
             end_date=end_date,
             symbols=symbols or None,
             params_hash=factor_value_params_hash,
+            include_symbols_sample=False,
         )
         is_custom_factor = await self._is_custom_factor(str(payload["factor_name"]))
         effective_range = self._coverage_effective_range(coverage, start_date, end_date)
@@ -491,12 +507,14 @@ class FactorResearchRunService:
             "transfer_fee_rate": transfer_fee_rate,
             "slippage": slippage,
             "fee_profile": self._fee_profile(fee_rate, stamp_tax_rate, transfer_fee_rate, slippage),
+            "benchmark_symbol": str(params.get("benchmark_symbol") or DEFAULT_BENCHMARK_SYMBOL),
             "filter_limit_up": bool(params.get("filter_limit_up", True)),
             "filter_limit_down": bool(params.get("filter_limit_down", True)),
             "group_count": int(params.get("group_count") or 5),
             "direction": str(params.get("direction") or "desc"),
             "pool_membership_mode": str(params.get("pool_membership_mode") or "static_latest"),
             "factor_value_params_hash": str(params.get("factor_value_params_hash") or ""),
+            "outlier_handling": str(params.get("outlier_handling") or "none"),
             "industry_neutralization": bool(params.get("industry_neutralization", False)),
             "standardize": bool(params.get("standardize", False)),
         }
@@ -632,6 +650,8 @@ class FactorResearchRunService:
     def _combination_facet_label(field: str, value: Any, settings: dict[str, Any]) -> str:
         if field == "date_range":
             return f"{settings.get('start_date')} ~ {settings.get('end_date')}"
+        if field == "benchmark_symbol":
+            return benchmark_display_name(str(value)) or str(value)
         if field == "fee_profile":
             return (
                 f"佣金 {settings.get('fee_rate', 0):g} / "
@@ -725,7 +745,7 @@ class FactorResearchRunService:
                 end_date=end_date,
                 params=params,
                 stock_pool=str(params.get("stock_pool_value") or ""),
-                benchmark="000905.SH",
+                benchmark=resolve_benchmark_symbol(params.get("benchmark_symbol")),
             )
             if result["errors"]:
                 raise ValueError("; ".join(result["errors"]))
@@ -763,6 +783,14 @@ class FactorResearchRunService:
         )
         if factor_df.empty or return_df.empty:
             raise ValueError("No overlapping cached factor values and return data are available in the requested range.")
+        factor_df, preprocess_logs = await self._preprocess_factor_matrix(factor_df, params)
+        factor_df, return_df, membership_mask = self._drop_empty_factor_dates(
+            factor_df,
+            return_df,
+            membership_mask,
+        )
+        if factor_df.empty or return_df.empty or not factor_df.notna().any().any():
+            raise ValueError("Factor preprocessing removed all valid values for the requested range.")
         effective_start_date = factor_df.index.min().date()
         effective_end_date = factor_df.index.max().date()
         eval_config = EvalConfig(group_count=int(params.get("group_count") or 5))
@@ -771,6 +799,12 @@ class FactorResearchRunService:
         turnover = evaluator._compute_turnover(factor_df)
         signal_decay = evaluator._compute_signal_decay(factor_df, return_df)
         quantile = self._quantile_nav(factor_df, return_df, params)
+        benchmark_logs = await self._attach_benchmark_to_quantile(
+            quantile,
+            benchmark_symbol=resolve_benchmark_symbol(params.get("benchmark_symbol")),
+            start_date=effective_start_date,
+            end_date=effective_end_date,
+        )
         latest = self._latest_non_empty_cross_section(factor_df)
         top = [{"symbol": str(k), "value": float(v)} for k, v in latest.sort_values(ascending=False).head(20).items()]
         bottom = [{"symbol": str(k), "value": float(v)} for k, v in latest.sort_values(ascending=True).head(20).items()]
@@ -795,6 +829,10 @@ class FactorResearchRunService:
             "long_short_return": quantile["summary"].get("long_short_return", 0.0),
             "max_drawdown": quantile["summary"].get("max_drawdown", 0.0),
             "sharpe": quantile["summary"].get("sharpe", 0.0),
+            "benchmark_symbol": quantile["summary"].get("benchmark_symbol"),
+            "benchmark_name": quantile["summary"].get("benchmark_name"),
+            "benchmark_return": quantile["summary"].get("benchmark_return", 0.0),
+            "excess_long_short_return": quantile["summary"].get("excess_long_short_return", 0.0),
             "turnover": self._mean_turnover(turnover),
         }
         definition = get_factor_definition(factor_name) or {}
@@ -816,7 +854,7 @@ class FactorResearchRunService:
             "quantile_summary": quantile["summary"],
             "top": top,
             "bottom": bottom,
-            "logs": [f"因子研究完成: {factor_name}, 股票数 {len(symbols)}"],
+            "logs": [*preprocess_logs, *benchmark_logs, f"因子研究完成: {factor_name}, 股票数 {len(symbols)}"],
         }
 
     @staticmethod
@@ -835,6 +873,151 @@ class FactorResearchRunService:
         if effective_end < effective_start:
             return None
         return effective_start, effective_end
+
+    async def _preprocess_factor_matrix(
+        self,
+        factor_df: pd.DataFrame,
+        params: dict[str, Any],
+    ) -> tuple[pd.DataFrame, list[str]]:
+        outlier_handling = str(params.get("outlier_handling") or "none").strip().lower()
+        if outlier_handling not in {"none", "winsorize"}:
+            raise ValueError(f"Unsupported outlier_handling: {outlier_handling}")
+
+        industry_neutralization = bool(params.get("industry_neutralization", False))
+        standardize = bool(params.get("standardize", False))
+        if outlier_handling == "none" and not industry_neutralization and not standardize:
+            return factor_df, []
+
+        metadata = await self._load_factor_metadata(list(factor_df.columns)) if industry_neutralization else None
+        processed = factor_df.apply(
+            lambda row: self._preprocess_cross_section(
+                row,
+                metadata=metadata,
+                outlier_handling=outlier_handling,
+                industry_neutralization=industry_neutralization,
+                standardize=standardize,
+            ),
+            axis=1,
+        )
+        processed.index = factor_df.index
+        processed.columns = factor_df.columns
+
+        steps = []
+        if outlier_handling == "winsorize":
+            steps.append("去极值")
+        if industry_neutralization:
+            steps.append("行业Z-Score" if standardize else "行业去均值")
+        elif standardize:
+            steps.append("横截面Z-Score")
+        return processed, [f"因子预处理: {' + '.join(steps)}"] if steps else []
+
+    @staticmethod
+    def _preprocess_cross_section(
+        row: pd.Series,
+        *,
+        metadata: pd.DataFrame | None,
+        outlier_handling: str,
+        industry_neutralization: bool,
+        standardize: bool,
+    ) -> pd.Series:
+        values = pd.to_numeric(row, errors="coerce").astype("float64")
+        if outlier_handling == "winsorize":
+            values = FactorResearchRunService._winsorize_cross_section(values)
+        if industry_neutralization:
+            values = FactorResearchRunService._industry_adjust_cross_section(values, metadata, standardize)
+        elif standardize:
+            values = FactorResearchRunService._zscore_cross_section(values)
+        return values.reindex(row.index)
+
+    @staticmethod
+    def _drop_empty_factor_dates(
+        factor_df: pd.DataFrame,
+        return_df: pd.DataFrame,
+        membership_mask: pd.DataFrame | None = None,
+    ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+        valid_dates = factor_df.notna().any(axis=1)
+        factor_df = factor_df.loc[valid_dates]
+        return_df = return_df.loc[valid_dates]
+        if membership_mask is not None:
+            membership_mask = membership_mask.loc[valid_dates]
+        return factor_df, return_df, membership_mask
+
+    @staticmethod
+    def _winsorize_cross_section(values: pd.Series, limit: float = 0.025) -> pd.Series:
+        valid = values.dropna()
+        if len(valid) < 3:
+            return values
+        lower = valid.quantile(limit)
+        upper = valid.quantile(1.0 - limit)
+        if not np.isfinite(lower) or not np.isfinite(upper) or upper < lower:
+            return values
+        return values.clip(lower=lower, upper=upper)
+
+    @staticmethod
+    def _zscore_cross_section(values: pd.Series) -> pd.Series:
+        valid = values.notna()
+        std = values.std(ddof=0)
+        if not np.isfinite(std) or std == 0:
+            result = pd.Series(np.nan, index=values.index, dtype="float64")
+            result.loc[valid] = 0.0
+            return result
+        return ((values - values.mean()) / std).astype("float64")
+
+    @staticmethod
+    def _industry_adjust_cross_section(
+        values: pd.Series,
+        metadata: pd.DataFrame | None,
+        standardize: bool,
+    ) -> pd.Series:
+        if metadata is None or "industry" not in metadata.columns:
+            raise ValueError("行业中性化需要 stocks.industry 元数据。")
+        aligned = metadata.reindex(values.index)
+        industry = aligned["industry"].replace("", np.nan)
+        valid_industry = industry.notna()
+        if not valid_industry.any():
+            raise ValueError("行业中性化需要有效的 stocks.industry 元数据。")
+        adjusted = pd.Series(np.nan, index=values.index, dtype="float64")
+        grouped = values[valid_industry].groupby(industry[valid_industry])
+        mean = grouped.transform("mean")
+        adjusted.loc[valid_industry] = values[valid_industry] - mean
+        if not standardize:
+            return adjusted.astype("float64")
+        std = grouped.transform(lambda item: item.std(ddof=0))
+        zero_std_mask = std.fillna(0).eq(0)
+        standardized = adjusted.loc[valid_industry] / std.replace(0, np.nan)
+        if zero_std_mask.any():
+            standardized.loc[zero_std_mask & values[valid_industry].notna()] = 0.0
+        adjusted.loc[valid_industry] = standardized
+        return adjusted.astype("float64")
+
+    async def _load_factor_metadata(self, symbols: list[str]) -> pd.DataFrame:
+        ordered_symbols = list(dict.fromkeys(str(symbol) for symbol in symbols))
+        if not ordered_symbols:
+            return pd.DataFrame(index=pd.Index([], name="symbol"), columns=["industry"])
+
+        def _query() -> pd.DataFrame:
+            rows: list[tuple[str, str | None]] = []
+            with sqlite3.connect(settings.sqlite_db_path) as conn:
+                for start in range(0, len(ordered_symbols), 800):
+                    chunk = ordered_symbols[start:start + 800]
+                    placeholders = ",".join("?" for _ in chunk)
+                    rows.extend(
+                        conn.execute(
+                            f"SELECT symbol, industry FROM stocks WHERE symbol IN ({placeholders})",
+                            chunk,
+                        ).fetchall()
+                    )
+            if not rows:
+                return pd.DataFrame(index=ordered_symbols, columns=["industry"])
+            frame = pd.DataFrame(rows, columns=["symbol", "industry"]).drop_duplicates("symbol", keep="last")
+            return frame.set_index("symbol").reindex(ordered_symbols)
+
+        import asyncio
+
+        try:
+            return await asyncio.to_thread(_query)
+        except sqlite3.Error as exc:
+            raise ValueError(f"加载行业元数据失败: {exc}") from exc
 
     @staticmethod
     def _align_frames(
@@ -1078,6 +1261,55 @@ class FactorResearchRunService:
                 "sharpe": round(float(returns_s.mean() / returns_s.std() * np.sqrt(252)), 4) if len(returns_s) > 1 and returns_s.std() > 0 else 0.0,
             },
         }
+
+    async def _attach_benchmark_to_quantile(
+        self,
+        quantile: dict[str, Any],
+        *,
+        benchmark_symbol: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[str]:
+        summary = quantile.setdefault("summary", {})
+        series = quantile.setdefault("series", {})
+        series.setdefault("benchmark", [])
+        series.setdefault("excess_long_short", [])
+        summary["benchmark_symbol"] = benchmark_symbol
+        summary["benchmark_name"] = benchmark_display_name(benchmark_symbol)
+
+        try:
+            store = get_market_data_store()
+            returns = await asyncio.to_thread(
+                store.load_benchmark,
+                benchmark_symbol,
+                start_date,
+                end_date,
+            )
+        except Exception as exc:
+            message = f"Benchmark data load failed for {benchmark_symbol}: {exc}"
+            summary["benchmark_warning"] = message
+            return [message]
+
+        if returns is None or returns.empty:
+            message = f"Benchmark data is unavailable for {benchmark_symbol}; comparison series is omitted."
+            summary["benchmark_warning"] = message
+            return [message]
+
+        benchmark_nav = returns_to_nav_series(returns)
+        benchmark_series = nav_points(benchmark_nav, value_key="value")
+        excess_series = excess_nav_points(
+            series.get("long_short") or [],
+            benchmark_nav,
+            strategy_key="value",
+            value_key="value",
+        )
+        series["benchmark"] = benchmark_series
+        series["excess_long_short"] = excess_series
+        summary["benchmark_return"] = round(float(benchmark_nav.iloc[-1] - 1.0), 4) if not benchmark_nav.empty else 0.0
+        summary["excess_long_short_return"] = (
+            round(float(excess_series[-1]["value"] - 1.0), 4) if excess_series else 0.0
+        )
+        return []
 
     @staticmethod
     def _max_drawdown(nav_values: list[float]) -> float:

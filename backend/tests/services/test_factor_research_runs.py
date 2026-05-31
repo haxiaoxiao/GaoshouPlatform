@@ -67,6 +67,44 @@ def test_transaction_cost_rate_sums_fee_tax_and_slippage() -> None:
     }) == 0.00501
 
 
+def test_attach_benchmark_to_quantile_adds_excess_series(monkeypatch) -> None:
+    class FakeStore:
+        def load_benchmark(self, symbol, start_date, end_date):
+            assert symbol == "000300.SH"
+            return pd.Series(
+                [0.0, 0.1],
+                index=pd.to_datetime(["2025-01-02", "2025-01-03"]),
+                name=symbol,
+            )
+
+    monkeypatch.setattr(
+        "app.services.factor_research_runs.get_market_data_store",
+        lambda: FakeStore(),
+    )
+    quantile = {
+        "series": {
+            "long_short": [
+                {"date": "2025-01-02", "value": 1.0},
+                {"date": "2025-01-03", "value": 1.2},
+            ],
+        },
+        "summary": {},
+    }
+
+    logs = asyncio.run(FactorResearchRunService()._attach_benchmark_to_quantile(
+        quantile,
+        benchmark_symbol="000300.SH",
+        start_date=date(2025, 1, 2),
+        end_date=date(2025, 1, 3),
+    ))
+
+    assert logs == []
+    assert quantile["series"]["benchmark"][-1]["value"] == 1.1
+    assert quantile["series"]["excess_long_short"][-1]["value"] == 1.090909
+    assert quantile["summary"]["benchmark_return"] == 0.1
+    assert quantile["summary"]["excess_long_short_return"] == 0.0909
+
+
 def test_normalized_params_keeps_current_factor_value_hash_only() -> None:
     params = FactorResearchRunService()._normalized_params({
         "factor_name": "factor_a",
@@ -107,6 +145,170 @@ def test_trim_to_effective_factor_dates_drops_uncached_dates() -> None:
     assert list(trimmed_return.index) == [pd.Timestamp("2026-05-20")]
 
 
+def test_preprocess_factor_matrix_standardizes_cross_section() -> None:
+    service = FactorResearchRunService()
+    factor_df = pd.DataFrame(
+        {"000001.SZ": [1.0], "000002.SZ": [2.0], "000003.SZ": [3.0]},
+        index=pd.to_datetime(["2025-01-02"]),
+    )
+
+    processed, logs = asyncio.run(service._preprocess_factor_matrix(
+        factor_df,
+        {"outlier_handling": "none", "standardize": True, "industry_neutralization": False},
+    ))
+
+    row = processed.iloc[0]
+    assert round(float(row.mean()), 12) == 0.0
+    assert round(float(row.std(ddof=0)), 12) == 1.0
+    assert logs == ["因子预处理: 横截面Z-Score"]
+
+
+def test_preprocess_factor_matrix_standardizes_constant_cross_section_to_zero() -> None:
+    service = FactorResearchRunService()
+    factor_df = pd.DataFrame(
+        {"000001.SZ": [5.0], "000002.SZ": [5.0], "000003.SZ": [5.0]},
+        index=pd.to_datetime(["2025-01-02"]),
+    )
+
+    processed, _ = asyncio.run(service._preprocess_factor_matrix(
+        factor_df,
+        {"outlier_handling": "none", "standardize": True, "industry_neutralization": False},
+    ))
+
+    assert processed.iloc[0].to_dict() == {
+        "000001.SZ": 0.0,
+        "000002.SZ": 0.0,
+        "000003.SZ": 0.0,
+    }
+
+
+def test_preprocess_factor_matrix_industry_zscore(monkeypatch) -> None:
+    service = FactorResearchRunService()
+    factor_df = pd.DataFrame(
+        {
+            "000001.SZ": [1.0],
+            "000002.SZ": [3.0],
+            "000003.SZ": [10.0],
+            "000004.SZ": [14.0],
+        },
+        index=pd.to_datetime(["2025-01-02"]),
+    )
+    metadata = pd.DataFrame(
+        {"industry": ["银行", "银行", "电子", "电子"]},
+        index=["000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"],
+    )
+
+    async def fake_metadata(symbols):
+        return metadata.reindex(symbols)
+
+    monkeypatch.setattr(service, "_load_factor_metadata", fake_metadata)
+    processed, logs = asyncio.run(service._preprocess_factor_matrix(
+        factor_df,
+        {"outlier_handling": "none", "standardize": True, "industry_neutralization": True},
+    ))
+
+    assert processed.iloc[0].to_dict() == {
+        "000001.SZ": -1.0,
+        "000002.SZ": 1.0,
+        "000003.SZ": -1.0,
+        "000004.SZ": 1.0,
+    }
+    assert logs == ["因子预处理: 行业Z-Score"]
+
+
+def test_preprocess_factor_matrix_industry_zscore_single_member_groups_to_zero(monkeypatch) -> None:
+    service = FactorResearchRunService()
+    factor_df = pd.DataFrame(
+        {
+            "000001.SZ": [2.0],
+            "000002.SZ": [6.0],
+        },
+        index=pd.to_datetime(["2025-01-02"]),
+    )
+    metadata = pd.DataFrame(
+        {"industry": ["閾惰", "鐢靛瓙"]},
+        index=["000001.SZ", "000002.SZ"],
+    )
+
+    async def fake_metadata(symbols):
+        return metadata.reindex(symbols)
+
+    monkeypatch.setattr(service, "_load_factor_metadata", fake_metadata)
+    processed, _ = asyncio.run(service._preprocess_factor_matrix(
+        factor_df,
+        {"outlier_handling": "none", "standardize": True, "industry_neutralization": True},
+    ))
+
+    assert processed.iloc[0].to_dict() == {
+        "000001.SZ": 0.0,
+        "000002.SZ": 0.0,
+    }
+
+
+def test_drop_empty_factor_dates_removes_all_nan_rows_after_preprocess() -> None:
+    dates = pd.to_datetime(["2025-01-02", "2025-01-03"])
+    factor_df = pd.DataFrame(
+        {
+            "000001.SZ": [0.0, None],
+            "000002.SZ": [0.0, None],
+        },
+        index=dates,
+    )
+    return_df = pd.DataFrame(
+        {
+            "000001.SZ": [0.01, 0.02],
+            "000002.SZ": [0.03, 0.04],
+        },
+        index=dates,
+    )
+    membership = pd.DataFrame(
+        {
+            "000001.SZ": [True, True],
+            "000002.SZ": [True, True],
+        },
+        index=dates,
+    )
+
+    trimmed_factor, trimmed_return, trimmed_membership = FactorResearchRunService._drop_empty_factor_dates(
+        factor_df,
+        return_df,
+        membership,
+    )
+
+    assert list(trimmed_factor.index) == [pd.Timestamp("2025-01-02")]
+    assert list(trimmed_return.index) == [pd.Timestamp("2025-01-02")]
+    assert trimmed_membership is not None
+    assert list(trimmed_membership.index) == [pd.Timestamp("2025-01-02")]
+
+
+def test_preprocess_factor_matrix_industry_zscore_preserves_missing_values(monkeypatch) -> None:
+    service = FactorResearchRunService()
+    factor_df = pd.DataFrame(
+        {
+            "000001.SZ": [2.0],
+            "000002.SZ": [None],
+        },
+        index=pd.to_datetime(["2025-01-02"]),
+    )
+    metadata = pd.DataFrame(
+        {"industry": ["银行", "银行"]},
+        index=["000001.SZ", "000002.SZ"],
+    )
+
+    async def fake_metadata(symbols):
+        return metadata.reindex(symbols)
+
+    monkeypatch.setattr(service, "_load_factor_metadata", fake_metadata)
+    processed, _ = asyncio.run(service._preprocess_factor_matrix(
+        factor_df,
+        {"outlier_handling": "none", "standardize": True, "industry_neutralization": True},
+    ))
+
+    row = processed.iloc[0]
+    assert row["000001.SZ"] == 0.0
+    assert pd.isna(row["000002.SZ"])
+
+
 def test_research_match_hash_ignores_date_range_and_context_keys() -> None:
     payload_a = {
         "factor_name": "alpha101_001",
@@ -122,6 +324,7 @@ def test_research_match_hash_ignores_date_range_and_context_keys() -> None:
         "group_count": 5,
         "direction": "desc",
         "pool_membership_mode": "static_latest",
+        "outlier_handling": "none",
         "industry_neutralization": False,
         "standardize": False,
     }
@@ -155,6 +358,7 @@ def test_normalized_factor_value_hash_matches_board_payload_without_dates() -> N
         "direction": "desc",
         "pool_membership_mode": "static_latest",
         "factor_value_params_hashes": {"paper_pb_roe_residual": "bf21a9e8fbc5a384"},
+        "outlier_handling": "none",
         "industry_neutralization": False,
         "standardize": False,
     })
@@ -175,6 +379,7 @@ def test_normalized_factor_value_hash_matches_board_payload_without_dates() -> N
         "direction": "desc",
         "pool_membership_mode": "static_latest",
         "factor_value_params_hash": "bf21a9e8fbc5a384",
+        "outlier_handling": "none",
         "industry_neutralization": False,
         "standardize": False,
     })
@@ -244,6 +449,7 @@ def test_combination_groups_use_union_and_coverage_counts(monkeypatch) -> None:
         "direction": "desc",
         "pool_membership_mode": "static_latest",
         "factor_value_params_hash": "bf21a9e8fbc5a384",
+        "outlier_handling": "none",
         "industry_neutralization": False,
         "standardize": False,
     }

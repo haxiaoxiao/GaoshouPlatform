@@ -1,5 +1,7 @@
 """Factor CRUD, templates, validation, preview, and precompute endpoints."""
 
+import asyncio
+
 from datetime import date, datetime
 from typing import Any
 
@@ -488,12 +490,14 @@ async def precompute_factor(
         for row in rows
         if row["value"] is not None
     ]
-    written = get_factor_value_store().write(pd.DataFrame(feature_rows)) if feature_rows else 0
+    writer = get_factor_value_store().batch_writer()
+    writer.extend(feature_rows)
+    writer.flush()
     return {
         "factor_id": factor.id,
         "factor_name": factor.name,
         "symbols": len(symbols),
-        "rows_written": written,
+        "rows_written": writer.written,
         "start_date": request.start_date.isoformat(),
         "end_date": request.end_date.isoformat(),
     }
@@ -510,7 +514,8 @@ async def factor_coverage(
     factor = await FactorService(session).get_factor(factor_id)
     if factor is None:
         raise HTTPException(status_code=404, detail=f"Factor {factor_id} not found")
-    return get_factor_value_store().coverage(
+    return await asyncio.to_thread(
+        get_factor_value_store().coverage,
         factor.name,
         start_date=start_date,
         end_date=end_date,

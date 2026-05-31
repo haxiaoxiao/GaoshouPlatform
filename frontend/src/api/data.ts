@@ -78,13 +78,14 @@ export interface IndexCatalogItem {
   notes: string
   stock_pool_alias?: string | null
   jq_symbol?: string | null
+  common_benchmark?: boolean
   component_status: 'available' | 'unavailable'
   reason: string | null
 }
 
 export const indexCatalogApi = {
-  list: () =>
-    request.get<IndexCatalogItem[]>('/data/index-catalog'),
+  list: (params?: { benchmark_only?: boolean; pool_only?: boolean }) =>
+    request.get<IndexCatalogItem[]>('/data/index-catalog', { params }),
 }
 
 export interface WatchlistGroup {
