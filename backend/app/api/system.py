@@ -15,7 +15,7 @@ router = APIRouter()
 
 @router.get("/status")
 async def get_system_status():
-    """获取系统状态（含数据后端配置和覆盖摘要）"""
+    """Return system status, backend config, and lightweight data coverage."""
     parquet_info = {}
 
     if settings.market_data_backend == "parquet":
@@ -38,7 +38,7 @@ async def get_system_status():
                 "klines_minute_cum_timer_latest": cum_timer.get("max_date"),
             }
         except Exception:
-            parquet_info = {"error": "无法读取 Parquet 状态"}
+            parquet_info = {"error": "Unable to read Parquet status"}
 
     sync_health = await sync_service_health()
     sync_current_status = None
@@ -99,7 +99,7 @@ async def get_cache_status():
 
 @router.get("/health")
 async def health_check():
-    """健康检查"""
+    """Health check."""
     return {"status": "healthy"}
 
 

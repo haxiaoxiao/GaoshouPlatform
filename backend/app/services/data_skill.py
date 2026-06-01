@@ -20,8 +20,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.clickhouse import get_ch_client
 from app.data_stores import get_market_data_store
+from app.db.clickhouse import get_ch_client
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from typing import Any
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.sqlite import get_async_session
+from app.db.sqlite import async_session_factory, get_async_session
+from app.services.runtime_tasks import register_task, update_task
 from app.services.sentiment import (
     DEFAULT_SOURCE_ORDER,
     SentimentIngestService,
@@ -37,6 +40,70 @@ def _resolve_ingest_sources(request: IngestRunRequest) -> list[str]:
     if request.source:
         return ordered_sentiment_sources([request.source])
     return list(DEFAULT_SOURCE_ORDER)
+
+
+def _validate_ingest_request(request: IngestRunRequest, sources: list[str]) -> str | None:
+    if "xueqiu_spyder" in sources and not request.symbol:
+        return (
+            "xueqiu_spyder ingest requires a symbol. "
+            "NGA/flocktrader can run without a symbol by selecting sources=['flocktrader']."
+        )
+    return None
+
+
+def _schedule_sentiment_ingest_task(task_id: str, request: IngestRunRequest, sources: list[str]) -> None:
+    asyncio.create_task(_run_sentiment_ingest_task(task_id, request, sources))
+
+
+async def _run_sentiment_ingest_task(
+    task_id: str,
+    request: IngestRunRequest,
+    sources: list[str],
+) -> None:
+    update_task(
+        task_id,
+        status="running",
+        progress=0.05,
+        meta={"sources": sources, "symbol": request.symbol},
+    )
+    try:
+        async with async_session_factory() as session:
+            ingest_service = SentimentIngestService(session)
+            if request.source and not request.sources and len(sources) == 1:
+                result = await ingest_service.run(
+                    sources[0],
+                    request.symbol,
+                    max_pages=request.max_pages,
+                    min_reply=request.min_reply,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    force_refresh=request.force_refresh,
+                )
+            else:
+                result = await ingest_service.run_many(
+                    request.symbol,
+                    sources=sources,
+                    max_pages=request.max_pages,
+                    min_reply=request.min_reply,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    force_refresh=request.force_refresh,
+                )
+        update_task(
+            task_id,
+            status="completed",
+            progress=1.0,
+            result_ref=f"/api/system/tasks/{task_id}",
+            meta={"result": result},
+        )
+    except Exception as exc:
+        update_task(
+            task_id,
+            status="failed",
+            progress=1.0,
+            error=str(exc),
+            meta={"sources": sources, "symbol": request.symbol},
+        )
 
 
 @router.get("/overview", summary="Get unified sentiment module overview")
@@ -90,31 +157,41 @@ async def get_sentiment_posts(
 @router.post("/ingest/run", summary="Run a local external sentiment crawler")
 async def run_sentiment_ingest(
     request: IngestRunRequest,
-    session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
         sources = _resolve_ingest_sources(request)
-        ingest_service = SentimentIngestService(session)
-        if request.source and not request.sources and len(sources) == 1:
-            result = await ingest_service.run(
-                sources[0],
-                request.symbol,
-                max_pages=request.max_pages,
-                min_reply=request.min_reply,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                force_refresh=request.force_refresh,
-            )
-        else:
-            result = await ingest_service.run_many(
-                request.symbol,
-                sources=sources,
-                max_pages=request.max_pages,
-                min_reply=request.min_reply,
-                start_date=request.start_date,
-                end_date=request.end_date,
-                force_refresh=request.force_refresh,
-            )
-        return {"code": 0, "data": result}
+        validation_error = _validate_ingest_request(request, sources)
+        if validation_error:
+            return {"code": 1, "message": validation_error}
+        task_id = f"sentiment-{uuid4().hex[:12]}"
+        register_task(
+            task_id=task_id,
+            kind="sentiment_ingest",
+            title="Sentiment ingest",
+            status="queued",
+            progress=0.0,
+            result_ref=f"/api/system/tasks/{task_id}",
+            meta={
+                "sources": sources,
+                "symbol": request.symbol,
+                "start_date": request.start_date.isoformat() if request.start_date else None,
+                "end_date": request.end_date.isoformat() if request.end_date else None,
+                "max_pages": request.max_pages,
+                "min_reply": request.min_reply,
+                "force_refresh": request.force_refresh,
+            },
+        )
+        _schedule_sentiment_ingest_task(task_id, request, sources)
+        return {
+            "code": 0,
+            "data": {
+                "task_id": task_id,
+                "status": "queued",
+                "kind": "sentiment_ingest",
+                "sources": sources,
+                "symbol": request.symbol,
+                "result_ref": f"/api/system/tasks/{task_id}",
+            },
+        }
     except Exception as exc:
         return {"code": 1, "message": str(exc)}

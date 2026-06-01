@@ -8,6 +8,7 @@ synthetic proxy values.
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store

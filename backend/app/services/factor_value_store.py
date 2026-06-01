@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime
@@ -27,6 +28,20 @@ from app.services.factor_precompute_runtime import precompute_memory_policy
 CUSTOM_FACTOR_CATEGORY = "custom"
 CUSTOM_FACTOR_GROUP_NAME = "custom_factor_library"
 DEFAULT_PRECOMPUTE_BATCH_ROWS = precompute_memory_policy().batch_rows
+METADATA_CACHE_TTL_SECONDS = 60
+
+_FACTOR_VALUE_METADATA_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+
+
+def invalidate_factor_value_store_metadata(data_dir: str | None = None) -> None:
+    """Clear cached Parquet metadata after factor value writes."""
+    if data_dir is None:
+        _FACTOR_VALUE_METADATA_CACHE.clear()
+        return
+    target = str(Path(data_dir).absolute())
+    for key in list(_FACTOR_VALUE_METADATA_CACHE):
+        if key[0] == target:
+            _FACTOR_VALUE_METADATA_CACHE.pop(key, None)
 
 
 @dataclass(frozen=True)
@@ -445,25 +460,70 @@ class FactorValueStore:
     def _glob_pattern(self) -> str:
         return str(self._dataset_path() / "year=*" / "month=??" / "*.parquet").replace("\\", "/")
 
-    def exists(self) -> bool:
+    def _metadata_cache_key(self) -> tuple[str, str]:
+        return str(self._data_dir.absolute()), self.dataset
+
+    def invalidate_metadata(self) -> None:
+        _FACTOR_VALUE_METADATA_CACHE.pop(self._metadata_cache_key(), None)
+
+    def _iter_schema_probe_files(self, root: Path):
+        yielded = 0
+        for year_dir in root.glob("year=*"):
+            for month_dir in year_dir.glob("month=*"):
+                for file in month_dir.glob("*.parquet"):
+                    if ".tmp-" in str(file):
+                        continue
+                    yield file
+                    yielded += 1
+                    break
+                if yielded >= 32:
+                    return
+        for file in root.glob("*.parquet"):
+            if ".tmp-" in str(file):
+                continue
+            yield file
+            yielded += 1
+            if yielded >= 32:
+                return
+
+    def _metadata(self) -> dict[str, Any]:
+        key = self._metadata_cache_key()
+        now = time.monotonic()
+        cached = _FACTOR_VALUE_METADATA_CACHE.get(key)
+        if cached and cached[0] > now:
+            return cached[1]
+
         root = self._dataset_path()
-        return root.exists() and any(".tmp-" not in str(path) for path in root.rglob("*.parquet"))
+        columns: set[str] = set()
+        exists = False
+        has_partitions = False
+        if root.exists():
+            has_partitions = any(root.glob("year=*/month=*"))
+            try:
+                import pyarrow.parquet as pq
+
+                for file in self._iter_schema_probe_files(root):
+                    exists = True
+                    columns.update(pq.read_schema(file).names)
+                    if {"factor_name", "feature_name"}.issubset(columns):
+                        break
+            except Exception as exc:
+                logger.warning("Failed to inspect factor_values schema: {}", exc)
+                exists = any(root.glob("year=*/month=*/*.parquet")) or any(root.glob("*.parquet"))
+
+        metadata = {
+            "exists": exists,
+            "columns": columns,
+            "has_partitions": has_partitions,
+        }
+        _FACTOR_VALUE_METADATA_CACHE[key] = (now + METADATA_CACHE_TTL_SECONDS, metadata)
+        return metadata
+
+    def exists(self) -> bool:
+        return bool(self._metadata().get("exists"))
 
     def _schema_columns(self) -> set[str]:
-        root = self._dataset_path()
-        if not root.exists():
-            return set()
-        columns: set[str] = set()
-        try:
-            import pyarrow.parquet as pq
-
-            for file in root.rglob("*.parquet"):
-                if ".tmp-" in str(file):
-                    continue
-                columns.update(pq.read_schema(file).names)
-        except Exception as exc:
-            logger.warning("Failed to inspect factor_values schema: {}", exc)
-        return columns
+        return set(self._metadata().get("columns") or set())
 
     def _name_expr(self) -> str:
         columns = self._schema_columns()
@@ -485,8 +545,7 @@ class FactorValueStore:
         return body
 
     def _has_year_month_partitions(self) -> bool:
-        root = self._dataset_path()
-        return root.exists() and any(root.glob("year=*/month=*"))
+        return bool(self._metadata().get("has_partitions"))
 
     def _year_month_filter(self, start_date: date, end_date: date) -> str:
         if not self._has_year_month_partitions():
@@ -551,6 +610,8 @@ class FactorValueStore:
             file_path = partition_dir / f"part-{uuid.uuid4().hex}.parquet"
             pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), file_path)
             total += len(part_body)
+        if total:
+            self.invalidate_metadata()
         return total
 
     def batch_writer(self, *, batch_size: int = DEFAULT_PRECOMPUTE_BATCH_ROWS) -> FactorValueBatchWriter:
