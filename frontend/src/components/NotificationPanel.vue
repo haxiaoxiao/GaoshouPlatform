@@ -166,7 +166,7 @@ function formatTime(date: Date): string {
 }
 
 .notif-dot--success {
-  background: var(--color-bull);
+  background: var(--status-ready);
 }
 
 .notif-dot--warning {
@@ -174,7 +174,7 @@ function formatTime(date: Date): string {
 }
 
 .notif-dot--error {
-  background: var(--accent-danger);
+  background: var(--status-attention);
 }
 
 .notif-content {

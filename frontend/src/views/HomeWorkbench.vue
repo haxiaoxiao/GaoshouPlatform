@@ -457,7 +457,7 @@ onMounted(loadWorkbench)
 }
 
 .tone-good {
-  color: var(--color-bull);
+  color: var(--status-ready);
 }
 
 .tone-warn {
@@ -465,7 +465,7 @@ onMounted(loadWorkbench)
 }
 
 .tone-bad {
-  color: var(--color-bear);
+  color: var(--status-attention);
 }
 
 .tone-neutral {

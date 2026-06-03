@@ -262,6 +262,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Delete, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { syncApi, type SyncCatalog, type SyncCatalogItem, type SyncLog, type SyncPreset, type SyncStatus } from '@/api/sync'
 
 interface QueueItem {
@@ -329,6 +330,68 @@ const filteredDatasets = computed(() => {
     return matchesCategory && (!term || text.includes(term))
   })
 })
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Queue',
+    rows: [
+      {
+        label: '待提交',
+        value: `${queue.value.length} 项`,
+        tone: queue.value.length > 0 ? 'warn' : 'neutral',
+      },
+      {
+        label: '后端排队',
+        value: `${Number(syncStatus.value.details?.queue_pending_count || 0)} 项`,
+        tone: Number(syncStatus.value.details?.queue_pending_count || 0) > 0 ? 'warn' : 'good',
+      },
+      {
+        label: '当前任务',
+        value: syncStatus.value.sync_type ? syncTypeLabel(syncStatus.value.sync_type) : '-',
+        tone: syncStatus.value.status === 'running' ? 'warn' : 'neutral',
+      },
+      {
+        label: '当前状态',
+        value: statusLabel(syncStatus.value.status),
+        tone: syncStatus.value.status === 'failed'
+          ? 'bad'
+          : ['queued', 'running'].includes(syncStatus.value.status)
+            ? 'warn'
+            : 'good',
+      },
+    ],
+  },
+  {
+    title: 'Execution',
+    rows: [
+      {
+        label: '进度',
+        value: `${(syncStatus.value.progress_percent || 0).toFixed(1)}%`,
+        tone: syncStatus.value.status === 'failed' ? 'bad' : 'neutral',
+      },
+      {
+        label: '服务状态',
+        value: syncStatus.value.sync_service_available === false ? '不可用' : '可用',
+        tone: syncStatus.value.sync_service_available === false ? 'bad' : 'good',
+      },
+      {
+        label: 'Relay Key',
+        value: catalog.value?.relay.configured ? '已配置' : '未配置',
+        tone: catalog.value?.relay.configured ? 'good' : 'warn',
+      },
+      {
+        label: '允许触发',
+        value: canTriggerSync.value ? '是' : '否',
+        tone: canTriggerSync.value ? 'good' : 'warn',
+      },
+      {
+        label: '原因',
+        value: canTriggerSync.value ? '队列可接受新任务' : syncUnavailableReason.value,
+      },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(async () => {
   await Promise.all([loadCatalog(false), refreshStatus(), loadLogs()])

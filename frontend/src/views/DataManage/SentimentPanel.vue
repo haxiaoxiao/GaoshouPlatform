@@ -469,8 +469,8 @@ function sentimentLabel(value?: string | null) {
 }
 
 function sentimentTagType(value?: string | null) {
-  if (value === 'bullish') return 'success'
-  if (value === 'bearish') return 'danger'
+  if (value === 'bullish') return 'danger'
+  if (value === 'bearish') return 'success'
   return 'info'
 }
 
@@ -875,11 +875,11 @@ onMounted(() => {
 }
 
 .summary-card__metrics .bull {
-  color: #5fe28c;
+  color: var(--market-up);
 }
 
 .summary-card__metrics .bear {
-  color: #ff8585;
+  color: var(--market-down);
 }
 
 .summary-card__keywords {

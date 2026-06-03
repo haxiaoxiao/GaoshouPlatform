@@ -270,7 +270,7 @@ const summaryCards = computed(() => {
     { label: '多空收益', value: formatPercent(summary.long_short_return), valueClass: valueClass(summary.long_short_return) },
     { label: '基准收益', value: formatPercent(summary.benchmark_return), valueClass: valueClass(summary.benchmark_return) },
     { label: '超额收益', value: formatPercent(summary.excess_long_short_return), valueClass: valueClass(summary.excess_long_short_return) },
-    { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'negative' },
+    { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'attention' },
     { label: '换手率', value: formatPercent(summary.turnover), valueClass: '' },
     { label: '覆盖率', value: formatPercent(summary.coverage_ratio), valueClass: '' },
     { label: '有效股票', value: String(summary.active_symbol_count || '-'), valueClass: '' },
@@ -922,8 +922,9 @@ h2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
-.positive { color: #d93026 !important; }
-.negative { color: #137333 !important; }
+.positive { color: var(--market-up) !important; }
+.negative { color: var(--market-down) !important; }
+.attention { color: var(--status-attention) !important; }
 @media (max-width: 1100px) {
   .detail-header,
   .info-panel,

@@ -89,7 +89,7 @@ const metricsList = computed(() => {
     { label: '总收益率', value: (m.total_return * 100).toFixed(2) + '%', color: m.total_return >= 0 ? 'positive' : 'negative' },
     { label: '年化收益', value: (m.annual_return * 100).toFixed(2) + '%', color: m.annual_return >= 0 ? 'positive' : 'negative' },
     { label: 'Sharpe', value: m.sharpe.toFixed(2), color: '' },
-    { label: '最大回撤', value: (m.max_drawdown * 100).toFixed(2) + '%', color: 'negative' },
+    { label: '最大回撤', value: (m.max_drawdown * 100).toFixed(2) + '%', color: 'attention' },
     { label: 'Alpha', value: m.alpha.toFixed(4), color: '' },
     { label: 'Beta', value: m.beta.toFixed(4), color: '' },
   ]
@@ -170,8 +170,9 @@ onUnmounted(() => navChart?.dispose())
 }
 .metric-label { font-size: 10px; color: var(--text-ghost); }
 .metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
+.attention { color: var(--status-attention); }
 .nav-chart { width: 100%; height: 300px; }
 .logs { margin-top: 12px; }
 .log-line { font-family: monospace; font-size: 11px; color: var(--text-ghost); padding: 2px 0; }

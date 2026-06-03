@@ -22,7 +22,7 @@
         <el-col :span="6">
           <el-card shadow="hover" class="metric-card">
             <div class="metric-label">最大回撤</div>
-            <div class="metric-value negative">
+            <div class="metric-value attention">
               {{ formatPercent(report.result?.max_drawdown) }}
             </div>
           </el-card>
@@ -51,7 +51,7 @@
           </div>
           <div class="stat-item">
             <span class="stat-label">亏损次数</span>
-            <span class="stat-value negative">{{ report.result?.loss_trades ?? '-' }}</span>
+            <span class="stat-value attention">{{ report.result?.loss_trades ?? '-' }}</span>
           </div>
           <div class="stat-item">
             <span class="stat-label">开仓标的</span>
@@ -80,7 +80,7 @@
           </el-table-column>
           <el-table-column label="方向" width="60">
             <template #default="{ row }">
-              <span :style="{ color: row.direction === 'buy' ? '#d93026' : '#137333' }">
+              <span :style="{ color: marketDirectionColor(row.direction) }">
                 {{ row.direction === 'buy' ? '买' : '卖' }}
               </span>
             </template>
@@ -149,6 +149,7 @@ import { Download } from '@element-plus/icons-vue'
 import * as echarts from '@/lib/echarts'
 import { backtestApi, type BacktestReport as BacktestReportType } from '@/api/backtest'
 import { formatCapital, getStatusType, getStatusLabel } from '@/utils/format'
+import { marketDirectionColor, marketValueColor, marketValueColorHex } from '@/utils/colors'
 
 const props = defineProps<{
   backtestId: number
@@ -273,7 +274,7 @@ const renderCharts = () => {
       yAxis: { type: 'value', axisLabel: { fontSize: 10 } },
       series: [{
         type: 'bar', data: rets,
-        itemStyle: { color: (p: any) => p.data >= 0 ? '#d93026' : '#137333' },
+        itemStyle: { color: (p: any) => marketValueColorHex(p.data) },
       }],
     }, true)
   }
@@ -285,7 +286,7 @@ const getReturnClass = (value: number | undefined): string => {
 }
 
 const pnlColor = (pnl: number | null | undefined) =>
-  (pnl || 0) > 0 ? '#d93026' : '#137333'
+  marketValueColor(pnl || 0)
 
 const formatPercent = (value: number | undefined): string =>
   value !== undefined && value !== null ? `${(value * 100).toFixed(2)}%` : '-'
@@ -324,15 +325,17 @@ watch(() => props.backtestId, () => {
 .metric-card :deep(.el-card__body) { padding: 20px; }
 .metric-label { font-size: 14px; color: #909399; margin-bottom: 8px; }
 .metric-value { font-size: 28px; font-weight: bold; color: #303133; }
-.metric-value.positive { color: #d93026; }
-.metric-value.negative { color: #137333; }
+.metric-value.positive { color: var(--market-up); }
+.metric-value.negative { color: var(--market-down); }
+.metric-value.attention { color: var(--status-attention); }
 .stats-card :deep(.el-card__body) { padding: 20px; }
 .stats-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; }
 .stat-item { display: flex; flex-direction: column; gap: 8px; }
 .stat-label { font-size: 14px; color: #909399; }
 .stat-value { font-size: 20px; font-weight: 500; color: #303133; }
-.stat-value.positive { color: #d93026; }
-.stat-value.negative { color: #137333; }
+.stat-value.positive { color: var(--market-up); }
+.stat-value.negative { color: var(--market-down); }
+.stat-value.attention { color: var(--status-attention); }
 .info-card :deep(.el-card__body) { padding: 20px; }
 
 .trades-section { background: #1a1a24; border-radius: 8px; padding: 16px; }

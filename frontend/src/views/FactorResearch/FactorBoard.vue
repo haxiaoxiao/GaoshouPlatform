@@ -1638,8 +1638,8 @@ onMounted(() => {
 .coverage-cell {
   align-items: start;
 }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
 .detail-action {
   color: #eaf6ff;
   border-color: rgba(56, 189, 248, 0.55);

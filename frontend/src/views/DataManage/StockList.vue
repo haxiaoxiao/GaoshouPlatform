@@ -688,7 +688,7 @@ onMounted(() => {
 }
 
 .stock-name--st {
-  color: var(--color-bear);
+  color: var(--status-attention);
 }
 
 .st-badge {
@@ -697,7 +697,7 @@ onMounted(() => {
   border-radius: var(--radius-sm);
   font-size: 10px;
   font-weight: 700;
-  color: var(--color-bear);
+  color: var(--status-attention);
 }
 
 /* Market Tag */
@@ -709,13 +709,13 @@ onMounted(() => {
 }
 
 .market-tag--sh {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--color-bear);
+  background: rgba(56, 189, 248, 0.13);
+  color: var(--accent-primary);
 }
 
 .market-tag--sz {
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--color-bull);
+  background: rgba(167, 139, 250, 0.14);
+  color: var(--accent-secondary);
 }
 
 .market-tag--bj {

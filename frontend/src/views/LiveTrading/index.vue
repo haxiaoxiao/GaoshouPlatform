@@ -113,7 +113,14 @@
             <h3>{{ signal.name }}</h3>
             <span>{{ signal.symbol }}</span>
           </div>
-          <el-tag :type="tagType(signal.action)" size="large">{{ actionText(signal.action) }}</el-tag>
+          <el-tag
+            :type="tagType(signal.action)"
+            size="large"
+            class="signal-action-tag"
+            :class="signalActionClass(signal.action)"
+          >
+            {{ actionText(signal.action) }}
+          </el-tag>
         </div>
 
         <div class="metrics">
@@ -232,10 +239,14 @@ async function submitOrder(signal: GridSignal) {
 }
 
 function tagType(action: string) {
-  if (action === 'BUY') return 'success'
-  if (action === 'SELL') return 'danger'
   if (action === 'NO_QUOTE') return 'warning'
   return 'info'
+}
+
+function signalActionClass(action: string) {
+  if (action === 'BUY') return 'signal-action-tag--buy'
+  if (action === 'SELL') return 'signal-action-tag--sell'
+  return ''
 }
 
 function actionText(action: string) {
@@ -396,6 +407,18 @@ onUnmounted(() => {
 .card-head span {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.signal-action-tag--buy {
+  background: rgba(217, 48, 38, 0.16) !important;
+  border-color: rgba(217, 48, 38, 0.38) !important;
+  color: var(--market-up) !important;
+}
+
+.signal-action-tag--sell {
+  background: rgba(19, 115, 51, 0.16) !important;
+  border-color: rgba(19, 115, 51, 0.36) !important;
+  color: var(--market-down) !important;
 }
 
 .metrics {

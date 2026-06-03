@@ -743,9 +743,9 @@ onUnmounted(() => {
   text-align: right;
 }
 
-.context-value--good { color: var(--color-bull) !important; }
+.context-value--good { color: var(--status-ready) !important; }
 .context-value--warn { color: var(--accent-warning) !important; }
-.context-value--bad { color: var(--color-bear) !important; }
+.context-value--bad { color: var(--status-attention) !important; }
 .context-value--neutral { color: var(--accent-primary) !important; }
 
 .page-enter-active,

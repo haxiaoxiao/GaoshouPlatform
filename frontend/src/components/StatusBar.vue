@@ -163,13 +163,13 @@ onUnmounted(() => {
 }
 
 .status-led--connected {
-  background: var(--color-bull);
-  box-shadow: 0 0 6px var(--color-bull);
+  background: var(--status-ready);
+  box-shadow: 0 0 6px var(--status-ready);
 }
 
 .status-led--disconnected {
-  background: var(--accent-danger);
-  box-shadow: 0 0 6px var(--accent-danger);
+  background: var(--status-attention);
+  box-shadow: 0 0 6px var(--status-attention);
 }
 
 .status-led--checking {

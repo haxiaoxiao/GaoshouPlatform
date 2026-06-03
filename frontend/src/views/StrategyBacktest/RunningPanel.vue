@@ -63,7 +63,7 @@
           <el-table-column prop="market_value" label="市值" width="100" />
           <el-table-column label="浮盈" width="120">
             <template #default="{ row }">
-              <span :style="{ color: row.unrealized_pnl >= 0 ? '#d93026' : '#137333' }">
+              <span :style="{ color: marketValueColor(row.unrealized_pnl) }">
                 {{ row.unrealized_pnl >= 0 ? '+' : '' }}{{ row.unrealized_pnl }}
               </span>
             </template>
@@ -98,6 +98,11 @@
 
 <script setup lang="ts">
 import { ref, computed } from 'vue'
+import {
+  MARKET_UP_COLOR,
+  STATUS_ATTENTION_COLOR,
+  marketValueColor,
+} from '@/utils/colors'
 
 interface LiveEvent {
   type: string
@@ -186,19 +191,19 @@ const miniMetrics = computed(() => {
   const p = props.liveData?.positions
   const posCount = p ? Object.keys(p).length : 0
   return [
-    { label: '累计收益', value: m?.total_return != null ? (m.total_return * 100).toFixed(2) + '%' : '—', color: (m?.total_return ?? 0) >= 0 ? '#d93026' : '#137333' },
+    { label: '累计收益', value: m?.total_return != null ? (m.total_return * 100).toFixed(2) + '%' : '—', color: marketValueColor(m?.total_return) },
     { label: '总资产', value: m?.total_value != null ? (m.total_value / 10000).toFixed(1) + '万' : '—', color: '#e2e2ea' },
     { label: '持仓数', value: posCount + ' 只', color: '#a78bfa' },
     { label: '累计成交', value: m?.n_trades != null ? m.n_trades + ' 笔' : '—', color: '#e2e2ea' },
     { label: '现金', value: m?.cash != null ? (m.cash / 10000).toFixed(1) + '万' : '—', color: '#e2e2ea' },
-    { label: '最大回撤', value: m?.max_drawdown != null ? (m.max_drawdown * 100).toFixed(2) + '%' : '—', color: '#137333' },
+    { label: '最大回撤', value: m?.max_drawdown != null ? (m.max_drawdown * 100).toFixed(2) + '%' : '—', color: STATUS_ATTENTION_COLOR },
   ]
 })
 
 const detailMetrics = computed(() => {
   const m = props.liveData?.metrics_snapshot
   return [
-    { label: '累计收益', value: m?.total_return != null ? (m.total_return * 100).toFixed(2) + '%' : '—', color: (m?.total_return ?? 0) >= 0 ? '#d93026' : '#137333' },
+    { label: '累计收益', value: m?.total_return != null ? (m.total_return * 100).toFixed(2) + '%' : '—', color: marketValueColor(m?.total_return) },
     { label: '总资产', value: m?.total_value != null ? '¥' + m.total_value.toLocaleString() : '—', color: '#e2e2ea' },
     { label: '可用现金', value: m?.cash != null ? '¥' + m.cash.toLocaleString() : '—', color: '#e2e2ea' },
     { label: '累计成交', value: m?.n_trades != null ? String(m.n_trades) : '—', color: '#e2e2ea' },
@@ -211,9 +216,9 @@ const EVENT_COLORS: Record<string, string> = {
   BEFORE_TRADING: '#a78bfa',
   AFTER_TRADING: '#a78bfa',
   BAR: '#e2e2ea',
-  ORDER_PASS: '#d93026',
-  TRADE: '#d93026',
-  ORDER_REJECT: '#137333',
+  ORDER_PASS: MARKET_UP_COLOR,
+  TRADE: MARKET_UP_COLOR,
+  ORDER_REJECT: STATUS_ATTENTION_COLOR,
 }
 
 function eventColor(type: string): string {

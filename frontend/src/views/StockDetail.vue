@@ -6,7 +6,7 @@
       <div class="stock-info" v-if="stockInfo">
         <span class="stock-name">{{ stockInfo.name }}</span>
         <span class="stock-symbol">{{ stockInfo.symbol }}</span>
-        <el-tag :type="stockInfo.market === 'SH' ? 'danger' : 'success'" size="small">
+        <el-tag type="info" size="small" class="exchange-tag" :class="marketTagClass(stockInfo.market)">
           {{ stockInfo.market }}
         </el-tag>
         <el-tag v-if="stockInfo.industry" size="small" type="info">
@@ -158,6 +158,11 @@ const symbol = computed(() => route.params.symbol as string)
 
 // 股票基本信息（从详情中获取）
 const stockInfo = computed(() => stockDetail.value)
+
+function marketTagClass(market?: string | null) {
+  const normalized = String(market || 'unknown').toLowerCase()
+  return `exchange-tag--${normalized}`
+}
 
 // 加载K线数据
 const loadKlineData = async () => {
@@ -325,6 +330,24 @@ onMounted(() => {
 .stock-symbol {
   font-size: 16px;
   color: #606266;
+}
+
+.exchange-tag--sh {
+  background: rgba(56, 189, 248, 0.13) !important;
+  border-color: rgba(56, 189, 248, 0.3) !important;
+  color: var(--accent-primary) !important;
+}
+
+.exchange-tag--sz {
+  background: rgba(167, 139, 250, 0.14) !important;
+  border-color: rgba(167, 139, 250, 0.3) !important;
+  color: var(--accent-secondary) !important;
+}
+
+.exchange-tag--bj {
+  background: rgba(251, 191, 36, 0.14) !important;
+  border-color: rgba(251, 191, 36, 0.34) !important;
+  color: var(--accent-warning) !important;
 }
 
 .control-card {

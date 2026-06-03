@@ -405,7 +405,7 @@ watch(activeTab, (tab) => {
 }
 
 .freshness-card--good .freshness-card__head b {
-  color: var(--color-bull);
+  color: var(--status-ready);
   background: rgba(34, 197, 94, 0.12);
 }
 
@@ -423,7 +423,7 @@ watch(activeTab, (tab) => {
 }
 
 .freshness-card--bad .freshness-card__head b {
-  color: var(--color-bear);
+  color: var(--status-attention);
   background: rgba(239, 68, 68, 0.12);
 }
 
@@ -480,12 +480,12 @@ watch(activeTab, (tab) => {
 }
 
 .status-completed {
-  color: var(--color-bull);
+  color: var(--status-ready);
 }
 
 .status-failed,
 .status-cancelled {
-  color: var(--color-bear);
+  color: var(--status-attention);
 }
 
 .status-running,

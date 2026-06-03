@@ -285,10 +285,10 @@ watch(() => route.params.id, loadReport, { immediate: true })
   align-items: center;
 }
 .positive {
-  color: #d93026;
+  color: var(--market-up);
 }
 .negative {
-  color: #137333;
+  color: var(--market-down);
 }
 .pager {
   margin-top: 12px;

@@ -2154,8 +2154,8 @@ onMounted(async () => {
 }
 .bt-metric-label { font-size: 10px; color: #8888a0; }
 .bt-metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; color: #e2e2ea; }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
 .bt-log-panel {
   border: 1px solid var(--border-ghost);
   border-radius: 8px;

@@ -31,17 +31,21 @@
   --text-label: #c3ccd8;            /* 卡片标题专用 */
   --text-ghost: #657086;
 
-  /* Accent colors - Electric palette, A-share convention: red up, green down */
-  --accent-primary: #38bdf8;        /* Electric cyan — unchanged */
-  --accent-secondary: #a78bfa;      /* Soft violet — unchanged */
-  --accent-success: #d93026;        /* A-share red = positive */
-  --accent-danger: #137333;         /* A-share green = negative */
-  --accent-warning: #fbbf24;        /* Gold alert — unchanged */
+  /* Accent colors - UI state semantics */
+  --accent-primary: #38bdf8;
+  --accent-secondary: #a78bfa;
+  --accent-success: #16a34a;        /* normal / ready / healthy */
+  --accent-danger: #ef4444;         /* needs attention / failed / risk */
+  --accent-warning: #fbbf24;
   --accent-glow: rgba(56, 189, 248, 0.4);
 
-  /* Semantic colors — A-share: 红涨绿跌 */
+  /* Market colors - A-share convention: red up, green down */
   --color-bull: #d93026;
   --color-bear: #137333;
+  --market-up: var(--color-bull);
+  --market-down: var(--color-bear);
+  --status-ready: var(--accent-success);
+  --status-attention: var(--accent-danger);
   --color-neutral: #8888a0;
   --color-warning: var(--accent-warning);
 
@@ -207,8 +211,23 @@ h4 { font-size: var(--text-lg); }
    COLOR UTILITIES
    ═══════════════════════════════════════════════════════════════ */
 
-.text-bull { color: var(--color-bull); }
-.text-bear { color: var(--color-bear); }
+.text-bull,
+.text-market-up,
+.positive {
+  color: var(--color-bull);
+}
+
+.text-bear,
+.text-market-down,
+.negative {
+  color: var(--color-bear);
+}
+
+.text-ready { color: var(--status-ready); }
+.text-attention,
+.attention {
+  color: var(--status-attention);
+}
 .text-muted { color: var(--text-muted); }
 .text-secondary { color: var(--text-secondary); }
 
@@ -440,6 +459,21 @@ h4 { font-size: var(--text-lg); }
   --el-color-info-light-5: var(--bg-hover);
   --el-color-info-light-7: var(--bg-surface);
   --el-color-info-light-9: var(--bg-elevated);
+  --el-color-success: var(--accent-success);
+  --el-color-success-light-3: #4ade80;
+  --el-color-success-light-5: #86efac;
+  --el-color-success-light-7: rgba(22, 163, 74, 0.28);
+  --el-color-success-light-8: rgba(22, 163, 74, 0.2);
+  --el-color-success-light-9: rgba(22, 163, 74, 0.14);
+  --el-color-success-dark-2: #15803d;
+  --el-color-danger: var(--accent-danger);
+  --el-color-danger-light-3: #f87171;
+  --el-color-danger-light-5: #fca5a5;
+  --el-color-danger-light-7: rgba(239, 68, 68, 0.28);
+  --el-color-danger-light-8: rgba(239, 68, 68, 0.2);
+  --el-color-danger-light-9: rgba(239, 68, 68, 0.14);
+  --el-color-danger-dark-2: #dc2626;
+  --el-color-warning: var(--accent-warning);
 }
 
 /* Checkbox label visibility */
@@ -538,12 +572,12 @@ h4 { font-size: var(--text-lg); }
 }
 
 .el-button--success {
-  background: linear-gradient(135deg, #d93026, #c53026);
+  background: linear-gradient(135deg, var(--accent-success), #15803d);
   border-color: transparent;
 }
 
 .el-button--danger {
-  background: linear-gradient(135deg, #137333, #0e5c28);
+  background: linear-gradient(135deg, var(--accent-danger), #dc2626);
   border-color: transparent;
 }
 
@@ -748,15 +782,15 @@ h4 { font-size: var(--text-lg); }
 }
 
 .el-tag--success {
-  background: rgba(217, 48, 38, 0.15);
-  border-color: rgba(217, 48, 38, 0.3);
-  color: var(--color-bull);
+  background: rgba(22, 163, 74, 0.15);
+  border-color: rgba(22, 163, 74, 0.34);
+  color: var(--accent-success);
 }
 
 .el-tag--danger {
-  background: rgba(19, 115, 51, 0.15);
-  border-color: rgba(19, 115, 51, 0.3);
-  color: var(--color-bear);
+  background: rgba(239, 68, 68, 0.16);
+  border-color: rgba(239, 68, 68, 0.36);
+  color: var(--accent-danger);
 }
 
 .el-tag--info {
