@@ -106,6 +106,7 @@ class FinancialReport:
     """单季度财务报告"""
     symbol: str
     report_date: date
+    ann_date: date | None = None
     report_type: str | None = None
     eps: float | None = None
     bvps: float | None = None
@@ -928,6 +929,7 @@ class DataSkill:
         return FinancialReport(
             symbol=f.symbol,
             report_date=f.report_date,
+            ann_date=f.ann_date,
             report_type=f.report_type,
             eps=f.eps,
             bvps=f.bvps,
@@ -951,6 +953,7 @@ class DataSkill:
         return FinancialReport(
             symbol=q.symbol,
             report_date=q.report_date,
+            ann_date=getattr(q, "ann_date", None),
             report_type=q.report_type,
             eps=q.eps,
             bvps=q.bvps,

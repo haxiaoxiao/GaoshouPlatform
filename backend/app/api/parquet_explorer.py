@@ -34,6 +34,11 @@ _DATASET_DATE_COLUMNS = {
 }
 
 
+def _is_temp_parquet_path(path) -> bool:
+    text = str(path)
+    return ".tmp-" in text or "_compact_tmp_" in text
+
+
 def _get_store():
     return ParquetMarketDataStore(settings.parquet_data_dir)
 
@@ -41,18 +46,22 @@ def _get_store():
 def _partition_summary(path, dataset: str) -> dict[str, Any] | None:
     partitions: list[tuple[int, int]] = []
     for year_dir in path.glob("year=*"):
+        if _is_temp_parquet_path(year_dir):
+            continue
         try:
             year = int(year_dir.name.split("=", 1)[1])
         except (IndexError, ValueError):
             continue
         for month_dir in year_dir.glob("month=??"):
+            if _is_temp_parquet_path(month_dir):
+                continue
             try:
                 month = int(month_dir.name.split("=", 1)[1])
             except (IndexError, ValueError):
                 continue
-            if any(".tmp-" not in str(file) for file in month_dir.glob("*.parquet")):
+            if any(not _is_temp_parquet_path(file) for file in month_dir.glob("*.parquet")):
                 partitions.append((year, month))
-    if not partitions and not any(".tmp-" not in str(file) for file in path.glob("*.parquet")):
+    if not partitions and not any(not _is_temp_parquet_path(file) for file in path.glob("*.parquet")):
         return None
 
     min_date = max_date = None

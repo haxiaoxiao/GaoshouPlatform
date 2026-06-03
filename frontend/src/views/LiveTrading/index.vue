@@ -1,9 +1,10 @@
 <template>
-  <div class="live-page">
-    <header class="page-head">
+  <div class="page-frame live-page">
+    <header class="panel-card page-head">
       <div>
-        <h2>实盘交易</h2>
-        <p>完美世界 / 昆仑万维网格信号</p>
+        <span class="section-kicker">TRADING GUARDRAILS</span>
+        <h2>模拟 / 实盘</h2>
+        <p>完美世界 / 昆仑万维网格信号；默认只看信号，真实下单必须显式开启并二次确认。</p>
       </div>
       <div class="actions">
         <el-switch v-model="autoRefresh" active-text="每分钟刷新" />
@@ -36,6 +37,15 @@
       </div>
     </section>
 
+    <el-alert
+      v-if="status?.order_submit_enabled"
+      type="error"
+      :closable="false"
+      show-icon
+      title="真实下单开关已开启：所有委托仍需在卡片内二次确认。"
+      class="account-alert"
+    />
+
     <section class="toolbar">
       <div class="field">
         <span>网格间距</span>
@@ -61,6 +71,15 @@
       :closable="false"
       show-icon
       :title="data?.account?.error || status?.error || ''"
+      class="account-alert"
+    />
+
+    <el-alert
+      v-if="data?.quote_error"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`行情不可用，已降级为 NO_QUOTE：${data.quote_error}`"
       class="account-alert"
     />
 
@@ -259,24 +278,29 @@ onUnmounted(() => {
 
 <style scoped>
 .live-page {
-  padding: 16px;
+  overflow: auto;
 }
 
 .page-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  gap: var(--space-4);
+  padding: var(--space-5);
 }
 
 .page-head h2 {
-  margin: 0;
-  font-size: 20px;
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+  font-size: 22px;
 }
 
 .page-head p {
-  margin: 4px 0 0;
-  color: var(--text-muted);
+  margin: 0;
+  max-width: 760px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 .actions {
@@ -293,9 +317,9 @@ onUnmounted(() => {
   gap: 14px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent), var(--bg-surface);
   border-radius: 8px;
-  margin-bottom: 12px;
+  box-shadow: var(--shadow-card);
 }
 
 .status-band div,
@@ -326,9 +350,10 @@ onUnmounted(() => {
 
 .signal-card {
   border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent), var(--bg-surface);
   border-radius: 8px;
   padding: 14px;
+  box-shadow: var(--shadow-card);
 }
 
 .card-head {
@@ -381,6 +406,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
+  .page-head {
+    grid-template-columns: 1fr;
+  }
+
   .signal-grid {
     grid-template-columns: 1fr;
   }

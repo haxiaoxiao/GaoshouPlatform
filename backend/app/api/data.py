@@ -14,9 +14,34 @@ from app.services import DataService, SyncService
 from app.services.cache_invalidation import invalidate_after_sync
 from app.services.index_catalog import list_index_catalog
 from app.services.runtime_tasks import register_task, update_task
-from app.services.sync_proxy import proxy_sync_request
+from app.services.sync_proxy import proxy_sync_request, sync_service_health
 
 router = APIRouter()
+
+
+def _attach_sync_availability(
+    data: dict[str, Any],
+    *,
+    service_available: bool,
+    unavailable_reason: str | None = None,
+) -> dict[str, Any]:
+    status = str(data.get("status") or "idle")
+    is_busy = status in {"queued", "running"}
+    if not service_available:
+        can_trigger = False
+        reason = unavailable_reason or "数据同步服务未启动"
+    elif is_busy:
+        can_trigger = False
+        reason = "已有同步任务正在运行"
+    else:
+        can_trigger = True
+        reason = None
+    return {
+        **data,
+        "sync_service_available": service_available,
+        "can_trigger": can_trigger,
+        "reason": reason,
+    }
 
 
 # ============== Pydantic Models ==============
@@ -256,19 +281,67 @@ async def get_stock_detail(
     symbol: str = Path(description="股票代码"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
-    """
-    获取单个股票的详细信息
-    """
+    """Return frontend-facing stock detail fields by symbol."""
     from sqlalchemy import select
 
-    from app.db.models import Stock
+    from app.db.models import FinancialData, Stock
 
-    query = select(Stock).where(Stock.symbol == symbol)
-    result = await session.execute(query)
-    stock = result.scalar_one_or_none()
+    stock_result = await session.execute(select(Stock).where(Stock.symbol == symbol))
+    stock = stock_result.scalar_one_or_none()
 
     if stock is None:
-        raise HTTPException(status_code=404, detail=f"股票 {symbol} 不存在")
+        raise HTTPException(status_code=404, detail=f"Stock {symbol} not found")
+
+    financial_result = await session.execute(
+        select(FinancialData)
+        .where(FinancialData.symbol == symbol)
+        .order_by(FinancialData.report_date.desc())
+        .limit(1)
+    )
+    latest_financial = financial_result.scalar_one_or_none()
+
+    total_assets = (
+        latest_financial.total_assets
+        if latest_financial and latest_financial.total_assets is not None
+        else stock.total_assets
+    )
+    total_liability = (
+        latest_financial.total_liability
+        if latest_financial and latest_financial.total_liability is not None
+        else stock.total_liability
+    )
+    revenue = (
+        latest_financial.revenue
+        if latest_financial and latest_financial.revenue is not None
+        else stock.revenue
+    )
+    net_profit = (
+        latest_financial.net_profit
+        if latest_financial and latest_financial.net_profit is not None
+        else stock.net_profit
+    )
+    debt_ratio = (
+        float(total_liability) / float(total_assets)
+        if total_assets and total_liability is not None
+        else None
+    )
+    net_margin = (
+        float(net_profit) / float(revenue)
+        if revenue and net_profit is not None
+        else None
+    )
+
+    def as_ratio(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric / 100 if abs(numeric) > 1.5 else numeric
+
+    def optional_attr(model: Any, name: str) -> Any:
+        return getattr(model, name, None) if model is not None else None
 
     return {
         "code": 0,
@@ -277,8 +350,73 @@ async def get_stock_detail(
             "symbol": stock.symbol,
             "name": stock.name,
             "exchange": stock.exchange,
+            "market": stock.exchange,
             "industry": stock.industry,
+            "industry2": stock.industry2,
+            "industry3": stock.industry3,
+            "sector": stock.sector,
+            "concept": stock.concept,
             "list_date": stock.list_date.isoformat() if stock.list_date else None,
+            "is_st": bool(stock.is_st),
+            "is_suspend": bool(stock.is_suspend),
+            "is_delist": bool(stock.is_delist),
+            "is_active": not bool(stock.is_suspend or stock.is_delist),
+            "market_cap": stock.total_mv / 10000 if stock.total_mv is not None else None,
+            "float_market_cap": stock.circ_mv / 10000 if stock.circ_mv is not None else None,
+            "pe_ratio": (
+                latest_financial.pe_ttm
+                if latest_financial and latest_financial.pe_ttm is not None
+                else stock.pe_ttm
+            ),
+            "pb_ratio": (
+                latest_financial.pb
+                if latest_financial and latest_financial.pb is not None
+                else stock.pb
+            ),
+            "roe": as_ratio(
+                latest_financial.roe
+                if latest_financial and latest_financial.roe is not None
+                else stock.roe
+            ),
+            "eps": (
+                latest_financial.eps
+                if latest_financial and latest_financial.eps is not None
+                else stock.eps
+            ),
+            "bvps": (
+                latest_financial.bvps
+                if latest_financial and latest_financial.bvps is not None
+                else stock.bvps
+            ),
+            "revenue_growth": as_ratio(
+                latest_financial.revenue_yoy
+                if latest_financial and latest_financial.revenue_yoy is not None
+                else optional_attr(stock, "revenue_yoy")
+            ),
+            "profit_growth": as_ratio(
+                latest_financial.profit_yoy
+                if latest_financial and latest_financial.profit_yoy is not None
+                else optional_attr(stock, "profit_yoy")
+            ),
+            "debt_ratio": debt_ratio,
+            "current_ratio": None,
+            "gross_margin": as_ratio(
+                latest_financial.gross_margin
+                if latest_financial and latest_financial.gross_margin is not None
+                else optional_attr(stock, "gross_margin")
+            ),
+            "net_margin": net_margin,
+            "dividend_yield": None,
+            "latest_report_date": (
+                latest_financial.report_date.isoformat()
+                if latest_financial and latest_financial.report_date
+                else None
+            ),
+            "latest_ann_date": (
+                latest_financial.ann_date.isoformat()
+                if latest_financial and latest_financial.ann_date
+                else None
+            ),
             "created_at": stock.created_at.isoformat() if stock.created_at else None,
             "updated_at": stock.updated_at.isoformat() if stock.updated_at else None,
         },
@@ -777,65 +915,56 @@ async def get_sync_catalog(refresh: bool = Query(default=False)) -> dict[str, An
 async def get_sync_status(
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
+    health = await sync_service_health()
+    service_available = bool(health.get("healthy"))
+    unavailable_reason = None if service_available else str(health.get("error") or "数据同步服务未启动")
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()
     if persisted:
-        return {"code": 0, "message": "success", "data": persisted}
+        return {
+            "code": 0,
+            "message": "success",
+            "data": _attach_sync_availability(
+                persisted,
+                service_available=service_available,
+                unavailable_reason=unavailable_reason,
+            ),
+        }
 
     try:
-        return await proxy_sync_request("GET", "/api/data/sync/status")
+        response = await proxy_sync_request("GET", "/api/data/sync/status")
+        if isinstance(response.get("data"), dict):
+            response["data"] = _attach_sync_availability(
+                response["data"],
+                service_available=True,
+            )
+        return response
     except HTTPException as exc:
         logger.warning("Sync service status proxy failed: {}", exc.detail)
         return {
             "code": 0,
             "message": "success",
-            "data": {
-                "sync_type": None,
-                "status": "idle",
-                "total": 0,
-                "current": 0,
-                "success_count": 0,
-                "failed_count": 0,
-                "progress_percent": 0.0,
-                "start_time": None,
-                "end_time": None,
-                "error_message": None,
-                "details": {
-                    "sync_service_unavailable": True,
-                    "proxy_error": str(exc.detail),
+            "data": _attach_sync_availability(
+                {
+                    "sync_type": None,
+                    "status": "idle",
+                    "total": 0,
+                    "current": 0,
+                    "success_count": 0,
+                    "failed_count": 0,
+                    "progress_percent": 0.0,
+                    "start_time": None,
+                    "end_time": None,
+                    "error_message": None,
+                    "details": {
+                        "sync_service_unavailable": True,
+                        "proxy_error": str(exc.detail),
+                    },
                 },
-            },
+                service_available=False,
+                unavailable_reason=str(exc.detail),
+            ),
         }
-    """
-    获取当前同步任务状态
-    """
-    service = SyncService(session)
-    status = service.get_sync_status()
-
-    if status is None:
-        return {
-            "code": 0,
-            "message": "success",
-            "data": {
-                "sync_type": None,
-                "status": "idle",
-                "total": 0,
-                "current": 0,
-                "success_count": 0,
-                "failed_count": 0,
-                "progress_percent": 0.0,
-                "start_time": None,
-                "end_time": None,
-                "error_message": None,
-                "details": {},
-            },
-        }
-
-    return {
-        "code": 0,
-        "message": "success",
-        "data": status.to_dict(),
-    }
 
 
 @router.get("/sync/logs", summary="获取同步日志")

@@ -72,5 +72,5 @@ export const strategyApi = {
     request.get<SignalsSummary>('/strategy/signals/summary', { params }),
 
   runChannelBacktest: (params: { start_date: string; end_date: string; symbols?: string }) =>
-    request.get<BacktestResult>('/strategy/channel-backtest', { params }),
+    request.get<BacktestResult>('/strategy/backtest', { params }),
 }

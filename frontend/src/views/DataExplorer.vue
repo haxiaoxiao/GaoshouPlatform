@@ -18,7 +18,7 @@
             @click="selectTable(table.name)"
           >
             <span>{{ table.name }}</span>
-            <small>{{ formatNumber(table.row_count) }} 行</small>
+            <small>{{ formatRowCount(table.row_count) }}</small>
           </button>
         </div>
       </section>
@@ -53,7 +53,7 @@
           <span class="panel-kicker">DATA EXPLORER</span>
           <h2>{{ selectedTable || '选择数据表' }}</h2>
           <p v-if="selectedTableInfo">
-            {{ formatNumber(selectedTableInfo.row_count) }} 行
+            {{ formatRowCount(selectedTableInfo.row_count) }}
             <template v-if="selectedTableInfo.min_date || selectedTableInfo.max_date">
               · {{ selectedTableInfo.min_date || '-' }} 至 {{ selectedTableInfo.max_date || '-' }}
             </template>
@@ -66,7 +66,10 @@
           </el-button>
           <el-button @click="copyQuery" :disabled="!selectedTable">复制条件</el-button>
           <el-button @click="exportCsv" :disabled="!result.rows.length">导出 CSV</el-button>
-          <el-button type="primary" @click="loadData" :disabled="!selectedTable" :loading="loading">
+          <el-button @click="loadData(true)" :disabled="!selectedTable" :loading="loading">
+            精确统计
+          </el-button>
+          <el-button type="primary" @click="loadData(false)" :disabled="!selectedTable" :loading="loading">
             查询
           </el-button>
         </div>
@@ -188,7 +191,7 @@
           <div>
             <strong>查询结果</strong>
             <span v-if="result.total">
-              {{ formatNumber(result.total) }} 行 · 第 {{ result.page }}/{{ result.total_pages || 1 }} 页
+              {{ result.total_estimated ? '约 ' : '' }}{{ formatNumber(result.total) }} 行 · 第 {{ result.page }}/{{ result.total_pages || 1 }} 页
             </span>
             <span v-else>暂无结果</span>
           </div>
@@ -406,6 +409,11 @@ function formatNumber(value: number) {
   return Number(value || 0).toLocaleString()
 }
 
+function formatRowCount(value: number | null | undefined) {
+  if (value === null || value === undefined) return '未统计'
+  return `${formatNumber(value)} 行`
+}
+
 function formatCell(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'number') {
@@ -482,7 +490,7 @@ function buildFilters(): ExplorerFilter[] {
     }))
 }
 
-async function loadData() {
+async function loadData(includeTotal = false) {
   if (!selectedTable.value) return
   loading.value = true
   error.value = ''
@@ -494,6 +502,7 @@ async function loadData() {
       order_dir: orderDir.value,
       filters: buildFilters(),
       quick_search: { ...quickSearch },
+      include_total: includeTotal,
     })
     result.value = response
   } catch (err: any) {
@@ -514,6 +523,7 @@ async function loadLegacyPreview() {
       order_by: orderBy.value || undefined,
       order_dir: orderDir.value,
       where: whereClause.value || undefined,
+      include_total: true,
     })
   } catch (err: any) {
     error.value = err?.message || '查询失败'

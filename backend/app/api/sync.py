@@ -58,6 +58,17 @@ VALID_SYNC_TYPES = (
 )
 
 
+def _attach_sync_availability(data: dict[str, Any]) -> dict[str, Any]:
+    status = str(data.get("status") or "idle")
+    is_busy = status in {"queued", "running"}
+    return {
+        **data,
+        "sync_service_available": True,
+        "can_trigger": not is_busy,
+        "reason": "已有同步任务正在运行" if is_busy else None,
+    }
+
+
 async def _run_sync_task(
     run_id: str,
     request: SyncRequest,
@@ -324,12 +335,12 @@ async def get_sync_status(
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()
     if persisted:
-        return {"code": 0, "message": "success", "data": persisted}
+        return {"code": 0, "message": "success", "data": _attach_sync_availability(persisted)}
     latest = await get_latest_sync_run(session)
     idle = idle_sync_status()
     if latest is not None:
         idle["last_run"] = run_to_status(latest)
-    return {"code": 0, "message": "success", "data": idle}
+    return {"code": 0, "message": "success", "data": _attach_sync_availability(idle)}
 
 
 @router.get("/sync/logs")

@@ -9,7 +9,7 @@
         <span class="queue-summary" :class="{ active: queue.length > 0 }">待执行 {{ queue.length }} 项</span>
         <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
         <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
-        <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0" :loading="executing" @click="executeQueue">
+        <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0 || !canTriggerSync" :loading="executing" @click="executeQueue">
           执行队列
         </el-button>
       </div>
@@ -40,6 +40,16 @@
       :status="syncStatus.status === 'failed' ? 'exception' : syncStatus.status === 'completed' ? 'success' : undefined"
       :stroke-width="10"
     />
+
+    <el-alert
+      v-if="!canTriggerSync"
+      class="sync-service-warning"
+      type="warning"
+      :closable="false"
+      show-icon
+    >
+      <template #title>{{ syncUnavailableReason }}</template>
+    </el-alert>
 
     <div class="layout-grid">
       <section class="panel presets-panel">
@@ -300,6 +310,17 @@ let pollTimer: number | undefined
 let lastLogRefreshAt = 0
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
+const canTriggerSync = computed(() => (
+  !isRunning.value
+  && syncStatus.value.can_trigger !== false
+  && syncStatus.value.sync_service_available !== false
+  && syncStatus.value.details?.sync_service_unavailable !== true
+))
+const syncUnavailableReason = computed(() => (
+  syncStatus.value.reason
+  || String(syncStatus.value.details?.proxy_error || '')
+  || 'dev 同步服务未启动或正在执行任务，请先启动 18810 同步服务后再提交。'
+))
 const queuedNames = computed(() => new Set(queue.value.map((item) => item.name)))
 const filteredDatasets = computed(() => {
   const term = keyword.value.trim().toLowerCase()
@@ -336,7 +357,28 @@ async function loadCatalog(force = false) {
 }
 
 async function refreshStatus() {
-  syncStatus.value = await syncApi.getStatus()
+  try {
+    syncStatus.value = normalizeStatusAvailability(await syncApi.getStatus())
+  } catch (error: any) {
+    syncStatus.value = {
+      ...idleStatus(),
+      sync_service_available: false,
+      can_trigger: false,
+      reason: error?.message || 'dev 同步服务未启动或状态接口不可用',
+    }
+  }
+}
+
+function normalizeStatusAvailability(status: SyncStatus): SyncStatus {
+  if (status.details?.sync_service_unavailable) {
+    return {
+      ...status,
+      sync_service_available: false,
+      can_trigger: false,
+      reason: status.reason || String(status.details.proxy_error || 'dev 同步服务未启动'),
+    }
+  }
+  return status
 }
 
 async function loadLogs() {
@@ -432,6 +474,10 @@ function clearQueue() {
 
 async function executeQueue() {
   if (queue.value.length === 0 || executing.value) return
+  if (!canTriggerSync.value) {
+    ElMessage.warning(syncUnavailableReason.value)
+    return
+  }
   executing.value = true
   try {
     const coreItems = queue.value.filter((item) => item.kind === 'core')
@@ -847,7 +893,8 @@ label.wide {
   width: 150px;
 }
 
-.relay-warning {
+.relay-warning,
+.sync-service-warning {
   border-radius: 6px;
 }
 

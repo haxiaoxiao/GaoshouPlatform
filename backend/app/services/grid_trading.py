@@ -56,7 +56,12 @@ class GridTradingService:
         manual_account: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         params = self._normalize_params(params or {})
-        quotes = await qmt_gateway.get_realtime_quotes(GRID_SYMBOLS)
+        quote_error: str | None = None
+        try:
+            quotes = await qmt_gateway.get_realtime_quotes(GRID_SYMBOLS)
+        except Exception as exc:
+            quotes = []
+            quote_error = f"{type(exc).__name__}: {exc}"
         quote_map = {str(q.get("symbol") or q.get("code") or q.get("stock_code")): q for q in quotes}
         account = await self._account_snapshot(manual_account)
         now = datetime.now()
@@ -66,7 +71,8 @@ class GridTradingService:
             quote = quote_map.get(symbol) or {}
             price = self._quote_price(quote)
             if price <= 0:
-                signals.append(self._empty_signal(symbol, "NO_QUOTE", "未获取到有效实时价格", now))
+                reason = quote_error or "未获取到有效实时价格"
+                signals.append(self._empty_signal(symbol, "NO_QUOTE", reason, now))
                 continue
             anchor, anchor_source = self._anchor_price(symbol, params["anchor_window_minutes"], price, quote)
             signals.append(self._build_signal(symbol, price, anchor, anchor_source, params, account, now))
@@ -81,6 +87,7 @@ class GridTradingService:
                 "source": account.source,
                 "error": account.error,
             },
+            "quote_error": quote_error,
             "order_submit_enabled": bool(settings.grid_trading_enable_order_submit),
             "signals": signals,
         }

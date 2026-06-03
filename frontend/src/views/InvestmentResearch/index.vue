@@ -56,6 +56,45 @@
         </div>
       </section>
 
+      <section class="research-tool-grid">
+        <article class="research-panel research-panel--tools">
+          <div class="panel-header">
+            <div>
+              <strong>研究操作台</strong>
+              <span>把想法、证据、实验和复盘拆成可推进的动作</span>
+            </div>
+          </div>
+          <div class="tool-card-grid">
+            <a v-for="tool in researchTools" :key="tool.title" class="tool-card" :href="tool.href">
+              <span>{{ tool.kicker }}</span>
+              <strong>{{ tool.title }}</strong>
+              <small>{{ tool.description }}</small>
+            </a>
+          </div>
+        </article>
+
+        <article class="research-panel research-panel--links">
+          <div class="panel-header">
+            <div>
+              <strong>外部链接 / 本地笔记</strong>
+              <span>研报、代码、笔记和可视化思维工具放在同一排入口</span>
+            </div>
+          </div>
+          <div class="link-list">
+            <a
+              v-for="link in externalLinks"
+              :key="link.title"
+              :href="link.href"
+              :target="link.href.startsWith('/') ? undefined : '_blank'"
+              rel="noreferrer"
+            >
+              <span>{{ link.title }}</span>
+              <small>{{ link.description }}</small>
+            </a>
+          </div>
+        </article>
+      </section>
+
       <section class="research-panel research-panel--main">
         <div class="panel-header">
           <div>
@@ -163,6 +202,56 @@ const keyword = ref('')
 const statusFilter = ref('')
 const loading = ref(false)
 const loadError = ref('')
+
+const researchTools = [
+  {
+    kicker: 'IDEA',
+    title: '研究假设卡',
+    description: '记录信号来源、可证伪条件、适用股票池和预期失败场景。',
+    href: 'obsidian://open?vault=GaoshouPlatform&file=Research%2FIdea%20Cards',
+  },
+  {
+    kicker: 'EVIDENCE',
+    title: '证据矩阵',
+    description: '把行情、公告、财务、舆情和外部研报证据按日期对齐。',
+    href: 'obsidian://open?vault=GaoshouPlatform&file=Research%2FEvidence%20Matrix',
+  },
+  {
+    kicker: 'RUNBOOK',
+    title: '实验记录',
+    description: '沉淀参数、股票池、数据口径、结果截图和失败原因。',
+    href: 'obsidian://open?vault=GaoshouPlatform&file=Research%2FExperiment%20Runs',
+  },
+  {
+    kicker: 'ARCHIVE',
+    title: '失败复盘',
+    description: '保留被否决想法，防止重复踩坑。',
+    href: 'obsidian://open?vault=GaoshouPlatform&file=Research%2FFailure%20Archive',
+  },
+]
+
+const externalLinks = [
+  {
+    title: 'Obsidian Research Vault',
+    description: '打开本地研究笔记库（需要已配置 vault 名称）。',
+    href: 'obsidian://open?vault=GaoshouPlatform',
+  },
+  {
+    title: '因子定义',
+    description: '进入本平台因子目录、覆盖率和预计算入口。',
+    href: '/factor',
+  },
+  {
+    title: '因子评估',
+    description: '进入 IC、多空收益、回撤和组合候选看板。',
+    href: '/factor/evaluation',
+  },
+  {
+    title: '策略回测',
+    description: '把研究假设转为策略代码并运行验证。',
+    href: '/backtest',
+  },
+]
 
 const statusLabels: Record<string, string> = {
   implemented: '已实现',
@@ -335,6 +424,12 @@ onMounted(() => {
   gap: 8px;
 }
 
+.research-tool-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(340px, 0.75fr);
+  gap: 12px;
+}
+
 .summary-grid > div {
   padding: 11px 12px;
   border: 1px solid var(--border-default);
@@ -372,6 +467,11 @@ onMounted(() => {
 
 .research-panel--main {
   flex: 1;
+}
+
+.research-panel--tools,
+.research-panel--links {
+  flex-shrink: 0;
 }
 
 .panel-header {
@@ -414,6 +514,57 @@ onMounted(() => {
 
 .tag-list a:hover {
   color: var(--accent-primary);
+}
+
+.tool-card-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.tool-card,
+.link-list a {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  color: inherit;
+  background: rgba(10, 14, 20, 0.5);
+  text-decoration: none;
+}
+
+.tool-card:hover,
+.link-list a:hover {
+  border-color: rgba(56, 189, 248, 0.38);
+  background: rgba(56, 189, 248, 0.08);
+}
+
+.tool-card span {
+  color: var(--accent-primary);
+  font-family: var(--font-data);
+  font-size: 11px;
+}
+
+.tool-card strong,
+.link-list span {
+  color: var(--text-bright);
+  font-size: 13px;
+}
+
+.tool-card small,
+.link-list small {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.link-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
 }
 
 :deep(.el-table) {
@@ -489,6 +640,11 @@ onMounted(() => {
   .research-actions {
     grid-template-columns: minmax(0, 1fr) 150px auto;
   }
+
+  .research-tool-grid,
+  .tool-card-grid {
+    grid-template-columns: 1fr 1fr;
+  }
 }
 
 @media (max-width: 760px) {
@@ -501,7 +657,10 @@ onMounted(() => {
   }
 
   .research-actions,
-  .summary-grid {
+  .summary-grid,
+  .research-tool-grid,
+  .tool-card-grid,
+  .link-list {
     grid-template-columns: 1fr;
   }
 

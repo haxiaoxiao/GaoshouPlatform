@@ -3,9 +3,9 @@
     <section class="toolbar">
       <div class="toolbar-header">
         <div class="store-title">
-          <span class="panel-kicker">FACTOR VALUE STORE</span>
-          <strong>因子值缓存</strong>
-          <span>管理因子定义、缓存覆盖、截面预览和预计算；收益表现请回到因子看板。</span>
+          <span class="panel-kicker">FACTOR DEFINITION / PRECOMPUTE</span>
+          <strong>因子定义与预计算</strong>
+          <span>管理因子目录、缓存覆盖、截面预览和预计算；表达式只在创建或编辑时打开。</span>
         </div>
         <div class="toolbar-meta">
           <span>{{ selectedDefinition?.frequency || '频率未知' }}</span>

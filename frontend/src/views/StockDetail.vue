@@ -194,14 +194,8 @@ const loadKlineData = async () => {
 
 // 加载股票详情
 const loadStockDetail = async () => {
-  // 根据symbol获取股票详情
-  // 由于API需要ID，我们先通过列表搜索获取
   try {
-    const response = await stockApi.getList({ search: symbol.value })
-    const stock = response.items.find((s) => s.symbol === symbol.value)
-    if (stock) {
-      stockDetail.value = await stockApi.getDetail(stock.id)
-    }
+    stockDetail.value = await stockApi.getDetail(symbol.value)
   } catch (error) {
     console.error('加载股票详情失败:', error)
   }
