@@ -54,8 +54,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, nextTick } from 'vue'
+import { computed, ref, onMounted, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { evaluationApi } from '@/api/factorResearch'
 import type { FactorReport, StockPool } from '@/types/factor'
@@ -188,6 +189,29 @@ async function fetchReport() {
     loading.value = false
   }
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Factor Analysis',
+    rows: [
+      { label: '因子', value: factorName.value || '-' },
+      { label: '股票池', value: stockPool.value },
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '更新日', value: report.value?.update_date || '-' },
+    ],
+  },
+  {
+    title: 'Coverage',
+    rows: [
+      { label: 'IC 序列', value: `${report.value?.ic_series.length || 0}` },
+      { label: '行业 IC', value: `${report.value?.industry_ic.length || 0}` },
+      { label: '换手序列', value: `${report.value?.turnover.length || 0}` },
+      { label: '衰减序列', value: `${report.value?.signal_decay.length || 0}` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(fetchReport)
 onUnmounted(disposeCharts)

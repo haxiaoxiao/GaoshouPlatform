@@ -61,6 +61,7 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { factorBacktestApi } from '@/api/v2'
 import type { BacktestReport, BtConfig } from '@/types/factor'
@@ -121,6 +122,29 @@ async function runBacktest() {
     loading.value = false
   }
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Factor Backtest',
+    rows: [
+      { label: '因子', value: factorName.value || '-' },
+      { label: '加载状态', value: loading.value ? '运行中' : '待运行', tone: loading.value ? 'warn' : 'neutral' },
+      { label: '调仓周期', value: btConfig.value.rebalance_period },
+      { label: '组合类型', value: btConfig.value.portfolio_type },
+    ],
+  },
+  {
+    title: 'Results',
+    rows: [
+      { label: '报告', value: report.value ? '已生成' : '未生成', tone: report.value ? 'good' : 'neutral' },
+      { label: '指标卡', value: `${metricsList.value.length} 项` },
+      { label: '净值点数', value: `${report.value?.nav_series.length || 0}` },
+      { label: '日志条数', value: `${report.value?.logs.length || 0}` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onUnmounted(() => navChart?.dispose())
 </script>

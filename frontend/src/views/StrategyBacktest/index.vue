@@ -426,6 +426,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { strategyApi, type Strategy, type LiveData, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
@@ -1003,6 +1004,39 @@ const optPeriodHint = computed(() => {
   const testDays = Math.max(1, Math.round(Number(optTestPeriod.value || 0) / 240))
   return `单位: bar，约 ${trainDays}/${testDays} 个交易日`
 })
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Backtest Run',
+    rows: [
+      { label: '当前标签', value: activeTab.value },
+      { label: '策略数量', value: `${strategyList.value.length}` },
+      { label: '当前策略', value: activeStrategy.value?.name || '未选择' },
+      { label: '引擎 / K线', value: `${btEngine.value} / ${btBarType.value}` },
+      {
+        label: '运行状态',
+        value: btRunning.value ? '运行中' : btTaskId.value ? '有结果' : '待提交',
+        tone: btRunning.value ? 'warn' : btTaskId.value ? 'good' : 'neutral',
+      },
+    ],
+  },
+  {
+    title: 'Universe',
+    rows: [
+      { label: '股票池', value: poolSource.value?.label || (effectiveSymbols.value.length ? '自定义列表' : '未设置') },
+      { label: '样本规模', value: poolSource.value?.count ? `${poolSource.value.count} 只` : `${effectiveSymbols.value.length} 只` },
+      { label: '指数池', value: selectedIndexSymbol.value || '-' },
+      { label: '基准', value: selectedBenchmarkSymbol.value || '-' },
+      {
+        label: '参数优化',
+        value: optimizationRunning.value ? `${Math.round(optimizationProgress.value * 100)}%` : '未运行',
+        tone: optimizationRunning.value ? 'warn' : 'neutral',
+      },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 const applyBtSettings = (settings?: BtSettings | null) => {
   if (!settings) return

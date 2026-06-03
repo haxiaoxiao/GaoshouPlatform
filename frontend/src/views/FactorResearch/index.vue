@@ -39,6 +39,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
 import FactorBoard from './FactorBoard.vue'
 import FactorValueStore from './FactorValueStore.vue'
 
@@ -53,6 +54,29 @@ const activeTabDescription = computed(() => (
     ? '评估 IC、ICIR、多空收益、回撤、换手和已计算组合；不在评估页展开表达式编辑器。'
     : '管理因子目录、覆盖率、参数版本和预计算；表达式只在创建或编辑因子时打开。'
 ))
+
+const pageContextBlocks = computed(() => {
+  if (!isShellVisible.value) return null
+  return [
+    {
+      title: 'Factor Lab',
+      rows: [
+        { label: '当前视图', value: activeTabLabel.value },
+        { label: '路径', value: route.path },
+        { label: '外壳状态', value: '主工作台', tone: 'good' },
+      ],
+    },
+    {
+      title: 'Mode',
+      rows: [
+        { label: '预计算', value: activeTab.value === 'board' ? '消费缓存' : '可发起预计算' },
+        { label: '表达式入口', value: activeTab.value === 'board' ? '关闭' : '创建/编辑时打开' },
+      ],
+    },
+  ]
+})
+
+usePageContext(pageContextBlocks)
 
 const routeToTab = () => {
   if (route.path.startsWith('/factor/evaluation')) return 'board'

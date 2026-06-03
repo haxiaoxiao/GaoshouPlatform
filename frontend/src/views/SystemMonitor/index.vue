@@ -85,6 +85,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Refresh } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { systemApi, type DataSummary, type DataSummaryItem, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
@@ -240,6 +241,33 @@ function formatDateTime(value?: string | null): string {
   if (!value) return '-'
   return value.replace('T', ' ').slice(0, value.includes(':') ? 16 : 10)
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Ops Status',
+    rows: [
+      { label: '刷新状态', value: loading.value ? '刷新中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '活动任务', value: `${activeTaskCount.value} 个`, tone: activeTaskCount.value ? 'warn' : 'good' },
+      {
+        label: '同步服务',
+        value: syncStatus.value ? syncStatusLabel(syncStatus.value.status) : '-',
+        tone: syncStatus.value?.status === 'failed' ? 'bad' : syncStatus.value?.status === 'running' ? 'warn' : 'good',
+      },
+      { label: '运行任务记录', value: `${runtimeTasks.value.length} 条` },
+      { label: '下单护栏', value: gridStatus.value?.order_submit_enabled ? '已开启' : '仅信号', tone: gridStatus.value?.order_submit_enabled ? 'bad' : 'good' },
+    ],
+  },
+  {
+    title: 'Datasets',
+    rows: datasetRows.value.slice(0, 4).map(row => ({
+      label: row.label,
+      value: row.latest,
+      tone: row.latest === '-' ? 'warn' : 'good',
+    })),
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(loadOps)
 </script>

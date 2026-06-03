@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import desc, select, update
+from sqlalchemy import case, desc, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,7 +107,10 @@ async def get_current_sync_run(session: AsyncSession) -> SyncRun | None:
     active = await session.execute(
         select(SyncRun)
         .where(SyncRun.status.in_(("queued", "running")))
-        .order_by(desc(SyncRun.updated_at))
+        .order_by(
+            desc(case((SyncRun.status == "running", 1), else_=0)),
+            desc(SyncRun.updated_at),
+        )
         .limit(1)
     )
     return active.scalar_one_or_none()

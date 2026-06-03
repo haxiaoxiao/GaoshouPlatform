@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from datetime import date
 from typing import Any
 from uuid import uuid4
@@ -19,6 +18,7 @@ from app.services.sentiment import (
     parse_sources,
     serialize_post,
 )
+from app.services.task_queue import QueuedTask, get_task_queue
 
 router = APIRouter()
 
@@ -51,8 +51,15 @@ def _validate_ingest_request(request: IngestRunRequest, sources: list[str]) -> s
     return None
 
 
-def _schedule_sentiment_ingest_task(task_id: str, request: IngestRunRequest, sources: list[str]) -> None:
-    asyncio.create_task(_run_sentiment_ingest_task(task_id, request, sources))
+async def _schedule_sentiment_ingest_task(task_id: str, request: IngestRunRequest, sources: list[str]) -> None:
+    await get_task_queue("sentiment_ingest").submit(
+        QueuedTask(
+            task_id=task_id,
+            title="sentiment ingest",
+            handler=lambda: _run_sentiment_ingest_task(task_id, request, sources),
+            metadata={"sources": sources, "symbol": request.symbol},
+        )
+    )
 
 
 async def _run_sentiment_ingest_task(
@@ -181,7 +188,7 @@ async def run_sentiment_ingest(
                 "force_refresh": request.force_refresh,
             },
         )
-        _schedule_sentiment_ingest_task(task_id, request, sources)
+        await _schedule_sentiment_ingest_task(task_id, request, sources)
         return {
             "code": 0,
             "data": {

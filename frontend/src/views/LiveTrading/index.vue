@@ -149,8 +149,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import {
   gridTradingApi,
   type GridSignal,
@@ -263,6 +264,30 @@ function formatQty(v?: number | null) {
 function formatMoney(v?: number | null) {
   return v == null ? '-' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Trading Guardrails',
+    rows: [
+      { label: '刷新', value: autoRefresh.value ? '每分钟自动刷新' : '手动刷新' },
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '行情连接', value: status.value?.quote_connected ? '已连接' : '未确认', tone: status.value?.quote_connected ? 'good' : 'warn' },
+      { label: '交易模块', value: status.value?.xttrader_available ? '可用' : '不可用', tone: status.value?.xttrader_available ? 'good' : 'bad' },
+      { label: '真实下单', value: status.value?.order_submit_enabled ? '已开启' : '仅信号', tone: status.value?.order_submit_enabled ? 'bad' : 'good' },
+    ],
+  },
+  {
+    title: 'Signals',
+    rows: [
+      { label: '账户', value: status.value?.account_id || '-' },
+      { label: '信号数', value: `${data.value?.signals?.length || 0} 条` },
+      { label: '账户来源', value: data.value?.account?.source || '-' },
+      { label: '账户总资产', value: formatMoney(data.value?.account?.total_asset) },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 watch(autoRefresh, resetTimer)
 

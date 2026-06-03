@@ -81,6 +81,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { systemApi, type DataSummary, type DataSummaryItem, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
@@ -293,6 +294,36 @@ function backtestStatusLabel(status: string): string {
   }
   return labels[status] || status
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Workbench',
+    rows: [
+      { label: '刷新状态', value: loading.value ? '刷新中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '活动任务', value: `${activeTasks.value.length} 个`, tone: activeTasks.value.length ? 'warn' : 'good' },
+      {
+        label: '同步服务',
+        value: syncStatus.value ? syncStatusLabel(syncStatus.value.status) : '-',
+        tone: syncStatus.value?.status === 'failed' ? 'bad' : syncStatus.value?.status === 'running' ? 'warn' : 'good',
+      },
+      {
+        label: '最近回测',
+        value: latestBacktests.value[0] ? backtestStatusLabel(latestBacktests.value[0].status) : '暂无',
+        tone: latestBacktests.value[0]?.status === 'failed' ? 'bad' : latestBacktests.value[0] ? 'good' : 'neutral',
+      },
+    ],
+  },
+  {
+    title: 'Freshness',
+    rows: dataFreshnessRows.value.slice(0, 4).map(row => ({
+      label: row.label,
+      value: row.value,
+      tone: row.value === '-' ? 'warn' : 'good',
+    })),
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(loadWorkbench)
 </script>

@@ -9,7 +9,7 @@
         <span class="queue-summary" :class="{ active: queue.length > 0 }">待执行 {{ queue.length }} 项</span>
         <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
         <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
-        <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0 || !canTriggerSync" :loading="executing" @click="executeQueue">
+        <el-button type="primary" :icon="VideoPlay" :disabled="queue.length === 0 || !canTriggerSync" :loading="executing" @click="executeQueue">
           执行队列
         </el-button>
       </div>
@@ -311,8 +311,7 @@ let lastLogRefreshAt = 0
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
 const canTriggerSync = computed(() => (
-  !isRunning.value
-  && syncStatus.value.can_trigger !== false
+  syncStatus.value.can_trigger !== false
   && syncStatus.value.sync_service_available !== false
   && syncStatus.value.details?.sync_service_unavailable !== true
 ))
@@ -482,6 +481,7 @@ async function executeQueue() {
   try {
     const coreItems = queue.value.filter((item) => item.kind === 'core')
     const relayItems = queue.value.filter((item) => item.kind === 'relay')
+    let submittedCount = 0
     for (const item of coreItems) {
       if (item.name === 'factor_dependency') {
         ElMessage.warning('因子依赖同步请从因子看板的预计算流程触发')
@@ -491,7 +491,7 @@ async function executeQueue() {
         sync_type: item.name as any,
         ...basePayload(),
       })
-      await waitUntilIdle()
+      submittedCount += 1
     }
     if (relayItems.length) {
       await syncApi.trigger({
@@ -500,10 +500,13 @@ async function executeQueue() {
         relay_datasets: relayItems.map((item) => item.name),
         relay_options: relayOptions(relayItems),
       })
-      await waitUntilIdle()
+      submittedCount += 1
     }
     queue.value = []
     await Promise.all([refreshStatus(), loadLogs(), loadCatalog(true)])
+    if (submittedCount > 0) {
+      ElMessage.success(`已提交 ${submittedCount} 个同步任务，将按队列依次执行`)
+    }
   } catch (error: any) {
     ElMessage.error(error?.message || '同步任务提交失败')
   } finally {
@@ -535,18 +538,6 @@ function relayOptions(items: QueueItem[]) {
     rps: catalog.value?.relay.rps || 1,
     timeout_seconds: catalog.value?.relay.timeout_seconds || 30,
   }
-}
-
-async function waitUntilIdle() {
-  for (let i = 0; i < 720; i += 1) {
-    await sleep(2500)
-    await refreshStatus()
-    if (!isRunning.value) {
-      if (syncStatus.value.status === 'failed') throw new Error(syncStatus.value.error_message || '同步失败')
-      return
-    }
-  }
-  throw new Error('同步任务等待超时')
 }
 
 async function cancelSync() {
@@ -645,9 +636,6 @@ function idleStatus(): SyncStatus {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
 </script>
 
 <style scoped>

@@ -196,6 +196,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
 import { factorValueApi, type FactorValueDefinition } from '@/api/factorValues'
@@ -276,6 +277,29 @@ const summaryCards = computed(() => {
     { label: '股票数', value: String(summary.symbol_count || '-'), valueClass: '' },
   ]
 })
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Factor Detail',
+    rows: [
+      { label: '因子', value: factorName.value },
+      { label: '分类', value: definition.value?.category || '-' },
+      { label: '来源', value: definition.value?.source || 'custom' },
+      { label: '加载状态', value: loading.value ? '加载中' : running.value ? '计算中' : '已就绪', tone: loading.value || running.value ? 'warn' : 'good' },
+    ],
+  },
+  {
+    title: 'Research Config',
+    rows: [
+      { label: '股票池', value: form.stock_pool_value || '-' },
+      { label: '基准', value: form.benchmark_symbol || '-' },
+      { label: 'IC均值', value: summaryCards.value[0]?.value || '-' },
+      { label: '覆盖率', value: summaryCards.value.find(item => item.label === '瑕嗙洊鐜?')?.value || '-' },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 const navChartRef = ref<HTMLElement | null>(null)
 const icChartRef = ref<HTMLElement | null>(null)

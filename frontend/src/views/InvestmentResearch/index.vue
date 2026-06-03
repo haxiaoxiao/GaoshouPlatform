@@ -190,6 +190,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { Refresh, Search } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import {
   factorValueApi,
   type FactorPaperExperimentSpec,
@@ -333,6 +334,29 @@ const loadResearch = async () => {
     loading.value = false
   }
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Research',
+    rows: [
+      { label: '刷新状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '关键词', value: keyword.value.trim() || '-' },
+      { label: '状态筛选', value: statusFilter.value || '全部' },
+      { label: '错误', value: loadError.value || '无', tone: loadError.value ? 'warn' : 'good' },
+    ],
+  },
+  {
+    title: 'Manifest',
+    rows: [
+      { label: '研报总数', value: `${manifestSummary.value.total}` },
+      { label: '已映射', value: `${manifestSummary.value.implemented}` },
+      { label: '当前结果', value: `${filteredManifestRows.value.length}` },
+      { label: '离线实验', value: `${paperExperiments.value.length}` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(() => {
   void loadResearch()

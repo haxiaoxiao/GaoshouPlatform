@@ -101,6 +101,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import StockList from './StockList.vue'
 import KlineQuery from './KlineQuery.vue'
 import SentimentPanel from './SentimentPanel.vue'
@@ -272,6 +273,28 @@ function formatDateTime(value?: string | null): string {
   if (!value) return '-'
   return value.replace('T', ' ').slice(0, value.includes(':') ? 16 : 10)
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Data View',
+    rows: [
+      { label: '当前标签', value: tabs.find(tab => tab.key === activeTab.value)?.label || activeTab.value },
+      { label: '刷新状态', value: loading.value ? '刷新中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '新鲜度卡片', value: `${freshnessCards.value.length} 项` },
+      { label: '同步记录', value: `${syncLogs.value.length} 条` },
+    ],
+  },
+  {
+    title: 'Coverage',
+    rows: coverageRows.value.slice(0, 4).map(row => ({
+      label: row.label,
+      value: row.value,
+      tone: row.value === '-' ? 'warn' : 'good',
+    })),
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(loadDashboard)
 

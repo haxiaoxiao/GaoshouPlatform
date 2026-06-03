@@ -27,6 +27,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import SyncPanel from './SyncPanel.vue'
 import { syncApi, type SyncStatus } from '@/api/sync'
 
@@ -98,6 +99,39 @@ async function runQuickSync() {
     quickSyncing.value = false
   }
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Queue',
+    rows: [
+      { label: '一键同步', value: quickSyncing.value ? '提交中' : '待触发', tone: quickSyncing.value ? 'warn' : 'neutral' },
+      {
+        label: '服务状态',
+        value: syncStatus.value?.sync_service_available === false ? '不可用' : '可用',
+        tone: syncStatus.value?.sync_service_available === false ? 'bad' : 'good',
+      },
+      {
+        label: '当前任务',
+        value: syncStatus.value?.sync_type || '-',
+        tone: syncStatus.value?.status === 'running' ? 'warn' : 'neutral',
+      },
+      {
+        label: '队列状态',
+        value: syncStatus.value?.status || '-',
+        tone: syncStatus.value?.status === 'failed' ? 'bad' : syncStatus.value?.status === 'running' ? 'warn' : 'good',
+      },
+    ],
+  },
+  {
+    title: 'Trigger Guard',
+    rows: [
+      { label: '允许触发', value: quickSyncDisabled.value ? '否' : '是', tone: quickSyncDisabled.value ? 'warn' : 'good' },
+      { label: '原因', value: quickSyncDisabled.value ? syncUnavailableReason.value : '队列可接受新任务' },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 </script>
 
 <style scoped>

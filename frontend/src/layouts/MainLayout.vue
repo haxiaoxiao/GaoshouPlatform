@@ -123,7 +123,7 @@
           <span class="page-kicker">CONTEXT</span>
           <h2>{{ pageTitle }}上下文</h2>
         </div>
-        <span class="context-badge">Live</span>
+        <span class="context-badge">{{ contextBadge }}</span>
       </div>
 
       <section v-for="block in contextBlocks" :key="block.title" class="context-card">
@@ -149,6 +149,7 @@ import {
   type AppNavItem,
   type ContextBlock,
 } from '@/app/navigation'
+import { useResolvedPageContext } from '@/app/pageContext'
 import { useNotificationStore } from '@/stores/notification'
 import NotificationPanel from '@/components/NotificationPanel.vue'
 import StatusBar from '@/components/StatusBar.vue'
@@ -164,6 +165,8 @@ const showNotifications = ref(false)
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
+const fallbackContextBlocks = computed<ContextBlock[]>(() => activeNavItem.value?.context || [])
+const resolvedContext = useResolvedPageContext(fallbackContextBlocks)
 
 const pageTitle = computed(() => {
   const title = route.meta.title
@@ -180,7 +183,8 @@ const pageKicker = computed(() => {
   return typeof kicker === 'string' ? kicker : activeNavItem.value?.kicker || 'GAOSHOU'
 })
 
-const contextBlocks = computed<ContextBlock[]>(() => activeNavItem.value?.context || [])
+const contextBlocks = computed<ContextBlock[]>(() => resolvedContext.value.blocks)
+const contextBadge = computed(() => resolvedContext.value.isDynamic ? 'Live' : 'Guide')
 
 function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value

@@ -41,6 +41,7 @@ from app.services.index_components import load_index_symbols
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
 from app.services.ta_factor_calculator import precompute_ta_factors
+from app.services.task_queue import QueuedTask, get_task_queue
 from app.services.tushare_relay_factor_calculator import precompute_relay_factors
 
 router = APIRouter(tags=["factor-values"])
@@ -302,7 +303,7 @@ async def precompute(request: FactorPrecomputeRequest = Body(...)) -> dict[str, 
         task_id=task_id,
         kind="factor_precompute",
         title=f"因子预计算 {', '.join(request.factor_names)}",
-        status="running",
+        status="queued" if request.async_task else "running",
         progress=0,
         result_ref="/factor",
         meta={
@@ -314,7 +315,14 @@ async def precompute(request: FactorPrecomputeRequest = Body(...)) -> dict[str, 
     )
     set(request.factor_names)
     if request.async_task:
-        asyncio.create_task(_run_single_precompute_task(task_id, request))
+        await get_task_queue("factor_compute").submit(
+            QueuedTask(
+                task_id=task_id,
+                title=f"factor precompute {', '.join(request.factor_names)}",
+                handler=lambda: _run_single_precompute_task(task_id, request),
+                metadata={"factor_names": request.factor_names},
+            )
+        )
         return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request)}
 
     try:
@@ -353,7 +361,7 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         task_id=task_id,
         kind="factor_precompute",
         title=f"因子集合预计算 {request.group_name}",
-        status="running",
+        status="queued" if request.async_task else "running",
         progress=0,
         result_ref="/factor",
         meta={
@@ -366,7 +374,14 @@ async def precompute_group(request: FactorGroupPrecomputeRequest = Body(...)) ->
         },
     )
     if request.async_task:
-        asyncio.create_task(_run_group_precompute_task(task_id, request, group))
+        await get_task_queue("factor_compute").submit(
+            QueuedTask(
+                task_id=task_id,
+                title=f"factor group precompute {request.group_name}",
+                handler=lambda: _run_group_precompute_task(task_id, request, group),
+                metadata={"group_name": request.group_name, "factor_names": group_factor_names},
+            )
+        )
         return {"code": 0, "message": "success", "data": _task_started_payload(task_id, request, group)}
 
     try:
@@ -410,7 +425,7 @@ def _task_started_payload(
         "rows": {},
         "rows_written": 0,
         "requested_factor_count": len(factor_names),
-        "status": "running",
+        "status": "queued",
     }
 
 

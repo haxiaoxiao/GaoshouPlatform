@@ -25,7 +25,6 @@ Last updated: 2026-05-25.
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
 | `docs/tushare-relay-ingestion.md` | Tushare Relay 接入：配置、同步目录、首批 Parquet 数据集、新闻公告护栏和轻量因子 |
 | `docs/akquant-integration-todo.md` | AKQuant 当前集成状态、验证命令和仍需跟进事项 |
-| `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐聚宽的阶段记录：参数、数据口径、已对齐节点和剩余差异 |
 | `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算、Relay 结构化因子和 ID=43 接入方式 |
 | `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
 | `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |
@@ -295,10 +294,8 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
   --times 10:00,10:30,14:30,14:50
 
 # 自动从最早可用 timer 数据起跑 ID=43
-.\backend\.venv\Scripts\python.exe backend/app/scripts/run_small_cap_full_debug.py --start auto
 
 # 年度切片调试，便于和聚宽日志逐年对比
-.\backend\.venv\Scripts\python.exe backend/app/scripts/run_small_cap_yearly_debug.py
 ```
 
 ---

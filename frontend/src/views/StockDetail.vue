@@ -136,6 +136,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import KlineChart from './DataManage/KlineChart.vue'
 import { klineApi, toDisplayFormat, type KlineDataDisplay, type KlineType } from '@/api/kline'
 import { stockApi, type StockDetail } from '@/api/data'
@@ -251,6 +252,34 @@ const handleBack = () => {
 }
 
 // 初始化
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Stock',
+    rows: [
+      { label: '代码', value: symbol.value || '-' },
+      { label: '市场', value: stockDetail.value?.market || '-' },
+      { label: '行业', value: stockDetail.value?.industry || '-' },
+      {
+        label: '交易状态',
+        value: stockDetail.value?.is_active ? '正常' : stockDetail.value ? '停牌/不可用' : '-',
+        tone: stockDetail.value?.is_active ? 'good' : stockDetail.value ? 'warn' : 'neutral',
+      },
+      { label: '最新公告日', value: stockDetail.value?.latest_ann_date || '-' },
+    ],
+  },
+  {
+    title: 'Kline',
+    rows: [
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '周期', value: klineType.value },
+      { label: '区间', value: startDate.value && endDate.value ? `${startDate.value} ~ ${endDate.value}` : '-' },
+      { label: '数据点', value: `${klineData.value.length} 条` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
+
 onMounted(() => {
   // 设置默认日期范围（最近1年）
   const end = new Date()

@@ -1,10 +1,9 @@
 # backend/app/api/data.py
 """数据相关 API 接口"""
-import uuid
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +14,7 @@ from app.services.cache_invalidation import invalidate_after_sync
 from app.services.index_catalog import list_index_catalog
 from app.services.runtime_tasks import register_task, update_task
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
+from app.services.task_queue import QueuedTask, get_task_queue
 
 router = APIRouter()
 
@@ -27,20 +27,20 @@ def _attach_sync_availability(
 ) -> dict[str, Any]:
     status = str(data.get("status") or "idle")
     is_busy = status in {"queued", "running"}
-    if not service_available:
-        can_trigger = False
-        reason = unavailable_reason or "数据同步服务未启动"
-    elif is_busy:
-        can_trigger = False
-        reason = "已有同步任务正在运行"
-    else:
-        can_trigger = True
-        reason = None
+    queue = get_task_queue("data_sync")
+    details = dict(data.get("details") or {})
+    details.update({
+        "queue_mode": True,
+        "queue_busy": is_busy,
+        "queue_pending_count": queue.pending_count,
+        "queue_active_task_id": queue.active_task.task_id if queue.active_task else None,
+    })
     return {
         **data,
+        "details": details,
         "sync_service_available": service_available,
-        "can_trigger": can_trigger,
-        "reason": reason,
+        "can_trigger": service_available,
+        "reason": None if service_available else (unavailable_reason or "数据同步服务未启动"),
     }
 
 
@@ -810,7 +810,6 @@ async def _run_sync_task(
 
 @router.post("/sync", summary="触发数据同步")
 async def trigger_sync(
-    background_tasks: BackgroundTasks,
     request: SyncRequest = Body(description="同步参数"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
@@ -819,85 +818,6 @@ async def trigger_sync(
         "/api/data/sync",
         json_body=request.model_dump(mode="json"),
     )
-    """
-    触发数据同步任务
-
-    同步类型:
-    - stock_info: 股票基础信息(快速同步)
-    - stock_full: 股票完整信息(含市值、财务等扩展字段)
-    - financial_data: 下载并同步财务数据(需QMT在线，耗时长)
-    - kline_daily: 日K线数据
-    - kline_minute: 分钟K线数据
-    - kline_weekly: 周K线数据
-    - realtime_mv: 实时市值更新
-    - dividends: 分红送股数据(需QMT在线)
-    """
-    valid_types = ("datasync", "stock_info", "stock_full", "financial_data", "kline_daily", "kline_minute", "kline_weekly", "realtime_mv", "dividends", "tushare_relay")
-    if request.sync_type not in valid_types:
-        raise HTTPException(
-            status_code=400,
-            detail=f"sync_type 必须是: {', '.join(valid_types)}",
-        )
-
-    if request.failure_strategy not in ("skip", "retry", "stop"):
-        raise HTTPException(
-            status_code=400, detail="failure_strategy 必须是 skip、retry 或 stop"
-        )
-
-    service = SyncService(session)
-
-    # 检查 QMT 是否在线（所有同步类型都需要）
-    from app.engines.qmt_gateway import qmt_gateway as _gw
-    if not await _gw.check_connection():
-        raise HTTPException(status_code=503, detail="QMT (miniQMT) 未连接，请先启动华泰 miniQMT 客户端后再同步")
-
-    # 检查是否有正在进行的同步任务
-    current_status = service.get_sync_status()
-    if current_status and current_status.status == "running":
-        raise HTTPException(status_code=409, detail="已有同步任务正在进行中")
-
-    task_id = f"sync-{str(uuid.uuid4())[:8]}"
-    register_task(
-        task_id=task_id,
-        kind="data_sync",
-        title=f"数据同步 {request.sync_type}",
-        status="queued",
-        progress=0,
-        result_ref="/data",
-        meta={
-            "sync_type": request.sync_type,
-            "start_date": request.start_date.isoformat() if request.start_date else None,
-            "end_date": request.end_date.isoformat() if request.end_date else None,
-            "symbol_count": len(request.symbols or []),
-        },
-    )
-
-    # 启动后台同步任务
-    background_tasks.add_task(
-        _run_sync_task,
-        task_id,
-        request.sync_type,
-        request.symbols,
-        request.start_date,
-        request.end_date,
-        request.failure_strategy,
-        request.full_sync,
-    )
-
-    # 构造并返回初始运行状态
-    from app.services.sync_service import SyncProgress
-
-    initial_progress = SyncProgress(
-        sync_type=request.sync_type,
-        status="running",
-        start_time=datetime.now(),
-    )
-
-    return {
-        "code": 0,
-        "message": "success",
-        "data": {**initial_progress.to_dict(), "task_id": task_id},
-    }
 
 
 @router.get("/sync/catalog", summary="获取同步任务目录")

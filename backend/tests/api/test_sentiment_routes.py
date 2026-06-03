@@ -24,7 +24,7 @@ async def test_sentiment_routes_are_registered_and_validate_sources():
 async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
     scheduled: list[tuple[str, list[str]]] = []
 
-    def fake_schedule(task_id, request, sources):
+    async def fake_schedule(task_id, request, sources):
         scheduled.append((task_id, sources))
 
     monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
@@ -53,7 +53,7 @@ async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
 async def test_sentiment_ingest_route_allows_flocktrader_without_symbol(monkeypatch):
     scheduled: list[tuple[str, list[str]]] = []
 
-    def fake_schedule(task_id, request, sources):
+    async def fake_schedule(task_id, request, sources):
         assert request.symbol is None
         scheduled.append((task_id, sources))
 
