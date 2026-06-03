@@ -217,6 +217,7 @@
           <span>展示保存因子的研究表现，因子值缓存负责数据覆盖和预计算。</span>
         </div>
         <div class="toolbar-actions">
+          <el-button @click="router.push('/factor')">预计算缓存</el-button>
           <el-button @click="openBatchDialog">批量计算</el-button>
           <el-button type="primary" :icon="Plus" @click="showCreateDialog = true">新建因子</el-button>
         </div>
@@ -1637,8 +1638,8 @@ onMounted(() => {
 .coverage-cell {
   align-items: start;
 }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
 .detail-action {
   color: #eaf6ff;
   border-color: rgba(56, 189, 248, 0.55);

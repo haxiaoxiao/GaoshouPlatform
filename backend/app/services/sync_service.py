@@ -1183,6 +1183,7 @@ class SyncService:
                         fin_data = {
                             "symbol": fq.symbol,
                             "report_date": fq.report_date,
+                            "ann_date": fq.ann_date,
                             "report_type": fq.report_type,
                             "eps": fq.eps,
                             "bvps": fq.bvps,
@@ -1407,6 +1408,7 @@ class SyncService:
                     for fq in quarters:
                         fin_data = {
                             "symbol": fq.symbol, "report_date": fq.report_date,
+                            "ann_date": fq.ann_date,
                             "report_type": fq.report_type,
                             "eps": fq.eps, "bvps": fq.bvps, "roe": fq.roe,
                             "revenue": fq.revenue, "net_profit": fq.net_profit,
@@ -1475,6 +1477,7 @@ class SyncService:
                             for fq in k_quarters:
                                 fin_data = {
                                     "symbol": fq.symbol, "report_date": fq.report_date,
+                                    "ann_date": fq.ann_date,
                                     "report_type": fq.report_type,
                                     "eps": fq.eps, "bvps": fq.bvps, "roe": fq.roe,
                                     "revenue": fq.revenue, "net_profit": fq.net_profit,

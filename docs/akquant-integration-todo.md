@@ -67,4 +67,3 @@ npm run build
 | `docs/data-source-cheatsheet.md` | 数据源优先级和适用场景 |
 | `docs/local-data-onboarding.md` | 本地 SQLite + Parquet/DuckDB 接入 |
 | `docs/factor-value-store.md` | 因子值缓存和预计算 |
-| `docs/small-cap-jq-alignment-notes.md` | ID=43 小市值策略对齐记录 |

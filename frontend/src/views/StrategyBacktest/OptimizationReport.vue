@@ -123,6 +123,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import { backtestApi, type BacktestReport } from '@/api/backtest'
 import {
   columnDisplayName,
@@ -213,6 +214,28 @@ const downloadCsv = () => {
   URL.revokeObjectURL(url)
 }
 
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Optimization',
+    rows: [
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '类型', value: typeLabel.value },
+      { label: '目标', value: metricLabel.value },
+      { label: '参数列', value: `${paramKeys.value.length}` },
+    ],
+  },
+  {
+    title: 'Rows',
+    rows: [
+      { label: '原始结果', value: `${rows.value.length.toLocaleString()} 行` },
+      { label: '窗口汇总', value: `${windowRows.value.length}` },
+      { label: '分页', value: `${page.value} / ${Math.max(1, Math.ceil(rows.value.length / pageSize))}` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
+
 watch(() => route.params.id, loadReport, { immediate: true })
 </script>
 
@@ -262,10 +285,10 @@ watch(() => route.params.id, loadReport, { immediate: true })
   align-items: center;
 }
 .positive {
-  color: #d93026;
+  color: var(--market-up);
 }
 .negative {
-  color: #137333;
+  color: var(--market-down);
 }
 .pager {
   margin-top: 12px;

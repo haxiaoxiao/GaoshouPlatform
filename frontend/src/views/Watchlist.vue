@@ -125,6 +125,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { watchlistApi, type WatchlistGroup, type WatchlistStock } from '@/api/data'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 
 const groups = ref<WatchlistGroup[]>([])
 const selectedGroupId = ref<number | null>(null)
@@ -235,6 +236,27 @@ function formatTime(t: string | null): string {
     return t
   }
 }
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Groups',
+    rows: [
+      { label: '分组数量', value: `${groups.value.length} 个` },
+      { label: '当前分组', value: currentGroup.value?.name || '未选择' },
+      { label: '建组弹窗', value: showCreateDialog.value ? '打开' : '关闭' },
+    ],
+  },
+  {
+    title: 'Selection',
+    rows: [
+      { label: '股票数量', value: selectedGroupId.value ? `${stocks.value.length} 只` : '-' },
+      { label: '加载状态', value: loadingStocks.value ? '加载中' : '已就绪', tone: loadingStocks.value ? 'warn' : 'good' },
+      { label: '待添加代码', value: addSymbol.value.trim() || '-' },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(loadGroups)
 </script>

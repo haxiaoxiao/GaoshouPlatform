@@ -47,3 +47,32 @@ async def test_sync_logs_falls_back_to_local_store_when_sync_service_unavailable
     assert len(body["data"]) == 1
     assert body["data"][0]["sync_type"] == "stock_info"
     assert body["data"][0]["details"]["source"] == "local"
+
+
+@pytest.mark.asyncio
+async def test_sync_status_reports_trigger_availability_when_service_unavailable(monkeypatch):
+    async def fake_sync_service_health():
+        return {"healthy": False, "error": "dev sync service unavailable"}
+
+    async def fake_proxy_sync_request(*args, **kwargs):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="dev sync service unavailable")
+
+    async def fake_get_persisted_sync_status(self):
+        return None
+
+    monkeypatch.setattr("app.api.data.sync_service_health", fake_sync_service_health)
+    monkeypatch.setattr("app.api.data.proxy_sync_request", fake_proxy_sync_request)
+    monkeypatch.setattr("app.api.data.SyncService.get_persisted_sync_status", fake_get_persisted_sync_status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/data/sync/status")
+
+    body = resp.json()
+    assert resp.status_code == 200
+    assert body["code"] == 0
+    assert body["data"]["status"] == "idle"
+    assert body["data"]["sync_service_available"] is False
+    assert body["data"]["can_trigger"] is False
+    assert "unavailable" in body["data"]["reason"]

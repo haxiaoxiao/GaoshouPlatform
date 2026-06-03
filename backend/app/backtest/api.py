@@ -42,6 +42,7 @@ from app.services.index_components import (
 )
 from app.services.optimization_result_store import save_optimization_result
 from app.services.runtime_tasks import register_task, update_task
+from app.services.task_queue import QueuedTask, get_task_queue
 from app.services.timer_minute_sync import (
     find_earliest_timer_coverage_date,
     parse_timer_times,
@@ -52,7 +53,6 @@ from app.services.timer_minute_sync import (
 router = APIRouter()
 
 _tasks: dict[str, dict] = {}
-_task_handles: dict[str, asyncio.Task] = {}
 _TASK_TTL_SECONDS = 3600
 _MAX_TASKS = 100
 
@@ -67,7 +67,6 @@ def _cleanup_tasks() -> None:
     ]
     for task_id in expired:
         _tasks.pop(task_id, None)
-        _task_handles.pop(task_id, None)
 
     if len(_tasks) <= _MAX_TASKS:
         return
@@ -75,7 +74,6 @@ def _cleanup_tasks() -> None:
     for task_id, task in sorted_items[: max(0, len(_tasks) - _MAX_TASKS)]:
         if task.get("status") != "running":
             _tasks.pop(task_id, None)
-            _task_handles.pop(task_id, None)
 
 
 def _set_task_progress(
@@ -659,7 +657,14 @@ async def run_backtest(req: RunBacktestRequest):
             )
             await _save_backtest_result(task_id, config, task_store["result"], success=False)
 
-    _task_handles[task_id] = asyncio.create_task(_run())
+    await get_task_queue("backtest").submit(
+        QueuedTask(
+            task_id=task_id,
+            title=f"backtest {req.strategy_name or req.strategy_id or req.engine}",
+            handler=_run,
+            metadata={"engine": req.engine, "start_date": req.start_date, "end_date": req.end_date},
+        )
+    )
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 
@@ -703,10 +708,7 @@ async def cancel_task(task_id: str):
     if task.get("status") in ("done", "failed", "cancelled"):
         return {"code": 0, "message": "Task already finished", "data": {"task_id": task_id, "status": task.get("status")}}
 
-    handle = _task_handles.get(task_id)
-    if handle is not None and not handle.done():
-        handle.cancel()
-    _task_handles.pop(task_id, None)
+    get_task_queue("backtest").cancel(task_id)
 
     task["status"] = "cancelled"
     task["progress"] = 1.0
@@ -998,7 +1000,14 @@ async def optimize_grid(req: OptimizeRequest):
             )
             task_store["finished_at"] = time.time()
 
-    _task_handles[task_id] = asyncio.create_task(_run())
+    await get_task_queue("backtest").submit(
+        QueuedTask(
+            task_id=task_id,
+            title="backtest grid search",
+            handler=_run,
+            metadata={"optimization_type": "grid_search"},
+        )
+    )
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 
@@ -1191,7 +1200,14 @@ async def optimize_walk_forward(req: WalkForwardRequest):
             )
             task_store["finished_at"] = time.time()
 
-    _task_handles[task_id] = asyncio.create_task(_run())
+    await get_task_queue("backtest").submit(
+        QueuedTask(
+            task_id=task_id,
+            title="backtest walk-forward",
+            handler=_run,
+            metadata={"optimization_type": "walk_forward"},
+        )
+    )
     return {"code": 0, "message": "success", "data": {"task_id": task_id}}
 
 

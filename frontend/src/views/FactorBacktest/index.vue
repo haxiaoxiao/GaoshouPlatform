@@ -61,6 +61,7 @@
 <script setup lang="ts">
 import { ref, computed, onUnmounted, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { factorBacktestApi } from '@/api/v2'
 import type { BacktestReport, BtConfig } from '@/types/factor'
@@ -88,7 +89,7 @@ const metricsList = computed(() => {
     { label: '总收益率', value: (m.total_return * 100).toFixed(2) + '%', color: m.total_return >= 0 ? 'positive' : 'negative' },
     { label: '年化收益', value: (m.annual_return * 100).toFixed(2) + '%', color: m.annual_return >= 0 ? 'positive' : 'negative' },
     { label: 'Sharpe', value: m.sharpe.toFixed(2), color: '' },
-    { label: '最大回撤', value: (m.max_drawdown * 100).toFixed(2) + '%', color: 'negative' },
+    { label: '最大回撤', value: (m.max_drawdown * 100).toFixed(2) + '%', color: 'attention' },
     { label: 'Alpha', value: m.alpha.toFixed(4), color: '' },
     { label: 'Beta', value: m.beta.toFixed(4), color: '' },
   ]
@@ -122,6 +123,29 @@ async function runBacktest() {
   }
 }
 
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Factor Backtest',
+    rows: [
+      { label: '因子', value: factorName.value || '-' },
+      { label: '加载状态', value: loading.value ? '运行中' : '待运行', tone: loading.value ? 'warn' : 'neutral' },
+      { label: '调仓周期', value: btConfig.value.rebalance_period },
+      { label: '组合类型', value: btConfig.value.portfolio_type },
+    ],
+  },
+  {
+    title: 'Results',
+    rows: [
+      { label: '报告', value: report.value ? '已生成' : '未生成', tone: report.value ? 'good' : 'neutral' },
+      { label: '指标卡', value: `${metricsList.value.length} 项` },
+      { label: '净值点数', value: `${report.value?.nav_series.length || 0}` },
+      { label: '日志条数', value: `${report.value?.logs.length || 0}` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
+
 onUnmounted(() => navChart?.dispose())
 </script>
 
@@ -146,8 +170,9 @@ onUnmounted(() => navChart?.dispose())
 }
 .metric-label { font-size: 10px; color: var(--text-ghost); }
 .metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
+.attention { color: var(--status-attention); }
 .nav-chart { width: 100%; height: 300px; }
 .logs { margin-top: 12px; }
 .log-line { font-family: monospace; font-size: 11px; color: var(--text-ghost); padding: 2px 0; }

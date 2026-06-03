@@ -255,8 +255,13 @@ def _load_financial(symbols: Sequence[str]) -> pd.DataFrame:
         return pd.DataFrame()
     placeholders = ",".join("?" for _ in symbols)
     with sqlite3.connect(db_path) as conn:
+        columns = {
+            str(row[1])
+            for row in conn.execute("PRAGMA table_info(financial_data)").fetchall()
+        }
+        ann_date_expr = "ann_date" if "ann_date" in columns else "NULL AS ann_date"
         return pd.read_sql_query(
-            f"SELECT symbol, report_date, eps, bvps, roe, revenue, net_profit, revenue_yoy, profit_yoy, gross_margin FROM financial_data WHERE symbol IN ({placeholders}) ORDER BY symbol, report_date DESC",
+            f"SELECT symbol, report_date, {ann_date_expr}, eps, bvps, roe, revenue, net_profit, revenue_yoy, profit_yoy, gross_margin FROM financial_data WHERE symbol IN ({placeholders}) ORDER BY symbol, report_date DESC",
             conn,
             params=list(symbols),
         )

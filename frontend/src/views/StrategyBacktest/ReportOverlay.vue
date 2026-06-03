@@ -47,7 +47,7 @@
           </el-table-column>
           <el-table-column label="方向" width="60">
             <template #default="{ row }">
-              <span :style="{ color: row.direction === 'buy' ? '#d93026' : '#137333', fontWeight: 600 }">
+              <span :style="{ color: marketDirectionColor(row.direction), fontWeight: 600 }">
                 {{ row.direction === 'buy' ? '买' : '卖' }}
               </span>
             </template>
@@ -91,15 +91,15 @@
         <div class="symbol-pnl-summary">
           <div class="pnl-summary-item">
             <span class="pnl-summary-label">盈利标的</span>
-            <span class="pnl-summary-value" style="color:#d93026">{{ symbolPnls.filter(s => s.total_pnl > 0).length }}</span>
+            <span class="pnl-summary-value" style="color:var(--market-up)">{{ symbolPnls.filter(s => s.total_pnl > 0).length }}</span>
           </div>
           <div class="pnl-summary-item">
             <span class="pnl-summary-label">亏损标的</span>
-            <span class="pnl-summary-value" style="color:#137333">{{ symbolPnls.filter(s => s.total_pnl < 0).length }}</span>
+            <span class="pnl-summary-value" style="color:var(--market-down)">{{ symbolPnls.filter(s => s.total_pnl < 0).length }}</span>
           </div>
           <div class="pnl-summary-item">
             <span class="pnl-summary-label">总盈亏</span>
-            <span class="pnl-summary-value" :style="{ color: totalSymbolPnl >= 0 ? '#d93026' : '#137333' }">
+            <span class="pnl-summary-value" :style="{ color: marketValueColor(totalSymbolPnl) }">
               {{ totalSymbolPnl >= 0 ? '+' : '' }}{{ totalSymbolPnl.toFixed(2) }}
             </span>
           </div>
@@ -113,7 +113,7 @@
           </el-table-column>
           <el-table-column label="总盈亏" width="120" sortable prop="total_pnl">
             <template #default="{ row }">
-              <span :style="{ color: row.total_pnl >= 0 ? '#d93026' : '#137333', fontWeight: 600 }">
+              <span :style="{ color: marketValueColor(row.total_pnl), fontWeight: 600 }">
                 {{ row.total_pnl >= 0 ? '+' : '' }}{{ row.total_pnl.toFixed(2) }}
               </span>
             </template>
@@ -154,7 +154,7 @@
           </div>
           <div class="summary-item">
             <span class="summary-label">最大回撤</span>
-            <span class="summary-value" style="color:#137333">{{ fmtPct(result.max_drawdown) }}</span>
+            <span class="summary-value" style="color:var(--status-attention)">{{ fmtPct(result.max_drawdown) }}</span>
           </div>
           <div class="summary-item">
             <span class="summary-label">年化波动率</span>
@@ -162,7 +162,7 @@
           </div>
           <div class="summary-item">
             <span class="summary-label">平均单笔收益</span>
-            <span class="summary-value" :style="{ color: (result.avg_return || 0) >= 0 ? '#d93026' : '#137333' }">
+            <span class="summary-value" :style="{ color: marketValueColor(result.avg_return) }">
               {{ result.avg_return != null ? (result.avg_return >= 0 ? '+¥' : '-¥') + Math.abs(result.avg_return).toFixed(2) : '-' }}
             </span>
           </div>
@@ -203,6 +203,13 @@
 import { ref, computed, watch, nextTick } from 'vue'
 import { Download, Document } from '@element-plus/icons-vue'
 import * as echarts from '@/lib/echarts'
+import {
+  STATUS_ATTENTION_COLOR,
+  STATUS_ATTENTION_CSS,
+  marketDirectionColor,
+  marketValueColor,
+  marketValueColorHex,
+} from '@/utils/colors'
 
 interface Trade {
   trade_date?: string
@@ -354,13 +361,12 @@ function fmtPct(v: number | null | undefined): string {
 }
 
 function colorPct(v: number | null | undefined): string {
-  if (v == null) return '#e2e2ea'
-  return v >= 0 ? '#d93026' : '#137333'
+  return marketValueColor(v)
 }
 
 function pnlColor(row: Trade): string {
   const pnl = row.pnl || 0
-  return pnl >= 0 ? '#d93026' : '#137333'
+  return marketValueColor(pnl)
 }
 
 const allMetrics = computed(() => {
@@ -371,7 +377,7 @@ const allMetrics = computed(() => {
     { label: '年化收益', value: fmtPct(r.annual_return), color: colorPct(r.annual_return) },
     { label: 'Sharpe', value: (r.sharpe ?? r.sharpe_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
     { label: 'Sortino', value: (r.sortino ?? r.sortino_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
-    { label: '最大回撤', value: fmtPct(r.max_drawdown), color: '#137333' },
+    { label: '最大回撤', value: fmtPct(r.max_drawdown), color: STATUS_ATTENTION_CSS },
     { label: 'Calmar', value: (r.calmar ?? r.calmar_ratio)?.toFixed(2) || '-', color: '#e2e2ea' },
     { label: 'Alpha', value: r.alpha?.toFixed(4) || '-', color: colorPct(r.alpha) },
     { label: 'Beta', value: r.beta?.toFixed(4) || '-', color: '#e2e2ea' },
@@ -533,7 +539,7 @@ function renderCharts() {
         }] : []),
         {
           name: '回撤', type: 'line', yAxisIndex: 1, data: dd,
-          lineStyle: { color: '#d93026', width: 1 },
+          lineStyle: { color: STATUS_ATTENTION_COLOR, width: 1 },
           areaStyle: { color: 'rgba(217,48,38,0.08)' },
           showSymbol: false,
         },
@@ -561,7 +567,7 @@ function renderCharts() {
       series: [{
         name: 'Daily Return', type: 'bar', data: returns,
         itemStyle: {
-          color: (p: any) => p.data >= 0 ? '#d93026' : '#137333',
+          color: (p: any) => marketValueColorHex(p.data),
           borderRadius: [0, 0, 0, 0],
         },
       }],

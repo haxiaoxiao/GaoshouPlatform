@@ -55,6 +55,7 @@ export interface GridSignalsResponse {
     source: string
     error?: string | null
   }
+  quote_error?: string | null
   order_submit_enabled: boolean
   signals: GridSignal[]
 }

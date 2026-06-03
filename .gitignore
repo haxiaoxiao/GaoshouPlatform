@@ -48,6 +48,9 @@ data/gaoshou.db
 data/parquet/
 data/parquet_test_*/
 data/tmp_*/
+data/dev_sample/
+data/dev_sample_*/
+data/sentiment/xueqiu-profile*/
 *.duckdb
 *.duckdb.wal
 

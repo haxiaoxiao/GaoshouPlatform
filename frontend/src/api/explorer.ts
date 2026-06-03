@@ -2,9 +2,12 @@ import request from './request'
 
 export interface TableInfo {
   name: string
-  row_count: number
+  row_count: number | null
   min_date?: string | null
   max_date?: string | null
+  estimated?: boolean
+  partition_count?: number
+  date_column?: string | null
 }
 
 export interface ColumnInfo {
@@ -18,6 +21,7 @@ export interface PreviewResult {
   columns: string[]
   rows: Record<string, any>[]
   total: number
+  total_estimated?: boolean
   page: number
   page_size: number
   total_pages: number
@@ -53,6 +57,7 @@ export interface ExplorerSearchRequest {
   columns?: string[]
   filters?: ExplorerFilter[]
   quick_search?: Record<string, unknown>
+  include_total?: boolean
 }
 
 export function getTables() {
@@ -71,6 +76,7 @@ export function previewTable(
     order_by?: string
     order_dir?: 'ASC' | 'DESC'
     where?: string
+    include_total?: boolean
   } = {}
 ) {
   return request.get<PreviewResult>(`/explorer/tables/${tableName}/preview`, { params })

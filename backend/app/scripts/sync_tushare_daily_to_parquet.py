@@ -2,7 +2,7 @@
 
 The script fetches market-wide daily bars by trade_date, which is much faster
 than requesting each stock separately. It also optionally fetches daily_basic
-into SQLite for point-in-time market-cap ranking used by small-cap strategies.
+into SQLite for point-in-time market-cap ranking and factor computation.
 """
 from __future__ import annotations
 
@@ -20,9 +20,80 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.scripts.fill_small_cap_missing_data import ensure_reference_tables
 
 DEFAULT_STATE_DB = Path(r"E:\Projects\GaoshouPlatform\data\parquet\import_state\tushare_daily_sync.sqlite")
+
+
+def ensure_reference_tables(db_path: Path) -> None:
+    """Create shared SQLite reference tables used by daily sync consumers."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_name_changes (
+                symbol TEXT NOT NULL,
+                name TEXT NOT NULL,
+                start_date DATE NOT NULL,
+                end_date DATE,
+                change_reason TEXT,
+                source TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (symbol, name, start_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stock_name_changes_lookup
+            ON stock_name_changes(symbol, start_date, end_date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_daily_basic (
+                symbol TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                total_share REAL,
+                float_share REAL,
+                total_mv REAL,
+                circ_mv REAL,
+                turnover_rate REAL,
+                pe_ttm REAL,
+                pb REAL,
+                source TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (symbol, trade_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stock_daily_basic_lookup
+            ON stock_daily_basic(symbol, trade_date)
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS stock_limit_prices (
+                symbol TEXT NOT NULL,
+                trade_date DATE NOT NULL,
+                up_limit REAL,
+                down_limit REAL,
+                source TEXT,
+                created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (symbol, trade_date)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_stock_limit_prices_lookup
+            ON stock_limit_prices(symbol, trade_date)
+            """
+        )
+        conn.commit()
 
 
 def parse_yyyymmdd(value: str) -> date:

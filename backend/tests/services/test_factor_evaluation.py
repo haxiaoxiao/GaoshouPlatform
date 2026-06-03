@@ -519,7 +519,7 @@ def test_attach_research_snapshot_coverage_from_summary() -> None:
 
 
 @pytest.mark.asyncio
-async def test_board_query_attaches_coverage_before_sort_for_coverage_sort(monkeypatch) -> None:
+async def test_board_query_attaches_only_paged_coverage_for_coverage_sort(monkeypatch) -> None:
     service = FactorEvaluationService()
     query = BoardQuery(
         factor_groups=["alpha101"],
@@ -584,5 +584,6 @@ async def test_board_query_attaches_coverage_before_sort_for_coverage_sort(monke
 
     result = await service.board_query(query)
 
-    assert coverage_calls == [["alpha101_001", "alpha101_002", "alpha101_003"]]
-    assert [row.factor_name for row in result.rows] == ["alpha101_002", "alpha101_003"]
+    assert coverage_calls == [["alpha101_001", "alpha101_002"]]
+    assert [row.factor_name for row in result.rows] == ["alpha101_001", "alpha101_002"]
+    assert [row.coverage_total_rows for row in result.rows] == [5, 20]

@@ -1,613 +1,588 @@
 <template>
-  <div class="data-dashboard">
-    <!-- Hero Metrics Section -->
-    <section class="metrics-hero">
-      <div class="metrics-grid">
-        <div
-          v-for="(metric, index) in heroMetrics"
-          :key="metric.key"
-          class="metric-card"
-          :style="{ animationDelay: `${index * 100}ms` }"
-        >
-          <div class="metric-card__glow" :style="{ background: metric.glowColor }"></div>
-          <div class="metric-card__inner">
-            <div class="metric-card__header">
-              <span class="metric-card__icon" v-html="metric.icon"></span>
-              <span class="metric-card__trend" v-if="metric.badge" :class="metric.trendClass">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path v-if="metric.trend >= 0" d="M7 17l5-5 5 5M7 12l5-5 5 5" />
-                  <path v-else d="M7 7l5 5 5-5M7 12l5 5 5-5" />
-                </svg>
-                {{ metric.badge }}
-              </span>
-            </div>
-            <div class="metric-card__value">{{ metric.displayValue || formatNumber(metric.value) }}</div>
-            <div class="metric-card__label">{{ metric.label }}</div>
-            <div class="metric-card__hint" v-if="metric.hint">{{ metric.hint }}</div>
-          </div>
-        </div>
+  <div class="page-frame data-center-page">
+    <header class="panel-card data-hero">
+      <div class="data-hero__copy">
+        <span class="section-kicker">DATA VIEW / FRESHNESS FIRST</span>
+        <h2>数据查看</h2>
+        <p>
+          首屏只看“最新口径”和数据链路状态：行情、基础信息、财务、因子指标、概念与舆情各自展示最近可用日期。
+        </p>
       </div>
+      <div class="data-hero__actions">
+        <el-button :icon="Refresh" :loading="loading" @click="loadDashboard">刷新口径</el-button>
+        <el-button type="primary" @click="goSync">去数据同步</el-button>
+      </div>
+    </header>
+
+    <section class="freshness-grid">
+      <article
+        v-for="item in freshnessCards"
+        :key="item.key"
+        class="freshness-card"
+        :class="`freshness-card--${item.tone}`"
+      >
+        <div class="freshness-card__head">
+          <span>{{ item.source }}</span>
+          <b>{{ item.status }}</b>
+        </div>
+        <strong>{{ item.title }}</strong>
+        <div class="freshness-card__date">{{ item.value }}</div>
+        <p>{{ item.detail }}</p>
+      </article>
     </section>
 
-    <!-- Main Content -->
-    <section class="content-section">
-      <!-- Tabs -->
-      <div class="tab-navigation">
-        <div class="tab-navigation__tabs">
+    <section class="page-grid page-grid--two data-summary-grid">
+      <article class="panel-card">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">COVERAGE CONTRACT</span>
+            <h3>核心数据口径</h3>
+          </div>
+        </div>
+        <div class="coverage-list">
+          <div v-for="row in coverageRows" :key="row.label" class="coverage-row">
+            <span>{{ row.label }}</span>
+            <strong>{{ row.value }}</strong>
+            <small>{{ row.hint }}</small>
+          </div>
+        </div>
+      </article>
+
+      <article class="panel-card">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">RECENT PIPELINE</span>
+            <h3>最近同步事件</h3>
+          </div>
+          <el-button size="small" text @click="goSync">管理队列</el-button>
+        </div>
+        <div v-if="syncLogs.length" class="sync-log-list">
+          <div v-for="log in syncLogs.slice(0, 5)" :key="log.id" class="sync-log-row">
+            <div>
+              <strong>{{ syncTypeLabel(log.sync_type) }}</strong>
+              <span>{{ formatDateTime(log.end_time || log.start_time || log.created_at) }}</span>
+            </div>
+            <b :class="`status-${log.status}`">{{ syncStatusLabel(log.status) }}</b>
+          </div>
+        </div>
+        <p v-else class="empty-copy">暂无同步记录；如需补齐数据，请进入独立的数据同步页。</p>
+      </article>
+    </section>
+
+    <section class="panel-card data-view-panel">
+      <div class="panel-card__head data-view-panel__head">
+        <div>
+          <span class="section-kicker">DATA EXPLORATION</span>
+          <h3>数据查看工作台</h3>
+        </div>
+        <div class="view-tabs">
           <button
             v-for="tab in tabs"
             :key="tab.key"
-            class="tab-btn"
-            :class="{ 'tab-btn--active': activeTab === tab.key }"
+            type="button"
+            :class="{ active: activeTab === tab.key }"
             @click="activeTab = tab.key"
           >
-            <span class="tab-btn__icon" v-html="tab.icon"></span>
-            <span>{{ tab.label }}</span>
+            {{ tab.label }}
           </button>
-        </div>
-        <div class="tab-navigation__actions">
-          <el-button
-            type="primary"
-            size="small"
-            :icon="Refresh"
-            :loading="oneClickSyncing"
-            @click="handleDataSync"
-          >
-            一键同步
-          </el-button>
         </div>
       </div>
 
-      <!-- Tab Content -->
-      <div class="tab-content">
-        <!-- Stock List -->
-        <div v-if="mountedTabs.stockList" v-show="activeTab === 'stockList'" class="panel panel--stock-list">
-          <StockList />
-        </div>
-
-        <!-- K-Line Query -->
-        <div v-if="mountedTabs.klineQuery" v-show="activeTab === 'klineQuery'" class="panel">
-          <KlineQuery />
-        </div>
-
-        <!-- Sentiment -->
-        <div v-if="mountedTabs.sentiment" v-show="activeTab === 'sentiment'" class="panel">
-          <SentimentPanel />
-        </div>
-
-        <!-- Sync Panel -->
-        <div v-if="mountedTabs.sync" v-show="activeTab === 'sync'" class="panel">
-          <SyncPanel />
-        </div>
+      <div class="tab-panel">
+        <StockList v-if="mountedTabs.stocks" v-show="activeTab === 'stocks'" />
+        <KlineQuery v-if="mountedTabs.quotes" v-show="activeTab === 'quotes'" />
+        <SentimentPanel v-if="mountedTabs.sentiment" v-show="activeTab === 'sentiment'" />
       </div>
     </section>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { computed, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import StockList from './StockList.vue'
-import SyncPanel from './SyncPanel.vue'
 import KlineQuery from './KlineQuery.vue'
 import SentimentPanel from './SentimentPanel.vue'
-import request from '@/api/request'
-import { syncApi } from '@/api/sync'
+import { systemApi, type DataSummary, type DataSummaryItem } from '@/api/system'
+import { syncApi, type SyncLog } from '@/api/sync'
 
-// SVG icons as strings
-const icons = {
-  database: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>',
-  chart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>',
-  refresh: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>',
-  activity: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>',
-  search: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>',
-  barChart: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>',
-  sentiment: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="M9 9h.01"/><path d="M15 9h.01"/><path d="M8.5 13a4 4 0 0 0 7 0"/></svg>'
+type FreshnessTone = 'good' | 'warn' | 'bad' | 'neutral'
+type TabKey = 'stocks' | 'quotes' | 'sentiment'
+
+interface FreshnessCard {
+  key: string
+  title: string
+  source: string
+  value: string
+  detail: string
+  status: string
+  tone: FreshnessTone
 }
 
-// State
-const activeTab = ref('sync')
-const mountedTabs = ref<Record<string, boolean>>({ sync: true })
-const oneClickSyncing = ref(false)
+interface CoverageRow {
+  label: string
+  value: string
+  hint: string
+}
 
-watch(activeTab, (tab) => {
-  mountedTabs.value[tab] = true
-}, { immediate: true })
+const router = useRouter()
+const loading = ref(false)
+const dataSummary = ref<DataSummary | null>(null)
+const syncLogs = ref<SyncLog[]>([])
+const activeTab = ref<TabKey>('quotes')
+const mountedTabs = ref<Record<TabKey, boolean>>({
+  stocks: false,
+  quotes: true,
+  sentiment: false,
+})
 
-// Hero metrics
-const heroMetrics = ref([
-  {
-    key: 'totalStocks',
-    label: '股票总数',
-    value: 0,
-    displayValue: '',
-    hint: 'SQLite stocks',
-    icon: icons.database,
-    trend: 0,
-    badge: '',
-    trendClass: '',
-    glowColor: 'radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, transparent 70%)'
-  },
-  {
-    key: 'totalKlines',
-    label: '日线覆盖',
-    value: 0,
-    displayValue: '-',
-    hint: 'klines_daily 最新日期',
-    icon: icons.chart,
-    trend: 0,
-    badge: '',
-    trendClass: '',
-    glowColor: 'radial-gradient(circle, rgba(34, 197, 94, 0.15) 0%, transparent 70%)'
-  },
-  {
-    key: 'todaySync',
-    label: '分钟线覆盖',
-    value: 0,
-    displayValue: '-',
-    hint: 'klines_minute 最新时间',
-    icon: icons.refresh,
-    trend: 0,
-    badge: '',
-    trendClass: '',
-    glowColor: 'radial-gradient(circle, rgba(167, 139, 250, 0.15) 0%, transparent 70%)'
-  },
-  {
-    key: 'dataQuality',
-    label: '最近同步',
-    value: 0,
-    displayValue: '-',
-    hint: '同步任务状态',
-    icon: icons.activity,
-    trend: 0,
-    badge: '',
-    trendClass: '',
-    glowColor: 'radial-gradient(circle, rgba(251, 191, 36, 0.15) 0%, transparent 70%)'
-  }
+const tabs: { key: TabKey; label: string }[] = [
+  { key: 'quotes', label: '行情查询' },
+  { key: 'stocks', label: '股票基础数据' },
+  { key: 'sentiment', label: '新闻舆情' },
+]
+
+const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
+
+const freshnessCards = computed<FreshnessCard[]>(() => [
+  buildSummaryCard('market_daily', '日线行情', '用于因子、回测、指数基准；关注 trade_date 最新口径，而不是容量。'),
+  buildSummaryCard('market_minute', '分钟行情', '用于日内策略与 minute_timer 抽样；关注 datetime 最新可用分钟。'),
+  buildSummaryCard('stocks', '股票基础数据', '代码、名称、行业、ST、股本、市值等基础字段。'),
+  buildSummaryCard('financial', '财务报表', '季度报表与最新财务摘要；因子预计算依赖这里的 point-in-time 口径。'),
+  buildSummaryCard('factor_values', '因子缓存', '因子定义页负责预计算；评估页只消费已经落盘的缓存。'),
+  buildSummaryCard('stock_indicators', '指标缓存', 'Indicator 体系预计算结果，供筛选、评估和策略复用。'),
+  buildSummaryCard('concept_membership', '概念与行业扩展', '同花顺概念成员、主题分类和股票池扩展信号。'),
+  buildSummaryCard('sentiment', '新闻舆情数据', '雪球/NGA 等样本用于研究假设验证，不默认参与回测。'),
 ])
 
-// Tabs
-const tabs = [
-  { key: 'stockList', label: '股票列表', icon: icons.search },
-  { key: 'klineQuery', label: '行情查询', icon: icons.barChart },
-  { key: 'sentiment', label: '情绪', icon: icons.sentiment },
-  { key: 'sync', label: '数据同步', icon: icons.refresh }
-]
+const coverageRows = computed<CoverageRow[]>(() => [
+  summaryRow('行情主口径', 'market_daily', '日线 trade_date 最新可用日'),
+  summaryRow('日内口径', 'market_minute', '分钟线 datetime 最新可用分钟'),
+  summaryRow('timer 抽样', 'minute_timer', 'minute_timer 回测优先读取'),
+  summaryRow('基础股票', 'stocks', '股票元数据 updated_at 最新口径'),
+  summaryRow('财务报表', 'financial', 'report_date 最新披露期'),
+  summaryRow('舆情样本', 'sentiment', '新闻舆情 published_at 最新样本'),
+])
 
-// 一键同步
-const ONE_CLICK_TYPES: { type: SyncType; label: string; daysBack?: number }[] = [
-  { type: 'stock_info', label: '股票信息' },
-  { type: 'stock_full', label: '股票完整信息' },
-  { type: 'kline_daily', label: '日K线', daysBack: 30 },
-  { type: 'index_daily', label: '指数日线', daysBack: 30 },
-  { type: 'kline_minute', label: '分钟K线', daysBack: 7 },
-  { type: 'realtime_mv', label: '实时市值' },
-]
-
-type SyncType = 'stock_info' | 'stock_full' | 'kline_daily' | 'index_daily' | 'kline_minute' | 'realtime_mv'
-
-const handleOneClickSync = async () => {
-  oneClickSyncing.value = true
-  activeTab.value = 'sync'  // 切换到同步面板查看进度
-
-  for (const item of ONE_CLICK_TYPES) {
-    ElMessage.info(`正在同步 ${item.label}...`)
-
-    try {
-      const params: Parameters<typeof syncApi.trigger>[0] = {
-        sync_type: item.type,
-        failure_strategy: 'skip',
-        full_sync: false,
-      }
-
-      // K线数据加默认日期范围
-      if (item.daysBack) {
-        const end = new Date()
-        const start = new Date()
-        start.setDate(start.getDate() - item.daysBack)
-        params.start_date = start.toISOString().slice(0, 10)
-        params.end_date = end.toISOString().slice(0, 10)
-      }
-
-      await syncApi.trigger(params)
-
-      // 等待当前同步完成再启动下一个
-      await waitForSyncComplete()
-    } catch (error: any) {
-      const detail = error?.response?.data?.detail || error?.message || String(error)
-      console.error(`One-click sync failed for ${item.type}:`, detail)
-      ElMessage.error(`${item.label} 同步失败: ${detail}`)
-      oneClickSyncing.value = false
-      return  // 失败则停止后续同步
-    }
-  }
-
-  oneClickSyncing.value = false
-  ElMessage.success('一键同步完成')
+function goSync() {
+  router.push('/data/sync')
 }
 
-const handleDataSync = async () => {
-  oneClickSyncing.value = true
-  activeTab.value = 'sync'
-
+async function loadDashboard() {
+  loading.value = true
   try {
-    ElMessage.info('正在启动一键数据同步...')
-    await syncApi.trigger({
-      sync_type: 'datasync',
-      failure_strategy: 'skip',
-      full_sync: false,
-    })
-    await waitForSyncComplete()
-    ElMessage.success('一键同步完成')
-  } catch (error: any) {
-    const detail = error?.response?.data?.detail || error?.message || String(error)
-    console.error('One-click datasync failed:', detail)
-    ElMessage.error(`一键同步失败: ${detail}`)
-  } finally {
-    oneClickSyncing.value = false
-  }
-}
-void handleOneClickSync
-
-const waitForSyncComplete = async (maxWaitMs = 600_000) => {
-  const start = Date.now()
-  while (Date.now() - start < maxWaitMs) {
-    await new Promise(r => setTimeout(r, 60_000))
-    try {
-      const res = await syncApi.getStatus()
-      const status = (res as any)?.data?.status || res?.status
-      if (status === 'idle' || status === 'completed') return
-      if (status === 'failed') {
-        const err = (res as any)?.data?.error_message || res?.error_message || '同步失败'
-        throw new Error(err)
-      }
-    } catch (e: any) {
-      if (e?.message && e.message !== '同步失败') throw e
-      // status endpoint error — keep waiting
-    }
-  }
-  throw new Error('同步超时')
-}
-
-// Methods
-type ExplorerTable = {
-  name: string
-  rows?: number
-  row_count?: number
-  count?: number
-  min_date?: string
-  max_date?: string
-  latest_date?: string
-  date_range?: string
-  latest_time?: string
-}
-
-const formatNumber = (num: number): string => {
-  if (num >= 100000000) {
-    return (num / 100000000).toFixed(1) + '亿'
-  }
-  if (num >= 10000) {
-    return (num / 10000).toFixed(1) + '万'
-  }
-  return num.toLocaleString()
-}
-
-const loadMetrics = async () => {
-  try {
-    const [stocksRes, tables, syncLogs] = await Promise.all([
-      request.get<{ total: number }>('/data/stocks', { params: { page_size: 1 } }),
-      request.get<ExplorerTable[]>('/explorer/tables').catch(() => []),
-      syncApi.getLogs({ limit: 1 }).catch(() => []),
+    const [summaryResult, logsResult] = await Promise.allSettled([
+      systemApi.dataSummary(),
+      syncApi.getLogs({ limit: 20 }),
     ])
 
-    heroMetrics.value[0].value = stocksRes.total || 0
-    heroMetrics.value[0].displayValue = ''
-    heroMetrics.value[0].hint = '当前股票基础信息记录数'
-
-    const daily = tables.find(item => item.name === 'klines_daily')
-    const minute = tables.find(item => item.name === 'klines_minute')
-    const dailyRows = Number(daily?.rows ?? daily?.row_count ?? daily?.count ?? 0)
-    const minuteRows = Number(minute?.rows ?? minute?.row_count ?? minute?.count ?? 0)
-    heroMetrics.value[1].value = dailyRows
-    heroMetrics.value[1].displayValue = latestLabel(daily)
-    heroMetrics.value[1].hint = `${formatNumber(dailyRows)} 行日线`
-    heroMetrics.value[1].badge = dailyRows > 0 ? '已接入' : '无数据'
-    heroMetrics.value[1].trend = dailyRows > 0 ? 1 : -1
-    heroMetrics.value[1].trendClass = dailyRows > 0 ? 'trend--up' : 'trend--down'
-
-    heroMetrics.value[2].value = minuteRows
-    heroMetrics.value[2].displayValue = latestLabel(minute)
-    heroMetrics.value[2].hint = `${formatNumber(minuteRows)} 行分钟线`
-    heroMetrics.value[2].badge = minuteRows > 0 ? '已接入' : '无数据'
-    heroMetrics.value[2].trend = minuteRows > 0 ? 1 : -1
-    heroMetrics.value[2].trendClass = minuteRows > 0 ? 'trend--up' : 'trend--down'
-
-    const latestSync = syncLogs[0]
-    heroMetrics.value[3].displayValue = latestSync ? syncTypeLabel(latestSync.sync_type) : '-'
-    heroMetrics.value[3].hint = latestSync ? `${syncStatusLabel(latestSync.status)} · ${formatDateTime(latestSync.end_time || latestSync.start_time)}` : '暂无同步记录'
-    heroMetrics.value[3].badge = latestSync ? syncStatusLabel(latestSync.status) : ''
-    heroMetrics.value[3].trend = latestSync?.status === 'failed' ? -1 : 1
-    heroMetrics.value[3].trendClass = latestSync?.status === 'failed' ? 'trend--down' : 'trend--up'
-  } catch (e) {
-    console.error('Failed to load metrics', e)
+    if (summaryResult.status === 'fulfilled') dataSummary.value = summaryResult.value
+    if (logsResult.status === 'fulfilled') syncLogs.value = logsResult.value
+  } finally {
+    loading.value = false
   }
 }
 
-const latestLabel = (table?: ExplorerTable): string => {
-  if (!table) return '-'
-  if (table.latest_time) return table.latest_time.slice(0, 16)
-  if (table.latest_date) return table.latest_date.slice(0, 10)
-  if (table.max_date) return table.max_date.slice(0, 10)
-  if (table.date_range) {
-    const parts = table.date_range.split('~').map(item => item.trim())
-    return parts[1] || parts[0] || '-'
+function buildSummaryCard(key: string, title: string, detail: string): FreshnessCard {
+  const item = summaryMap.value[key]
+  const tone = summaryTone(item)
+  const rowText = item ? formatRowCount(item.row_count, item.row_count_estimated) : '后端暂无来源'
+  return {
+    key,
+    title,
+    source: item?.source || key,
+    value: latestValue(item),
+    detail: `${detail} · ${rowText}`,
+    status: item?.status_text || toneLabel(tone),
+    tone,
   }
-  return '-'
 }
 
-const syncTypeLabel = (type: string): string => {
+function summaryRow(label: string, key: string, hint: string): CoverageRow {
+  const item = summaryMap.value[key]
+  return {
+    label,
+    value: latestValue(item),
+    hint: item ? `${hint} · ${formatRowCount(item.row_count, item.row_count_estimated)}` : `${hint} · 暂无后端口径`,
+  }
+}
+
+function latestValue(item?: DataSummaryItem): string {
+  return formatDateTime(item?.latest_datetime || item?.latest_date)
+}
+
+function summaryTone(item?: DataSummaryItem): FreshnessTone {
+  if (!item) return 'bad'
+  if (item.status === 'good') return 'good'
+  if (item.status === 'stale') return 'warn'
+  if (item.status === 'missing' || item.status === 'error') return 'bad'
+  return 'neutral'
+}
+
+function toneLabel(tone: FreshnessTone): string {
+  const labels: Record<FreshnessTone, string> = {
+    good: '新鲜',
+    warn: '需关注',
+    bad: '待补齐',
+    neutral: '未知',
+  }
+  return labels[tone]
+}
+
+function syncTypeLabel(type: string): string {
   const labels: Record<string, string> = {
     datasync: '一键同步',
-    stock_info: '股票信息',
-    stock_full: '股票完整信息',
-    financial_data: '财务数据',
-    kline_daily: '日线',
+    stock_info: '股票基础',
+    stock_full: '股票完整',
+    financial_data: '财务报表',
+    kline_daily: '日线行情',
     index_daily: '指数日线',
-    kline_minute: '分钟线',
+    kline_minute: '分钟行情',
     realtime_mv: '实时市值',
-    dividends: 'QMT 分红',
+    dividends: '分红数据',
     factor_dependency: '因子依赖',
     tushare_relay: 'Tushare Relay',
+    ths_concept: '同花顺概念',
+    sentiment_xueqiu: '雪球舆情',
+    sentiment_nga: 'NGA 舆情',
   }
   return labels[type] || type
 }
 
-const syncStatusLabel = (status: string): string => {
+function syncStatusLabel(status: string): string {
   const labels: Record<string, string> = {
-    completed: '完成',
-    running: '运行中',
+    idle: '空闲',
     queued: '排队',
+    running: '运行中',
+    completed: '完成',
     failed: '失败',
     cancelled: '取消',
   }
   return labels[status] || status
 }
 
-const formatDateTime = (value?: string | null): string => {
-  if (!value) return '-'
-  return value.replace('T', ' ').slice(0, 16)
+function formatRowCount(value?: number | null, estimated = false): string {
+  if (value === null || value === undefined) return '未统计'
+  const prefix = estimated ? '约 ' : ''
+  return `${prefix}${value.toLocaleString()} 行`
 }
 
-onMounted(() => {
-  loadMetrics()
+function formatDateTime(value?: string | null): string {
+  if (!value) return '-'
+  return value.replace('T', ' ').slice(0, value.includes(':') ? 16 : 10)
+}
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Data View',
+    rows: [
+      { label: '当前标签', value: tabs.find(tab => tab.key === activeTab.value)?.label || activeTab.value },
+      { label: '刷新状态', value: loading.value ? '刷新中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '新鲜度卡片', value: `${freshnessCards.value.length} 项` },
+      { label: '同步记录', value: `${syncLogs.value.length} 条` },
+    ],
+  },
+  {
+    title: 'Coverage',
+    rows: coverageRows.value.slice(0, 4).map(row => ({
+      label: row.label,
+      value: row.value,
+      tone: row.value === '-' ? 'warn' : 'good',
+    })),
+  },
+])
+
+usePageContext(pageContextBlocks)
+
+onMounted(loadDashboard)
+
+watch(activeTab, (tab) => {
+  mountedTabs.value[tab] = true
 })
 </script>
 
 <style scoped>
-/* ═══════════════════════════════════════════════════════════════
-   DATA DASHBOARD
-   ═══════════════════════════════════════════════════════════════ */
-
-.data-dashboard {
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-5);
-  animation: fadeIn var(--duration-slow) var(--ease-out);
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   HERO METRICS
-   ═══════════════════════════════════════════════════════════════ */
-
-.metrics-hero {
-  flex-shrink: 0;
-}
-
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: var(--space-4);
-}
-
-@media (max-width: 1200px) {
-  .metrics-grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-}
-
-@media (max-width: 600px) {
-  .metrics-grid {
-    grid-template-columns: 1fr;
-  }
-}
-
-.metric-card {
-  position: relative;
-  background: linear-gradient(180deg, #131b25 0%, #0f151e 100%);
-  border: 1px solid rgba(136, 160, 190, 0.28);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-  animation: slideUp var(--duration-slow) var(--ease-out) backwards;
-}
-
-.metric-card__glow {
-  position: absolute;
-  top: -50%;
-  right: -50%;
-  width: 100%;
-  height: 200%;
-  opacity: 0.5;
-  pointer-events: none;
-  transition: opacity var(--duration-normal);
-}
-
-.metric-card:hover .metric-card__glow {
-  opacity: 0.8;
-}
-
-.metric-card__inner {
-  position: relative;
-  padding: var(--space-5);
-}
-
-.metric-card__header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-bottom: var(--space-3);
-}
-
-.metric-card__icon {
-  width: 40px;
-  height: 40px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-surface);
-  border-radius: var(--radius-md);
-  color: var(--accent-primary);
-}
-
-.metric-card__icon :deep(svg) {
-  width: 20px;
-  height: 20px;
-}
-
-.metric-card__trend {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--text-xs);
-  font-weight: 600;
-  padding: 4px 8px;
-  border-radius: var(--radius-full);
-}
-
-.metric-card__trend svg {
-  width: 12px;
-  height: 12px;
-}
-
-.metric-card__trend.trend--up {
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--color-bull);
-}
-
-.metric-card__trend.trend--down {
-  background: rgba(239, 68, 68, 0.15);
-  color: var(--color-bear);
-}
-
-.metric-card__value {
-  font-family: var(--font-display);
-  font-size: var(--text-2xl);
-  font-weight: 700;
-  color: var(--text-bright);
-  margin-bottom: var(--space-1);
-  letter-spacing: var(--tracking-tight);
-}
-
-.metric-card__label {
-  font-size: var(--text-sm);
-  color: var(--text-secondary);
-}
-
-.metric-card__hint {
-  margin-top: var(--space-1);
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ═══════════════════════════════════════════════════════════════
-   CONTENT SECTION
-   ═══════════════════════════════════════════════════════════════ */
-
-.content-section {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  background: #0e151f;
-  border: 1px solid rgba(136, 160, 190, 0.24);
-  border-radius: var(--radius-lg);
-  overflow: hidden;
-}
-
-/* Tab Navigation */
-.tab-navigation {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid rgba(136, 160, 190, 0.22);
-  background: #101923;
-}
-
-.tab-navigation__tabs {
-  display: flex;
-  gap: var(--space-1);
-}
-
-.tab-navigation__actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  flex-shrink: 0;
-}
-
-.tab-btn {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2) var(--space-4);
-  background: transparent;
-  border: none;
-  border-radius: var(--radius-md);
-  color: #c0cbda;
-  font-size: var(--text-sm);
-  font-weight: 500;
-  cursor: pointer;
-  transition: all var(--duration-normal) var(--ease-out);
-}
-
-.tab-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-.tab-btn--active {
-  background: var(--accent-primary);
-  color: #07111c;
-  font-weight: 700;
-}
-
-.tab-btn__icon {
-  width: 16px;
-  height: 16px;
-}
-
-.tab-btn__icon :deep(svg) {
-  width: 100%;
-  height: 100%;
-}
-
-/* Tab Content */
-.tab-content {
-  flex: 1;
-  overflow: hidden;
-}
-
-.panel {
-  height: 100%;
+.data-center-page {
   overflow: auto;
 }
 
-.panel--stock-list :deep(.stock-list-container) {
+.data-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-4);
+  padding: var(--space-5);
+}
+
+.data-hero__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.data-hero h2,
+.panel-card__head h3 {
+  margin: 0;
+}
+
+.data-hero p {
+  max-width: 760px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.data-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.freshness-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.freshness-card {
+  display: flex;
+  min-height: 154px;
+  flex-direction: column;
+  gap: var(--space-2);
   padding: var(--space-4);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    var(--bg-elevated);
+  box-shadow: var(--shadow-card);
+}
+
+.freshness-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
+.freshness-card__head b {
+  padding: 3px 7px;
+  border-radius: var(--radius-full);
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.freshness-card > strong {
+  color: var(--text-primary);
+  font-size: var(--text-base);
+}
+
+.freshness-card__date {
+  color: var(--text-bright);
+  font-family: var(--font-data);
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.freshness-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.55;
+}
+
+.freshness-card--good {
+  border-color: rgba(34, 197, 94, 0.32);
+}
+
+.freshness-card--good .freshness-card__head b {
+  color: var(--status-ready);
+  background: rgba(34, 197, 94, 0.12);
+}
+
+.freshness-card--warn {
+  border-color: rgba(245, 158, 11, 0.38);
+}
+
+.freshness-card--warn .freshness-card__head b {
+  color: var(--color-warning);
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.freshness-card--bad {
+  border-color: rgba(239, 68, 68, 0.38);
+}
+
+.freshness-card--bad .freshness-card__head b {
+  color: var(--status-attention);
+  background: rgba(239, 68, 68, 0.12);
+}
+
+.data-summary-grid {
+  align-items: stretch;
+}
+
+.coverage-list,
+.sync-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.coverage-row,
+.sync-log-row {
+  display: grid;
+  grid-template-columns: 130px minmax(0, 1fr) minmax(180px, 0.9fr);
+  align-items: center;
+  gap: var(--space-3);
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(10, 14, 20, 0.58);
+}
+
+.coverage-row span,
+.coverage-row small,
+.sync-log-row span {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.coverage-row strong,
+.sync-log-row strong {
+  color: var(--text-primary);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+}
+
+.sync-log-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.sync-log-row > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.sync-log-row b {
+  font-size: var(--text-xs);
+}
+
+.status-completed {
+  color: var(--status-ready);
+}
+
+.status-failed,
+.status-cancelled {
+  color: var(--status-attention);
+}
+
+.status-running,
+.status-queued {
+  color: var(--accent-primary);
+}
+
+.data-view-panel {
+  min-height: 680px;
+  overflow: hidden;
+}
+
+.data-view-panel__head {
+  align-items: center;
+}
+
+.view-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  background: rgba(10, 14, 20, 0.65);
+}
+
+.view-tabs button {
+  border: 0;
+  border-radius: var(--radius-full);
+  padding: 7px 12px;
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: var(--text-xs);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.view-tabs button.active {
+  color: var(--text-bright);
+  background: rgba(56, 189, 248, 0.18);
+}
+
+.tab-panel {
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-4);
+}
+
+:deep(.stock-list-container),
+:deep(.kline-query),
+:deep(.sentiment-panel) {
+  min-width: 0;
+}
+
+@media (max-width: 1280px) {
+  .freshness-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .coverage-row {
+    grid-template-columns: 110px minmax(0, 1fr);
+  }
+
+  .coverage-row small {
+    grid-column: 2;
+  }
+}
+
+@media (max-width: 760px) {
+  .data-hero,
+  .data-view-panel__head {
+    grid-template-columns: 1fr;
+  }
+
+  .data-hero__actions {
+    justify-content: flex-start;
+  }
+
+  .freshness-grid,
+  .data-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-row {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-row small {
+    grid-column: auto;
+  }
+
+  .view-tabs {
+    width: 100%;
+    overflow-x: auto;
+  }
+
+  .view-tabs button {
+    white-space: nowrap;
+  }
 }
 </style>

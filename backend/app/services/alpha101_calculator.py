@@ -11,7 +11,10 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.services.factor_precompute_runtime import precompute_memory_policy, release_precompute_memory
+from app.services.factor_precompute_runtime import (
+    precompute_memory_policy,
+    release_precompute_memory,
+)
 from app.services.factor_value_store import (
     FactorValueStore,
     factor_params_hash,

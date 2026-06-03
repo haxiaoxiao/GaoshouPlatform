@@ -27,7 +27,7 @@
       </el-table-column>
       <el-table-column label="收益率" width="100">
         <template #default="{ row }">
-          <span v-if="row.result?.total_return != null" :style="{ color: row.result.total_return >= 0 ? '#d93026' : '#137333', fontWeight: 600 }">
+          <span v-if="row.result?.total_return != null" :style="{ color: marketValueColor(row.result.total_return), fontWeight: 600 }">
             {{ (row.result.total_return * 100).toFixed(1) }}%
           </span>
           <span v-else style="color:#666">—</span>
@@ -171,6 +171,7 @@ import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/ba
 import BacktestReport from './BacktestReport.vue'
 import { formatDateTime, getStatusType, getStatusLabel } from '@/utils/format'
 import { isOptimizationRecord, optimizationType } from '@/utils/optimizationReport'
+import { marketValueColor } from '@/utils/colors'
 
 // 状态
 const router = useRouter()

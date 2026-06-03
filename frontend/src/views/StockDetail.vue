@@ -6,7 +6,7 @@
       <div class="stock-info" v-if="stockInfo">
         <span class="stock-name">{{ stockInfo.name }}</span>
         <span class="stock-symbol">{{ stockInfo.symbol }}</span>
-        <el-tag :type="stockInfo.market === 'SH' ? 'danger' : 'success'" size="small">
+        <el-tag type="info" size="small" class="exchange-tag" :class="marketTagClass(stockInfo.market)">
           {{ stockInfo.market }}
         </el-tag>
         <el-tag v-if="stockInfo.industry" size="small" type="info">
@@ -136,6 +136,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import KlineChart from './DataManage/KlineChart.vue'
 import { klineApi, toDisplayFormat, type KlineDataDisplay, type KlineType } from '@/api/kline'
 import { stockApi, type StockDetail } from '@/api/data'
@@ -157,6 +158,11 @@ const symbol = computed(() => route.params.symbol as string)
 
 // 股票基本信息（从详情中获取）
 const stockInfo = computed(() => stockDetail.value)
+
+function marketTagClass(market?: string | null) {
+  const normalized = String(market || 'unknown').toLowerCase()
+  return `exchange-tag--${normalized}`
+}
 
 // 加载K线数据
 const loadKlineData = async () => {
@@ -194,14 +200,8 @@ const loadKlineData = async () => {
 
 // 加载股票详情
 const loadStockDetail = async () => {
-  // 根据symbol获取股票详情
-  // 由于API需要ID，我们先通过列表搜索获取
   try {
-    const response = await stockApi.getList({ search: symbol.value })
-    const stock = response.items.find((s) => s.symbol === symbol.value)
-    if (stock) {
-      stockDetail.value = await stockApi.getDetail(stock.id)
-    }
+    stockDetail.value = await stockApi.getDetail(symbol.value)
   } catch (error) {
     console.error('加载股票详情失败:', error)
   }
@@ -257,6 +257,34 @@ const handleBack = () => {
 }
 
 // 初始化
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Stock',
+    rows: [
+      { label: '代码', value: symbol.value || '-' },
+      { label: '市场', value: stockDetail.value?.market || '-' },
+      { label: '行业', value: stockDetail.value?.industry || '-' },
+      {
+        label: '交易状态',
+        value: stockDetail.value?.is_active ? '正常' : stockDetail.value ? '停牌/不可用' : '-',
+        tone: stockDetail.value?.is_active ? 'good' : stockDetail.value ? 'warn' : 'neutral',
+      },
+      { label: '最新公告日', value: stockDetail.value?.latest_ann_date || '-' },
+    ],
+  },
+  {
+    title: 'Kline',
+    rows: [
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '周期', value: klineType.value },
+      { label: '区间', value: startDate.value && endDate.value ? `${startDate.value} ~ ${endDate.value}` : '-' },
+      { label: '数据点', value: `${klineData.value.length} 条` },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
+
 onMounted(() => {
   // 设置默认日期范围（最近1年）
   const end = new Date()
@@ -302,6 +330,24 @@ onMounted(() => {
 .stock-symbol {
   font-size: 16px;
   color: #606266;
+}
+
+.exchange-tag--sh {
+  background: rgba(56, 189, 248, 0.13) !important;
+  border-color: rgba(56, 189, 248, 0.3) !important;
+  color: var(--accent-primary) !important;
+}
+
+.exchange-tag--sz {
+  background: rgba(167, 139, 250, 0.14) !important;
+  border-color: rgba(167, 139, 250, 0.3) !important;
+  color: var(--accent-secondary) !important;
+}
+
+.exchange-tag--bj {
+  background: rgba(251, 191, 36, 0.14) !important;
+  border-color: rgba(251, 191, 36, 0.34) !important;
+  color: var(--accent-warning) !important;
 }
 
 .control-card {
