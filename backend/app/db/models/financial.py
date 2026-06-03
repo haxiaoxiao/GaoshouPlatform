@@ -18,6 +18,7 @@ class FinancialData(Base, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True, comment="股票代码")
     report_date: Mapped[date] = mapped_column(Date, index=True, comment="报告期 如 2025-03-31")
+    ann_date: Mapped[date | None] = mapped_column(Date, index=True, default=None, comment="财报公告日，用于 PIT 对齐")
     report_type: Mapped[str | None] = mapped_column(String(10), default=None, comment="报告类型: Q1/H1/Q3/Annual")
 
     eps: Mapped[float | None] = mapped_column(Float, comment="基本每股收益")

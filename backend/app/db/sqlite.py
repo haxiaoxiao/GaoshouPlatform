@@ -24,6 +24,13 @@ async def init_db():
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        columns = await conn.exec_driver_sql("PRAGMA table_info(financial_data)")
+        financial_columns = {str(row[1]) for row in columns.fetchall()}
+        if "ann_date" not in financial_columns:
+            await conn.exec_driver_sql("ALTER TABLE financial_data ADD COLUMN ann_date DATE")
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_financial_data_ann_date ON financial_data (ann_date)"
+        )
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:

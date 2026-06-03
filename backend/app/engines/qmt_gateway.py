@@ -101,6 +101,7 @@ class FinancialQuarter:
 
     symbol: str
     report_date: date
+    ann_date: date | None = None
     report_type: str | None = None
     eps: float | None = None
     bvps: float | None = None
@@ -492,6 +493,10 @@ class QMTGateway:
                     if row is None:
                         continue
 
+                ann_date = self._parse_yyyymmdd(row.get("m_anntime"))
+                if ann_date is not None and (fq.ann_date is None or ann_date > fq.ann_date):
+                    fq.ann_date = ann_date
+
                 if table_name == "PershareIndex":
                     fq.eps = self._safe_float(row.get("s_fa_eps_basic"))
                     fq.bvps = self._safe_float(row.get("s_fa_bps"))
@@ -568,6 +573,10 @@ class QMTGateway:
                     continue
                 row = row_df.iloc[0]
 
+                ann_date = QMTGateway._parse_yyyymmdd(row.get("m_anntime"))
+                if ann_date is not None and (fq.ann_date is None or ann_date > fq.ann_date):
+                    fq.ann_date = ann_date
+
                 if table_name == "PershareIndex":
                     fq.eps = QMTGateway._safe_float(row.get("s_fa_eps_basic"))
                     fq.bvps = QMTGateway._safe_float(row.get("s_fa_bps"))
@@ -617,6 +626,26 @@ class QMTGateway:
             if row_idx < len(values) and j < len(values[row_idx]):
                 row[fname] = values[row_idx][j]
         return row
+
+    @staticmethod
+    def _parse_yyyymmdd(value: Any) -> date | None:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except TypeError:
+            pass
+        text = str(value).strip()
+        if text.endswith(".0"):
+            text = text[:-2]
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if len(digits) < 8 or digits[:8] in {"00000000", "19700101"}:
+            return None
+        try:
+            return date(int(digits[:4]), int(digits[4:6]), int(digits[6:8]))
+        except ValueError:
+            return None
 
     @staticmethod
     def _safe_float(val: Any) -> float | None:
