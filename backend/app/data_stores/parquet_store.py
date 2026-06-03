@@ -466,13 +466,19 @@ class ParquetMarketDataStore(MarketDataStore):
                 body = body.sort_values(["symbol", date_col] if "symbol" in body.columns else [date_col])
 
             tmp_dir = partition_dir.with_name(f"{partition_dir.name}.tmp-{uuid.uuid4().hex}")
-            tmp_dir.mkdir(parents=True, exist_ok=True)
-            table = pa.Table.from_pandas(body, preserve_index=False)
-            pq.write_table(table, tmp_dir / "part-0.parquet")
+            try:
+                tmp_dir.mkdir(parents=True, exist_ok=True)
+                table = pa.Table.from_pandas(body, preserve_index=False)
+                pq.write_table(table, tmp_dir / "part-0.parquet")
 
-            if partition_dir.exists():
-                shutil.rmtree(partition_dir)
-            tmp_dir.replace(partition_dir)
+                if partition_dir.exists():
+                    shutil.rmtree(partition_dir)
+                tmp_dir.replace(partition_dir)
+            except Exception:
+                # Failed atomic replaces can leave month=MM.tmp-* folders that
+                # confuse recursive parquet readers outside this store.
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                raise
         return len(df)
 
     def write_dataset(self, df: pd.DataFrame, *, dataset: str, date_col: str) -> int:

@@ -84,6 +84,7 @@ def _paper_daily_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
             financial_rows.append({
                 "symbol": symbol,
                 "report_date": pd.Timestamp(report_date),
+                "ann_date": pd.Timestamp(report_date) + pd.Timedelta(days=20),
                 "roe": 5 + symbol_index * 2 + quarter_index * 0.2,
                 "revenue": 100_000 + symbol_index * 20_000 + quarter_index * 5_000,
                 "net_profit": 8_000 + symbol_index * 1_500 + quarter_index * 300,
@@ -106,6 +107,7 @@ def test_align_financial_asof_normalizes_datetime_units() -> None:
     financial = pd.DataFrame({
         "symbol": ["000001.SZ"],
         "report_date": np.array(["2024-03-31"], dtype="datetime64[us]"),
+        "ann_date": np.array(["2024-04-01"], dtype="datetime64[us]"),
         "roe": [12.5],
         "revenue": [100_000.0],
         "net_profit": [9_000.0],
@@ -115,6 +117,27 @@ def test_align_financial_asof_normalizes_datetime_units() -> None:
 
     assert result["roe"].tolist() == [12.5, 12.5]
     assert "trade_date_ts" not in result.columns
+
+
+def test_align_financial_asof_uses_announcement_date() -> None:
+    daily = pd.DataFrame({
+        "symbol": ["000001.SZ", "000001.SZ", "000001.SZ"],
+        "trade_date": [date(2024, 3, 31), date(2024, 4, 1), date(2024, 4, 30)],
+        "close": [10.0, 10.1, 10.2],
+    })
+    financial = pd.DataFrame({
+        "symbol": ["000001.SZ"],
+        "report_date": [pd.Timestamp("2024-03-31")],
+        "ann_date": [pd.Timestamp("2024-04-30")],
+        "roe": [12.5],
+        "revenue": [100_000.0],
+        "net_profit": [9_000.0],
+    })
+
+    result = module._align_financial_asof(daily, financial)
+
+    assert result["roe"].isna().tolist() == [True, True, False]
+    assert result.loc[2, "roe"] == 12.5
 
 
 def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:

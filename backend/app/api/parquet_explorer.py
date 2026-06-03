@@ -1,6 +1,7 @@
-"""Parquet 数据浏览器 API — /api/explorer/parquet"""
 import asyncio
+import calendar
 from datetime import date
+from typing import Any
 
 from fastapi import APIRouter, Query
 
@@ -21,37 +22,102 @@ _DATASETS = [
     "indicator_timeseries",
 ]
 
+_DATASET_DATE_COLUMNS = {
+    "klines_daily": "trade_date",
+    "klines_minute": "datetime",
+    "klines_minute_timer": "datetime",
+    "klines_minute_cum_timer": "datetime",
+    "factor_cache": "trade_date",
+    "factor_values": "trade_date",
+    "stock_indicators": "trade_date",
+    "indicator_timeseries": "datetime",
+}
+
+
+def _is_temp_parquet_path(path) -> bool:
+    text = str(path)
+    return ".tmp-" in text or "_compact_tmp_" in text
+
 
 def _get_store():
     return ParquetMarketDataStore(settings.parquet_data_dir)
 
 
+def _partition_summary(path, dataset: str) -> dict[str, Any] | None:
+    partitions: list[tuple[int, int]] = []
+    for year_dir in path.glob("year=*"):
+        if _is_temp_parquet_path(year_dir):
+            continue
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for month_dir in year_dir.glob("month=??"):
+            if _is_temp_parquet_path(month_dir):
+                continue
+            try:
+                month = int(month_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if any(not _is_temp_parquet_path(file) for file in month_dir.glob("*.parquet")):
+                partitions.append((year, month))
+    if not partitions and not any(not _is_temp_parquet_path(file) for file in path.glob("*.parquet")):
+        return None
+
+    min_date = max_date = None
+    if partitions:
+        min_year, min_month = min(partitions)
+        max_year, max_month = max(partitions)
+        max_day = calendar.monthrange(max_year, max_month)[1]
+        min_date = f"{min_year:04d}-{min_month:02d}-01"
+        max_date = f"{max_year:04d}-{max_month:02d}-{max_day:02d}"
+        if _DATASET_DATE_COLUMNS.get(dataset) == "datetime":
+            min_date = f"{min_date} 00:00:00"
+            max_date = f"{max_date} 23:59:59"
+
+    return {
+        "partition_count": len(partitions),
+        "row_count": None,
+        "estimated": True,
+        "min_date": min_date,
+        "max_date": max_date,
+        "date_column": _DATASET_DATE_COLUMNS.get(dataset),
+    }
+
+
+def _estimated_total(offset: int, row_count: int, limit: int) -> int:
+    return offset + row_count + (1 if row_count >= limit else 0)
+
+
 @router.get("/datasets")
 async def list_datasets():
-    """列出所有 Parquet dataset 及其基本信息"""
+    """List Parquet datasets without scanning large file trees."""
     store = _get_store()
     datasets = []
     for name in _DATASETS:
-        if store._exists(name):
-            path = store._dataset_path(name)
-            # Count files
-            n_files = len(list(path.rglob("*.parquet")))
-            datasets.append({"name": name, "path": str(path), "files": n_files})
+        path = store._dataset_path(name)
+        if path.exists():
+            summary = _partition_summary(path, name)
+            if summary is None:
+                continue
+            datasets.append({"name": name, "path": str(path), **summary})
     return {"code": 0, "data": datasets}
 
 
 @router.get("/{dataset}/schema")
 async def dataset_schema(dataset: str):
-    """返回 Parquet dataset 的字段 schema"""
+    """Return the Parquet dataset schema."""
     store = _get_store()
     if not store._exists(dataset):
         return {"code": 1, "message": f"Dataset '{dataset}' not found"}
     pattern = store._glob_pattern(dataset)
-    db = get_duckdb()
     try:
-        df = db.execute(
-            f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true) LIMIT 1"
-        ).df()
+        def _read_schema():
+            return get_duckdb().execute(
+                f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true) LIMIT 1"
+            ).df()
+
+        df = await asyncio.to_thread(_read_schema)
         return {"code": 0, "data": {
             "columns": df.columns.tolist(),
             "dtypes": {c: str(t) for c, t in df.dtypes.items()},
@@ -65,22 +131,31 @@ async def dataset_preview(
     dataset: str,
     limit: int = Query(default=20, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    include_total: bool = Query(default=False),
 ):
-    """预览 Parquet dataset 数据"""
+    """Preview rows; exact totals are opt-in because large Parquet counts are expensive."""
     store = _get_store()
     if not store._exists(dataset):
         return {"code": 1, "message": f"Dataset '{dataset}' not found"}
     pattern = store._glob_pattern(dataset)
-    db = get_duckdb()
     try:
-        count = db.execute(
-            f"SELECT count(*) FROM read_parquet('{pattern}', hive_partitioning=true)"
-        ).fetchone()[0]
-        df = db.execute(
-            f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true) LIMIT {limit} OFFSET {offset}"
-        ).df()
+        def _read_preview():
+            db = get_duckdb()
+            df = db.execute(
+                f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true) LIMIT {limit} OFFSET {offset}"
+            ).df()
+            count = None
+            if include_total:
+                count = db.execute(
+                    f"SELECT count(*) FROM read_parquet('{pattern}', hive_partitioning=true)"
+                ).fetchone()[0]
+            return df, count
+
+        df, count = await asyncio.to_thread(_read_preview)
+        total_rows = int(count or 0) if include_total else _estimated_total(offset, len(df), limit)
         return {"code": 0, "data": {
-            "total_rows": count,
+            "total_rows": total_rows,
+            "total_estimated": not include_total,
             "rows": df.fillna("").to_dict(orient="records"),
         }}
     except Exception as e:

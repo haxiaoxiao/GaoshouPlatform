@@ -261,6 +261,7 @@ async def get_financial_data(
     items = [
         {
             "report_date": r.report_date.isoformat(),
+            "ann_date": r.ann_date.isoformat() if r.ann_date else None,
             "report_type": r.report_type,
             "eps": r.eps,
             "bvps": r.bvps,

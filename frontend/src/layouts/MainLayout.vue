@@ -1,72 +1,60 @@
 <template>
-  <div class="app-shell">
-    <!-- Ambient background effects -->
-    <div class="ambient-bg">
+  <div
+    class="app-shell"
+    :class="{
+      'app-shell--collapsed': isCollapsed,
+      'app-shell--context-collapsed': isContextCollapsed,
+    }"
+  >
+    <div class="ambient-bg" aria-hidden="true">
       <div class="gradient-orb gradient-orb--primary"></div>
       <div class="gradient-orb gradient-orb--secondary"></div>
       <div class="grid-pattern"></div>
     </div>
 
-    <!-- Sidebar -->
-    <aside class="sidebar" :class="{ 'sidebar--collapsed': isCollapsed }">
-      <!-- Logo -->
+    <aside class="sidebar">
       <div class="sidebar__brand">
-        <div class="brand-icon">
-          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <rect x="2" y="2" width="28" height="28" rx="6" stroke="currentColor" stroke-width="2"/>
-            <path d="M8 22L12 14L16 18L20 10L24 16" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
-            <circle cx="24" cy="16" r="2" fill="currentColor"/>
-          </svg>
-        </div>
-        <div class="brand-text" v-if="!isCollapsed">
+        <div class="brand-icon" aria-hidden="true">GS</div>
+        <div v-if="!isCollapsed" class="brand-text">
           <span class="brand-name">GAOSHOU</span>
-          <span class="brand-tagline">量化投研平台</span>
+          <span class="brand-tagline">Quant Research Cockpit</span>
         </div>
       </div>
 
-      <!-- Navigation -->
-      <nav class="sidebar__nav">
-        <div class="nav-section">
-          <span class="nav-section__title" v-if="!isCollapsed">核心功能</span>
+      <nav class="sidebar__nav" aria-label="主导航">
+        <section v-for="section in navSections" :key="section.key" class="nav-section">
+          <span v-if="!isCollapsed" class="nav-section__title">{{ section.label }}</span>
           <router-link
-            v-for="item in mainNavItems"
-            :key="item.path"
+            v-for="item in navItemsForSection(section.key)"
+            :key="item.key"
             :to="item.path"
             class="nav-item"
-            :class="{ 'nav-item--active': isActive(item.path) }"
+            :class="{ 'nav-item--active': isActive(item) }"
+            :title="isCollapsed ? item.label : undefined"
           >
             <span class="nav-item__icon" v-html="item.icon"></span>
-            <span class="nav-item__label" v-if="!isCollapsed">{{ item.label }}</span>
-            <span class="nav-item__indicator" v-if="item.badge">{{ item.badge }}</span>
+            <span v-if="!isCollapsed" class="nav-item__body">
+              <span class="nav-item__label">{{ item.label }}</span>
+              <span class="nav-item__hint">{{ item.hint }}</span>
+            </span>
+            <span v-if="!isCollapsed && item.badge" class="nav-item__indicator">{{ item.badge }}</span>
           </router-link>
-        </div>
-
-        <div class="nav-section" v-if="!isCollapsed">
-          <span class="nav-section__title">系统</span>
-          <router-link
-            v-for="item in systemNavItems"
-            :key="item.path"
-            :to="item.path"
-            class="nav-item"
-            :class="{ 'nav-item--active': isActive(item.path) }"
-          >
-            <span class="nav-item__icon" v-html="item.icon"></span>
-            <span class="nav-item__label">{{ item.label }}</span>
-          </router-link>
-        </div>
+        </section>
       </nav>
 
-      <!-- Sidebar footer -->
-      <div class="sidebar__footer" v-if="!isCollapsed">
-        <div class="status-indicator">
-          <span class="status-dot status-dot--active"></span>
-          <span class="status-text">系统运行中</span>
+      <div v-if="!isCollapsed" class="sidebar__footer">
+        <div>
+          <strong>系统运行中</strong>
+          <span>Parquet backend · v0.1.0</span>
         </div>
-        <div class="version-tag">v0.1.0</div>
       </div>
 
-      <!-- Collapse toggle -->
-      <button class="sidebar__toggle" @click="toggleSidebar" :title="isCollapsed ? '展开菜单' : '收起菜单'">
+      <button
+        class="sidebar__toggle"
+        type="button"
+        :title="isCollapsed ? '展开菜单' : '收起菜单'"
+        @click="toggleSidebar"
+      >
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
           <path v-if="isCollapsed" d="M9 18l6-6-6-6" stroke-linecap="round" stroke-linejoin="round"/>
           <path v-else d="M15 18l-6-6 6-6" stroke-linecap="round" stroke-linejoin="round"/>
@@ -74,62 +62,50 @@
       </button>
     </aside>
 
-    <!-- Main content area -->
     <main class="main-area">
-      <!-- Header -->
       <header class="topbar">
         <div class="topbar__left">
-          <h1 class="page-title">{{ pageTitle }}</h1>
-          <span class="page-subtitle" v-if="pageSubtitle">{{ pageSubtitle }}</span>
+          <span class="page-kicker">{{ pageKicker }}</span>
+          <div class="page-copy">
+            <h1 class="page-title">{{ pageTitle }}</h1>
+            <span v-if="pageSubtitle" class="page-subtitle">{{ pageSubtitle }}</span>
+          </div>
         </div>
+
+        <label class="global-search">
+          <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="M21 21l-4.35-4.35"/>
+          </svg>
+          <input
+            v-model="searchQuery"
+            type="text"
+            placeholder="搜索股票、策略、因子..."
+            class="search-input"
+            @focus="searchFocused = true"
+            @blur="searchFocused = false"
+          />
+          <kbd v-if="!searchFocused" class="search-kbd">Ctrl K</kbd>
+        </label>
+
         <div class="topbar__right">
-          <!-- Search -->
-          <div class="global-search">
-            <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-              <circle cx="11" cy="11" r="8"/>
-              <path d="M21 21l-4.35-4.35"/>
-            </svg>
-            <input
-              type="text"
-              placeholder="搜索股票、策略..."
-              class="search-input"
-              @focus="searchFocused = true"
-              @blur="searchFocused = false"
-              v-model="searchQuery"
-            />
-            <kbd class="search-kbd" v-if="!searchFocused">⌘K</kbd>
-          </div>
-
-          <!-- Quick actions -->
-          <div class="quick-actions">
-            <div class="notification-wrapper">
-              <button class="action-btn" title="通知" @click="toggleNotificationPanel">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
-                  <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
-                </svg>
-                <span v-if="notificationStore.unreadCount > 0" class="action-badge">{{ notificationStore.unreadCount }}</span>
-              </button>
-              <NotificationPanel v-if="showNotifications" />
-            </div>
-            <button class="action-btn" title="设置">
+          <button class="action-btn action-btn--text" type="button" @click="toggleContextRail">
+            {{ isContextCollapsed ? '打开上下文' : '收起上下文' }}
+          </button>
+          <div class="notification-wrapper">
+            <button class="action-btn" title="通知" type="button" @click="toggleNotificationPanel">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="3"/>
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
               </svg>
+              <span v-if="notificationStore.unreadCount > 0" class="action-badge">{{ notificationStore.unreadCount }}</span>
             </button>
+            <NotificationPanel v-if="showNotifications" />
           </div>
-
-          <!-- User -->
-          <div class="user-menu">
-            <div class="user-avatar">
-              <span>A</span>
-            </div>
-          </div>
+          <div class="user-avatar" title="当前用户">A</div>
         </div>
       </header>
 
-      <!-- Content -->
       <div class="content-wrapper">
         <router-view v-slot="{ Component }">
           <transition name="page" mode="out-in">
@@ -138,26 +114,85 @@
         </router-view>
       </div>
 
-      <!-- Status bar -->
       <StatusBar />
     </main>
+
+    <aside v-if="!isContextCollapsed" class="context-rail" aria-label="当前页面上下文">
+      <div class="context-rail__header">
+        <div>
+          <span class="page-kicker">CONTEXT</span>
+          <h2>{{ pageTitle }}上下文</h2>
+        </div>
+        <span class="context-badge">{{ contextBadge }}</span>
+      </div>
+
+      <section v-for="block in contextBlocks" :key="block.title" class="context-card">
+        <h3>{{ block.title }}</h3>
+        <div class="context-list">
+          <div v-for="row in block.rows" :key="`${block.title}-${row.label}`" class="context-row">
+            <span>{{ row.label }}</span>
+            <strong :class="row.tone ? `context-value--${row.tone}` : undefined">{{ row.value }}</strong>
+          </div>
+        </div>
+      </section>
+    </aside>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import {
+  NAV_SECTIONS,
+  navItemsForSection,
+  resolveNavItem,
+  type AppNavItem,
+  type ContextBlock,
+} from '@/app/navigation'
+import { useResolvedPageContext } from '@/app/pageContext'
 import { useNotificationStore } from '@/stores/notification'
 import NotificationPanel from '@/components/NotificationPanel.vue'
 import StatusBar from '@/components/StatusBar.vue'
 
 const notificationStore = useNotificationStore()
-
 const route = useRoute()
+
 const isCollapsed = ref(false)
+const isContextCollapsed = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
 const showNotifications = ref(false)
+
+const navSections = NAV_SECTIONS
+const activeNavItem = computed(() => resolveNavItem(route.path))
+const fallbackContextBlocks = computed<ContextBlock[]>(() => activeNavItem.value?.context || [])
+const resolvedContext = useResolvedPageContext(fallbackContextBlocks)
+
+const pageTitle = computed(() => {
+  const title = route.meta.title
+  return typeof title === 'string' ? title : activeNavItem.value?.label || '高手平台'
+})
+
+const pageSubtitle = computed(() => {
+  const subtitle = route.meta.subtitle
+  return typeof subtitle === 'string' ? subtitle : activeNavItem.value?.subtitle || ''
+})
+
+const pageKicker = computed(() => {
+  const kicker = route.meta.kicker
+  return typeof kicker === 'string' ? kicker : activeNavItem.value?.kicker || 'GAOSHOU'
+})
+
+const contextBlocks = computed<ContextBlock[]>(() => resolvedContext.value.blocks)
+const contextBadge = computed(() => resolvedContext.value.isDynamic ? 'Live' : 'Guide')
+
+function toggleSidebar() {
+  isCollapsed.value = !isCollapsed.value
+}
+
+function toggleContextRail() {
+  isContextCollapsed.value = !isContextCollapsed.value
+}
 
 function toggleNotificationPanel() {
   showNotifications.value = !showNotifications.value
@@ -170,6 +205,10 @@ function closeNotificationPanel(e: MouseEvent) {
   }
 }
 
+function isActive(item: AppNavItem) {
+  return activeNavItem.value?.key === item.key
+}
+
 onMounted(() => {
   document.addEventListener('click', closeNotificationPanel)
   notificationStore.startTaskPolling()
@@ -179,78 +218,27 @@ onUnmounted(() => {
   document.removeEventListener('click', closeNotificationPanel)
   notificationStore.stopTaskPolling()
 })
-
-// SVG icons as strings
-const icons = {
-  data: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V10"/><path d="M18 20V4"/><path d="M6 20v-4"/></svg>',
-  explorer: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/><path d="M11 8v6"/><path d="M8 11h6"/></svg>',
-  watchlist: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>',
-  factor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg>',
-  research: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5z"/><path d="M8 7h8"/><path d="M8 11h6"/></svg>',
-  backtest: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/></svg>',
-  trade: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/></svg>',
-  monitor: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8"/><path d="M12 17v4"/></svg>'
-}
-
-// Navigation items
-const mainNavItems = [
-  { path: '/data', label: '数据管理', icon: icons.data, badge: '' },
-  { path: '/explorer', label: '数据浏览器', icon: icons.explorer, badge: '' },
-  { path: '/watchlist', label: '自选股', icon: icons.watchlist, badge: '' },
-  { path: '/factor', label: '因子研究', icon: icons.factor, badge: '' },
-  { path: '/research', label: '投研', icon: icons.research, badge: '' },
-  { path: '/backtest', label: '策略回测', icon: icons.backtest, badge: '' },
-  { path: '/trade', label: '实盘交易', icon: icons.trade, badge: '' },
-]
-
-const systemNavItems = [
-  { path: '/monitor', label: '系统监控', icon: icons.monitor }
-]
-
-// Page titles
-const pageTitles: Record<string, { title: string; subtitle?: string }> = {
-  '/data': { title: '数据管理', subtitle: '股票数据查询与同步' },
-  '/explorer': { title: '数据浏览器', subtitle: '本地行情与指标数据查询' },
-  '/watchlist': { title: '自选股', subtitle: '分组管理自选股票' },
-  '/factor': { title: '因子研究', subtitle: '因子分析与筛选' },
-  '/research': { title: '投研', subtitle: '研报落地与实验跟踪' },
-  '/backtest': { title: '策略回测', subtitle: '策略开发与验证' },
-  '/trade': { title: '实盘交易', subtitle: '模拟盘与实盘' },
-  '/monitor': { title: '系统监控', subtitle: '运行状态与日志' }
-}
-
-const pageTitle = computed(() => {
-  const info = pageTitles[route.path]
-  return info?.title || '高手平台'
-})
-
-const pageSubtitle = computed(() => {
-  const info = pageTitles[route.path]
-  return info?.subtitle || ''
-})
-
-const isActive = (path: string) => {
-  return route.path.startsWith(path)
-}
-
-const toggleSidebar = () => {
-  isCollapsed.value = !isCollapsed.value
-}
 </script>
 
 <style scoped>
-/* ═══════════════════════════════════════════════════════════════
-   LAYOUT SHELL
-   ═══════════════════════════════════════════════════════════════ */
-
 .app-shell {
-  display: flex;
+  --sidebar-width: 252px;
+  --context-width: 320px;
+  display: grid;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--context-width);
   height: 100vh;
   overflow: hidden;
   position: relative;
 }
 
-/* Ambient Background */
+.app-shell--collapsed {
+  --sidebar-width: 76px;
+}
+
+.app-shell--context-collapsed {
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+}
+
 .ambient-bg {
   position: fixed;
   inset: 0;
@@ -263,32 +251,25 @@ const toggleSidebar = () => {
   position: absolute;
   border-radius: 50%;
   filter: blur(80px);
-  opacity: 0.4;
+  opacity: 0.36;
   animation: float 20s ease-in-out infinite;
 }
 
 .gradient-orb--primary {
-  width: 600px;
-  height: 600px;
-  background: radial-gradient(circle, rgba(56, 189, 248, 0.15) 0%, transparent 70%);
-  top: -200px;
-  right: -100px;
-  animation-delay: 0s;
+  width: 620px;
+  height: 620px;
+  background: radial-gradient(circle, rgba(103, 212, 255, 0.14) 0%, transparent 70%);
+  top: -220px;
+  right: -120px;
 }
 
 .gradient-orb--secondary {
-  width: 500px;
-  height: 500px;
-  background: radial-gradient(circle, rgba(167, 139, 250, 0.12) 0%, transparent 70%);
-  bottom: -150px;
-  left: 20%;
+  width: 520px;
+  height: 520px;
+  background: radial-gradient(circle, rgba(231, 185, 79, 0.1) 0%, transparent 70%);
+  bottom: -180px;
+  left: 18%;
   animation-delay: -10s;
-}
-
-@keyframes float {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33% { transform: translate(30px, -30px) scale(1.05); }
-  66% { transform: translate(-20px, 20px) scale(0.95); }
 }
 
 .grid-pattern {
@@ -300,197 +281,202 @@ const toggleSidebar = () => {
   background-size: 60px 60px;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   SIDEBAR
-   ═══════════════════════════════════════════════════════════════ */
+@keyframes float {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -30px) scale(1.05); }
+  66% { transform: translate(-20px, 20px) scale(0.95); }
+}
 
-.sidebar {
-  width: 240px;
-  height: 100vh;
-  background: rgba(13, 13, 16, 0.8);
-  backdrop-filter: blur(20px);
-  border-right: 1px solid var(--border-subtle);
-  display: flex;
-  flex-direction: column;
+.sidebar,
+.main-area,
+.context-rail {
   position: relative;
   z-index: var(--z-elevated);
-  transition: width var(--duration-slow) var(--ease-out);
 }
 
-.sidebar--collapsed {
-  width: 72px;
-}
-
-/* Brand */
-.sidebar__brand {
+.sidebar {
+  height: 100vh;
+  background: rgba(12, 15, 20, 0.94);
+  border-right: 1px solid var(--border-subtle);
+  backdrop-filter: blur(20px);
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar__brand {
+  display: grid;
+  grid-template-columns: 40px minmax(0, 1fr);
   gap: var(--space-3);
-  padding: var(--space-5);
-  border-bottom: 1px solid var(--border-subtle);
+  align-items: center;
   min-height: 72px;
+  padding: var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.app-shell--collapsed .sidebar__brand {
+  grid-template-columns: 40px;
+  justify-content: center;
+  padding-inline: var(--space-3);
 }
 
 .brand-icon {
-  width: 36px;
-  height: 36px;
-  flex-shrink: 0;
+  width: 40px;
+  height: 40px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
   color: var(--accent-primary);
-  filter: drop-shadow(0 0 8px var(--accent-glow));
+  font-family: var(--font-display);
+  font-size: var(--text-sm);
+  font-weight: 800;
+  box-shadow: var(--shadow-glow);
 }
 
 .brand-text {
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  overflow: hidden;
 }
 
 .brand-name {
   font-family: var(--font-display);
-  font-size: var(--text-sm);
-  font-weight: 700;
-  letter-spacing: var(--tracking-wider);
   color: var(--text-bright);
+  font-size: var(--text-sm);
+  font-weight: 800;
+  letter-spacing: var(--tracking-wider);
 }
 
 .brand-tagline {
-  font-size: var(--text-xs);
   color: var(--text-muted);
+  font-size: var(--text-xs);
 }
 
-/* Navigation */
 .sidebar__nav {
   flex: 1;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: var(--space-4);
+  overflow: auto;
+  padding: var(--space-4) var(--space-3);
 }
 
 .nav-section {
-  margin-bottom: var(--space-6);
+  margin-bottom: var(--space-5);
 }
 
 .nav-section__title {
   display: block;
+  color: var(--text-ghost);
   font-size: var(--text-xs);
-  font-weight: 600;
+  font-weight: 700;
   letter-spacing: var(--tracking-wider);
-  color: var(--text-muted);
   text-transform: uppercase;
-  padding: 0 var(--space-3);
-  margin-bottom: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2);
 }
 
 .nav-item {
-  display: flex;
-  align-items: center;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
   gap: var(--space-3);
-  padding: var(--space-3);
+  align-items: center;
+  min-height: 44px;
+  margin: 2px 0;
+  padding: 7px 10px;
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   text-decoration: none;
-  font-weight: 500;
-  font-size: var(--text-sm);
-  transition: all var(--duration-normal) var(--ease-out);
+  transition: color var(--duration-normal), background var(--duration-normal), box-shadow var(--duration-normal);
   position: relative;
-  margin-bottom: 2px;
+}
+
+.app-shell--collapsed .nav-item {
+  grid-template-columns: 30px;
+  justify-content: center;
+  padding-inline: 8px;
 }
 
 .nav-item:hover {
-  background: var(--bg-hover);
   color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.045);
 }
 
 .nav-item--active {
-  background: linear-gradient(135deg, rgba(56, 189, 248, 0.1) 0%, rgba(167, 139, 250, 0.05) 100%);
-  color: var(--accent-primary);
-}
-
-.nav-item--active::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 3px;
-  height: 24px;
-  background: var(--accent-primary);
-  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
-  box-shadow: 0 0 12px var(--accent-glow);
+  color: var(--text-bright);
+  background: rgba(103, 212, 255, 0.11);
+  box-shadow: inset 3px 0 0 var(--accent-primary);
 }
 
 .nav-item__icon {
-  width: 20px;
-  height: 20px;
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border-default);
+  border-radius: 7px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
 }
 
 .nav-item__icon :deep(svg) {
-  width: 100%;
-  height: 100%;
+  width: 17px;
+  height: 17px;
+}
+
+.nav-item__body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
 }
 
 .nav-item__label {
-  flex: 1;
-  white-space: nowrap;
   overflow: hidden;
+  color: inherit;
+  font-size: var(--text-sm);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.nav-item__indicator {
-  background: var(--accent-primary);
-  color: var(--bg-void);
+.nav-item__hint {
+  color: var(--text-ghost);
+  font-size: var(--text-xs);
+}
+
+.nav-item__indicator,
+.context-badge {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
   font-size: 10px;
   font-weight: 700;
-  padding: 2px 6px;
-  border-radius: var(--radius-full);
-  min-width: 18px;
-  text-align: center;
+  padding: 2px 7px;
 }
 
-/* Sidebar Footer */
 .sidebar__footer {
-  padding: var(--space-4);
-  border-top: 1px solid var(--border-subtle);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
+  margin: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.025);
 }
 
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
+.sidebar__footer strong,
+.sidebar__footer span {
+  display: block;
 }
 
-.status-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--color-neutral);
-}
-
-.status-dot--active {
-  background: var(--color-bull);
-  box-shadow: 0 0 8px var(--color-bull);
-  animation: pulse 2s ease-in-out infinite;
-}
-
-.status-text {
+.sidebar__footer strong {
+  color: var(--text-primary);
   font-size: var(--text-xs);
+  margin-bottom: 3px;
+}
+
+.sidebar__footer span {
   color: var(--text-muted);
+  font-size: 11px;
 }
 
-.version-tag {
-  font-size: var(--text-xs);
-  color: var(--text-ghost);
-  font-family: var(--font-display);
-}
-
-/* Collapse Toggle */
 .sidebar__toggle {
   position: absolute;
   right: -12px;
@@ -501,17 +487,15 @@ const toggleSidebar = () => {
   background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   cursor: pointer;
   color: var(--text-muted);
   transition: all var(--duration-normal);
-  z-index: var(--z-elevated);
+  z-index: var(--z-sticky);
 }
 
 .sidebar__toggle:hover {
-  background: var(--bg-hover);
   color: var(--accent-primary);
   border-color: var(--accent-primary);
 }
@@ -521,142 +505,140 @@ const toggleSidebar = () => {
   height: 14px;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   MAIN AREA
-   ═══════════════════════════════════════════════════════════════ */
-
 .main-area {
-  flex: 1;
+  min-width: 0;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  position: relative;
-  z-index: var(--z-base);
 }
 
-/* Topbar */
 .topbar {
-  height: 64px;
-  display: flex;
+  min-height: 72px;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 360px) auto;
+  gap: var(--space-3);
   align-items: center;
-  justify-content: space-between;
-  padding: 0 var(--space-6);
-  background: rgba(13, 13, 16, 0.6);
-  backdrop-filter: blur(12px);
+  padding: var(--space-3) var(--space-5);
+  background: rgba(16, 20, 26, 0.82);
   border-bottom: 1px solid var(--border-subtle);
-  position: relative;
-  z-index: var(--z-sticky);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow-sm);
 }
 
 .topbar__left {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.page-kicker {
+  color: var(--accent-primary);
+  font-family: var(--font-display);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: var(--tracking-wider);
+}
+
+.page-copy {
+  min-width: 0;
   display: flex;
   align-items: baseline;
   gap: var(--space-3);
 }
 
 .page-title {
+  color: var(--text-bright);
   font-family: var(--font-display);
   font-size: var(--text-xl);
-  font-weight: 600;
-  color: var(--text-bright);
-  letter-spacing: var(--tracking-tight);
+  font-weight: 750;
+  line-height: 1.1;
+  margin: 0;
+  white-space: nowrap;
 }
 
 .page-subtitle {
-  font-size: var(--text-sm);
+  overflow: hidden;
   color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.topbar__right {
-  display: flex;
-  align-items: center;
-  gap: var(--space-4);
-}
-
-/* Global Search */
 .global-search {
-  position: relative;
-  width: 280px;
+  min-width: 0;
+  height: 38px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-2);
+  align-items: center;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(4, 6, 9, 0.45);
+  padding: 0 var(--space-3);
+  color: var(--text-muted);
 }
 
 .search-icon {
-  position: absolute;
-  left: 12px;
-  top: 50%;
-  transform: translateY(-50%);
   width: 16px;
   height: 16px;
-  color: var(--text-muted);
-  pointer-events: none;
-  transition: color var(--duration-normal);
 }
 
 .search-input {
-  width: 100%;
-  height: 36px;
-  padding: 0 var(--space-10) 0 40px;
-  background: var(--bg-elevated);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
   color: var(--text-primary);
-  font-size: var(--text-sm);
+  background: transparent;
   font-family: var(--font-ui);
-  transition: all var(--duration-normal);
+  font-size: var(--text-sm);
 }
 
 .search-input::placeholder {
   color: var(--text-muted);
 }
 
-.search-input:focus {
-  outline: none;
-  border-color: var(--accent-primary);
-  box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1);
-}
-
-.search-input:focus + .search-icon,
-.global-search:focus-within .search-icon {
-  color: var(--accent-primary);
-}
-
 .search-kbd {
-  position: absolute;
-  right: 8px;
-  top: 50%;
-  transform: translateY(-50%);
-  padding: 2px 6px;
-  background: var(--bg-surface);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
-  font-size: var(--text-xs);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text-muted);
   font-family: var(--font-display);
+  font-size: var(--text-xs);
+  padding: 2px 6px;
 }
 
-/* Quick Actions */
-.quick-actions {
+.topbar__right {
   display: flex;
+  align-items: center;
+  justify-content: flex-end;
   gap: var(--space-2);
 }
 
 .action-btn {
   position: relative;
-  width: 36px;
+  min-width: 36px;
   height: 36px;
-  background: transparent;
+  display: grid;
+  place-items: center;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.035);
   color: var(--text-secondary);
   cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-family: var(--font-ui);
   transition: all var(--duration-normal);
 }
 
+.action-btn--text {
+  padding: 0 var(--space-3);
+  white-space: nowrap;
+}
+
 .action-btn:hover {
-  background: var(--bg-hover);
   color: var(--text-primary);
+  background: var(--bg-hover);
   border-color: var(--border-default);
 }
 
@@ -667,62 +649,110 @@ const toggleSidebar = () => {
 
 .action-badge {
   position: absolute;
-  top: -4px;
-  right: -4px;
+  top: -5px;
+  right: -5px;
   min-width: 16px;
   height: 16px;
-  padding: 0 4px;
-  background: var(--accent-danger);
+  display: grid;
+  place-items: center;
   border-radius: var(--radius-full);
+  background: var(--accent-warning);
+  color: #070a0e;
   font-size: 10px;
-  font-weight: 700;
-  color: white;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  font-weight: 800;
 }
 
 .notification-wrapper {
   position: relative;
 }
 
-/* User Menu */
-.user-menu {
-  display: flex;
-  align-items: center;
-}
-
 .user-avatar {
   width: 36px;
   height: 36px;
-  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  display: grid;
+  place-items: center;
   border-radius: var(--radius-md);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: var(--text-sm);
-  color: white;
-  cursor: pointer;
-  transition: transform var(--duration-normal);
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+  color: #071014;
+  cursor: default;
+  font-weight: 800;
 }
 
-.user-avatar:hover {
-  transform: scale(1.05);
-}
-
-/* Content Wrapper */
 .content-wrapper {
   flex: 1;
+  min-height: 0;
   overflow: hidden;
   padding: var(--space-5);
 }
 
-/* Page Transitions */
+.context-rail {
+  height: 100vh;
+  overflow: auto;
+  padding: var(--space-4);
+  border-left: 1px solid var(--border-subtle);
+  background: rgba(16, 20, 26, 0.88);
+  backdrop-filter: blur(18px);
+}
+
+.context-rail__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+}
+
+.context-rail__header h2 {
+  margin: 4px 0 0;
+  color: var(--text-bright);
+  font-size: var(--text-lg);
+}
+
+.context-card {
+  padding: var(--space-3);
+  margin-bottom: var(--space-3);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.context-card h3 {
+  margin: 0 0 var(--space-3);
+  color: var(--text-bright);
+  font-size: var(--text-sm);
+}
+
+.context-list {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.context-row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-3);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.context-row strong {
+  color: var(--text-primary);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-align: right;
+}
+
+.context-value--good { color: var(--status-ready) !important; }
+.context-value--warn { color: var(--accent-warning) !important; }
+.context-value--bad { color: var(--status-attention) !important; }
+.context-value--neutral { color: var(--accent-primary) !important; }
+
 .page-enter-active,
 .page-leave-active {
-  transition: opacity var(--duration-slow) var(--ease-out),
-              transform var(--duration-slow) var(--ease-out);
+  transition:
+    opacity var(--duration-slow) var(--ease-out),
+    transform var(--duration-slow) var(--ease-out);
 }
 
 .page-enter-from {
@@ -733,5 +763,66 @@ const toggleSidebar = () => {
 .page-leave-to {
   opacity: 0;
   transform: translateY(-8px);
+}
+
+@media (max-width: 1360px) {
+  .app-shell {
+    grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  }
+
+  .context-rail {
+    display: none;
+  }
+}
+
+@media (max-width: 1024px) {
+  .topbar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .global-search {
+    display: none;
+  }
+}
+
+@media (max-width: 760px) {
+  .app-shell,
+  .app-shell--collapsed,
+  .app-shell--context-collapsed {
+    --sidebar-width: 100%;
+    display: grid;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .sidebar {
+    height: auto;
+    max-height: 42vh;
+  }
+
+  .sidebar__toggle {
+    display: none;
+  }
+
+  .topbar {
+    min-height: auto;
+    grid-template-columns: 1fr;
+    align-items: stretch;
+  }
+
+  .topbar__right,
+  .page-copy {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .main-area {
+    height: auto;
+    min-height: 0;
+  }
+
+  .content-wrapper {
+    padding: var(--space-3);
+  }
 }
 </style>

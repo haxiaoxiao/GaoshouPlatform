@@ -5,6 +5,10 @@ export interface SyncStatus {
   run_id?: string
   sync_type: string | null
   status: 'idle' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  sync_service_available?: boolean
+  can_trigger?: boolean
+  reason?: string | null
+  last_run?: Record<string, unknown> | null
   total: number
   current: number
   success_count: number

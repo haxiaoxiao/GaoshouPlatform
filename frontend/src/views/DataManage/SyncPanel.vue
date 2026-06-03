@@ -9,7 +9,7 @@
         <span class="queue-summary" :class="{ active: queue.length > 0 }">待执行 {{ queue.length }} 项</span>
         <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
         <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
-        <el-button v-else type="primary" :icon="VideoPlay" :disabled="queue.length === 0" :loading="executing" @click="executeQueue">
+        <el-button type="primary" :icon="VideoPlay" :disabled="queue.length === 0 || !canTriggerSync" :loading="executing" @click="executeQueue">
           执行队列
         </el-button>
       </div>
@@ -40,6 +40,16 @@
       :status="syncStatus.status === 'failed' ? 'exception' : syncStatus.status === 'completed' ? 'success' : undefined"
       :stroke-width="10"
     />
+
+    <el-alert
+      v-if="!canTriggerSync"
+      class="sync-service-warning"
+      type="warning"
+      :closable="false"
+      show-icon
+    >
+      <template #title>{{ syncUnavailableReason }}</template>
+    </el-alert>
 
     <div class="layout-grid">
       <section class="panel presets-panel">
@@ -252,6 +262,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Delete, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { syncApi, type SyncCatalog, type SyncCatalogItem, type SyncLog, type SyncPreset, type SyncStatus } from '@/api/sync'
 
 interface QueueItem {
@@ -300,6 +311,16 @@ let pollTimer: number | undefined
 let lastLogRefreshAt = 0
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
+const canTriggerSync = computed(() => (
+  syncStatus.value.can_trigger !== false
+  && syncStatus.value.sync_service_available !== false
+  && syncStatus.value.details?.sync_service_unavailable !== true
+))
+const syncUnavailableReason = computed(() => (
+  syncStatus.value.reason
+  || String(syncStatus.value.details?.proxy_error || '')
+  || 'dev 同步服务未启动或正在执行任务，请先启动 18810 同步服务后再提交。'
+))
 const queuedNames = computed(() => new Set(queue.value.map((item) => item.name)))
 const filteredDatasets = computed(() => {
   const term = keyword.value.trim().toLowerCase()
@@ -309,6 +330,68 @@ const filteredDatasets = computed(() => {
     return matchesCategory && (!term || text.includes(term))
   })
 })
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Queue',
+    rows: [
+      {
+        label: '待提交',
+        value: `${queue.value.length} 项`,
+        tone: queue.value.length > 0 ? 'warn' : 'neutral',
+      },
+      {
+        label: '后端排队',
+        value: `${Number(syncStatus.value.details?.queue_pending_count || 0)} 项`,
+        tone: Number(syncStatus.value.details?.queue_pending_count || 0) > 0 ? 'warn' : 'good',
+      },
+      {
+        label: '当前任务',
+        value: syncStatus.value.sync_type ? syncTypeLabel(syncStatus.value.sync_type) : '-',
+        tone: syncStatus.value.status === 'running' ? 'warn' : 'neutral',
+      },
+      {
+        label: '当前状态',
+        value: statusLabel(syncStatus.value.status),
+        tone: syncStatus.value.status === 'failed'
+          ? 'bad'
+          : ['queued', 'running'].includes(syncStatus.value.status)
+            ? 'warn'
+            : 'good',
+      },
+    ],
+  },
+  {
+    title: 'Execution',
+    rows: [
+      {
+        label: '进度',
+        value: `${(syncStatus.value.progress_percent || 0).toFixed(1)}%`,
+        tone: syncStatus.value.status === 'failed' ? 'bad' : 'neutral',
+      },
+      {
+        label: '服务状态',
+        value: syncStatus.value.sync_service_available === false ? '不可用' : '可用',
+        tone: syncStatus.value.sync_service_available === false ? 'bad' : 'good',
+      },
+      {
+        label: 'Relay Key',
+        value: catalog.value?.relay.configured ? '已配置' : '未配置',
+        tone: catalog.value?.relay.configured ? 'good' : 'warn',
+      },
+      {
+        label: '允许触发',
+        value: canTriggerSync.value ? '是' : '否',
+        tone: canTriggerSync.value ? 'good' : 'warn',
+      },
+      {
+        label: '原因',
+        value: canTriggerSync.value ? '队列可接受新任务' : syncUnavailableReason.value,
+      },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 onMounted(async () => {
   await Promise.all([loadCatalog(false), refreshStatus(), loadLogs()])
@@ -336,7 +419,28 @@ async function loadCatalog(force = false) {
 }
 
 async function refreshStatus() {
-  syncStatus.value = await syncApi.getStatus()
+  try {
+    syncStatus.value = normalizeStatusAvailability(await syncApi.getStatus())
+  } catch (error: any) {
+    syncStatus.value = {
+      ...idleStatus(),
+      sync_service_available: false,
+      can_trigger: false,
+      reason: error?.message || 'dev 同步服务未启动或状态接口不可用',
+    }
+  }
+}
+
+function normalizeStatusAvailability(status: SyncStatus): SyncStatus {
+  if (status.details?.sync_service_unavailable) {
+    return {
+      ...status,
+      sync_service_available: false,
+      can_trigger: false,
+      reason: status.reason || String(status.details.proxy_error || 'dev 同步服务未启动'),
+    }
+  }
+  return status
 }
 
 async function loadLogs() {
@@ -432,10 +536,15 @@ function clearQueue() {
 
 async function executeQueue() {
   if (queue.value.length === 0 || executing.value) return
+  if (!canTriggerSync.value) {
+    ElMessage.warning(syncUnavailableReason.value)
+    return
+  }
   executing.value = true
   try {
     const coreItems = queue.value.filter((item) => item.kind === 'core')
     const relayItems = queue.value.filter((item) => item.kind === 'relay')
+    let submittedCount = 0
     for (const item of coreItems) {
       if (item.name === 'factor_dependency') {
         ElMessage.warning('因子依赖同步请从因子看板的预计算流程触发')
@@ -445,7 +554,7 @@ async function executeQueue() {
         sync_type: item.name as any,
         ...basePayload(),
       })
-      await waitUntilIdle()
+      submittedCount += 1
     }
     if (relayItems.length) {
       await syncApi.trigger({
@@ -454,10 +563,13 @@ async function executeQueue() {
         relay_datasets: relayItems.map((item) => item.name),
         relay_options: relayOptions(relayItems),
       })
-      await waitUntilIdle()
+      submittedCount += 1
     }
     queue.value = []
     await Promise.all([refreshStatus(), loadLogs(), loadCatalog(true)])
+    if (submittedCount > 0) {
+      ElMessage.success(`已提交 ${submittedCount} 个同步任务，将按队列依次执行`)
+    }
   } catch (error: any) {
     ElMessage.error(error?.message || '同步任务提交失败')
   } finally {
@@ -489,18 +601,6 @@ function relayOptions(items: QueueItem[]) {
     rps: catalog.value?.relay.rps || 1,
     timeout_seconds: catalog.value?.relay.timeout_seconds || 30,
   }
-}
-
-async function waitUntilIdle() {
-  for (let i = 0; i < 720; i += 1) {
-    await sleep(2500)
-    await refreshStatus()
-    if (!isRunning.value) {
-      if (syncStatus.value.status === 'failed') throw new Error(syncStatus.value.error_message || '同步失败')
-      return
-    }
-  }
-  throw new Error('同步任务等待超时')
 }
 
 async function cancelSync() {
@@ -599,9 +699,6 @@ function idleStatus(): SyncStatus {
   }
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms))
-}
 </script>
 
 <style scoped>
@@ -847,7 +944,8 @@ label.wide {
   width: 150px;
 }
 
-.relay-warning {
+.relay-warning,
+.sync-service-warning {
   border-radius: 6px;
 }
 

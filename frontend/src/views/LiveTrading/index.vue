@@ -1,9 +1,10 @@
 <template>
-  <div class="live-page">
-    <header class="page-head">
+  <div class="page-frame live-page">
+    <header class="panel-card page-head">
       <div>
-        <h2>实盘交易</h2>
-        <p>完美世界 / 昆仑万维网格信号</p>
+        <span class="section-kicker">TRADING GUARDRAILS</span>
+        <h2>模拟 / 实盘</h2>
+        <p>完美世界 / 昆仑万维网格信号；默认只看信号，真实下单必须显式开启并二次确认。</p>
       </div>
       <div class="actions">
         <el-switch v-model="autoRefresh" active-text="每分钟刷新" />
@@ -36,6 +37,15 @@
       </div>
     </section>
 
+    <el-alert
+      v-if="status?.order_submit_enabled"
+      type="error"
+      :closable="false"
+      show-icon
+      title="真实下单开关已开启：所有委托仍需在卡片内二次确认。"
+      class="account-alert"
+    />
+
     <section class="toolbar">
       <div class="field">
         <span>网格间距</span>
@@ -61,6 +71,15 @@
       :closable="false"
       show-icon
       :title="data?.account?.error || status?.error || ''"
+      class="account-alert"
+    />
+
+    <el-alert
+      v-if="data?.quote_error"
+      type="warning"
+      :closable="false"
+      show-icon
+      :title="`行情不可用，已降级为 NO_QUOTE：${data.quote_error}`"
       class="account-alert"
     />
 
@@ -94,7 +113,14 @@
             <h3>{{ signal.name }}</h3>
             <span>{{ signal.symbol }}</span>
           </div>
-          <el-tag :type="tagType(signal.action)" size="large">{{ actionText(signal.action) }}</el-tag>
+          <el-tag
+            :type="tagType(signal.action)"
+            size="large"
+            class="signal-action-tag"
+            :class="signalActionClass(signal.action)"
+          >
+            {{ actionText(signal.action) }}
+          </el-tag>
         </div>
 
         <div class="metrics">
@@ -130,8 +156,9 @@
 </template>
 
 <script setup lang="ts">
-import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import {
   gridTradingApi,
   type GridSignal,
@@ -212,10 +239,14 @@ async function submitOrder(signal: GridSignal) {
 }
 
 function tagType(action: string) {
-  if (action === 'BUY') return 'success'
-  if (action === 'SELL') return 'danger'
   if (action === 'NO_QUOTE') return 'warning'
   return 'info'
+}
+
+function signalActionClass(action: string) {
+  if (action === 'BUY') return 'signal-action-tag--buy'
+  if (action === 'SELL') return 'signal-action-tag--sell'
+  return ''
 }
 
 function actionText(action: string) {
@@ -245,6 +276,30 @@ function formatMoney(v?: number | null) {
   return v == null ? '-' : Number(v).toLocaleString(undefined, { maximumFractionDigits: 2 })
 }
 
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Trading Guardrails',
+    rows: [
+      { label: '刷新', value: autoRefresh.value ? '每分钟自动刷新' : '手动刷新' },
+      { label: '加载状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '行情连接', value: status.value?.quote_connected ? '已连接' : '未确认', tone: status.value?.quote_connected ? 'good' : 'warn' },
+      { label: '交易模块', value: status.value?.xttrader_available ? '可用' : '不可用', tone: status.value?.xttrader_available ? 'good' : 'bad' },
+      { label: '真实下单', value: status.value?.order_submit_enabled ? '已开启' : '仅信号', tone: status.value?.order_submit_enabled ? 'bad' : 'good' },
+    ],
+  },
+  {
+    title: 'Signals',
+    rows: [
+      { label: '账户', value: status.value?.account_id || '-' },
+      { label: '信号数', value: `${data.value?.signals?.length || 0} 条` },
+      { label: '账户来源', value: data.value?.account?.source || '-' },
+      { label: '账户总资产', value: formatMoney(data.value?.account?.total_asset) },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
+
 watch(autoRefresh, resetTimer)
 
 onMounted(() => {
@@ -259,24 +314,29 @@ onUnmounted(() => {
 
 <style scoped>
 .live-page {
-  padding: 16px;
+  overflow: auto;
 }
 
 .page-head {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 12px;
+  gap: var(--space-4);
+  padding: var(--space-5);
 }
 
 .page-head h2 {
-  margin: 0;
-  font-size: 20px;
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+  font-size: 22px;
 }
 
 .page-head p {
-  margin: 4px 0 0;
-  color: var(--text-muted);
+  margin: 0;
+  max-width: 760px;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
 }
 
 .actions {
@@ -293,9 +353,9 @@ onUnmounted(() => {
   gap: 14px;
   padding: 12px;
   border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent), var(--bg-surface);
   border-radius: 8px;
-  margin-bottom: 12px;
+  box-shadow: var(--shadow-card);
 }
 
 .status-band div,
@@ -326,9 +386,10 @@ onUnmounted(() => {
 
 .signal-card {
   border: 1px solid var(--border-subtle);
-  background: var(--bg-surface);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent), var(--bg-surface);
   border-radius: 8px;
   padding: 14px;
+  box-shadow: var(--shadow-card);
 }
 
 .card-head {
@@ -346,6 +407,18 @@ onUnmounted(() => {
 .card-head span {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.signal-action-tag--buy {
+  background: rgba(217, 48, 38, 0.16) !important;
+  border-color: rgba(217, 48, 38, 0.38) !important;
+  color: var(--market-up) !important;
+}
+
+.signal-action-tag--sell {
+  background: rgba(19, 115, 51, 0.16) !important;
+  border-color: rgba(19, 115, 51, 0.36) !important;
+  color: var(--market-down) !important;
 }
 
 .metrics {
@@ -381,6 +454,10 @@ onUnmounted(() => {
 }
 
 @media (max-width: 900px) {
+  .page-head {
+    grid-template-columns: 1fr;
+  }
+
   .signal-grid {
     grid-template-columns: 1fr;
   }

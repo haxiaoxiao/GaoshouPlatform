@@ -8,6 +8,7 @@ synthetic proxy values.
 
 from __future__ import annotations
 
+import gc
 import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -15,6 +16,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
@@ -124,6 +126,7 @@ def _load_financial(symbols: Sequence[str]) -> pd.DataFrame:
     wanted = [
         "symbol",
         "report_date",
+        "ann_date",
         "roe",
         "revenue",
         "net_profit",
@@ -159,8 +162,9 @@ def _load_financial(symbols: Sequence[str]) -> pd.DataFrame:
         return frame
     frame["symbol"] = frame["symbol"].astype(str)
     frame["report_date"] = _to_datetime64_ns(frame["report_date"])
+    frame["ann_date"] = _to_datetime64_ns(frame["ann_date"])
     for column in wanted:
-        if column not in {"symbol", "report_date"}:
+        if column not in {"symbol", "report_date", "ann_date"}:
             frame[column] = pd.to_numeric(frame[column], errors="coerce")
     return frame.dropna(subset=["symbol", "report_date"]).sort_values(["symbol", "report_date"]).reset_index(drop=True)
 
@@ -238,10 +242,27 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
     daily_frame["trade_date_ts"] = _to_datetime64_ns(daily_frame["trade_date"])
     financial_frame = financial.copy()
     financial_frame["report_date"] = _to_datetime64_ns(financial_frame["report_date"])
+    if "ann_date" not in financial_frame.columns:
+        financial_frame["ann_date"] = pd.NaT
+    financial_frame["ann_date"] = _to_datetime64_ns(financial_frame["ann_date"])
+    fallback_days = pd.to_timedelta(
+        np.select(
+            [
+                financial_frame["report_date"].dt.month.eq(3),
+                financial_frame["report_date"].dt.month.eq(6),
+                financial_frame["report_date"].dt.month.eq(9),
+                financial_frame["report_date"].dt.month.eq(12),
+            ],
+            [30, 60, 30, 120],
+            default=120,
+        ),
+        unit="D",
+    )
+    financial_frame["available_date"] = financial_frame["ann_date"].fillna(financial_frame["report_date"] + fallback_days)
     financial_frame = financial_frame.dropna(subset=["symbol", "report_date"])
     parts: list[pd.DataFrame] = []
     for symbol, trade_group in daily_frame.groupby("symbol", sort=False):
-        fin_group = financial_frame[financial_frame["symbol"] == symbol].sort_values("report_date")
+        fin_group = financial_frame[financial_frame["symbol"] == symbol].dropna(subset=["available_date"]).sort_values("available_date")
         if fin_group.empty:
             parts.append(trade_group)
             continue
@@ -249,7 +270,7 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
             trade_group.sort_values("trade_date_ts"),
             fin_group,
             left_on="trade_date_ts",
-            right_on="report_date",
+            right_on="available_date",
             direction="backward",
         )
         if "symbol_x" in merged.columns:

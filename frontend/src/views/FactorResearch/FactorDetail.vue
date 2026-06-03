@@ -196,6 +196,7 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
 import { factorValueApi, type FactorValueDefinition } from '@/api/factorValues'
@@ -269,13 +270,36 @@ const summaryCards = computed(() => {
     { label: '多空收益', value: formatPercent(summary.long_short_return), valueClass: valueClass(summary.long_short_return) },
     { label: '基准收益', value: formatPercent(summary.benchmark_return), valueClass: valueClass(summary.benchmark_return) },
     { label: '超额收益', value: formatPercent(summary.excess_long_short_return), valueClass: valueClass(summary.excess_long_short_return) },
-    { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'negative' },
+    { label: '最大回撤', value: formatPercent(summary.max_drawdown), valueClass: 'attention' },
     { label: '换手率', value: formatPercent(summary.turnover), valueClass: '' },
     { label: '覆盖率', value: formatPercent(summary.coverage_ratio), valueClass: '' },
     { label: '有效股票', value: String(summary.active_symbol_count || '-'), valueClass: '' },
     { label: '股票数', value: String(summary.symbol_count || '-'), valueClass: '' },
   ]
 })
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Factor Detail',
+    rows: [
+      { label: '因子', value: factorName.value },
+      { label: '分类', value: definition.value?.category || '-' },
+      { label: '来源', value: definition.value?.source || 'custom' },
+      { label: '加载状态', value: loading.value ? '加载中' : running.value ? '计算中' : '已就绪', tone: loading.value || running.value ? 'warn' : 'good' },
+    ],
+  },
+  {
+    title: 'Research Config',
+    rows: [
+      { label: '股票池', value: form.stock_pool_value || '-' },
+      { label: '基准', value: form.benchmark_symbol || '-' },
+      { label: 'IC均值', value: summaryCards.value[0]?.value || '-' },
+      { label: '覆盖率', value: summaryCards.value.find(item => item.label === '瑕嗙洊鐜?')?.value || '-' },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 const navChartRef = ref<HTMLElement | null>(null)
 const icChartRef = ref<HTMLElement | null>(null)
@@ -898,8 +922,9 @@ h2 {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
-.positive { color: #d93026 !important; }
-.negative { color: #137333 !important; }
+.positive { color: var(--market-up) !important; }
+.negative { color: var(--market-down) !important; }
+.attention { color: var(--status-attention) !important; }
 @media (max-width: 1100px) {
   .detail-header,
   .info-panel,

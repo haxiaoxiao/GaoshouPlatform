@@ -1,7 +1,17 @@
 <template>
-  <div class="page-container">
-    <div class="page-header">
-      <h2>策略回测</h2>
+  <div class="page-frame page-container backtest-page">
+    <div class="backtest-hero panel-card">
+      <div class="backtest-hero__copy">
+        <span class="section-kicker">BACKTEST COCKPIT</span>
+        <h2>策略回测</h2>
+        <p>保留策略列表、回测记录、代码编辑器、参数配置、数据检查、参数优化和报告入口；运行页优先放大代码区。</p>
+        <div class="backtest-hero__meta">
+          <span>策略：{{ activeStrategy?.name || '未选择' }}</span>
+          <span>引擎：{{ btEngine }}</span>
+          <span>K线：{{ btBarType }}</span>
+          <span>状态：{{ btRunning ? '运行中' : btTaskId ? '有结果' : '待运行' }}</span>
+        </div>
+      </div>
       <div class="page-header-actions">
         <el-button link type="primary" @click="openDocs">
           <el-icon><Document /></el-icon>
@@ -13,9 +23,6 @@
             新建策略
             <el-icon class="el-icon--right"><ArrowDown /></el-icon>
           </el-button>
-        <el-button type="success" @click="showUploadDialog = true" style="margin-left:4px">
-          上传研报
-        </el-button>
           <template #dropdown>
             <el-dropdown-menu>
               <el-dropdown-item command="script">新建脚本策略</el-dropdown-item>
@@ -23,6 +30,9 @@
             </el-dropdown-menu>
           </template>
         </el-dropdown>
+        <el-button type="success" @click="showUploadDialog = true">
+          上传研报
+        </el-button>
       </div>
     </div>
     <el-tabs v-model="activeTab" class="strategy-tabs">
@@ -416,6 +426,7 @@ import { ref, computed, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
+import { usePageContext } from '@/app/pageContext'
 import { strategyApi, type Strategy, type LiveData, type BacktestResultData } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
@@ -993,6 +1004,39 @@ const optPeriodHint = computed(() => {
   const testDays = Math.max(1, Math.round(Number(optTestPeriod.value || 0) / 240))
   return `单位: bar，约 ${trainDays}/${testDays} 个交易日`
 })
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Backtest Run',
+    rows: [
+      { label: '当前标签', value: activeTab.value },
+      { label: '策略数量', value: `${strategyList.value.length}` },
+      { label: '当前策略', value: activeStrategy.value?.name || '未选择' },
+      { label: '引擎 / K线', value: `${btEngine.value} / ${btBarType.value}` },
+      {
+        label: '运行状态',
+        value: btRunning.value ? '运行中' : btTaskId.value ? '有结果' : '待提交',
+        tone: btRunning.value ? 'warn' : btTaskId.value ? 'good' : 'neutral',
+      },
+    ],
+  },
+  {
+    title: 'Universe',
+    rows: [
+      { label: '股票池', value: poolSource.value?.label || (effectiveSymbols.value.length ? '自定义列表' : '未设置') },
+      { label: '样本规模', value: poolSource.value?.count ? `${poolSource.value.count} 只` : `${effectiveSymbols.value.length} 只` },
+      { label: '指数池', value: selectedIndexSymbol.value || '-' },
+      { label: '基准', value: selectedBenchmarkSymbol.value || '-' },
+      {
+        label: '参数优化',
+        value: optimizationRunning.value ? `${Math.round(optimizationProgress.value * 100)}%` : '未运行',
+        tone: optimizationRunning.value ? 'warn' : 'neutral',
+      },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 
 const applyBtSettings = (settings?: BtSettings | null) => {
   if (!settings) return
@@ -1741,20 +1785,56 @@ onMounted(async () => {
   height: 100%;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-.page-header {
-  display: flex;
-  justify-content: space-between;
+.backtest-page {
+  gap: var(--space-4);
+}
+
+.backtest-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  margin-bottom: 16px;
+  gap: var(--space-4);
+  padding: var(--space-5);
+  flex-shrink: 0;
 }
 
-.page-header h2 {
+.backtest-hero__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.backtest-hero h2 {
   margin: 0;
-  font-size: 20px;
-  font-weight: 600;
-  color: #e2e2ea;
+  color: var(--text-bright);
+  font-size: 22px;
+}
+
+.backtest-hero p {
+  max-width: 860px;
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.backtest-hero__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.backtest-hero__meta span {
+  padding: 5px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-full);
+  color: var(--text-secondary);
+  background: rgba(10, 14, 20, 0.58);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
 }
 
 .page-header-actions {
@@ -1764,19 +1844,83 @@ onMounted(async () => {
 }
 
 .strategy-tabs {
-  height: 100%;
-  background: #131318;
-  border-radius: 4px;
-  padding: 16px;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 15, 19, 0.76);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  padding: 10px 12px 12px;
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
 }
 
 .strategy-tabs :deep(.el-tabs__content) {
   flex: 1;
-  overflow: auto;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .strategy-tabs :deep(.el-tab-pane) {
   height: 100%;
+}
+
+.strategy-tabs :deep(.el-table) {
+  --el-table-bg-color: rgba(10, 14, 20, 0.78);
+  --el-table-tr-bg-color: rgba(11, 16, 24, 0.72);
+  --el-table-header-bg-color: rgba(11, 20, 31, 0.95);
+  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.08);
+  --el-table-border-color: rgba(108, 117, 137, 0.22);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+  background: rgba(10, 14, 20, 0.78) !important;
+  color: var(--text-primary);
+}
+
+.strategy-tabs :deep(.el-table__inner-wrapper),
+.strategy-tabs :deep(.el-table__body-wrapper),
+.strategy-tabs :deep(.el-table__fixed),
+.strategy-tabs :deep(.el-table__fixed-right),
+.strategy-tabs :deep(.el-table__fixed-body-wrapper),
+.strategy-tabs :deep(.el-table__fixed-right-patch) {
+  background: transparent !important;
+}
+
+.strategy-tabs :deep(.el-table th.el-table__cell) {
+  background: rgba(11, 20, 31, 0.95) !important;
+  color: var(--text-secondary);
+  border-bottom-color: rgba(108, 117, 137, 0.24);
+}
+
+.strategy-tabs :deep(.el-table tr),
+.strategy-tabs :deep(.el-table__body tr),
+.strategy-tabs :deep(.el-table__body td.el-table__cell) {
+  background: rgba(11, 16, 24, 0.72) !important;
+  color: var(--text-primary);
+}
+
+.strategy-tabs :deep(.el-table--striped .el-table__body tr.el-table__row--striped td.el-table__cell) {
+  background: rgba(15, 23, 34, 0.82) !important;
+}
+
+.strategy-tabs :deep(.el-table__body tr:hover > td.el-table__cell) {
+  background: rgba(56, 189, 248, 0.08) !important;
+}
+
+.strategy-tabs :deep(.el-table .el-table__cell) {
+  border-bottom-color: rgba(108, 117, 137, 0.22) !important;
+}
+
+.strategy-tabs :deep(.el-table__inner-wrapper::before),
+.strategy-tabs :deep(.el-table__border-left-patch),
+.strategy-tabs :deep(.el-table__border-bottom-patch) {
+  background-color: rgba(108, 117, 137, 0.22) !important;
+}
+
+.strategy-tabs :deep(.el-table .el-table-fixed-column--left),
+.strategy-tabs :deep(.el-table .el-table-fixed-column--right) {
+  background: rgba(11, 16, 24, 0.94) !important;
 }
 
 .tab-content {
@@ -1790,13 +1934,21 @@ onMounted(async () => {
   justify-content: flex-end;
 }
 
-.split-layout { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; height: calc(100vh - 200px); }
+.split-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.34fr) minmax(380px, 0.66fr);
+  gap: 12px;
+  height: calc(100vh - 250px);
+  min-height: 680px;
+}
 .editor-panel {
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border-ghost);
   border-radius: 8px;
   overflow: hidden;
+  min-width: 0;
+  min-height: 0;
 }
 .editor-toolbar {
   display: flex;
@@ -1826,7 +1978,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  min-height: 0;
+  min-height: 560px;
   padding: 8px;
   background: #1e1e1e;
 }
@@ -1835,7 +1987,14 @@ onMounted(async () => {
   flex: 1;
   min-height: 0;
 }
-.right-panel { display: flex; flex-direction: column; gap: 12px; overflow: auto; }
+.right-panel {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+}
 
 .upload-area {
   border: 2px dashed #444;
@@ -1856,6 +2015,7 @@ onMounted(async () => {
   border-radius: 8px;
   font-size: 12px;
   color: #c0c0cc;
+  flex-wrap: wrap;
 }
 .bt-config-bar span {
   color: #999;
@@ -1994,8 +2154,8 @@ onMounted(async () => {
 }
 .bt-metric-label { font-size: 10px; color: #8888a0; }
 .bt-metric-value { font-size: 16px; font-weight: 700; margin-top: 4px; color: #e2e2ea; }
-.positive { color: #d93026; }
-.negative { color: #137333; }
+.positive { color: var(--market-up); }
+.negative { color: var(--market-down); }
 .bt-log-panel {
   border: 1px solid var(--border-ghost);
   border-radius: 8px;
@@ -2032,6 +2192,7 @@ onMounted(async () => {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 560px;
 }
 .expression-input-row {
   display: flex;
@@ -2084,5 +2245,37 @@ onMounted(async () => {
 .empty-runner p {
   font-size: 14px;
   line-height: 1.6;
+}
+
+@media (max-width: 1320px) {
+  .split-layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: 0;
+  }
+
+  .right-panel {
+    max-height: none;
+  }
+}
+
+@media (max-width: 900px) {
+  .backtest-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .page-header-actions {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .editor-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .strategy-name-input {
+    width: 100%;
+  }
 }
 </style>

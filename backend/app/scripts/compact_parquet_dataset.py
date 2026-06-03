@@ -52,6 +52,8 @@ def compact_dataset(
     # 收集分区
     partitions = {}
     for f in sorted(root.rglob("*.parquet")):
+        if ".tmp-" in str(f) or "_compact_tmp_" in str(f):
+            continue
         rel = f.relative_to(root)
         parts = rel.parts
         # 提取分区键值对 year=YYYY/month=MM

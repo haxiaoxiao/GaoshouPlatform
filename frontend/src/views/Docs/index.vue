@@ -85,6 +85,12 @@ class MyStrategy(aq.Strategy):
 </template>
 
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useRoute } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
+
+const route = useRoute()
+
 const sections = [
   { id: 'overview', title: '概览' },
   { id: 'engine-architecture', title: '引擎架构' },
@@ -97,6 +103,27 @@ const sections = [
   { id: 'api-v2', title: 'Backtest API' },
   { id: 'examples', title: '示例' },
 ]
+
+const pageContextBlocks = computed(() => [
+  {
+    title: 'Docs',
+    rows: [
+      { label: '文档类型', value: 'Backtest Manual' },
+      { label: '章节数', value: `${sections.length}` },
+      { label: '当前锚点', value: route.hash || '#overview' },
+    ],
+  },
+  {
+    title: 'Topics',
+    rows: [
+      { label: '引擎', value: 'AKQuant / Builtin' },
+      { label: '接口', value: '/api/backtest/*' },
+      { label: '用途', value: '策略编写与回测说明' },
+    ],
+  },
+])
+
+usePageContext(pageContextBlocks)
 </script>
 
 <style scoped>

@@ -243,9 +243,9 @@ class FactorEvaluationService:
         if rows or query.factor_groups or query.factor_keyword:
             total = len(rows)
             await self._attach_latest_research_runs(rows, query)
-            if self._sort_uses_coverage(query.sort_by):
-                await self._maybe_await(self._attach_board_coverage(rows, query))
             rows = self._sort_and_page_rows(rows, query)
+            if self._sort_uses_coverage(query.sort_by):
+                await self._attach_missing_board_coverage(rows, query)
             return BoardResponse(
                 rows=rows,
                 total=total,
@@ -296,9 +296,9 @@ class FactorEvaluationService:
 
         total = len(rows)
         await self._attach_latest_research_runs(rows, query)
-        if self._sort_uses_coverage(query.sort_by):
-            await self._maybe_await(self._attach_board_coverage(rows, query))
         rows = self._sort_and_page_rows(rows, query)
+        if self._sort_uses_coverage(query.sort_by):
+            await self._attach_missing_board_coverage(rows, query)
         return BoardResponse(
             rows=rows, total=total,
             page=query.page, page_size=query.page_size,

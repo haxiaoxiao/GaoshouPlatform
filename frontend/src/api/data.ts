@@ -2,13 +2,17 @@ import request from './request'
 
 // 股票相关接口
 export interface Stock {
-  id: number
+  id?: number
   symbol: string
   name: string
+  exchange?: string | null
   industry: string | null
-  market: string
+  market?: string | null
   list_date: string | null
-  is_active: boolean
+  is_active?: boolean
+  is_st?: boolean
+  total_mv?: number | null
+  circ_mv?: number | null
 }
 
 export interface StockListParams {
@@ -28,10 +32,19 @@ export interface PaginatedResponse<T> {
 }
 
 export interface StockDetail extends Stock {
+  industry2?: string | null
+  industry3?: string | null
+  sector?: string | null
+  concept?: string | null
+  is_suspend?: boolean
+  is_delist?: boolean
+  float_market_cap?: number | null
   market_cap: number | null
   pe_ratio: number | null
   pb_ratio: number | null
   roe: number | null
+  eps?: number | null
+  bvps?: number | null
   revenue_growth: number | null
   profit_growth: number | null
   debt_ratio: number | null
@@ -39,6 +52,9 @@ export interface StockDetail extends Stock {
   gross_margin: number | null
   net_margin: number | null
   dividend_yield: number | null
+  latest_report_date?: string | null
+  latest_ann_date?: string | null
+  updated_at?: string | null
 }
 
 export const stockApi = {
@@ -47,8 +63,8 @@ export const stockApi = {
     request.get<PaginatedResponse<Stock>>('/data/stocks', { params }),
 
   // 获取股票详情
-  getDetail: (id: number) =>
-    request.get<StockDetail>(`/data/stocks/${id}`),
+  getDetail: (symbol: string) =>
+    request.get<StockDetail>(`/data/stocks/${symbol}`),
 }
 
 // 行业相关接口

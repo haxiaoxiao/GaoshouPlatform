@@ -5,7 +5,7 @@ import uuid
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.services.sync_run_store import (
     upsert_sync_run,
 )
 from app.services.sync_service import SyncProgress, SyncService
+from app.services.task_queue import QueuedTask, get_task_queue
 
 router = APIRouter()
 
@@ -56,6 +57,26 @@ VALID_SYNC_TYPES = (
     "sentiment_xueqiu",
     "sentiment_nga",
 )
+
+
+def _attach_sync_availability(data: dict[str, Any]) -> dict[str, Any]:
+    status = str(data.get("status") or "idle")
+    is_busy = status in {"queued", "running"}
+    queue = get_task_queue("data_sync")
+    details = dict(data.get("details") or {})
+    details.update({
+        "queue_mode": True,
+        "queue_busy": is_busy,
+        "queue_pending_count": queue.pending_count,
+        "queue_active_task_id": queue.active_task.task_id if queue.active_task else None,
+    })
+    return {
+        **data,
+        "details": details,
+        "sync_service_available": True,
+        "can_trigger": True,
+        "reason": None,
+    }
 
 
 async def _run_sync_task(
@@ -275,7 +296,6 @@ async def _run_sync_task(
 
 @router.post("/sync")
 async def trigger_sync(
-    background_tasks: BackgroundTasks,
     request: SyncRequest = Body(...),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
@@ -286,11 +306,6 @@ async def trigger_sync(
     if request.sync_mode not in ("incremental", "range", "full"):
         raise HTTPException(status_code=400, detail="sync_mode must be incremental, range or full")
 
-    service = SyncService(session)
-    persisted = await service.get_persisted_sync_status()
-    if persisted and persisted.get("status") in {"queued", "running"}:
-        raise HTTPException(status_code=409, detail="已有同步任务正在运行中")
-
     run_id = f"sync-{str(uuid.uuid4())[:8]}"
     await upsert_sync_run(
         session,
@@ -299,7 +314,14 @@ async def trigger_sync(
         status="queued",
         request=request.model_dump(mode="json"),
     )
-    background_tasks.add_task(_run_sync_task, run_id, request)
+    await get_task_queue("data_sync").submit(
+        QueuedTask(
+            task_id=run_id,
+            title=f"data sync {request.sync_type}",
+            handler=lambda: _run_sync_task(run_id, request),
+            metadata={"sync_type": request.sync_type},
+        )
+    )
 
     initial_progress = SyncProgress(
         sync_type=request.sync_type,
@@ -324,12 +346,12 @@ async def get_sync_status(
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()
     if persisted:
-        return {"code": 0, "message": "success", "data": persisted}
+        return {"code": 0, "message": "success", "data": _attach_sync_availability(persisted)}
     latest = await get_latest_sync_run(session)
     idle = idle_sync_status()
     if latest is not None:
         idle["last_run"] = run_to_status(latest)
-    return {"code": 0, "message": "success", "data": idle}
+    return {"code": 0, "message": "success", "data": _attach_sync_availability(idle)}
 
 
 @router.get("/sync/logs")

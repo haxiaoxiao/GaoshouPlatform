@@ -1,5 +1,5 @@
-# backend/app/api/data_explorer.py
 """Data explorer API for ClickHouse or local Parquet/DuckDB."""
+import calendar
 from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
@@ -32,6 +32,26 @@ _PARQUET_DATASETS = [
     "market_news",
 ]
 
+_PARQUET_DATE_COLUMNS = {
+    "klines_daily": "trade_date",
+    "klines_minute": "datetime",
+    "klines_minute_timer": "datetime",
+    "klines_minute_cum_timer": "datetime",
+    "factor_cache": "trade_date",
+    "factor_values": "trade_date",
+    "stock_indicators": "trade_date",
+    "indicator_timeseries": "datetime",
+    "adj_factors": "trade_date",
+    "moneyflow": "trade_date",
+    "block_moneyflow": "trade_date",
+    "auction_replay": "datetime",
+    "ths_index": "snapshot_date",
+    "ths_member": "snapshot_date",
+    "announcements": "ann_date",
+    "research_reports": "report_date",
+    "market_news": "publish_time",
+}
+
 _ALLOWED_FILTER_OPS = {
     "=",
     "!=",
@@ -63,6 +83,7 @@ class ExplorerSearchRequest(BaseModel):
     columns: list[str] | None = None
     filters: list[ExplorerFilter] = Field(default_factory=list)
     quick_search: dict[str, Any] = Field(default_factory=dict)
+    include_total: bool = False
 
 
 def _use_parquet() -> bool:
@@ -227,39 +248,71 @@ def _parquet_schema(table_name: str) -> list[dict[str, Any]]:
     ]
 
 
-@router.get("/tables", summary="获取所有表")
+def _partition_bounds(root) -> tuple[int, str | None, str | None]:
+    partitions: list[tuple[int, int]] = []
+    for year_dir in root.glob("year=*"):
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for month_dir in year_dir.glob("month=??"):
+            try:
+                month = int(month_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if any(".tmp-" not in str(file) for file in month_dir.glob("*.parquet")):
+                partitions.append((year, month))
+    if not partitions:
+        return 0, None, None
+    min_year, min_month = min(partitions)
+    max_year, max_month = max(partitions)
+    max_day = calendar.monthrange(max_year, max_month)[1]
+    return (
+        len(partitions),
+        f"{min_year:04d}-{min_month:02d}-01",
+        f"{max_year:04d}-{max_month:02d}-{max_day:02d}",
+    )
+
+
+def _fast_parquet_table_summary(store: ParquetMarketDataStore, name: str) -> dict[str, Any] | None:
+    root = store._dataset_path(name)
+    if not root.exists():
+        return None
+    partition_count, min_date, max_date = _partition_bounds(root)
+    if partition_count == 0 and not any(".tmp-" not in str(file) for file in root.glob("*.parquet")):
+        return None
+
+    date_col = _PARQUET_DATE_COLUMNS.get(name)
+    if date_col == "datetime" and min_date and max_date:
+        min_date = f"{min_date} 00:00:00"
+        max_date = f"{max_date} 23:59:59"
+
+    return {
+        "name": name,
+        "row_count": None,
+        "rows": None,
+        "count": None,
+        "min_date": min_date,
+        "max_date": max_date,
+        "date_column": date_col,
+        "estimated": True,
+        "partition_count": partition_count,
+    }
+
+
+def _estimated_total(offset: int, row_count: int, page_size: int) -> int:
+    return offset + row_count + (1 if row_count >= page_size else 0)
+
+
+@router.get("/tables", summary="List available data tables")
 def list_tables():
     if _use_parquet():
         store = _parquet_store()
-        db = get_duckdb()
         tables = []
         for name in _PARQUET_DATASETS:
-            if not store._exists(name):
-                continue
-            pattern = store._glob_pattern(name)
-            columns = [column["name"] for column in _parquet_schema(name)]
-            date_col = next((column for column in ("trade_date", "datetime", "date", "snapshot_date", "ann_date", "report_date", "publish_time") if column in columns), None)
-            if date_col:
-                row = db.execute(
-                    f"""
-                    SELECT
-                        count(*) AS row_count,
-                        min({date_col}) AS min_date,
-                        max({date_col}) AS max_date
-                    FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true)
-                    """
-                ).fetchone()
-            else:
-                count = db.execute(
-                    f"SELECT count(*) FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true)"
-                ).fetchone()[0]
-                row = (count, None, None)
-            tables.append({
-                "name": name,
-                "row_count": int(row[0] or 0) if row else 0,
-                "min_date": str(row[1]) if row and row[1] is not None else None,
-                "max_date": str(row[2]) if row and row[2] is not None else None,
-            })
+            summary = _fast_parquet_table_summary(store, name)
+            if summary is not None:
+                tables.append(summary)
         return {"code": 0, "data": tables}
 
     ch = get_ch_client()
@@ -272,7 +325,7 @@ def list_tables():
     return {"code": 0, "data": tables}
 
 
-@router.get("/tables/{table_name}/schema", summary="获取表结构")
+@router.get("/tables/{table_name}/schema", summary="Get table schema")
 def get_table_schema(table_name: str):
     if _use_parquet():
         try:
@@ -293,7 +346,7 @@ def get_table_schema(table_name: str):
     return {"code": 0, "data": columns}
 
 
-@router.get("/tables/{table_name}/preview", summary="预览表数据")
+@router.get("/tables/{table_name}/preview", summary="Preview table rows")
 def preview_table(
     table_name: str,
     page: int = Query(1, ge=1),
@@ -301,6 +354,7 @@ def preview_table(
     order_by: str | None = Query(None),
     order_dir: str = Query("ASC"),
     where: str | None = Query(None),
+    include_total: bool = Query(False),
 ):
     if _use_parquet():
         try:
@@ -313,10 +367,14 @@ def preview_table(
             offset = (page - 1) * page_size
             source = f"read_parquet({_sql_literal(pattern)}, hive_partitioning=true)"
             db = get_duckdb()
-            total = db.execute(f"SELECT count(*) FROM {source} {where_clause}").fetchone()[0]
             raw_rows = db.execute(
                 f"SELECT * FROM {source} {where_clause} {order_clause} LIMIT {page_size} OFFSET {offset}"
             ).fetchall()
+            total_estimated = not include_total
+            if include_total:
+                total = int(db.execute(f"SELECT count(*) FROM {source} {where_clause}").fetchone()[0] or 0)
+            else:
+                total = _estimated_total(offset, len(raw_rows), page_size)
             rows = [
                 {col: _normalize_value(raw[i]) for i, col in enumerate(columns)}
                 for raw in raw_rows
@@ -327,6 +385,7 @@ def preview_table(
                     "columns": columns,
                     "rows": rows,
                     "total": int(total or 0),
+                    "total_estimated": total_estimated,
                     "page": page,
                     "page_size": page_size,
                     "total_pages": (int(total or 0) + page_size - 1) // page_size,
@@ -343,11 +402,13 @@ def preview_table(
     order_clause = f"ORDER BY `{order_by}` {safe_dir}" if order_by else ""
     offset = (page - 1) * page_size
 
-    count_sql = f"SELECT count() FROM `{table_name}` {where_clause}"
-    total = ch.execute(count_sql)[0][0]
-
     data_sql = f"SELECT * FROM `{table_name}` {where_clause} {order_clause} LIMIT {page_size} OFFSET {offset}"
     raw_rows = ch.execute(data_sql)
+    if include_total:
+        count_sql = f"SELECT count() FROM `{table_name}` {where_clause}"
+        total = int(ch.execute(count_sql)[0][0] or 0)
+    else:
+        total = _estimated_total(offset, len(raw_rows), page_size)
 
     col_names = [desc[0] for desc in ch.execute(f"DESCRIBE TABLE `{table_name}`")]
 
@@ -369,6 +430,7 @@ def preview_table(
             "columns": col_names,
             "rows": rows,
             "total": total,
+            "total_estimated": not include_total,
             "page": page,
             "page_size": page_size,
             "total_pages": (total + page_size - 1) // page_size,
@@ -376,7 +438,7 @@ def preview_table(
     }
 
 
-@router.post("/tables/{table_name}/search", summary="结构化查询表数据")
+@router.post("/tables/{table_name}/search", summary="Search table rows")
 def search_table(
     table_name: str,
     request: ExplorerSearchRequest = Body(...),
@@ -399,17 +461,24 @@ def search_table(
     backend = "parquet" if _use_parquet() else "clickhouse"
     source, select_sql, selected_columns, where_sql = _build_search_sql(table_name, request, backend=backend)
     offset = (request.page - 1) * request.page_size
-    count_sql = f"SELECT count(*) FROM {source} {where_sql}"
     data_sql = f"{select_sql} LIMIT {request.page_size} OFFSET {offset}"
     try:
         if backend == "parquet":
             db = get_duckdb()
-            total = db.execute(count_sql).fetchone()[0]
             raw_rows = db.execute(data_sql).fetchall()
+            total = (
+                int(db.execute(f"SELECT count(*) FROM {source} {where_sql}").fetchone()[0] or 0)
+                if request.include_total
+                else _estimated_total(offset, len(raw_rows), request.page_size)
+            )
         else:
             ch = get_ch_client()
-            total = ch.execute(count_sql)[0][0]
             raw_rows = ch.execute(data_sql)
+            total = (
+                int(ch.execute(f"SELECT count(*) FROM {source} {where_sql}")[0][0] or 0)
+                if request.include_total
+                else _estimated_total(offset, len(raw_rows), request.page_size)
+            )
         rows = [
             {col: _normalize_value(raw[index]) for index, col in enumerate(selected_columns)}
             for raw in raw_rows
@@ -420,6 +489,7 @@ def search_table(
                 "columns": selected_columns,
                 "rows": rows,
                 "total": int(total or 0),
+                "total_estimated": not request.include_total,
                 "page": request.page,
                 "page_size": request.page_size,
                 "total_pages": (int(total or 0) + request.page_size - 1) // request.page_size,
@@ -432,7 +502,7 @@ def search_table(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.get("/tables/{table_name}/distinct", summary="获取某列的唯一值")
+@router.get("/tables/{table_name}/distinct", summary="Get distinct column values")
 def get_distinct_values(
     table_name: str,
     column: str = Query(...),
@@ -469,16 +539,16 @@ def get_distinct_values(
     return {"code": 0, "data": values}
 
 
-@router.post("/query", summary="执行自定义SQL查询")
+@router.post("/query", summary="Run a read-only SQL query")
 def execute_query(
-    sql: str = Query(..., description="SQL查询语句", max_length=2000),
+    sql: str = Query(..., description="SQL query", max_length=2000),
     limit: int = Query(200, ge=1, le=1000),
 ):
     ch = get_ch_client()
 
     upper = sql.strip().upper()
     if not upper.startswith("SELECT") and not upper.startswith("SHOW") and not upper.startswith("DESCRIBE"):
-        return {"code": 1, "message": "只允许SELECT/SHOW/DESCRIBE查询"}
+        return {"code": 1, "message": "Only SELECT/SHOW/DESCRIBE queries are allowed"}
 
     if "LIMIT" not in upper:
         sql = f"{sql.rstrip(';')} LIMIT {limit}"

@@ -5,7 +5,7 @@
         <div class="factor-title">
           <span class="factor-title__eyebrow">FACTOR LAB / RESEARCH WORKBENCH</span>
           <h2>因子研究</h2>
-          <p>管理因子缓存、检查覆盖率、预计算特征，并查看因子表现。</p>
+          <p>{{ activeTabDescription }}</p>
         </div>
         <div class="factor-status">
           <div>
@@ -13,21 +13,21 @@
             <strong>{{ activeTabLabel }}</strong>
           </div>
           <div>
-            <span>数据口径</span>
-            <strong>Point-in-time</strong>
+            <span>计算前置</span>
+            <strong>{{ activeTab === 'board' ? '缓存已落盘' : '可预计算' }}</strong>
           </div>
           <div>
-            <span>默认窗口</span>
-            <strong>过去一年</strong>
+            <span>表达式入口</span>
+            <strong>创建 / 编辑时打开</strong>
           </div>
         </div>
       </header>
 
-      <el-tabs v-model="activeTab" class="factor-tabs">
-        <el-tab-pane label="因子缓存" name="factor-values" lazy>
+      <el-tabs v-model="activeTab" class="factor-tabs" @tab-change="handleTabChange">
+        <el-tab-pane label="因子定义 / 预计算" name="factor-values" lazy>
           <FactorValueStore v-show="activeTab === 'factor-values'" />
         </el-tab-pane>
-        <el-tab-pane label="因子看板" name="board" lazy>
+        <el-tab-pane label="因子评估看板" name="board" lazy>
           <FactorBoard v-show="activeTab === 'board'" />
         </el-tab-pane>
       </el-tabs>
@@ -38,19 +38,61 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
+import { usePageContext } from '@/app/pageContext'
 import FactorBoard from './FactorBoard.vue'
 import FactorValueStore from './FactorValueStore.vue'
 
 const route = useRoute()
+const router = useRouter()
 const activeTab = ref('factor-values')
-const isShellVisible = computed(() => route.name === 'FactorResearch')
-const activeTabLabel = computed(() => activeTab.value === 'board' ? '因子看板' : '因子缓存')
+const shellRouteNames = new Set(['FactorResearch', 'FactorEvaluation'])
+const isShellVisible = computed(() => shellRouteNames.has(String(route.name || '')))
+const activeTabLabel = computed(() => activeTab.value === 'board' ? '因子评估' : '因子定义')
+const activeTabDescription = computed(() => (
+  activeTab.value === 'board'
+    ? '评估 IC、ICIR、多空收益、回撤、换手和已计算组合；不在评估页展开表达式编辑器。'
+    : '管理因子目录、覆盖率、参数版本和预计算；表达式只在创建或编辑因子时打开。'
+))
+
+const pageContextBlocks = computed(() => {
+  if (!isShellVisible.value) return null
+  return [
+    {
+      title: 'Factor Lab',
+      rows: [
+        { label: '当前视图', value: activeTabLabel.value },
+        { label: '路径', value: route.path },
+        { label: '外壳状态', value: '主工作台', tone: 'good' },
+      ],
+    },
+    {
+      title: 'Mode',
+      rows: [
+        { label: '预计算', value: activeTab.value === 'board' ? '消费缓存' : '可发起预计算' },
+        { label: '表达式入口', value: activeTab.value === 'board' ? '关闭' : '创建/编辑时打开' },
+      ],
+    },
+  ]
+})
+
+usePageContext(pageContextBlocks)
+
+const routeToTab = () => {
+  if (route.path.startsWith('/factor/evaluation')) return 'board'
+  if (route.query.tab === 'board') return 'board'
+  return 'factor-values'
+}
+
+const handleTabChange = (name: string | number) => {
+  const target = name === 'board' ? '/factor/evaluation' : '/factor'
+  if (route.path !== target) router.push(target)
+}
 
 watch(
-  () => route.query.tab,
-  (tab) => {
-    if (tab === 'board' || tab === 'factor-values') activeTab.value = tab
+  () => [route.path, route.query.tab],
+  () => {
+    activeTab.value = routeToTab()
   },
   { immediate: true },
 )
