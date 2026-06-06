@@ -48,6 +48,25 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-GitChecked {
+    param(
+        [string]$DeploymentRoot,
+        [string[]]$ArgumentList
+    )
+
+    Invoke-Checked -FilePath "git" `
+        -ArgumentList (@("-c", "safe.directory=$DeploymentRoot", "-C", $DeploymentRoot) + $ArgumentList)
+}
+
+function Invoke-GitOutput {
+    param(
+        [string]$DeploymentRoot,
+        [string[]]$ArgumentList
+    )
+
+    return (& git -c "safe.directory=$DeploymentRoot" -C $DeploymentRoot @ArgumentList)
+}
+
 function Wait-HttpOk {
     param(
         [string]$Url,
@@ -144,22 +163,22 @@ Write-Host "Ports:       backend=$backendPort sync=$syncPort frontend=$frontendP
 Write-Host "Pip index:   $PipIndexUrl"
 Write-Host ""
 
-$dirty = (& git -C $Root status --porcelain)
+$dirty = Invoke-GitOutput -DeploymentRoot $Root -ArgumentList @("status", "--porcelain")
 if ($dirty -and -not $AllowDirty) {
     throw "Deployment checkout has uncommitted changes. Commit/stash them or rerun with -AllowDirty."
 }
 
-Invoke-Checked -FilePath "git" -ArgumentList @("-C", $Root, "fetch", "origin", $Branch)
-$currentBranch = (& git -C $Root branch --show-current).Trim()
+Invoke-GitChecked -DeploymentRoot $Root -ArgumentList @("fetch", "origin", $Branch)
+$currentBranch = (Invoke-GitOutput -DeploymentRoot $Root -ArgumentList @("branch", "--show-current")).Trim()
 if ($currentBranch -ne $Branch) {
-    $localBranches = (& git -C $Root branch --format "%(refname:short)")
+    $localBranches = Invoke-GitOutput -DeploymentRoot $Root -ArgumentList @("branch", "--format", "%(refname:short)")
     if ($localBranches -contains $Branch) {
-        Invoke-Checked -FilePath "git" -ArgumentList @("-C", $Root, "switch", $Branch)
+        Invoke-GitChecked -DeploymentRoot $Root -ArgumentList @("switch", $Branch)
     } else {
-        Invoke-Checked -FilePath "git" -ArgumentList @("-C", $Root, "switch", "--track", "origin/$Branch")
+        Invoke-GitChecked -DeploymentRoot $Root -ArgumentList @("switch", "--track", "origin/$Branch")
     }
 }
-Invoke-Checked -FilePath "git" -ArgumentList @("-C", $Root, "pull", "--ff-only", "origin", $Branch)
+Invoke-GitChecked -DeploymentRoot $Root -ArgumentList @("pull", "--ff-only", "origin", $Branch)
 
 if (-not (Test-Path -LiteralPath $python)) {
     $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
