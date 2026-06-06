@@ -72,11 +72,18 @@ if errorlevel 1 (
 )
 
 echo [3/3] Verifying configured ports...
+set "PORTS_BUSY=0"
 for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT%) do (
   netstat -ano 2>nul | findstr ":%%p " | findstr "LISTENING" >nul 2>&1
   if not errorlevel 1 (
-    echo       WARN: port %%p is still listening
+    echo       ERROR: port %%p is still listening
+    set "PORTS_BUSY=1"
   )
+)
+if "%PORTS_BUSY%"=="1" (
+  echo       One or more configured ports are still occupied.
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
 )
 echo       Done
 echo       miniQMT client is external and was left running.

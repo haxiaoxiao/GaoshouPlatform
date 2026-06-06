@@ -83,6 +83,11 @@ if not exist "%FRONTEND_DIR%\package.json" (
 echo [1/7] Stopping stale project processes on configured ports...
 call :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
+call :assert_ports_free
+if errorlevel 1 (
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
+)
 echo       OK
 
 echo [2/7] Starting Redis on port %REDIS_PORT% if Docker is available...
@@ -179,4 +184,19 @@ exit /b 0
 :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+exit /b 0
+
+:assert_ports_free
+set "PORTS_BUSY=0"
+for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT%) do (
+  netstat -ano 2>nul | findstr ":%%p " | findstr "LISTENING" >nul 2>&1
+  if not errorlevel 1 (
+    echo       ERROR: port %%p is still listening
+    set "PORTS_BUSY=1"
+  )
+)
+if "%PORTS_BUSY%"=="1" (
+  echo       Unable to start because one or more configured ports are still occupied.
+  exit /b 1
+)
 exit /b 0

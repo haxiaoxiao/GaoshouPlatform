@@ -27,6 +27,9 @@ concurrency:
   group: gaoshou-windows-deploy
   cancel-in-progress: false
 
+env:
+  GAOSHOU_PIP_INDEX_URL: https://pypi.tuna.tsinghua.edu.cn/simple
+
 jobs:
   deploy-development:
     name: Deploy development
