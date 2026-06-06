@@ -271,6 +271,22 @@ index_symbol, con_code, con_name, in_date
 
 - 财务数据应同时保存 `ann_date` 和 `end_date`。
 - 回测中只能在 `trade_date >= ann_date` 后使用该报告数据。
+- `financial_data.ann_date` 的优先补数口径是 Tushare `disclosure_date.actual_date`，按报告期 `end_date` 批量获取全市场实际披露日，映射到 SQLite `financial_data(symbol, report_date)`。
+- 当 `disclosure_date` 缺少少数新股或历史报告期记录时，可用三表 `balancesheet.f_ann_date` 做保守兜底；不要优先使用更早的 `balancesheet.ann_date`，避免因子回测提前使用尚未完整披露的财务数据。
+- QMT 财务同步仍会从 `m_anntime` 写入 `ann_date`；若后续同时使用 QMT 与 Tushare 补数，应以不早于实际可见日的口径为准，宁可晚用，不可提前。
+
+2026-06-03 prod 补数记录：
+
+| 项目 | 结果 |
+|---|---:|
+| SQLite 表 | `financial_data` |
+| 总行数 | 48,606 |
+| 季度报告行 | 33,469 |
+| 已补 `ann_date` 季度行 | 33,463 |
+| 剩余季度缺口 | 6 |
+| 非季末/`Unknown` 行缺口 | 15,137 |
+
+剩余 6 条季度缺口集中在 2026 年新上市股票的 IPO 前历史年报，未做猜测性填充。非季末 `Unknown` 行多为无财务值的日期型噪音，不应作为财务 PIT 因子输入。
 
 ### 公告：`anns_d`
 

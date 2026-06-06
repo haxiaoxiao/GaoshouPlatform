@@ -2156,6 +2156,7 @@ class SyncService:
         run_id: str | None = None,
         failure_strategy: str = "skip",
         full_sync: bool = False,
+        auto_incremental: bool = False,
     ) -> SyncProgress:
         """
         同步分钟K线数据
@@ -2167,6 +2168,7 @@ class SyncService:
             task_id: 关联任务ID
             failure_strategy: 失败策略 (skip/retry/stop)
             full_sync: 是否全量同步(True=先删除已有数据，False=增量追加)
+            auto_incremental: 是否按本地已有分钟线自动推导增量起点
 
         Returns:
             SyncProgress: 同步进度
@@ -2176,8 +2178,24 @@ class SyncService:
         # 设置默认日期范围
         if end_date is None:
             end_date = date.today()
+        start_date_was_provided = start_date is not None
         if start_date is None:
             start_date = end_date
+
+        requested_start_date = start_date
+        requested_end_date = end_date
+        incremental_latest_date: date | None = None
+        if auto_incremental and not full_sync:
+            if symbols:
+                incremental_latest_date = _latest_market_date_for_symbols("klines_minute", symbols)
+            else:
+                incremental_latest_date = _latest_market_date("klines_minute")
+            if incremental_latest_date is not None:
+                # Why: 最新分钟分区可能只有个别 symbol 写入成功，重叠 1 天可补齐稀疏分区。
+                incremental_start = incremental_latest_date - td(days=1)
+                start_date = max(start_date, incremental_start) if start_date_was_provided else incremental_start
+            elif not start_date_was_provided:
+                start_date = end_date - td(days=DATASYNC_INITIAL_MINUTE_DAYS)
 
         # 初始化进度
         progress = SyncProgress(
@@ -2188,11 +2206,43 @@ class SyncService:
                 "run_id": run_id,
                 "start_date": start_date.isoformat(),
                 "end_date": end_date.isoformat(),
+                "requested_start_date": requested_start_date.isoformat(),
+                "requested_end_date": requested_end_date.isoformat(),
                 "full_sync": full_sync,
+                "auto_incremental": auto_incremental,
+                "incremental_overlap_days": 1 if auto_incremental and not full_sync else 0,
+                "latest_local_date": incremental_latest_date.isoformat() if incremental_latest_date else None,
             },
         )
         _current_sync = progress
         await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+        if start_date > end_date:
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details.update(
+                {
+                    "skipped": True,
+                    "skip_reason": "already up to date",
+                    "total_klines": 0,
+                    "failed_symbols": [],
+                }
+            )
+            await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+            await self.create_sync_log(
+                sync_type="kline_minute",
+                status="completed",
+                total_count=0,
+                success_count=0,
+                failed_count=0,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            _current_sync = None
+            return progress
 
         # ClickHouse is optional. In parquet mode without clickhouse_enabled,
         # sync writes directly to Parquet and does not require Docker/CH.

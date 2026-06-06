@@ -20,7 +20,7 @@
       </div>
     </header>
 
-    <SyncPanel />
+    <SyncPanel @status-change="updateSyncStatus" />
   </div>
 </template>
 
@@ -32,15 +32,20 @@ import { syncApi, type SyncStatus } from '@/api/sync'
 
 const quickSyncing = ref(false)
 const syncStatus = ref<SyncStatus | null>(null)
+const quickSyncBusy = computed(() => ['queued', 'running'].includes(syncStatus.value?.status || ''))
 const quickSyncDisabled = computed(() => (
-  syncStatus.value?.can_trigger === false
+  quickSyncBusy.value
+  || quickSyncing.value
+  || syncStatus.value?.can_trigger === false
   || syncStatus.value?.sync_service_available === false
   || syncStatus.value?.details?.sync_service_unavailable === true
 ))
 const syncUnavailableReason = computed(() => (
-  syncStatus.value?.reason
-  || String(syncStatus.value?.details?.proxy_error || '')
-  || 'dev 同步服务未启动或正在执行任务，请先启动 18810 同步服务后再提交。'
+  quickSyncBusy.value
+    ? `当前正在${syncStatus.value?.status === 'queued' ? '排队' : '执行'}：${syncTypeLabel(syncStatus.value?.sync_type)}，请等待完成或停止后再一键同步。`
+    : syncStatus.value?.reason
+      || String(syncStatus.value?.details?.proxy_error || '')
+      || 'dev 同步服务未启动或正在执行任务，请先启动 18810 同步服务后再提交。'
 ))
 
 onMounted(loadSyncStatus)
@@ -74,6 +79,30 @@ async function loadSyncStatus() {
       reason: error?.message || 'dev 同步服务状态接口不可用',
     }
   }
+}
+
+function updateSyncStatus(status: SyncStatus) {
+  syncStatus.value = status
+}
+
+function syncTypeLabel(type?: string | null) {
+  const map: Record<string, string> = {
+    datasync: '一键同步',
+    stock_info: '股票基础',
+    stock_full: '股票完整',
+    financial_data: '财务数据',
+    kline_daily: '日 K',
+    index_daily: '指数日线',
+    kline_minute: '分钟 K',
+    realtime_mv: '实时市值',
+    dividends: 'QMT 分红',
+    factor_dependency: '因子依赖',
+    tushare_relay: 'Tushare Relay',
+    ths_concept: '同花顺概念',
+    sentiment_xueqiu: '情绪 / 雪球',
+    sentiment_nga: '情绪 / NGA',
+  }
+  return type ? map[type] || type : '同步任务'
 }
 
 async function runQuickSync() {

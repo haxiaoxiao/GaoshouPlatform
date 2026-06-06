@@ -63,12 +63,15 @@ def _attach_sync_availability(data: dict[str, Any]) -> dict[str, Any]:
     status = str(data.get("status") or "idle")
     is_busy = status in {"queued", "running"}
     queue = get_task_queue("data_sync")
+    queue_snapshot = queue.snapshot()
     details = dict(data.get("details") or {})
     details.update({
         "queue_mode": True,
         "queue_busy": is_busy,
-        "queue_pending_count": queue.pending_count,
-        "queue_active_task_id": queue.active_task.task_id if queue.active_task else None,
+        "queue_pending_count": queue_snapshot["pending_count"],
+        "queue_active_task_id": queue_snapshot["active_task_id"],
+        "queue_active_task": queue_snapshot["active"],
+        "queue_pending_tasks": queue_snapshot["pending"],
     })
     return {
         **data,
@@ -119,18 +122,22 @@ async def _run_sync_task(
 
         qmt_required_types = {"datasync", "stock_info", "stock_full", "financial_data", "realtime_mv", "kline_daily", "kline_minute", "kline_weekly", "dividends"}
         qmt_required = request.sync_type in qmt_required_types
-        if request.sync_type == "kline_daily" and request.sync_mode == "incremental" and not effective_full_sync:
+        # 分钟线增量会重叠回刷最新分区，不能仅凭 max(datetime) 判断已完整。
+        incremental_dataset = {
+            "kline_daily": "klines_daily",
+        }.get(request.sync_type)
+        if incremental_dataset and request.sync_mode == "incremental" and not effective_full_sync:
             try:
                 target_end = request.end_date or date.today()
                 latest = (
-                    sync_service_module._latest_market_date_for_symbols("klines_daily", request.symbols)
+                    sync_service_module._latest_market_date_for_symbols(incremental_dataset, request.symbols)
                     if request.symbols
-                    else sync_service_module._latest_market_date("klines_daily")
+                    else sync_service_module._latest_market_date(incremental_dataset)
                 )
                 if latest is not None and latest >= target_end:
                     qmt_required = False
             except Exception as exc:
-                logger.debug("Unable to pre-check incremental daily coverage: {}", exc)
+                logger.debug("Unable to pre-check incremental {} coverage: {}", request.sync_type, exc)
         if request.sync_type == "factor_dependency":
             steps = (request.factor_sync_plan or {}).get("steps") or []
             qmt_required = any(
@@ -222,6 +229,7 @@ async def _run_sync_task(
                     end_date=request.end_date,
                     failure_strategy=request.failure_strategy,
                     full_sync=effective_full_sync,
+                    auto_incremental=request.sync_mode == "incremental" and not effective_full_sync,
                     run_id=run_id,
                 )
             elif request.sync_type == "factor_dependency":
@@ -319,7 +327,10 @@ async def trigger_sync(
             task_id=run_id,
             title=f"data sync {request.sync_type}",
             handler=lambda: _run_sync_task(run_id, request),
-            metadata={"sync_type": request.sync_type},
+            metadata={
+                "sync_type": request.sync_type,
+                "relay_datasets": request.relay_datasets or [],
+            },
         )
     )
 

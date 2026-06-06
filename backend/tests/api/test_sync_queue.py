@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -96,3 +97,64 @@ async def test_sync_status_stays_triggerable_while_queue_is_busy(monkeypatch):
     assert body["can_trigger"] is True
     assert body["sync_service_available"] is True
     assert body["details"]["queue_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_kline_minute_incremental_request_reaches_service(monkeypatch):
+    from app.api.sync import SyncRequest, _run_sync_task
+    from app.services.sync_service import SyncProgress
+
+    captured: dict[str, object] = {}
+
+    class FakeEngine:
+        async def dispose(self):
+            captured["disposed"] = True
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+    class FakeSessionMaker:
+        def __call__(self):
+            return FakeSessionContext()
+
+    class FakeSyncService:
+        def __init__(self, session):
+            self.session = session
+
+        async def sync_kline_minute(self, **kwargs):
+            captured.update(kwargs)
+            return SyncProgress(sync_type="kline_minute", status="completed")
+
+        async def persist_sync_progress(self, progress, **kwargs):
+            captured["persisted_sync_type"] = progress.sync_type
+
+    async def fake_upsert_sync_run(*args, **kwargs):
+        return None
+
+    async def fake_check_connection():
+        return True
+
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.create_async_engine", lambda *args, **kwargs: FakeEngine())
+    monkeypatch.setattr("sqlalchemy.ext.asyncio.async_sessionmaker", lambda *args, **kwargs: FakeSessionMaker())
+    monkeypatch.setattr("app.api.sync.upsert_sync_run", fake_upsert_sync_run)
+    monkeypatch.setattr("app.api.sync.sync_service_module._latest_market_date", lambda dataset: None)
+    monkeypatch.setattr("app.api.sync.qmt_gateway.check_connection", fake_check_connection)
+    monkeypatch.setattr("app.api.sync.SyncService", FakeSyncService)
+    monkeypatch.setattr("app.api.sync.invalidate_after_sync", lambda sync_type: {})
+
+    request = SyncRequest(
+        sync_type="kline_minute",
+        sync_mode="incremental",
+        end_date=date(2026, 6, 6),
+    )
+    await _run_sync_task("sync-minute", request)
+
+    assert captured["auto_incremental"] is True
+    assert captured["full_sync"] is False
+    assert captured["end_date"] == date(2026, 6, 6)
+    assert captured["persisted_sync_type"] == "kline_minute"
+    assert captured["disposed"] is True

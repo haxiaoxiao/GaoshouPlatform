@@ -43,6 +43,31 @@ class AsyncTaskQueue:
     def active_task(self) -> QueuedTask | None:
         return self._active_task
 
+    @property
+    def pending_tasks(self) -> list[QueuedTask]:
+        """Return a read-only snapshot of queued work for status UIs."""
+        return list(self._queue._queue)  # type: ignore[attr-defined]
+
+    def snapshot(self) -> dict[str, Any]:
+        """Expose queue state without leaking task handlers."""
+        return {
+            "active": self._task_summary(self._active_task),
+            "pending": [self._task_summary(task) for task in self.pending_tasks],
+            "pending_count": self.pending_count,
+            "active_task_id": self._active_task.task_id if self._active_task else None,
+        }
+
+    @staticmethod
+    def _task_summary(task: QueuedTask | None) -> dict[str, Any] | None:
+        if task is None:
+            return None
+        return {
+            "task_id": task.task_id,
+            "title": task.title,
+            "metadata": task.metadata,
+            "enqueued_at": task.enqueued_at.isoformat(),
+        }
+
     async def submit(self, task: QueuedTask) -> None:
         await self._ensure_worker()
         self._known_ids.add(task.task_id)
