@@ -76,3 +76,105 @@ async def test_sync_status_reports_trigger_availability_when_service_unavailable
     assert body["data"]["sync_service_available"] is False
     assert body["data"]["can_trigger"] is False
     assert "unavailable" in body["data"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_sync_status_prefers_live_sync_service_queue(monkeypatch):
+    async def fake_sync_service_health():
+        return {"healthy": True}
+
+    async def fake_get_persisted_sync_status(self):
+        return {
+            "sync_type": "stock_info",
+            "status": "running",
+            "total": 10,
+            "current": 1,
+            "success_count": 1,
+            "failed_count": 0,
+            "progress_percent": 10.0,
+            "start_time": None,
+            "end_time": None,
+            "error_message": None,
+            "details": {},
+        }
+
+    async def fake_proxy_sync_request(method, path, **kwargs):
+        assert method == "GET"
+        assert path == "/api/data/sync/status"
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "sync_type": "index_daily",
+                "status": "running",
+                "total": 100,
+                "current": 37,
+                "success_count": 37,
+                "failed_count": 0,
+                "progress_percent": 37.0,
+                "start_time": None,
+                "end_time": None,
+                "error_message": None,
+                "details": {
+                    "queue_mode": True,
+                    "queue_pending_count": 2,
+                    "queue_active_task_id": "run-live",
+                },
+            },
+        }
+
+    monkeypatch.setattr("app.api.data.sync_service_health", fake_sync_service_health)
+    monkeypatch.setattr("app.api.data.proxy_sync_request", fake_proxy_sync_request)
+    monkeypatch.setattr("app.api.data.SyncService.get_persisted_sync_status", fake_get_persisted_sync_status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/data/sync/status")
+
+    body = resp.json()["data"]
+    assert resp.status_code == 200
+    assert body["sync_type"] == "index_daily"
+    assert body["progress_percent"] == 37.0
+    assert body["sync_service_available"] is True
+    assert body["can_trigger"] is True
+    assert body["details"]["queue_pending_count"] == 2
+    assert body["details"]["queue_active_task_id"] == "run-live"
+
+
+@pytest.mark.asyncio
+async def test_sync_status_marks_unavailable_when_live_status_proxy_fails(monkeypatch):
+    async def fake_sync_service_health():
+        return {"healthy": True}
+
+    async def fake_proxy_sync_request(*args, **kwargs):
+        from fastapi import HTTPException
+
+        raise HTTPException(status_code=503, detail="sync status proxy down")
+
+    async def fake_get_persisted_sync_status(self):
+        return {
+            "sync_type": "tushare_relay",
+            "status": "running",
+            "total": 100,
+            "current": 37,
+            "success_count": 37,
+            "failed_count": 0,
+            "progress_percent": 37.0,
+            "start_time": None,
+            "end_time": None,
+            "error_message": None,
+            "details": {},
+        }
+
+    monkeypatch.setattr("app.api.data.sync_service_health", fake_sync_service_health)
+    monkeypatch.setattr("app.api.data.proxy_sync_request", fake_proxy_sync_request)
+    monkeypatch.setattr("app.api.data.SyncService.get_persisted_sync_status", fake_get_persisted_sync_status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get("/api/data/sync/status")
+
+    body = resp.json()["data"]
+    assert resp.status_code == 200
+    assert body["status"] == "running"
+    assert body["sync_service_available"] is False
+    assert body["can_trigger"] is False
+    assert body["reason"] == "sync status proxy down"

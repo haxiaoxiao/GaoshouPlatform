@@ -33,6 +33,13 @@
 | `factor_analysis` / `factors` | 1 / 1 | 保留 | 因子研究元数据。 |
 | `strategies` / `backtests` / `orders` / `trades` | 6 / 48 / 0 / 0 | 保留 | 回测与交易记录。 |
 
+`financial_data.ann_date` 口径：
+
+- `ann_date` 用于财务因子的 point-in-time 对齐，因子或回测只能在 `trade_date >= ann_date` 后使用对应报告期。
+- 优先来源为 Tushare `disclosure_date.actual_date`，按 `end_date` 批量获取实际披露日，并映射到 `financial_data(symbol, report_date)`。
+- 少量 `disclosure_date` 缺失时，使用 `balancesheet.f_ann_date` 做保守兜底；不要优先使用更早的 `balancesheet.ann_date`。
+- 2026-06-03 prod 快照：`financial_data` 48,606 行，其中季度报告行 33,469 行，已补 `ann_date` 33,463 行，剩余 6 条为 2026 年新上市股票的 IPO 前历史年报；非季末/`Unknown` 行缺口 15,137 条，不作为财务 PIT 因子输入。
+
 ## 容易混淆的数据集
 
 ### `klines_minute_timer` 与 `klines_minute_cum_timer`
