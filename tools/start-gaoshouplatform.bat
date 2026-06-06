@@ -20,6 +20,9 @@ if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") e
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
 if "%GAOSHOU_SKIP_PAUSE%"=="1" set "NO_PAUSE=1"
+set "SKIP_OPTIONAL_CHECKS=0"
+if "%GAOSHOU_SKIP_OPTIONAL_CHECKS%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
+if "%GAOSHOU_SKIP_DOCKER%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 
 set "MARKET_DATA_BACKEND=parquet"
 set "CLICKHOUSE_ENABLED=false"
@@ -90,20 +93,25 @@ if errorlevel 1 (
 )
 echo       OK
 
-echo [2/7] Starting Redis on port %REDIS_PORT% if Docker is available...
-where docker >nul 2>&1
-if errorlevel 1 (
-  echo       WARN: Docker not found. Continue without Redis.
+echo [2/7] Optional Redis handling...
+if "%SKIP_OPTIONAL_CHECKS%"=="1" (
+  echo       SKIP: optional Redis/Docker checks disabled for this startup.
 ) else (
-  docker start redis-server >nul 2>&1
+  echo       Starting Redis on port %REDIS_PORT% if Docker is available...
+  where docker >nul 2>&1
   if errorlevel 1 (
-    docker run -d --name redis-server -p %REDIS_PORT%:6379 redis:7-alpine >nul 2>&1
-  )
-  docker ps --format "{{.Names}}" 2>nul | findstr /x "redis-server" >nul 2>&1
-  if errorlevel 1 (
-    echo       WARN: Redis is not running. Continue without Redis.
+    echo       WARN: Docker not found. Continue without Redis.
   ) else (
-    echo       OK
+    docker start redis-server >nul 2>&1
+    if errorlevel 1 (
+      docker run -d --name redis-server -p %REDIS_PORT%:6379 redis:7-alpine >nul 2>&1
+    )
+    docker ps --format "{{.Names}}" 2>nul | findstr /x "redis-server" >nul 2>&1
+    if errorlevel 1 (
+      echo       WARN: Redis is not running. Continue without Redis.
+    ) else (
+      echo       OK
+    )
   )
 )
 
@@ -111,21 +119,29 @@ echo [3/7] ClickHouse handling...
 set "NEED_CLICKHOUSE=0"
 if /i "%MARKET_DATA_BACKEND%"=="clickhouse" set "NEED_CLICKHOUSE=1"
 if /i "%CLICKHOUSE_ENABLED%"=="true" set "NEED_CLICKHOUSE=1"
-if "%NEED_CLICKHOUSE%"=="1" (
-  where docker >nul 2>&1
-  if errorlevel 1 (
-    echo       WARN: Docker not found. ClickHouse cannot be started.
+if "%SKIP_OPTIONAL_CHECKS%"=="1" (
+  if "%NEED_CLICKHOUSE%"=="1" (
+    echo       WARN: optional Docker checks skipped, but ClickHouse appears enabled.
   ) else (
-    docker start clickhouse-server >nul 2>&1
-    docker ps --format "{{.Names}}" 2>nul | findstr /x "clickhouse-server" >nul 2>&1
-    if errorlevel 1 (
-      echo       WARN: ClickHouse is not running.
-    ) else (
-      echo       OK
-    )
+    echo       SKIP: optional ClickHouse/Docker checks disabled for this startup.
   )
 ) else (
-  echo       SKIP: Parquet/DuckDB mode does not require ClickHouse.
+  if "%NEED_CLICKHOUSE%"=="1" (
+    where docker >nul 2>&1
+    if errorlevel 1 (
+      echo       WARN: Docker not found. ClickHouse cannot be started.
+    ) else (
+      docker start clickhouse-server >nul 2>&1
+      docker ps --format "{{.Names}}" 2>nul | findstr /x "clickhouse-server" >nul 2>&1
+      if errorlevel 1 (
+        echo       WARN: ClickHouse is not running.
+      ) else (
+        echo       OK
+      )
+    )
+  ) else (
+    echo       SKIP: Parquet/DuckDB mode does not require ClickHouse.
+  )
 )
 
 echo [4/7] Starting sync service on %SYNC_HOST%:%SYNC_PORT%...

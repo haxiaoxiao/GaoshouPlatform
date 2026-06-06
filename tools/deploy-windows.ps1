@@ -120,12 +120,69 @@ function Test-PythonImport {
     )
 
     $escaped = $ModuleName.Replace("'", "''")
-    $process = Start-Process -FilePath $PythonPath `
-        -ArgumentList @("-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$escaped') else 1)") `
-        -NoNewWindow `
-        -Wait `
-        -PassThru
-    return $process.ExitCode -eq 0
+    & $PythonPath -c "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$escaped') else 1)" *> $null
+    return $LASTEXITCODE -eq 0
+}
+
+function Invoke-CmdChecked {
+    param(
+        [string]$Command,
+        [string]$WorkingDirectory = (Get-Location).Path
+    )
+
+    $cmdExe = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
+    Invoke-Checked -FilePath $cmdExe -ArgumentList @("/d", "/s", "/c", "`"$Command`"") -WorkingDirectory $WorkingDirectory
+}
+
+function Invoke-NpmChecked {
+    param(
+        [string[]]$ArgumentList,
+        [string]$WorkingDirectory = (Get-Location).Path
+    )
+
+    $npmCmd = (Get-Command npm.cmd -ErrorAction Stop).Source
+    Invoke-Checked -FilePath $npmCmd -ArgumentList $ArgumentList -WorkingDirectory $WorkingDirectory
+}
+
+function Set-EnvVarOrRemove {
+    param(
+        [string]$Name,
+        [bool]$HadValue,
+        [AllowNull()][string]$Value
+    )
+
+    if ($HadValue) {
+        Set-Item -LiteralPath "Env:$Name" -Value $Value
+    } else {
+        Remove-Item -LiteralPath "Env:$Name" -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-StartScriptChecked {
+    param(
+        [string]$StartScript,
+        [string]$WorkingDirectory
+    )
+
+    $hadRunnerTracking = Test-Path -LiteralPath "Env:RUNNER_TRACKING_ID"
+    $oldRunnerTracking = if ($hadRunnerTracking) { $env:RUNNER_TRACKING_ID } else { $null }
+    $hadSkipOptional = Test-Path -LiteralPath "Env:GAOSHOU_SKIP_OPTIONAL_CHECKS"
+    $oldSkipOptional = if ($hadSkipOptional) { $env:GAOSHOU_SKIP_OPTIONAL_CHECKS } else { $null }
+    $hadSkipDocker = Test-Path -LiteralPath "Env:GAOSHOU_SKIP_DOCKER"
+    $oldSkipDocker = if ($hadSkipDocker) { $env:GAOSHOU_SKIP_DOCKER } else { $null }
+
+    try {
+        # Why: GitHub's Windows runner kills tracked child processes after the
+        # job. Services launched by the startup script must survive deployment.
+        Remove-Item -LiteralPath "Env:RUNNER_TRACKING_ID" -ErrorAction SilentlyContinue
+        $env:GAOSHOU_SKIP_OPTIONAL_CHECKS = "1"
+        $env:GAOSHOU_SKIP_DOCKER = "1"
+        Invoke-CmdChecked -Command "`"$StartScript`" --no-pause" -WorkingDirectory $WorkingDirectory
+    } finally {
+        Set-EnvVarOrRemove -Name "RUNNER_TRACKING_ID" -HadValue $hadRunnerTracking -Value $oldRunnerTracking
+        Set-EnvVarOrRemove -Name "GAOSHOU_SKIP_OPTIONAL_CHECKS" -HadValue $hadSkipOptional -Value $oldSkipOptional
+        Set-EnvVarOrRemove -Name "GAOSHOU_SKIP_DOCKER" -HadValue $hadSkipDocker -Value $oldSkipDocker
+    }
 }
 
 $defaults = Resolve-Defaults -Name $Environment
@@ -195,6 +252,8 @@ $env:GAOSHOU_BACKEND_PORT = $backendPort
 $env:GAOSHOU_SYNC_PORT = $syncPort
 $env:GAOSHOU_FRONTEND_PORT = $frontendPort
 $env:GAOSHOU_SKIP_PAUSE = "1"
+$env:GAOSHOU_SKIP_OPTIONAL_CHECKS = "1"
+$env:GAOSHOU_SKIP_DOCKER = "1"
 
 $servicesStopped = $false
 $servicesStarted = $false
@@ -202,7 +261,7 @@ $servicesStarted = $false
 try {
     # Why: npm ci replaces native bindings under node_modules and will fail on
     # Windows when the running Vite dev server keeps those files open.
-    Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$stopScript`" --no-pause") -WorkingDirectory $Root
+    Invoke-CmdChecked -Command "`"$stopScript`" --no-pause" -WorkingDirectory $Root
     $servicesStopped = $true
 
     if (-not $SkipInstall) {
@@ -222,11 +281,11 @@ try {
             Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", $xtquantSpec) -WorkingDirectory $backendDir
         }
 
-        Invoke-Checked -FilePath "npm" -ArgumentList @("ci") -WorkingDirectory $frontendDir
+        Invoke-NpmChecked -ArgumentList @("ci") -WorkingDirectory $frontendDir
     }
 
-    Invoke-Checked -FilePath "npm" -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
-    Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$startScript`" --no-pause") -WorkingDirectory $Root
+    Invoke-NpmChecked -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
+    Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
     $servicesStarted = $true
 
     Wait-HttpOk -Url "http://127.0.0.1:$backendPort/health" -TimeoutSeconds 60
@@ -236,7 +295,7 @@ try {
     if ($servicesStopped -and -not $servicesStarted) {
         Write-Warning "Deployment failed before restart. Attempting to bring the target environment back online."
         try {
-            Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$startScript`" --no-pause") -WorkingDirectory $Root
+            Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
             $servicesStarted = $true
         } catch {
             Write-Warning "Automatic restart after deploy failure also failed: $($_.Exception.Message)"
