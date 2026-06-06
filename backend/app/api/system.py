@@ -125,7 +125,7 @@ async def _dataset_coverages(specs: dict[str, tuple[str, str]]) -> dict[str, dic
 
     keys = list(specs)
     results = await asyncio.gather(*(read_one(*specs[key]) for key in keys))
-    return dict(zip(keys, results))
+    return dict(zip(keys, results, strict=False))
 
 
 @router.get("/status")

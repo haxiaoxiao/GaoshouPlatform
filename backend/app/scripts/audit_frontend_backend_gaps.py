@@ -3,14 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
-
 
 ROOT = Path(__file__).resolve().parents[3]
 FRONTEND_ROOT = ROOT / "frontend" / "src"
@@ -271,7 +269,7 @@ def _path_matches(openapi_path: str, actual_path: str) -> bool:
     actual_parts = [part for part in actual_path.strip("/").split("/") if part]
     if len(openapi_parts) != len(actual_parts):
         return False
-    for expected, actual in zip(openapi_parts, actual_parts):
+    for expected, actual in zip(openapi_parts, actual_parts, strict=False):
         if expected.startswith("{") and expected.endswith("}"):
             continue
         if expected != actual:

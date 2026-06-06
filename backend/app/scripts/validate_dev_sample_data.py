@@ -17,7 +17,6 @@ if str(_BACKEND) not in sys.path:
 
 from app.core.config import settings
 
-
 REQUIRED_SQLITE_TABLES = (
     "stocks",
     "financial_data",

@@ -13,7 +13,6 @@ import json
 import shutil
 import socket
 import sqlite3
-import sys
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Iterable, Sequence

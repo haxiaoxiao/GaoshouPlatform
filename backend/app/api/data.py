@@ -12,9 +12,9 @@ from app.db.sqlite import get_async_session
 from app.services import DataService, SyncService
 from app.services.cache_invalidation import invalidate_after_sync
 from app.services.index_catalog import list_index_catalog
-from app.services.runtime_tasks import register_task, update_task
+from app.services.runtime_tasks import update_task
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
-from app.services.task_queue import QueuedTask, get_task_queue
+from app.services.task_queue import get_task_queue
 
 router = APIRouter()
 
