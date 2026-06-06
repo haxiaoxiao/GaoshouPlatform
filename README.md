@@ -1,6 +1,6 @@
 # GaoshouPlatform - 量化投研平台
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-03.
 
 基于 Vue 3 + FastAPI 的 A 股量化投研平台，支持数据管理、因子研究、策略回测和实盘交易。
 
@@ -14,6 +14,8 @@ Last updated: 2026-05-25.
 - **无需 ClickHouse**：默认 `MARKET_DATA_BACKEND=parquet`，零运维启动。切换 `MARKET_DATA_BACKEND=clickhouse` 可启用 ClickHouse。
 - 指数池：回测可通过 `index_symbol` 使用动态指数成分池，例如中小综指 `399101.SZ`，避免用当前自选股静态替代历史股票池。
 - 因子能力：既有指标注册体系，也有表达式 Compute Engine；Factor Value Store 已承载 TA-Lib、研究因子、小市值因子和 Alpha101 缓存；Alpha101 101 个公式已接入宽表向量化批量计算。
+- 前端信息架构：`/home` 是投研决策工作台，`/monitor` 是系统运维控制台；数据查看 `/data` 与数据同步 `/data/sync` 已拆分，因子定义 `/factor` 与因子评估 `/factor/evaluation` 已拆分。
+- 同步状态语义：`/api/data/sync/status` 中 `can_trigger=true` 表示“同步服务可接收新提交/排队”，不表示当前没有任务运行；前端展示为“提交入口/运行说明”，避免把运行中任务误判为空闲。
 
 关键文档：
 
@@ -27,6 +29,7 @@ Last updated: 2026-05-25.
 | `docs/akquant-integration-todo.md` | AKQuant 当前集成状态、验证命令和仍需跟进事项 |
 | `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算、Relay 结构化因子和 ID=43 接入方式 |
 | `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
+| `docs/frontend-information-architecture.md` | 新版前端页面职责、菜单分层、工作台/运维差异化和颜色语义 |
 | `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |
 | `AGENTS.md` | AI coding agent 项目指南和关键约束 |
 
@@ -58,12 +61,12 @@ GaoshouPlatform/
 │   │   │   └── config.py        # 配置（DB路径、ClickHouse端口等）
 │   │   ├── api/
 │   │   │   ├── router.py        # 路由汇总 /api/system /api/data /api/explorer ...
-│   │   │   ├── data.py          # 股票/K线/同步/自选股 API
+│   │   │   ├── data.py          # 股票/K线/同步代理/自选股 API
 │   │   │   ├── data_explorer.py # ClickHouse 数据浏览器 API
 │   │   │   ├── indicator.py     # 指标库 API
 │   │   │   ├── factor.py        # 因子研究 API
 │   │   │   ├── backtest.py      # 回测 API
-│   │   │   └── system.py        # 系统状态 API
+│   │   │   └── system.py        # 系统状态 / data-summary / runtime tasks API
 │   │   ├── engines/
 │   │   │   ├── qmt_gateway.py   # ⭐ QMT 数据网关（核心，封装 xtquant）
 │   │   │   └── vn_engine.py     # VeighNa 回测引擎
@@ -99,11 +102,12 @@ GaoshouPlatform/
 │   │   │   ├── indicator.ts     # 指标 API
 │   │   │   └── factor.ts       # 因子 API
 │   │   ├── views/
-│   │   │   ├── DataManage/      # 数据管理页（股票列表/K线/同步）
-│   │   │   ├── DataExplorer.vue # ⭐ ClickHouse 数据浏览器
-│   │   │   ├── FactorResearch/  # 因子投研页
+│   │   │   ├── HomeWorkbench.vue# 投研决策工作台
+│   │   │   ├── DataManage/      # 数据查看 + 独立数据同步页
+│   │   │   ├── DataExplorer.vue # ⭐ Parquet/DuckDB / ClickHouse 数据浏览器
+│   │   │   ├── FactorResearch/  # 因子定义 / 因子评估页
 │   │   │   ├── StrategyBacktest/# 策略回测页
-│   │   │   └── SystemMonitor/   # 系统监控页
+│   │   │   └── SystemMonitor/   # 系统运维控制台
 │   │   ├── layouts/
 │   │   │   └── MainLayout.vue   # 主布局（含侧边导航）
 │   │   ├── router/index.ts      # 路由配置
@@ -180,6 +184,13 @@ cd E:\Projects\GaoshouPlatform-dev\backend
 uvicorn app.main:app --host 127.0.0.1 --port 18800
 ```
 
+**同步服务：**
+```powershell
+cd E:\Projects\GaoshouPlatform-dev\backend
+.venv\Scripts\activate
+uvicorn app.sync_main:app --host 127.0.0.1 --port 18810
+```
+
 **前端：**
 ```powershell
 cd E:\Projects\GaoshouPlatform-dev\frontend
@@ -187,10 +198,12 @@ npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
 - 后端 API 文档：http://localhost:18800/docs
+- 同步服务健康：http://localhost:18810/health
 - 前端页面：http://localhost:13500
 - 健康检查：http://localhost:18800/health
 
 > 后端启动时会自动创建 SQLite 表和 ClickHouse 表。
+> 生产环境对应端口为 `8800/8810/3500`，不要把 dev 前端代理到 prod API，也不要从 dev 页面触发 prod 写入任务。
 
 ---
 
@@ -221,6 +234,18 @@ QMT Server → download_financial_data2()/download_history_data()
 | `kline_minute` | 分钟 K 线 | `download_history_data` + `get_market_data_ex` | Parquet / ClickHouse |
 | `realtime_mv` | 实时市值 | `get_full_tick` | SQLite |
 | `tushare_relay` | Relay 增强数据 | Indevs Tushare Relay | Parquet (`adj_factors`/`moneyflow`/`auction_replay`/`ths_index`/`ths_member`/`block_moneyflow`) |
+
+同步相关 API：
+
+| 接口 | 说明 |
+|---|---|
+| `POST /api/data/sync` | 提交同步任务；长任务进入队列串行执行 |
+| `GET /api/data/sync/status` | 查询当前同步状态、服务可用性、提交入口和队列详情 |
+| `GET /api/data/sync/catalog` | 同步任务目录、预设方案、Relay 配置和覆盖概览 |
+| `GET /api/data/sync/logs` | 最近同步审计日志 |
+| `POST /api/data/sync/cancel` | 请求取消当前同步任务 |
+
+`can_trigger=true` 只表示服务可以接收新提交；当 `status=running/queued` 且 `details.queue_mode=true` 时，新提交会排队，不代表当前任务已经空闲。
 
 固定时间点分钟线策略推荐链路：
 
@@ -349,13 +374,33 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 ---
 
+## 前端页面与信息架构
+
+| 路由 | 页面职责 |
+|---|---|
+| `/home` | 今日投研工作台：研究就绪度、今日行动建议、投研输入口径和流水线推进 |
+| `/data` | 数据查看：最新日线、分钟线、基础股票、财务、指标、概念和舆情口径 |
+| `/data/sync` | 数据同步：任务目录、预设、执行参数、队列、进度、同步日志 |
+| `/explorer` | 数据浏览器：按需预览 Parquet/DuckDB 或 ClickHouse 表，不默认全量 `count(*)` |
+| `/factor` | 因子定义：因子目录、覆盖率、参数版本、预计算入口；表达式只在创建/编辑时打开 |
+| `/factor/evaluation` | 因子评估：IC、ICIR、多空收益、回撤、换手和已计算组合 |
+| `/research` | 研究实验室：假设、证据链、外部链接、实验记录和复盘 |
+| `/backtest` | 策略回测：代码编辑、参数配置、运行日志和报告入口 |
+| `/trade` | 模拟/实盘：信号、账户、订单预览和真实下单护栏 |
+| `/monitor` | 系统运维控制台：服务拓扑、值班排障、任务表、存储巡检、同步审计 |
+
+颜色语义：平台状态中红色表示需要关注/异常，绿色表示正常/就绪；A 股行情中上涨为红、下跌为绿。
+
+---
+
 ## 数据浏览器
 
-dev 环境访问 `http://localhost:13500/explorer` 可以浏览 ClickHouse 中的数据：
-- 自动列出所有表和行数
+dev 环境访问 `http://localhost:13500/explorer` 可以浏览 Parquet/DuckDB 或 ClickHouse 数据：
+- 自动列出可查询表和分区/元数据
 - 动态展示表结构（不硬编码字段）
 - 支持 WHERE 过滤、排序、分页
 - 支持自定义 SQL 查询（仅 SELECT/SHOW/DESCRIBE）
+- Parquet 表未知行数显示为“未统计”，精确行数需要显式触发，避免默认全量扫描
 
 后端 API：`/api/explorer/tables`、`/api/explorer/tables/{name}/schema`、`/api/explorer/tables/{name}/preview`
 
@@ -450,4 +495,4 @@ chore: 构建/工具
 
 ---
 
-*最后更新: 2026-05-15*
+*最后更新: 2026-06-03*

@@ -612,17 +612,31 @@ async def run_tushare_relay_sync(
             "end_date": end.isoformat(),
             "symbol_count": len(resolved_symbols),
             "request_headers_logged": ["x-api-relay-cache", "x-tushare-cache-bucket", "x-request-id"],
+            "dataset_total": len(requested),
+            "dataset_completed": 0,
+            "dataset_failed": 0,
+            "dataset_remaining": len(requested),
             "datasets": {},
         }
     )
 
     ths_index_rows: list[dict[str, Any]] = []
     ths_member_rows: list[dict[str, Any]] = []
-    for dataset_name in requested:
+    for dataset_index, dataset_name in enumerate(requested, start=1):
         spec = RELAY_DATASET_SPECS[dataset_name]
         dataset_rows: list[dict[str, Any]] = []
         dataset_meta: list[dict[str, Any]] = []
-        progress.details["current_dataset"] = dataset_name
+        for key in ("current_symbol", "current_date", "current_ths_code"):
+            progress.details.pop(key, None)
+        progress.details.update(
+            {
+                "current_dataset": dataset_name,
+                "current_dataset_display_name": spec.display_name,
+                "current_dataset_index": dataset_index,
+                "current_dataset_unit_total": _estimate_total([dataset_name], dates, resolved_symbols, options),
+                "dataset_remaining": max(0, len(requested) - dataset_index + 1),
+            }
+        )
         try:
             if dataset_name in {"adj_factor", "moneyflow", "stk_auction_replay"}:
                 dataset_rows, dataset_meta = await _sync_symbol_date_dataset(
@@ -667,6 +681,13 @@ async def run_tushare_relay_sync(
                 "date_col": spec.date_col,
                 "calls": dataset_meta[-10:],
             }
+            dataset_states = progress.details.get("datasets") if isinstance(progress.details.get("datasets"), dict) else {}
+            progress.details["dataset_completed"] = len(dataset_states)
+            progress.details["dataset_failed"] = sum(
+                1 for value in dataset_states.values()
+                if isinstance(value, dict) and value.get("error")
+            )
+            progress.details["dataset_remaining"] = max(0, len(requested) - len(dataset_states))
         except Exception as exc:
             progress.failed_count += 1
             progress.details["datasets"][dataset_name] = {
@@ -674,6 +695,13 @@ async def run_tushare_relay_sync(
                 "storage_dataset": spec.storage_dataset,
                 "calls": dataset_meta[-10:],
             }
+            dataset_states = progress.details.get("datasets") if isinstance(progress.details.get("datasets"), dict) else {}
+            progress.details["dataset_completed"] = len(dataset_states)
+            progress.details["dataset_failed"] = sum(
+                1 for value in dataset_states.values()
+                if isinstance(value, dict) and value.get("error")
+            )
+            progress.details["dataset_remaining"] = max(0, len(requested) - len(dataset_states))
             logger.opt(exception=True).warning("Tushare relay dataset {} sync failed: {}", dataset_name, exc)
             if failure_strategy == "stop":
                 raise

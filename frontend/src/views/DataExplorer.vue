@@ -85,11 +85,21 @@
             <el-form-item v-if="hasColumn('symbol')" label="股票代码">
               <el-input v-model="quickSearch.symbol" clearable placeholder="600519.SH, 000001.SZ" @keyup.enter="applySearch" />
             </el-form-item>
-            <el-form-item v-if="dateColumn" label="日期范围">
+            <el-form-item v-if="dateColumn" label="日期范围" class="date-range-item">
               <div class="date-pair">
-                <el-date-picker v-model="quickSearch.start_date" type="date" value-format="YYYY-MM-DD" placeholder="开始日期" />
+                <el-date-picker
+                  v-model="quickSearch.start_date"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="开始日期"
+                />
                 <span>至</span>
-                <el-date-picker v-model="quickSearch.end_date" type="date" value-format="YYYY-MM-DD" placeholder="结束日期" />
+                <el-date-picker
+                  v-model="quickSearch.end_date"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="结束日期"
+                />
               </div>
             </el-form-item>
             <el-form-item v-if="hasColumn('factor_name')" label="因子名">
@@ -843,16 +853,48 @@ onMounted(async () => {
 
 .quick-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(180px, 1fr));
-  gap: 8px 12px;
+  grid-template-columns: repeat(2, minmax(220px, 1fr));
+  gap: 12px 14px;
   margin-top: 10px;
+}
+
+.quick-grid :deep(.el-form-item) {
+  margin-bottom: 0;
+}
+
+.quick-grid :deep(.el-form-item__label) {
+  color: var(--text-label);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.date-range-item {
+  grid-column: 1 / -1;
+}
+
+.date-range-item :deep(.el-form-item__content) {
+  min-width: 0;
 }
 
 .date-pair {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
   align-items: center;
-  gap: 6px;
+  gap: 10px;
+  width: 100%;
+}
+
+.date-pair :deep(.el-date-editor.el-input),
+.date-pair :deep(.el-date-editor.el-input__wrapper) {
+  width: 100%;
+}
+
+.date-pair span {
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 700;
+  text-align: center;
 }
 
 .filter-list {
@@ -1034,6 +1076,16 @@ onMounted(async () => {
   .explorer-sidebar {
     grid-template-columns: 1fr 1fr;
     grid-template-rows: 240px;
+  }
+
+  .quick-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 720px) {
+  .date-pair {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

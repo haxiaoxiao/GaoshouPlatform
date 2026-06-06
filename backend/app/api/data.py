@@ -28,13 +28,14 @@ def _attach_sync_availability(
     status = str(data.get("status") or "idle")
     is_busy = status in {"queued", "running"}
     queue = get_task_queue("data_sync")
+    queue_snapshot = queue.snapshot()
     details = dict(data.get("details") or {})
-    details.update({
-        "queue_mode": True,
-        "queue_busy": is_busy,
-        "queue_pending_count": queue.pending_count,
-        "queue_active_task_id": queue.active_task.task_id if queue.active_task else None,
-    })
+    details.setdefault("queue_mode", True)
+    details.setdefault("queue_busy", is_busy)
+    details.setdefault("queue_pending_count", queue_snapshot["pending_count"])
+    details.setdefault("queue_active_task_id", queue_snapshot["active_task_id"])
+    details.setdefault("queue_active_task", queue_snapshot["active"])
+    details.setdefault("queue_pending_tasks", queue_snapshot["pending"])
     return {
         **data,
         "details": details,
@@ -840,6 +841,21 @@ async def get_sync_status(
     unavailable_reason = None if service_available else str(health.get("error") or "数据同步服务未启动")
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()
+
+    if service_available:
+        try:
+            response = await proxy_sync_request("GET", "/api/data/sync/status")
+            if isinstance(response.get("data"), dict):
+                response["data"] = _attach_sync_availability(
+                    response["data"],
+                    service_available=True,
+                )
+            return response
+        except HTTPException as exc:
+            logger.warning("Sync service status proxy failed: {}", exc.detail)
+            unavailable_reason = str(exc.detail)
+            service_available = False
+
     if persisted:
         return {
             "code": 0,
@@ -851,40 +867,31 @@ async def get_sync_status(
             ),
         }
 
-    try:
-        response = await proxy_sync_request("GET", "/api/data/sync/status")
-        if isinstance(response.get("data"), dict):
-            response["data"] = _attach_sync_availability(
-                response["data"],
-                service_available=True,
-            )
-        return response
-    except HTTPException as exc:
-        logger.warning("Sync service status proxy failed: {}", exc.detail)
-        return {
-            "code": 0,
-            "message": "success",
-            "data": _attach_sync_availability(
-                {
-                    "sync_type": None,
-                    "status": "idle",
-                    "total": 0,
-                    "current": 0,
-                    "success_count": 0,
-                    "failed_count": 0,
-                    "progress_percent": 0.0,
-                    "start_time": None,
-                    "end_time": None,
-                    "error_message": None,
-                    "details": {
-                        "sync_service_unavailable": True,
-                        "proxy_error": str(exc.detail),
-                    },
+    unavailable_reason = unavailable_reason or "数据同步服务状态接口不可用"
+    return {
+        "code": 0,
+        "message": "success",
+        "data": _attach_sync_availability(
+            {
+                "sync_type": None,
+                "status": "idle",
+                "total": 0,
+                "current": 0,
+                "success_count": 0,
+                "failed_count": 0,
+                "progress_percent": 0.0,
+                "start_time": None,
+                "end_time": None,
+                "error_message": None,
+                "details": {
+                    "sync_service_unavailable": True,
+                    "proxy_error": unavailable_reason,
                 },
-                service_available=False,
-                unavailable_reason=str(exc.detail),
-            ),
-        }
+            },
+            service_available=False,
+            unavailable_reason=unavailable_reason,
+        ),
+    }
 
 
 @router.get("/sync/logs", summary="获取同步日志")

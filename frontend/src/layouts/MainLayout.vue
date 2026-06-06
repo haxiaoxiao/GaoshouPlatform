@@ -729,17 +729,23 @@ onUnmounted(() => {
 
 .context-row {
   display: flex;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-3);
   color: var(--text-muted);
-  font-size: var(--text-xs);
+  font-size: 0.78rem;
+  line-height: 1.45;
 }
 
 .context-row strong {
   color: var(--text-primary);
   font-family: var(--font-data);
-  font-size: var(--text-xs);
-  font-weight: 700;
+  font-size: 0.82rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  line-height: 1.35;
+  max-width: 58%;
+  overflow-wrap: anywhere;
   text-align: right;
 }
 
