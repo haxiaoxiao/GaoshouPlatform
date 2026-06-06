@@ -79,6 +79,19 @@ The deploy script defaults pip to `https://pypi.org/simple` to avoid inherited
 machine-level mirror errors. Set `GAOSHOU_PIP_INDEX_URL` or pass `-PipIndexUrl`
 if a local mirror is required.
 
+Deployment notes:
+
+- The script stops the target services before `npm ci` so Windows file locks
+  under `frontend/node_modules` do not break deploys.
+- Backend editable install now bootstraps `packaging`, `hatchling`, and
+  `editables`, then uses `--no-build-isolation` for a more stable local build.
+- When `.env.local` configures miniQMT (`QMT_ACCOUNT_ID` or `QMT_TRADER_PATH`),
+  the script auto-installs `xtquant==250516.1.1` unless it is already present in
+  the target venv. Override the package spec with `GAOSHOU_XTQUANT_SPEC` if the
+  machine needs a different local QMT build.
+- Local runtime output such as `factor_eval_runs/` is git-ignored so generated
+  research artifacts do not block automatic deploys.
+
 ## Validation policy
 
 The current repository has pre-existing Ruff findings, so CI treats Ruff as a

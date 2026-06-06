@@ -67,6 +67,48 @@ function Wait-HttpOk {
     throw "Health check failed: $Url"
 }
 
+function Get-EnvFileMap {
+    param([string]$Path)
+
+    $result = @{}
+    if (-not (Test-Path -LiteralPath $Path)) {
+        return $result
+    }
+
+    foreach ($line in Get-Content -LiteralPath $Path) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith("#")) {
+            continue
+        }
+        $separator = $trimmed.IndexOf("=")
+        if ($separator -lt 1) {
+            continue
+        }
+        $key = $trimmed.Substring(0, $separator).Trim()
+        $value = $trimmed.Substring($separator + 1).Trim()
+        if ($key) {
+            $result[$key] = $value
+        }
+    }
+
+    return $result
+}
+
+function Test-PythonImport {
+    param(
+        [string]$PythonPath,
+        [string]$ModuleName
+    )
+
+    $escaped = $ModuleName.Replace("'", "''")
+    $process = Start-Process -FilePath $PythonPath `
+        -ArgumentList @("-c", "import importlib.util, sys; sys.exit(0 if importlib.util.find_spec('$escaped') else 1)") `
+        -NoNewWindow `
+        -Wait `
+        -PassThru
+    return $process.ExitCode -eq 0
+}
+
 $defaults = Resolve-Defaults -Name $Environment
 if (-not $Root) { $Root = $defaults.Root }
 if (-not $Branch) { $Branch = $defaults.Branch }
@@ -82,6 +124,7 @@ $frontendDir = Join-Path $Root "frontend"
 $startScript = Join-Path $Root "tools\start-gaoshouplatform.bat"
 $stopScript = Join-Path $Root "tools\stop-gaoshouplatform.bat"
 $python = Join-Path $backendDir ".venv\Scripts\python.exe"
+$envConfig = Get-EnvFileMap -Path $EnvFile
 
 if (-not (Test-Path -LiteralPath (Join-Path $Root ".git"))) {
     throw "Deployment root is not a git checkout: $Root"
@@ -127,14 +170,6 @@ if (-not (Test-Path -LiteralPath $python)) {
     }
 }
 
-if (-not $SkipInstall) {
-    Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", "--upgrade", "pip") -WorkingDirectory $backendDir
-    Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", "-e", ".[dev]") -WorkingDirectory $backendDir
-    Invoke-Checked -FilePath "npm" -ArgumentList @("ci") -WorkingDirectory $frontendDir
-}
-
-Invoke-Checked -FilePath "npm" -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
-
 $env:GAOSHOU_ROOT = $Root
 $env:GAOSHOU_ENV_FILE = $EnvFile
 $env:GAOSHOU_BACKEND_PORT = $backendPort
@@ -142,12 +177,54 @@ $env:GAOSHOU_SYNC_PORT = $syncPort
 $env:GAOSHOU_FRONTEND_PORT = $frontendPort
 $env:GAOSHOU_SKIP_PAUSE = "1"
 
-Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$stopScript`" --no-pause") -WorkingDirectory $Root
-Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$startScript`" --no-pause") -WorkingDirectory $Root
+$servicesStopped = $false
+$servicesStarted = $false
 
-Wait-HttpOk -Url "http://127.0.0.1:$backendPort/health" -TimeoutSeconds 60
-Wait-HttpOk -Url "http://127.0.0.1:$syncPort/health" -TimeoutSeconds 60
-Wait-HttpOk -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds 60
+try {
+    # Why: npm ci replaces native bindings under node_modules and will fail on
+    # Windows when the running Vite dev server keeps those files open.
+    Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$stopScript`" --no-pause") -WorkingDirectory $Root
+    $servicesStopped = $true
+
+    if (-not $SkipInstall) {
+        Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", "--upgrade", "pip") -WorkingDirectory $backendDir
+        Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", "packaging", "hatchling", "editables") -WorkingDirectory $backendDir
+        Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", "--no-build-isolation", "-e", ".[dev]") -WorkingDirectory $backendDir
+
+        $xtquantSpec = if ($env:GAOSHOU_XTQUANT_SPEC) {
+            $env:GAOSHOU_XTQUANT_SPEC
+        } elseif ($envConfig.ContainsKey("GAOSHOU_XTQUANT_SPEC") -and $envConfig["GAOSHOU_XTQUANT_SPEC"]) {
+            $envConfig["GAOSHOU_XTQUANT_SPEC"]
+        } else {
+            "xtquant==250516.1.1"
+        }
+        $needsQmt = $envConfig.ContainsKey("QMT_ACCOUNT_ID") -or $envConfig.ContainsKey("QMT_TRADER_PATH")
+        if ($needsQmt -and -not (Test-PythonImport -PythonPath $python -ModuleName "xtquant")) {
+            Invoke-Checked -FilePath $python -ArgumentList @("-m", "pip", "install", "--index-url", $PipIndexUrl, "--timeout", "60", "--retries", "5", $xtquantSpec) -WorkingDirectory $backendDir
+        }
+
+        Invoke-Checked -FilePath "npm" -ArgumentList @("ci") -WorkingDirectory $frontendDir
+    }
+
+    Invoke-Checked -FilePath "npm" -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
+    Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$startScript`" --no-pause") -WorkingDirectory $Root
+    $servicesStarted = $true
+
+    Wait-HttpOk -Url "http://127.0.0.1:$backendPort/health" -TimeoutSeconds 60
+    Wait-HttpOk -Url "http://127.0.0.1:$syncPort/health" -TimeoutSeconds 60
+    Wait-HttpOk -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds 60
+} catch {
+    if ($servicesStopped -and -not $servicesStarted) {
+        Write-Warning "Deployment failed before restart. Attempting to bring the target environment back online."
+        try {
+            Invoke-Checked -FilePath "cmd.exe" -ArgumentList @("/c", "`"$startScript`" --no-pause") -WorkingDirectory $Root
+            $servicesStarted = $true
+        } catch {
+            Write-Warning "Automatic restart after deploy failure also failed: $($_.Exception.Message)"
+        }
+    }
+    throw
+}
 
 Write-Host ""
 Write-Host "Deployment completed: $Environment"
