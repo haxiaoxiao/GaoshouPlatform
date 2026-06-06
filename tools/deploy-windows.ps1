@@ -177,11 +177,60 @@ function Invoke-StartScriptChecked {
         Remove-Item -LiteralPath "Env:RUNNER_TRACKING_ID" -ErrorAction SilentlyContinue
         $env:GAOSHOU_SKIP_OPTIONAL_CHECKS = "1"
         $env:GAOSHOU_SKIP_DOCKER = "1"
-        Invoke-CmdChecked -Command "`"$StartScript`" --no-pause" -WorkingDirectory $WorkingDirectory
+        $cmdExe = if ($env:ComSpec) { $env:ComSpec } else { "cmd.exe" }
+        $logDir = Join-Path $WorkingDirectory "logs"
+        New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+        $logPath = Join-Path $logDir ("deploy-startup-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+        $command = "`"$StartScript`" --no-pause 1>> `"$logPath`" 2>>&1"
+
+        # Why: the startup script launches long-lived services. Keep launcher
+        # output out of the Actions pipe, then use HTTP health checks below as
+        # the deploy success signal so the runner cannot hang on inherited IO.
+        Write-Host ">> $cmdExe /d /s /c $command"
+        $process = Start-Process -FilePath $cmdExe `
+            -ArgumentList @("/d", "/s", "/c", "`"$command`"") `
+            -WorkingDirectory $WorkingDirectory `
+            -WindowStyle Hidden `
+            -PassThru
+        Write-Host "Startup script launched as PID $($process.Id); log: $logPath"
+        return [pscustomobject]@{
+            Process = $process
+            LogPath = $logPath
+        }
     } finally {
         Set-EnvVarOrRemove -Name "RUNNER_TRACKING_ID" -HadValue $hadRunnerTracking -Value $oldRunnerTracking
         Set-EnvVarOrRemove -Name "GAOSHOU_SKIP_OPTIONAL_CHECKS" -HadValue $hadSkipOptional -Value $oldSkipOptional
         Set-EnvVarOrRemove -Name "GAOSHOU_SKIP_DOCKER" -HadValue $hadSkipDocker -Value $oldSkipDocker
+    }
+}
+
+function Wait-StartupHealthy {
+    param(
+        [pscustomobject]$Startup,
+        [string[]]$HealthUrls
+    )
+
+    Start-Sleep -Seconds 1
+    $Startup.Process.Refresh()
+    if ($Startup.Process.HasExited -and $Startup.Process.ExitCode -ne 0) {
+        throw "Startup script failed with exit code $($Startup.Process.ExitCode). See log: $($Startup.LogPath)"
+    }
+
+    foreach ($url in $HealthUrls) {
+        Wait-HttpOk -Url $url -TimeoutSeconds 60
+    }
+
+    $Startup.Process.Refresh()
+    if (-not $Startup.Process.HasExited) {
+        if (-not $Startup.Process.WaitForExit(5000)) {
+            Write-Warning "Startup script is still running after health checks; continuing because services are healthy. Log: $($Startup.LogPath)"
+            return
+        }
+    }
+
+    $Startup.Process.Refresh()
+    if ($Startup.Process.HasExited -and $Startup.Process.ExitCode -ne 0) {
+        throw "Startup script failed with exit code $($Startup.Process.ExitCode). See log: $($Startup.LogPath)"
     }
 }
 
@@ -285,17 +334,23 @@ try {
     }
 
     Invoke-NpmChecked -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
-    Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
+    $startup = Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
+    Wait-StartupHealthy -Startup $startup -HealthUrls @(
+        "http://127.0.0.1:$backendPort/health",
+        "http://127.0.0.1:$syncPort/health",
+        "http://127.0.0.1:$frontendPort"
+    )
     $servicesStarted = $true
-
-    Wait-HttpOk -Url "http://127.0.0.1:$backendPort/health" -TimeoutSeconds 60
-    Wait-HttpOk -Url "http://127.0.0.1:$syncPort/health" -TimeoutSeconds 60
-    Wait-HttpOk -Url "http://127.0.0.1:$frontendPort" -TimeoutSeconds 60
 } catch {
     if ($servicesStopped -and -not $servicesStarted) {
         Write-Warning "Deployment failed before restart. Attempting to bring the target environment back online."
         try {
-            Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
+            $startup = Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
+            Wait-StartupHealthy -Startup $startup -HealthUrls @(
+                "http://127.0.0.1:$backendPort/health",
+                "http://127.0.0.1:$syncPort/health",
+                "http://127.0.0.1:$frontendPort"
+            )
             $servicesStarted = $true
         } catch {
             Write-Warning "Automatic restart after deploy failure also failed: $($_.Exception.Message)"
