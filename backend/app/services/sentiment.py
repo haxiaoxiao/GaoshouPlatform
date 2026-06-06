@@ -291,6 +291,17 @@ def _xueqiu_profile_dir() -> Path:
     return Path(_config_value("XUEQIU_USER_DATA_DIR", "xueqiu_user_data_dir", str(_repo_root() / "data" / "sentiment" / "xueqiu-profile"))).expanduser()
 
 
+def _xueqiu_project_dir() -> Path:
+    raw = _config_value("XUEQIU_SPYDER_DIR", "xueqiu_spyder_dir", "")
+    if raw:
+        return Path(raw).expanduser()
+    return _xueqiu_profile_dir()
+
+
+def _flocktrader_project_dir() -> Path:
+    return Path(_config_value("FLOCKTRADER_DIR", "flocktrader_dir", r"E:\Projects\flocktrader")).expanduser()
+
+
 def _xueqiu_debug_port() -> int:
     try:
         return max(int(_config_value("XUEQIU_DEBUG_PORT", "xueqiu_debug_port", "9222")), 1)
@@ -1280,15 +1291,34 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             chrome_path = _config_value("XUEQIU_CHROME_PATH", "xueqiu_chrome_path")
             chrome_ready = False
         cookie_configured = bool(_config_value("XUEQIU_COOKIE", "xueqiu_cookie").strip())
+        project_dir = _xueqiu_project_dir()
         profile_dir = _xueqiu_profile_dir()
+        project_ready = project_dir.exists() or (playwright_ready and chrome_ready)
         return {
             "label": "Xueqiu",
-            "project_dir": str(profile_dir),
-            "project_ready": playwright_ready and chrome_ready,
+            "project_dir": str(project_dir),
+            "project_ready": project_ready,
             "cookie_configured": cookie_configured,
-            "cache_dir": None,
+            "cache_dir": str(profile_dir),
             "cache_file_count": 0,
-            "ready": playwright_ready and chrome_ready and cookie_configured,
+            "ready": project_ready and cookie_configured,
+            "chrome_path": chrome_path,
+        }
+
+    if source == "flocktrader":
+        project_dir = _flocktrader_project_dir()
+        cache_dir = _nga_data_dir()
+        cache_file_count = len(list(cache_dir.glob("posts_*.json"))) if cache_dir.exists() else 0
+        cookie_configured = bool(_config_value("NGA_COOKIE", "nga_cookie").strip())
+        project_ready = project_dir.exists()
+        return {
+            "label": "NGA",
+            "project_dir": str(project_dir),
+            "project_ready": project_ready,
+            "cookie_configured": cookie_configured,
+            "cache_dir": str(cache_dir),
+            "cache_file_count": cache_file_count,
+            "ready": project_ready and (cookie_configured or cache_file_count > 0),
         }
 
     cache_dir = _nga_data_dir()
