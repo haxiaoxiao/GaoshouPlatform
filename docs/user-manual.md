@@ -81,7 +81,7 @@ xtquant 是同步阻塞 SDK。后端代码中所有 QMT 调用都应通过 `asyn
 4. 写入 Parquet `klines_minute_timer` 或 ClickHouse `klines_minute`。
 5. 回测使用 `bar_type="minute_timer"`。
 
-如果使用当前默认 Parquet 后端，timer 数据也可以来自 `data/parquet/klines_minute` 或 `data/parquet/klines_minute_timer`。当前本地已导入聚宽版全 A 1 分钟线，覆盖 `2005-01-04` 至 `2026-05-15`，因此 ID=43 这类固定时点策略可以直接从 Parquet/DuckDB 抽取 `10:30` 等分钟点。
+如果使用当前默认 Parquet 后端，timer 数据也可以来自公共目录 `E:\Projects\Data\parquet\klines_minute` 或 `E:\Projects\Data\parquet\klines_minute_timer`。当前本地已导入聚宽版全 A 1 分钟线，覆盖 `2005-01-04` 至 `2026-05-15`，因此 ID=43 这类固定时点策略可以直接从 Parquet/DuckDB 抽取 `10:30` 等分钟点。
 
 示例：
 

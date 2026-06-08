@@ -67,4 +67,4 @@ financial = await skill.get_financial("600051.SH", report_count=8)
 - 不要使用 `download_financial_data`；财务同步只用 `download_financial_data2(callback=None)`。
 - 指数池回测应使用历史指数成分快照，不要用当前自选股静态替代。
 - 固定时点分钟策略应使用 `minute_timer` 数据，不要在策略运行时加载完整分钟线。
-- 因子研究和策略复用优先读 Factor Value Store：`data/parquet/factor_values`。
+- 因子研究和策略复用优先读 Factor Value Store：`E:\Projects\Data\parquet\factor_values`。

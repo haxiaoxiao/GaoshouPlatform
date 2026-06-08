@@ -21,7 +21,7 @@ from loguru import logger
 from app.core.config import settings
 from app.data_stores import get_market_data_store
 
-DEFAULT_STATE_DB = Path(r"E:\Projects\GaoshouPlatform\data\parquet\import_state\tushare_daily_sync.sqlite")
+DEFAULT_STATE_DB = Path(settings.parquet_data_dir) / "import_state" / "tushare_daily_sync.sqlite"
 
 
 def ensure_reference_tables(db_path: Path) -> None:

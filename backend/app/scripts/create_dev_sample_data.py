@@ -20,8 +20,9 @@ from typing import Iterable, Sequence
 import duckdb
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_SOURCE_DATA_DIR = Path("E:/Projects/data")
-_DEFAULT_TARGET_DATA_DIR = _REPO_ROOT / "data" / "dev_sample"
+_DEFAULT_PUBLIC_DATA_DIR = _REPO_ROOT.parent / "Data"
+_DEFAULT_SOURCE_DATA_DIR = _DEFAULT_PUBLIC_DATA_DIR
+_DEFAULT_TARGET_DATA_DIR = _DEFAULT_PUBLIC_DATA_DIR / "dev_sample"
 _DEFAULT_INDEX_SYMBOL = "399101.SZ"
 _DEFAULT_EXTRA_SYMBOLS = ("600519.SH", "000001.SZ", "002117.SZ", "000821.SZ", "600651.SH")
 
@@ -605,10 +606,12 @@ def _assert_safe_paths(source_data_dir: Path, target_data_dir: Path, *, allow_ex
     source = source_data_dir.resolve()
     target = target_data_dir.resolve()
     repo = _REPO_ROOT.resolve()
-    if source == target or source in target.parents or target in source.parents:
+    public_data = _DEFAULT_PUBLIC_DATA_DIR.resolve()
+    target_is_public_sample = target.parent == source and target.name == "dev_sample"
+    if source == target or target in source.parents or (source in target.parents and not target_is_public_sample):
         raise ValueError(f"Source and target must be independent: source={source}, target={target}")
-    if not allow_external_target and not target.is_relative_to(repo):
-        raise ValueError(f"Target must stay inside this dev workspace by default: {target}")
+    if not allow_external_target and not (target.is_relative_to(repo) or target.is_relative_to(public_data)):
+        raise ValueError(f"Target must stay inside this dev workspace or public data root by default: {target}")
 
 
 def _write_host_env(target_data_dir: Path) -> Path:

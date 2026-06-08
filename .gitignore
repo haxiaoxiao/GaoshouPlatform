@@ -38,19 +38,12 @@ TushareTokens*.md
 .claude/*.lock
 .claude/*.local.json
 
-# Database
+# Local data lives outside the repo (default: E:/Projects/Data)
 *.db
-data/*.db
-data/gaoshou.db
+data/
 .worktrees
 
-# Parquet data (large generated files)
-data/parquet/
-data/parquet_test_*/
-data/tmp_*/
-data/dev_sample/
-data/dev_sample_*/
-data/sentiment/xueqiu-profile*/
+# Parquet / DuckDB runtime data
 *.duckdb
 *.duckdb.wal
 

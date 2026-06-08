@@ -1030,7 +1030,7 @@ class SentimentIngestService:
         if not cookie:
             raise RuntimeError(
                 "NGA_COOKIE is required to crawl missing NGAdata files; "
-                "set it in the environment or pre-populate data/sentiment/NGAdata"
+                "set it in the environment or pre-populate the shared sentiment data directory"
             )
         start_dt = datetime.combine(day, time.min)
         end_dt = datetime.combine(day, time.max.replace(microsecond=0))

@@ -15,7 +15,7 @@ Last updated: 2026-05-25.
 当前 Parquet 目录：
 
 ```text
-data/parquet/factor_values/year=YYYY/month=MM/part-*.parquet
+E:/Projects/Data/parquet/factor_values/year=YYYY/month=MM/part-*.parquet
 ```
 
 逻辑主键：
@@ -30,7 +30,7 @@ symbol, trade_date, as_of_time, factor_name, params_hash
 symbol, trade_date, as_of_time, factor_name, params_hash, value, source, created_at
 ```
 
-旧 `data/parquet/feature_values` 只作为历史数据源保留，不再被因子值缓存 API 使用。迁移脚本：
+旧 `E:/Projects/Data/parquet/feature_values` 只作为历史数据源保留，不再被因子值缓存 API 使用。迁移脚本：
 
 ```powershell
 cd E:\Projects\GaoshouPlatform\backend

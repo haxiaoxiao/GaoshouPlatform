@@ -30,7 +30,7 @@
 | 层 | 技术 | 说明 |
 |---|---|---|
 | 后端框架 | FastAPI + SQLAlchemy (async) | Python 3.12+ |
-| 元数据库 | SQLite via aiosqlite | `data/gaoshou.db` |
+| 元数据库 | SQLite via aiosqlite | 默认 `E:\Projects\Data\gaoshou.db` |
 | 时序数据库(默认) | DuckDB + Parquet | 文件型分析数据，零运维 |
 | 时序数据库(可选) | ClickHouse | 端口 19000，大规模高并发查询 |
 | 数据源 | xtquant (华泰 miniQMT) | 同步阻塞，必须用 `run_in_executor` 包装 |
@@ -46,7 +46,7 @@
 | `parquet` (默认) | DuckDB 查询 Parquet 文件 | 无需 Docker/ClickHouse |
 | `clickhouse` | ClickHouse 列式存储 | 需 ClickHouse 服务运行 |
 
-环境变量: `MARKET_DATA_BACKEND=parquet`, `PARQUET_DATA_DIR=data/parquet`, `DUCKDB_PATH=:memory:`, `CLICKHOUSE_ENABLED=false`
+环境变量: `GAOSHOU_DATA_DIR=E:/Projects/Data`, `MARKET_DATA_BACKEND=parquet`, `PARQUET_DATA_DIR=E:/Projects/Data/parquet`, `DUCKDB_PATH=:memory:`, `CLICKHOUSE_ENABLED=false`
 
 ---
 
@@ -99,7 +99,7 @@
 ### Parquet 目录结构
 
 ```text
-data/parquet/
+E:\Projects\Data\parquet\
   klines_daily/       year=YYYY/month=MM/part-*.parquet
   klines_minute_timer/ year=YYYY/month=MM/part-*.parquet
   klines_minute/      year=YYYY/month=MM/part-*.parquet
@@ -113,7 +113,7 @@ data/parquet/
 - 导入脚本：`backend/app/scripts/import_jq_minute_parquet.py`
 - zip/tar.gz 归档导入：`backend/app/scripts/import_jq_minute_archives.py`
 - 异常日期清理：`backend/app/scripts/clean_minute_parquet_dates.py`
-- 状态库：`data/parquet/import_state/jq_minute_import.sqlite`
+- 状态库：`E:\Projects\Data\parquet\import_state\jq_minute_import.sqlite`
 
 ### SQLite stocks 表核心字段
 

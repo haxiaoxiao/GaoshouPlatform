@@ -26,13 +26,13 @@ CLICKHOUSE_ENABLED=false
 当前项目默认数据目录：
 
 ```text
-E:\Projects\GaoshouPlatform\data
+E:\Projects\Data
 ```
 
 Parquet 数据集默认位于：
 
 ```text
-data/parquet/
+E:\Projects\Data\parquet\
   klines_daily/
   klines_minute/
   klines_minute_timer/
@@ -46,7 +46,7 @@ data/parquet/
 SQLite 元数据库默认位于：
 
 ```text
-data/gaoshou.db
+E:\Projects\Data\gaoshou.db
 ```
 
 说明：
@@ -67,8 +67,9 @@ Windows 示例：
 
 ```text
 MARKET_DATA_BACKEND=parquet
-PARQUET_DATA_DIR=E:/Projects/GaoshouPlatform/data/parquet
-DATABASE_URL=sqlite+aiosqlite:///E:/Projects/GaoshouPlatform/data/gaoshou.db
+GAOSHOU_DATA_DIR=E:/Projects/Data
+PARQUET_DATA_DIR=E:/Projects/Data/parquet
+DATABASE_URL=sqlite+aiosqlite:///E:/Projects/Data/gaoshou.db
 DUCKDB_PATH=:memory:
 CLICKHOUSE_ENABLED=false
 DEBUG=false
@@ -78,8 +79,9 @@ macOS / Linux 示例：
 
 ```text
 MARKET_DATA_BACKEND=parquet
-PARQUET_DATA_DIR=/Users/albert/MyProjects/GaoshouPlatform/data/parquet
-DATABASE_URL=sqlite+aiosqlite:////Users/albert/MyProjects/GaoshouPlatform/data/gaoshou.db
+GAOSHOU_DATA_DIR=/Users/albert/MyProjects/Data
+PARQUET_DATA_DIR=/Users/albert/MyProjects/Data/parquet
+DATABASE_URL=sqlite+aiosqlite:////Users/albert/MyProjects/Data/gaoshou.db
 DUCKDB_PATH=:memory:
 CLICKHOUSE_ENABLED=false
 DEBUG=false
@@ -150,7 +152,7 @@ GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&en
 
 检查：
 
-1. `PARQUET_DATA_DIR` 是否指向 `data/parquet`。
+1. `PARQUET_DATA_DIR` 是否指向公共数据目录下的 `parquet`，如 `E:\Projects\Data\parquet`。
 2. 目录下是否有 `klines_daily/year=YYYY/month=MM/part-*.parquet`。
 3. 后端启动日志是否显示 `ClickHouse disabled, using Parquet/DuckDB backend`。
 

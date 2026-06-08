@@ -5,7 +5,7 @@ Source layout observed:
     code examples: 000001.XSHE, 600000.XSHG
 
 Target layout:
-    data/parquet/klines_minute/year=YYYY/month=MM/part-*.parquet
+    E:/Projects/Data/parquet/klines_minute/year=YYYY/month=MM/part-*.parquet
     columns: symbol, datetime, open, high, low, close, volume, amount, source
 
 Examples:
@@ -30,7 +30,7 @@ from loguru import logger
 DEFAULT_SOURCE = Path(
     r"E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版\01_数据文件"
 )
-DEFAULT_TARGET = Path(r"E:\Projects\GaoshouPlatform\data\parquet")
+DEFAULT_TARGET = Path(__file__).resolve().parents[3].parent / "Data" / "parquet"
 
 
 @dataclass(frozen=True)

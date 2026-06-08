@@ -28,7 +28,7 @@
 ```
 
 - 后端：Python 3.12+、FastAPI、SQLAlchemy async、SQLite 元数据库。
-- 默认行情后端：`MARKET_DATA_BACKEND=parquet`，通过 DuckDB 查询 `data/parquet`。
+- 默认行情后端：`MARKET_DATA_BACKEND=parquet`，通过 DuckDB 查询公共目录 `E:\Projects\Data\parquet`。
 - 可选行情后端：ClickHouse，主要用于大规模高并发查询。
 - 前端：Vue 3、TypeScript、Vite、Element Plus、深色主题。
 

@@ -15,7 +15,7 @@ from pathlib import Path
 import duckdb
 from loguru import logger
 
-DEFAULT_ROOT = Path(r"E:\Projects\GaoshouPlatform\data\parquet\klines_minute")
+DEFAULT_ROOT = Path(__file__).resolve().parents[3].parent / "Data" / "parquet" / "klines_minute"
 
 
 def sql_literal(value: object) -> str:

@@ -1,3 +1,4 @@
+import os
 import socket
 from pathlib import Path
 
@@ -6,19 +7,6 @@ from pydantic_settings import BaseSettings
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _BASE_DIR = _BACKEND_DIR.parent
 _HOSTNAME = socket.gethostname().split(".")[0]
-_DATA_DIR = _BASE_DIR / "data"
-_DATA_DIR.mkdir(parents=True, exist_ok=True)
-_LEGACY_DATA_DIR = _BACKEND_DIR / "data"
-_DB_PATH = _DATA_DIR / "gaoshou.db"
-_LEGACY_DB_PATH = _LEGACY_DATA_DIR / "gaoshou.db"
-if not _DB_PATH.exists() and _LEGACY_DB_PATH.exists():
-    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        _LEGACY_DB_PATH.replace(_DB_PATH)
-    except OSError:
-        # If another process keeps SQLite open, keep using the legacy DB for
-        # this process. The file can be moved after the process stops.
-        _DB_PATH = _LEGACY_DB_PATH
 
 _ENV_FILES = (
     str(_BASE_DIR / ".env"),
@@ -30,6 +18,40 @@ _ENV_FILES = (
 )
 
 
+def _env_file_value(name: str) -> str | None:
+    value: str | None = None
+    for env_file in _ENV_FILES:
+        path = Path(env_file)
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            text = line.strip()
+            if not text or text.startswith("#") or "=" not in text:
+                continue
+            key, raw = text.split("=", 1)
+            if key.strip() == name:
+                value = raw.strip().strip('"').strip("'")
+    return value
+
+
+_DATA_DIR = Path(os.getenv("GAOSHOU_DATA_DIR") or _env_file_value("GAOSHOU_DATA_DIR") or (_BASE_DIR.parent / "Data")).expanduser()
+_DATA_DIR.mkdir(parents=True, exist_ok=True)
+_DB_PATH = _DATA_DIR / "gaoshou.db"
+_LEGACY_DB_PATHS = (
+    _BASE_DIR / "data" / "gaoshou.db",
+    _BACKEND_DIR / "data" / "gaoshou.db",
+)
+_LEGACY_DB_PATH = next((path for path in _LEGACY_DB_PATHS if path.exists()), None)
+if not _DB_PATH.exists() and _LEGACY_DB_PATH is not None:
+    _DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        _LEGACY_DB_PATH.replace(_DB_PATH)
+    except OSError:
+        # If another process keeps SQLite open, keep using the legacy DB for
+        # this process. The file can be moved after the process stops.
+        _DB_PATH = _LEGACY_DB_PATH
+
+
 class Settings(BaseSettings):
     """应用配置"""
 
@@ -37,6 +59,7 @@ class Settings(BaseSettings):
     app_name: str = "GaoshouPlatform"
     app_version: str = "0.1.0"
     debug: bool = True
+    gaoshou_data_dir: str = str(_DATA_DIR)
 
     # 数据库配置
     database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"

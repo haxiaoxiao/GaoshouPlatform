@@ -2,7 +2,7 @@
 
 Last updated: 2026-06-01.
 
-本审计回答：逐页开发/重构时，当前 `data/dev_sample` 是否能覆盖各数据接口需要的 SQLite/Parquet 存储。
+本审计回答：逐页开发/重构时，当前公共目录样本 `E:\Projects\Data\dev_sample` 是否能覆盖各数据接口需要的 SQLite/Parquet 存储。
 
 ## 结论
 
@@ -77,7 +77,7 @@ Parquet:
 ```powershell
 cd E:\Projects\GaoshouPlatform-dev\backend
 .\.venv\Scripts\python.exe -m app.scripts.validate_dev_sample_data `
-  --json-report E:\Projects\GaoshouPlatform-dev\data\dev_sample\validation-report.json
+  --json-report E:\Projects\Data\dev_sample\validation-report.json
 ```
 
-`validation-report.json` 在 ignored 的样本目录里，适合每次重切样本后检查，不提交到仓库。
+`validation-report.json` 在公共数据目录的 ignored 样本目录里，适合每次重切样本后检查，不提交到仓库。
