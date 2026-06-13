@@ -18,6 +18,10 @@ from app.backtest.strategies.multi_factor_akquant import (
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
     MULTI_FACTOR_STRATEGY_CODE,
 )
+from app.backtest.strategies.tech_small_cap_akquant import (
+    DEFAULT_TECH_SMALL_CAP_PARAMS,
+    TECH_SMALL_CAP_STRATEGY_CODE,
+)
 
 
 def test_multi_factor_strategy_code_shape():
@@ -91,3 +95,32 @@ def test_cn_paper_style_rotation_builtin_templates_are_registered():
     assert defensive_template is not None
     assert style_template.to_preset_dict()["strategy_params"]["required_factor_group"] == "cn_paper_style_rotation"
     assert defensive_template.to_preset_dict()["strategy_params"]["required_factor_group"] == "cn_paper_style_rotation"
+
+
+def test_tech_small_cap_preset_executes():
+    assert "paper_growth_quality_score" in TECH_SMALL_CAP_STRATEGY_CODE
+    assert "high_volume_ratio" in TECH_SMALL_CAP_STRATEGY_CODE
+    assert DEFAULT_TECH_SMALL_CAP_PARAMS["rebalance_every_n_days"] == 5
+    assert DEFAULT_TECH_SMALL_CAP_PARAMS["timer_times"] == ["10:00", "10:30", "14:30"]
+
+    namespace = {"aq": aq}
+    exec(TECH_SMALL_CAP_STRATEGY_CODE, namespace)
+    strategy_cls = namespace["MultiFactorStrategy"]
+    strategy = strategy_cls()
+
+    assert issubclass(strategy_cls, aq.Strategy)
+    assert strategy.top_n == 20
+    assert strategy.rebalance_every_n_days == 5
+    assert strategy.stop_loss_pct == 0.08
+    assert strategy.high_volume_risk_factor == "high_volume_ratio"
+    assert strategy.strict_theme_filter is True
+
+
+def test_tech_small_cap_builtin_template_is_registered():
+    template = get_builtin_strategy_template("tech_small_cap")
+    assert template is not None
+    payload = template.to_preset_dict()
+    assert payload["strategy_key"] == "tech_small_cap"
+    assert payload["bar_type"] == "minute_timer"
+    assert payload["strategy_params"]["index_symbol"] == "399101.SZ"
+    assert "small_cap_v4_core" in payload["strategy_params"]["required_factor_groups"]

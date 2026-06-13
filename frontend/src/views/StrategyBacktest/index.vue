@@ -1645,6 +1645,17 @@ const seedMultiFactorStrategy = async () => {
   }
 }
 
+const seedTechSmallCapStrategy = async () => {
+  if (strategyList.value.some(s => s.name === '科技小市值多因子')) return
+  try {
+    const { backtestEngines } = await import('@/api/backtest')
+    await backtestEngines.createTechSmallCapStrategy()
+    await loadStrategies()
+  } catch {
+    // non-critical: built-in template can still be created manually
+  }
+}
+
 const loadEngines = async () => {
   try {
     const { backtestEngines } = await import('@/api/backtest')
@@ -1769,6 +1780,7 @@ onMounted(async () => {
   await loadStrategies()
   await seedTrendCapitalStrategy()
   await seedMultiFactorStrategy()
+  await seedTechSmallCapStrategy()
   await loadEngines()
   await loadIndexCatalog()
   loadSavedFactors()

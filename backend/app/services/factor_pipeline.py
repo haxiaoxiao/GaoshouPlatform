@@ -314,7 +314,7 @@ class FactorPipeline:
             return pd.DataFrame(index=pd.Index(symbol_list, name="symbol"))
         placeholders = ",".join(["?"] * len(symbol_list))
         sql = f"""
-            SELECT symbol, industry, industry2, industry3, circ_mv, total_mv
+            SELECT symbol, industry, industry2, industry3, sector, concept, circ_mv, total_mv
             FROM stocks
             WHERE symbol IN ({placeholders})
         """

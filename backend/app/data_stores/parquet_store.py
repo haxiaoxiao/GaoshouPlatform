@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import shutil
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Sequence
 
@@ -503,12 +503,25 @@ class ParquetMarketDataStore(MarketDataStore):
 
         col = "datetime" if "minute" in dataset else "trade_date"
         symbol_filter = f"symbol IN {_list_param(symbols)} AND" if symbols else ""
+        start_value: object = start_date
+        end_value: object = end_date
+        timer_filter = ""
+        if "minute" in dataset:
+            start_value = datetime.combine(start_date, time.min)
+            end_value = datetime.combine(end_date, time.max)
+            timer_minutes = self._timer_minutes(timer_times)
+            if timer_minutes:
+                timer_filter = (
+                    "AND (EXTRACT(hour FROM {col}) * 60 + EXTRACT(minute FROM {col})) "
+                    "IN {minutes}"
+                ).format(col=col, minutes="(" + ", ".join(str(item) for item in timer_minutes) + ")")
         sql = f"""
             SELECT symbol, MIN({col}) as min_dt, MAX({col}) as max_dt, COUNT(*) as cnt
             FROM read_parquet('{self._glob_pattern(dataset)}', hive_partitioning=true)
             WHERE {symbol_filter}
-              {col} >= {_sql_literal(start_date)}
-              AND {col} <= {_sql_literal(end_date)}
+              {col} >= {_sql_literal(start_value)}
+              AND {col} <= {_sql_literal(end_value)}
+              {timer_filter}
             GROUP BY symbol
         """
         db = get_duckdb()
@@ -520,3 +533,16 @@ class ParquetMarketDataStore(MarketDataStore):
             "symbols_covered": symbols_covered,
             "date_range": f"{start_date} ~ {end_date}",
         }
+
+    @staticmethod
+    def _timer_minutes(timer_times: Sequence[str] | None) -> list[int]:
+        minutes: list[int] = []
+        for value in timer_times or []:
+            parts = str(value).strip().split(":")
+            if len(parts) < 2:
+                continue
+            try:
+                minutes.append(int(parts[0]) * 60 + int(parts[1]))
+            except ValueError:
+                continue
+        return sorted(set(minutes))

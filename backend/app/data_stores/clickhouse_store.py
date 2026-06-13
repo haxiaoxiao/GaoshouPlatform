@@ -1,7 +1,7 @@
 """ClickHouse 行情数据存储 — 包装现有 ClickHouse 查询实现 MarketDataStore"""
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, time
 from typing import Sequence
 
 import pandas as pd
@@ -245,13 +245,40 @@ class ClickHouseMarketDataStore(MarketDataStore):
     ) -> dict:
         table = "klines_minute" if "minute" in dataset else "klines_daily"
         col = "datetime" if "minute" in dataset else "trade_date"
+        start_value: object = start_date
+        end_value: object = end_date
+        timer_clause = ""
+        params = {"syms": tuple(symbols), "start": start_value, "end": end_value}
+        if "minute" in dataset:
+            start_value = datetime.combine(start_date, time.min)
+            end_value = datetime.combine(end_date, time.max)
+            params["start"] = start_value
+            params["end"] = end_value
+            timer_minutes = self._timer_minutes(timer_times)
+            if timer_minutes:
+                timer_clause = "AND (toHour(datetime) * 60 + toMinute(datetime)) IN %(timer_minutes)s"
+                params["timer_minutes"] = tuple(timer_minutes)
         rows = self._execute(
             f"""SELECT symbol, MIN({col}), MAX({col}), COUNT(*)
                 FROM {table}
                 WHERE symbol IN %(syms)s AND {col} >= %(start)s AND {col} <= %(end)s
+                {timer_clause}
                 GROUP BY symbol""",
-            {"syms": tuple(symbols), "start": start_date, "end": end_date},
+            params,
         )
         syms = [r[0] for r in rows]
         total = sum(r[3] for r in rows)
         return {"total_rows": total, "symbols_covered": syms, "date_range": f"{start_date} ~ {end_date}"}
+
+    @staticmethod
+    def _timer_minutes(timer_times: Sequence[str] | None) -> list[int]:
+        minutes: list[int] = []
+        for value in timer_times or []:
+            parts = str(value).strip().split(":")
+            if len(parts) < 2:
+                continue
+            try:
+                minutes.append(int(parts[0]) * 60 + int(parts[1]))
+            except ValueError:
+                continue
+        return sorted(set(minutes))

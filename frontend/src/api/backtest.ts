@@ -303,6 +303,7 @@ export const backtestEngines = {
   dualStockGridPreset: () => request.get<Record<string, unknown>>('/backtest/presets/dual-stock-grid'),
   createDualStockGridStrategy: () => request.post<Strategy>('/backtest/presets/dual-stock-grid/strategy', {}),
   createMultiFactorStrategy: () => request.post<Strategy>('/backtest/presets/multi-factor/strategy', {}),
+  createTechSmallCapStrategy: () => request.post<Strategy>('/backtest/presets/tech-small-cap/strategy', {}),
 }
 
 

@@ -25,9 +25,12 @@ from app.backtest.strategies.builtin_templates import (
     DEFAULT_DUAL_STOCK_GRID_PARAMS,
     DEFAULT_MULTI_FACTOR_PARAMS,
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
+    DEFAULT_TECH_SMALL_CAP_PARAMS,
+    DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
     DUAL_STOCK_GRID_STRATEGY_CODE,
     DUAL_STOCK_GRID_SYMBOLS,
     MULTI_FACTOR_STRATEGY_CODE,
+    TECH_SMALL_CAP_STRATEGY_CODE,
 )
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory
@@ -844,6 +847,69 @@ async def create_multi_factor_strategy(req: BuiltinStrategyCreateRequest):
             strategy.code = MULTI_FACTOR_STRATEGY_CODE
             strategy.parameters = parameters
             strategy.description = "AKQuant 通用多因子选股模板；因子、权重、标准化和 ML 接口在策略代码顶部配置。"
+        await session.commit()
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "id": strategy.id,
+                "name": strategy.name,
+                "code": strategy.code,
+                "parameters": strategy.parameters,
+                "description": strategy.description,
+            },
+        }
+
+
+@router.post("/presets/tech-small-cap/strategy")
+async def create_tech_small_cap_strategy(req: BuiltinStrategyCreateRequest):
+    """Create or update the technology-mainline small-cap strategy."""
+    strategy_name = "科技小市值多因子"
+    parameters = {
+        **DEFAULT_TECH_SMALL_CAP_PARAMS,
+        "risk_config": DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+        "backtest_settings": {
+            "engine": "akquant",
+            "barType": "minute_timer",
+            "benchmarkSymbol": "399101.SZ",
+            "poolSource": {
+                "type": "index",
+                "label": "中小综指 / 399101.SZ",
+                "count": 0,
+                "symbols": [],
+                "indexSymbol": "399101.SZ",
+            },
+            "showOptimizationPanel": False,
+        },
+        "index_symbol": "399101.SZ",
+        "required_factor_groups": [
+            "small_cap_v4_core",
+            "cn_paper_implemented",
+            "cn_paper_style_rotation",
+        ],
+    }
+    description = (
+        "面向 A 股科技主线的小市值多因子 AKQuant 策略；"
+        "周频 10:30 调仓，10:00/14:30 使用 minute_timer 做止损与异常放量风控。"
+    )
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Strategy).where(Strategy.name == strategy_name).limit(1)
+        )
+        strategy = result.scalars().first()
+        if strategy is None:
+            strategy = Strategy(
+                name=strategy_name,
+                code=TECH_SMALL_CAP_STRATEGY_CODE,
+                parameters=parameters,
+                description=description,
+            )
+            session.add(strategy)
+            await session.flush()
+        else:
+            strategy.code = TECH_SMALL_CAP_STRATEGY_CODE
+            strategy.parameters = parameters
+            strategy.description = description
         await session.commit()
         return {
             "code": 0,

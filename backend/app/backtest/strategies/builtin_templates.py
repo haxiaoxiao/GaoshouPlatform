@@ -29,6 +29,11 @@ from app.backtest.strategies.multi_factor_akquant import (
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
     MULTI_FACTOR_STRATEGY_CODE,
 )
+from app.backtest.strategies.tech_small_cap_akquant import (
+    DEFAULT_TECH_SMALL_CAP_PARAMS,
+    DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+    TECH_SMALL_CAP_STRATEGY_CODE,
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +126,31 @@ CN_PAPER_DEFENSIVE_ALLOCATION_PARAMETERS = {
 }
 
 
+TECH_SMALL_CAP_PARAMETERS = {
+    **DEFAULT_TECH_SMALL_CAP_PARAMS,
+    "risk_config": DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+    "backtest_settings": {
+        "engine": "akquant",
+        "barType": "minute_timer",
+        "benchmarkSymbol": "399101.SZ",
+        "poolSource": {
+            "type": "index",
+            "label": "中小综指 / 399101.SZ",
+            "count": 0,
+            "symbols": [],
+            "indexSymbol": "399101.SZ",
+        },
+        "showOptimizationPanel": False,
+    },
+    "index_symbol": "399101.SZ",
+    "required_factor_groups": [
+        "small_cap_v4_core",
+        "cn_paper_implemented",
+        "cn_paper_style_rotation",
+    ],
+}
+
+
 BUILTIN_STRATEGY_TEMPLATES: dict[str, BuiltinStrategyTemplate] = {
     "dual_stock_grid": BuiltinStrategyTemplate(
         key="dual_stock_grid",
@@ -169,6 +199,14 @@ BUILTIN_STRATEGY_TEMPLATES: dict[str, BuiltinStrategyTemplate] = {
         code=CN_PAPER_DEFENSIVE_ALLOCATION_STRATEGY_CODE,
         parameters=CN_PAPER_DEFENSIVE_ALLOCATION_PARAMETERS,
         bar_type="daily",
+    ),
+    "tech_small_cap": BuiltinStrategyTemplate(
+        key="tech_small_cap",
+        name="科技小市值多因子",
+        description="面向 A 股科技主线的小市值多因子 AKQuant 策略；周频 10:30 调仓，10:00/14:30 使用 minute_timer 做止损与异常放量风控。",
+        code=TECH_SMALL_CAP_STRATEGY_CODE,
+        parameters=TECH_SMALL_CAP_PARAMETERS,
+        bar_type="minute_timer",
     ),
 }
 
