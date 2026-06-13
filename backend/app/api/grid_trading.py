@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from app.services.grid_trading import GRID_SYMBOLS, grid_trading_service
+from app.services.tech_small_cap_live import tech_small_cap_live_service
 
 router = APIRouter(prefix="/grid-trading", tags=["grid-trading"])
 
@@ -22,6 +23,16 @@ class GridSubmitPreviewRequest(BaseModel):
 
 class GridSubmitOrderRequest(BaseModel):
     order: dict[str, Any] = Field(default_factory=dict)
+
+
+class TechSmallCapSignalRequest(BaseModel):
+    params: dict[str, Any] = Field(default_factory=dict)
+    manual_account: dict[str, Any] | None = None
+
+
+class TechSmallCapSubmitOrdersRequest(BaseModel):
+    orders: list[dict[str, Any]] = Field(default_factory=list)
+    confirm: bool = False
 
 
 @router.get("/symbols")
@@ -69,4 +80,24 @@ async def submit_grid_order_preview(req: GridSubmitPreviewRequest):
 @router.post("/orders/submit")
 async def submit_grid_order(req: GridSubmitOrderRequest):
     data = await grid_trading_service.submit_order(req.order)
+    return {"code": 0, "data": data}
+
+
+@router.get("/tech-small-cap/variants")
+async def get_tech_small_cap_variants():
+    return {"code": 0, "data": tech_small_cap_live_service.variants()}
+
+
+@router.post("/tech-small-cap/signals")
+async def get_tech_small_cap_signals(req: TechSmallCapSignalRequest):
+    data = await tech_small_cap_live_service.signals(
+        params=req.params,
+        manual_account=req.manual_account,
+    )
+    return {"code": 0, "data": data}
+
+
+@router.post("/tech-small-cap/orders/submit")
+async def submit_tech_small_cap_orders(req: TechSmallCapSubmitOrdersRequest):
+    data = await tech_small_cap_live_service.submit_orders(req.orders, confirm=req.confirm)
     return {"code": 0, "data": data}

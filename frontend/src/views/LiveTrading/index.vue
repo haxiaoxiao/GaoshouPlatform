@@ -65,6 +65,65 @@
       </div>
     </section>
 
+    <section class="tsmf-panel">
+      <div class="tsmf-head">
+        <div>
+          <span class="section-kicker">TSMF TECH SMALL-CAP</span>
+          <h3>科技小市值组合执行</h3>
+          <p>使用平台因子截面和美股隔夜过滤生成目标组合；QMT 下单仍受真实下单开关和二次确认保护。</p>
+        </div>
+        <div class="tsmf-actions">
+          <el-select v-model="tsmfParams.strategy_variant" size="small" style="width: 260px" @change="loadTsmfSignals">
+            <el-option
+              v-for="variant in tsmfVariants"
+              :key="variant.key"
+              :label="variant.name"
+              :value="variant.key"
+            />
+          </el-select>
+          <el-date-picker v-model="tsmfParams.trade_date" value-format="YYYY-MM-DD" size="small" style="width: 140px" />
+          <el-input v-model="tsmfParams.index_symbol" size="small" style="width: 120px" />
+          <el-button size="small" :loading="tsmfLoading" @click="loadTsmfSignals">生成组合</el-button>
+        </div>
+      </div>
+      <div class="tsmf-summary">
+        <div><label>股票池</label><strong>{{ tsmfData?.universe_size || 0 }}</strong></div>
+        <div><label>候选</label><strong>{{ tsmfData?.candidate_count || 0 }}</strong></div>
+        <div><label>目标</label><strong>{{ tsmfData?.target_symbols?.length || 0 }}</strong></div>
+        <div><label>委托</label><strong>{{ tsmfData?.orders?.length || 0 }}</strong></div>
+        <div><label>入场过滤</label><strong>{{ String(tsmfData?.entry_filter?.us_overnight_reason || 'off') }}</strong></div>
+        <div><label>美股日期</label><strong>{{ String(tsmfData?.entry_filter?.us_date || '-') }}</strong></div>
+      </div>
+      <el-alert
+        v-if="tsmfData?.quote_error || tsmfData?.account?.error"
+        type="warning"
+        :closable="false"
+        show-icon
+        :title="tsmfData?.quote_error || tsmfData?.account?.error || ''"
+        class="account-alert"
+      />
+      <div class="tsmf-order-actions">
+        <el-button size="small" @click="previewTsmfOrders">组合委托预览</el-button>
+        <el-button
+          v-if="status?.order_submit_enabled"
+          size="small"
+          type="danger"
+          plain
+          :disabled="!(tsmfData?.orders?.length)"
+          @click="submitTsmfOrders"
+        >
+          确认提交 TSMF
+        </el-button>
+      </div>
+      <el-table v-if="tsmfData?.orders?.length" :data="tsmfData.orders" size="small" stripe max-height="220">
+        <el-table-column prop="symbol" label="代码" width="110" />
+        <el-table-column prop="side" label="方向" width="80" />
+        <el-table-column prop="quantity" label="数量" width="100" />
+        <el-table-column prop="reference_price" label="参考价" width="100" />
+        <el-table-column prop="remark" label="原因" min-width="180" />
+      </el-table>
+    </section>
+
     <el-alert
       v-if="data?.account?.error || status?.error"
       type="warning"
@@ -164,6 +223,8 @@ import {
   type GridSignal,
   type GridSignalsResponse,
   type GridStatus,
+  type TechSmallCapSignalsResponse,
+  type TechSmallCapVariant,
 } from '@/api/gridTrading'
 
 const params = reactive({
@@ -177,9 +238,18 @@ const params = reactive({
   initial_cash: 1_000_000,
 })
 
+const tsmfParams = reactive({
+  strategy_variant: 'entry_filter_relaxed_risk',
+  trade_date: new Date().toISOString().slice(0, 10),
+  index_symbol: '399101.SZ',
+})
+
 const status = ref<GridStatus | null>(null)
 const data = ref<GridSignalsResponse | null>(null)
+const tsmfVariants = ref<TechSmallCapVariant[]>([])
+const tsmfData = ref<TechSmallCapSignalsResponse | null>(null)
 const loading = ref(false)
+const tsmfLoading = ref(false)
 const autoRefresh = ref(true)
 const seenSignals = new Set<string>()
 let timer: number | undefined
@@ -187,15 +257,31 @@ let timer: number | undefined
 async function loadAll() {
   loading.value = true
   try {
-    const [nextStatus, nextSignals] = await Promise.all([
+    const [nextStatus, nextSignals, nextVariants, nextTsmfSignals] = await Promise.all([
       gridTradingApi.status(),
       gridTradingApi.signals({ params: { ...params } }),
+      gridTradingApi.techSmallCapVariants(),
+      gridTradingApi.techSmallCapSignals({ params: { ...tsmfParams } }),
     ])
     status.value = nextStatus
     data.value = nextSignals
+    tsmfVariants.value = nextVariants
+    tsmfData.value = nextTsmfSignals
     notifyNewSignals(nextSignals.signals)
   } finally {
     loading.value = false
+  }
+}
+
+async function loadTsmfSignals() {
+  tsmfLoading.value = true
+  try {
+    if (!tsmfVariants.value.length) {
+      tsmfVariants.value = await gridTradingApi.techSmallCapVariants()
+    }
+    tsmfData.value = await gridTradingApi.techSmallCapSignals({ params: { ...tsmfParams } })
+  } finally {
+    tsmfLoading.value = false
   }
 }
 
@@ -234,6 +320,31 @@ async function submitOrder(signal: GridSignal) {
   })
   const result = await gridTradingApi.submitOrder({ ...signal.order_preview, confirm: true })
   ElMessageBox.alert(JSON.stringify(result, null, 2), '委托结果', {
+    confirmButtonText: '知道了',
+  })
+}
+
+async function previewTsmfOrders() {
+  const orders = tsmfData.value?.orders || []
+  if (!orders.length) {
+    ElMessage.info('TSMF 当前没有需要执行的组合委托')
+    return
+  }
+  ElMessageBox.alert(JSON.stringify(orders, null, 2), 'TSMF 委托预览', {
+    confirmButtonText: '知道了',
+  })
+}
+
+async function submitTsmfOrders() {
+  const orders = tsmfData.value?.orders || []
+  if (!orders.length) return
+  await ElMessageBox.confirm(`确认提交 TSMF 组合委托 ${orders.length} 笔？`, '真实委托确认', {
+    type: 'warning',
+    confirmButtonText: '确认提交',
+    cancelButtonText: '取消',
+  })
+  const result = await gridTradingApi.submitTechSmallCapOrders(orders as any[], true)
+  ElMessageBox.alert(JSON.stringify(result, null, 2), 'TSMF 委托结果', {
     confirmButtonText: '知道了',
   })
 }
@@ -374,6 +485,62 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+.tsmf-panel {
+  border: 1px solid var(--border-subtle);
+  background: linear-gradient(180deg, rgba(64, 158, 255, 0.08), transparent), var(--bg-surface);
+  border-radius: 8px;
+  padding: 14px;
+  box-shadow: var(--shadow-card);
+}
+
+.tsmf-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.tsmf-head h3 {
+  margin: 4px 0;
+  color: var(--text-bright);
+}
+
+.tsmf-head p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.tsmf-actions,
+.tsmf-order-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.tsmf-summary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.tsmf-summary div {
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.tsmf-summary label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 11px;
+  margin-bottom: 2px;
+}
+
 .account-alert {
   margin-bottom: 12px;
 }
@@ -464,6 +631,11 @@ onUnmounted(() => {
 
   .metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tsmf-head,
+  .tsmf-summary {
+    grid-template-columns: 1fr;
   }
 }
 </style>

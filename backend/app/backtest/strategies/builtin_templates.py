@@ -30,9 +30,10 @@ from app.backtest.strategies.multi_factor_akquant import (
     MULTI_FACTOR_STRATEGY_CODE,
 )
 from app.backtest.strategies.tech_small_cap_akquant import (
-    DEFAULT_TECH_SMALL_CAP_PARAMS,
-    DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
     TECH_SMALL_CAP_STRATEGY_CODE,
+    get_tech_small_cap_params,
+    get_tech_small_cap_risk_config,
+    get_tech_small_cap_variant,
 )
 
 
@@ -127,8 +128,8 @@ CN_PAPER_DEFENSIVE_ALLOCATION_PARAMETERS = {
 
 
 TECH_SMALL_CAP_PARAMETERS = {
-    **DEFAULT_TECH_SMALL_CAP_PARAMS,
-    "risk_config": DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+    **get_tech_small_cap_params(),
+    "risk_config": get_tech_small_cap_risk_config(),
     "backtest_settings": {
         "engine": "akquant",
         "barType": "minute_timer",

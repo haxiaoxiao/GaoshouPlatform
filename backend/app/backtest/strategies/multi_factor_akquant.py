@@ -7,6 +7,10 @@ from typing import Any
 import akquant as aq
 
 from app.services.factor_pipeline import FactorPipeline, LinearFactorScorer
+from app.services.us_market import (
+    apply_entry_filter_to_target_weights,
+    us_overnight_entry_filter_state,
+)
 
 
 FACTOR_CONFIGS = [
@@ -69,6 +73,20 @@ HIGH_VOLUME_RISK_MAX = 0.0
 HIGH_VOLUME_RISK_PARAMS = {}
 RISK_CHECK_TIMES = []
 BLOCK_REBUY_AFTER_STOP = True
+HOLD_RANK_BUFFER = 0
+USE_TARGET_WEIGHT_REBALANCE = True
+CANCEL_OPEN_ORDERS_ON_REBALANCE = True
+US_OVERNIGHT_ENTRY_FILTER = "none"
+US_OVERNIGHT_DATA_PATH = ""
+US_OVERNIGHT_MAX_LAG_DAYS = 5
+US_OVERNIGHT_CAUTION_EXPOSURE = 0.85
+US_OVERNIGHT_DEFENSIVE_EXPOSURE = 0.70
+US_OVERNIGHT_QQQ_CAUTION_RET = -0.01
+US_OVERNIGHT_QQQ_DEFENSIVE_RET = -0.02
+US_OVERNIGHT_SEMI_CAUTION_RET = -0.02
+US_OVERNIGHT_SEMI_DEFENSIVE_RET = -0.03
+US_OVERNIGHT_NVDA_CAUTION_RET = -0.03
+US_OVERNIGHT_NVDA_DEFENSIVE_RET = -0.04
 
 # Risk and fees are intentionally controlled by the platform backtest config:
 # risk_config / max_positions / volume_limit_pct, commission_rate,
@@ -124,6 +142,20 @@ class MultiFactorStrategy(aq.Strategy):
         self.high_volume_risk_params = dict(HIGH_VOLUME_RISK_PARAMS)
         self.risk_check_times = list(RISK_CHECK_TIMES)
         self.block_rebuy_after_stop = bool(BLOCK_REBUY_AFTER_STOP)
+        self.hold_rank_buffer = int(HOLD_RANK_BUFFER)
+        self.use_target_weight_rebalance = bool(USE_TARGET_WEIGHT_REBALANCE)
+        self.cancel_open_orders_on_rebalance = bool(CANCEL_OPEN_ORDERS_ON_REBALANCE)
+        self.us_overnight_entry_filter = str(US_OVERNIGHT_ENTRY_FILTER)
+        self.us_overnight_data_path = str(US_OVERNIGHT_DATA_PATH)
+        self.us_overnight_max_lag_days = int(US_OVERNIGHT_MAX_LAG_DAYS)
+        self.us_overnight_caution_exposure = float(US_OVERNIGHT_CAUTION_EXPOSURE)
+        self.us_overnight_defensive_exposure = float(US_OVERNIGHT_DEFENSIVE_EXPOSURE)
+        self.us_overnight_qqq_caution_ret = float(US_OVERNIGHT_QQQ_CAUTION_RET)
+        self.us_overnight_qqq_defensive_ret = float(US_OVERNIGHT_QQQ_DEFENSIVE_RET)
+        self.us_overnight_semi_caution_ret = float(US_OVERNIGHT_SEMI_CAUTION_RET)
+        self.us_overnight_semi_defensive_ret = float(US_OVERNIGHT_SEMI_DEFENSIVE_RET)
+        self.us_overnight_nvda_caution_ret = float(US_OVERNIGHT_NVDA_CAUTION_RET)
+        self.us_overnight_nvda_defensive_ret = float(US_OVERNIGHT_NVDA_DEFENSIVE_RET)
         self._pipeline = None
         self._seen_symbols = set(DEFAULT_UNIVERSE_SYMBOLS)
         self._latest_price = {}
@@ -136,6 +168,8 @@ class MultiFactorStrategy(aq.Strategy):
         self._last_rebalance_date = None
         self._rebalance_count = 0
         self._daily_rebalanced = set()
+        self._pending_sell_symbols = set()
+        self._last_entry_filter_state = {}
 
     def on_start(self):
         self.set_history_depth(0)
@@ -215,36 +249,102 @@ class MultiFactorStrategy(aq.Strategy):
             self.log(f"MF skip {trade_date}: theme-filtered candidates too small ({len(frame)})")
             return
 
-        target_symbols = list(frame.head(self.top_n).index.astype(str))
+        target_symbols = self._rank_buffer_targets(frame)
         if not target_symbols:
             return
         target_weight = min(
             self.max_position_pct,
             (1.0 - self.cash_buffer_pct) / float(len(target_symbols)),
         )
-        self._submit_targets(target_symbols, target_weight, price_map)
+        entry_filter_state = self._us_entry_filter_state(trade_date)
+        self._last_entry_filter_state = dict(entry_filter_state)
+        self._submit_targets(target_symbols, target_weight, price_map, entry_filter_state=entry_filter_state)
         self._last_rebalance_date = trade_date
         self._rebalance_count += 1
         self.log(
             f"MF rebalance {trade_date}: selected={target_symbols[:5]} "
-            f"excluded={len(result.excluded_symbols)}"
+            f"excluded={len(result.excluded_symbols)} entry_filter={entry_filter_state.get('us_overnight_reason', 'off')}"
         )
 
-    def _submit_targets(self, target_symbols, target_weight, price_map):
-        target_set = set(target_symbols)
+    def _rank_buffer_targets(self, frame):
+        top_n = max(1, int(getattr(self, "top_n", TOP_N) or TOP_N))
+        buffer_n = max(0, int(getattr(self, "hold_rank_buffer", 0) or 0))
+        ranked = list(frame.index.astype(str))
+        if buffer_n <= top_n:
+            return ranked[:top_n]
+        rank_buffer = set(ranked[:buffer_n])
+        current = {symbol for symbol, qty in self._positions().items() if float(qty or 0.0) > 0}
+        keep = [symbol for symbol in ranked if symbol in current and symbol in rank_buffer]
+        additions = [symbol for symbol in ranked if symbol not in keep]
+        return (keep + additions)[:top_n]
+
+    def _us_entry_filter_state(self, trade_date):
+        return us_overnight_entry_filter_state(
+            trade_date,
+            mode=str(getattr(self, "us_overnight_entry_filter", "none") or "none"),
+            data_path=str(getattr(self, "us_overnight_data_path", "") or ""),
+            max_lag_days=int(getattr(self, "us_overnight_max_lag_days", 5) or 5),
+            caution_exposure=float(getattr(self, "us_overnight_caution_exposure", 0.85) or 0.85),
+            defensive_exposure=float(getattr(self, "us_overnight_defensive_exposure", 0.70) or 0.70),
+            qqq_caution_ret=float(getattr(self, "us_overnight_qqq_caution_ret", -0.01) or -0.01),
+            qqq_defensive_ret=float(getattr(self, "us_overnight_qqq_defensive_ret", -0.02) or -0.02),
+            semi_caution_ret=float(getattr(self, "us_overnight_semi_caution_ret", -0.02) or -0.02),
+            semi_defensive_ret=float(getattr(self, "us_overnight_semi_defensive_ret", -0.03) or -0.03),
+            nvda_caution_ret=float(getattr(self, "us_overnight_nvda_caution_ret", -0.03) or -0.03),
+            nvda_defensive_ret=float(getattr(self, "us_overnight_nvda_defensive_ret", -0.04) or -0.04),
+        )
+
+    def _submit_targets(self, target_symbols, target_weight, price_map, entry_filter_state=None):
         portfolio_value = self._portfolio_value(price_map)
+        current_positions = self._positions()
+        target_weights = {
+            str(symbol): float(target_weight)
+            for symbol in target_symbols
+            if str(symbol).strip() and float(target_weight) > 0
+        }
+        target_weights, entry_filter_state = apply_entry_filter_to_target_weights(
+            target_weights,
+            current_positions=current_positions,
+            price_map=price_map,
+            portfolio_value=portfolio_value,
+            entry_filter_state=dict(entry_filter_state or {}),
+        )
+        self._last_entry_filter_state = dict(entry_filter_state or {})
+
+        if bool(getattr(self, "use_target_weight_rebalance", False)) and hasattr(self, "order_target_weights"):
+            if bool(getattr(self, "cancel_open_orders_on_rebalance", True)):
+                try:
+                    self.cancel_all_orders()
+                    self._pending_sell_symbols.clear()
+                except Exception:
+                    pass
+            try:
+                self.order_target_weights(
+                    target_weights=target_weights,
+                    price_map=None,
+                    liquidate_unmentioned=True,
+                    allow_leverage=False,
+                    rebalance_tolerance=float(self.rebalance_tolerance_pct),
+                )
+                return
+            except Exception as exc:
+                self.log(f"MF target-weight rebalance fallback: {exc}")
+
+        target_set = set(target_weights)
         target_positions = {}
-        for symbol in target_symbols:
+        for symbol, weight in target_weights.items():
             price = float(price_map.get(symbol, 0.0) or 0.0)
             if price <= 0:
                 continue
-            target_value = portfolio_value * target_weight
+            target_value = portfolio_value * float(weight)
             target_positions[symbol] = self._round_lot(target_value / price)
 
-        current_positions = self._positions()
         for symbol, qty in current_positions.items():
-            if qty > 0 and symbol not in target_set:
-                self.sell(symbol=symbol, quantity=self._round_lot(qty), price=price_map.get(symbol))
+            if qty > 0 and symbol not in target_set and symbol not in self._pending_sell_symbols:
+                sell_qty = self._round_lot(qty)
+                if sell_qty > 0:
+                    self._pending_sell_symbols.add(symbol)
+                    self.sell(symbol=symbol, quantity=sell_qty, price=None)
 
         for symbol, target_qty in target_positions.items():
             price = float(price_map.get(symbol, 0.0) or 0.0)
@@ -258,11 +358,12 @@ class MultiFactorStrategy(aq.Strategy):
                 buy_qty = self._round_lot(delta)
                 if buy_qty > 0 and self._can_buy(buy_qty, price):
                     self._note_submitted_buy(symbol, buy_qty, price, current_qty)
-                    self.buy(symbol=symbol, quantity=buy_qty, price=price)
+                    self.buy(symbol=symbol, quantity=buy_qty, price=None)
             elif delta < 0:
                 sell_qty = self._round_lot(-delta)
-                if sell_qty > 0:
-                    self.sell(symbol=symbol, quantity=sell_qty, price=price)
+                if sell_qty > 0 and symbol not in self._pending_sell_symbols:
+                    self._pending_sell_symbols.add(symbol)
+                    self.sell(symbol=symbol, quantity=sell_qty, price=None)
 
     def _should_rebalance(self, trade_date):
         if trade_date in self._risk_exit_dates:
@@ -301,6 +402,7 @@ class MultiFactorStrategy(aq.Strategy):
                 self._peak_price[symbol] = max(price, float(self._peak_price.get(symbol, price) or price))
             return
         if "sell" in side or "close" in side:
+            self._pending_sell_symbols.discard(symbol)
             if current_qty <= 0:
                 self._cost_basis.pop(symbol, None)
                 self._peak_price.pop(symbol, None)
@@ -562,6 +664,10 @@ DEFAULT_MULTI_FACTOR_PARAMS = {
     "lot_size": 100,
     "max_position_pct": 0.12,
     "scorer_type": "linear",
+    "hold_rank_buffer": 0,
+    "use_target_weight_rebalance": True,
+    "us_overnight_entry_filter": "none",
+    "us_overnight_max_lag_days": 5,
 }
 
 

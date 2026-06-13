@@ -25,12 +25,13 @@ from app.backtest.strategies.builtin_templates import (
     DEFAULT_DUAL_STOCK_GRID_PARAMS,
     DEFAULT_MULTI_FACTOR_PARAMS,
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
-    DEFAULT_TECH_SMALL_CAP_PARAMS,
-    DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
     DUAL_STOCK_GRID_STRATEGY_CODE,
     DUAL_STOCK_GRID_SYMBOLS,
     MULTI_FACTOR_STRATEGY_CODE,
     TECH_SMALL_CAP_STRATEGY_CODE,
+    get_tech_small_cap_params,
+    get_tech_small_cap_risk_config,
+    get_tech_small_cap_variant,
 )
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory
@@ -344,6 +345,23 @@ async def _prepare_backtest_config(
                 }
             if not config.strategy_code:
                 config.strategy_code = strategy.code
+            stored_params = dict(strategy.parameters or {})
+            strategy_defaults = {
+                key: value
+                for key, value in stored_params.items()
+                if key not in {"backtest_settings", "risk_config"}
+            }
+            if strategy_defaults:
+                config.strategy_params = {**strategy_defaults, **dict(config.strategy_params or {})}
+            if config.risk_config is None and isinstance(stored_params.get("risk_config"), dict):
+                config.risk_config = dict(stored_params["risk_config"])
+            if config.timer_times is None and isinstance(stored_params.get("timer_times"), list):
+                config.timer_times = list(stored_params["timer_times"])
+            if config.max_positions is None:
+                risk_max_positions = (config.risk_config or {}).get("max_positions") if isinstance(config.risk_config, dict) else None
+                max_positions = risk_max_positions or stored_params.get("max_positions")
+                if max_positions is not None:
+                    config.max_positions = int(max_positions)
 
     config._task_id = task_id
     return config, None
@@ -420,6 +438,7 @@ class StrategyParamsValidateRequest(StrategyParamsSchemaRequest):
 
 class BuiltinStrategyCreateRequest(BaseModel):
     name: str = Field(default="dual_stock_grid")
+    variant: str | None = None
 
 
 async def _save_backtest_result(
@@ -864,10 +883,13 @@ async def create_multi_factor_strategy(req: BuiltinStrategyCreateRequest):
 @router.post("/presets/tech-small-cap/strategy")
 async def create_tech_small_cap_strategy(req: BuiltinStrategyCreateRequest):
     """Create or update the technology-mainline small-cap strategy."""
-    strategy_name = "科技小市值多因子"
+    variant = get_tech_small_cap_variant(req.variant or req.name)
+    strategy_name = str(variant["name"])
+    strategy_params = get_tech_small_cap_params(str(variant["key"]))
+    risk_config = get_tech_small_cap_risk_config(str(variant["key"]))
     parameters = {
-        **DEFAULT_TECH_SMALL_CAP_PARAMS,
-        "risk_config": DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+        **strategy_params,
+        "risk_config": risk_config,
         "backtest_settings": {
             "engine": "akquant",
             "barType": "minute_timer",
@@ -889,7 +911,7 @@ async def create_tech_small_cap_strategy(req: BuiltinStrategyCreateRequest):
         ],
     }
     description = (
-        "面向 A 股科技主线的小市值多因子 AKQuant 策略；"
+        f"{variant['description']} "
         "周频 10:30 调仓，10:00/14:30 使用 minute_timer 做止损与异常放量风控。"
     )
     async with async_session_factory() as session:

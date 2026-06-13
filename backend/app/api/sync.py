@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
@@ -52,6 +52,7 @@ VALID_SYNC_TYPES = (
     "realtime_mv",
     "dividends",
     "factor_dependency",
+    "us_market",
     "tushare_relay",
     "ths_concept",
     "sentiment_xueqiu",
@@ -239,6 +240,52 @@ async def _run_sync_task(
                     run_id=run_id,
                     failure_strategy=request.failure_strategy,
                 )
+            elif request.sync_type == "us_market":
+                from app.services.us_market import (
+                    DEFAULT_US_MARKET_SPECS,
+                    default_us_market_dir,
+                    load_us_market_frame,
+                    sync_us_market_history,
+                )
+
+                target_end = request.end_date or date.today()
+                target_start = request.start_date or date(2020, 1, 1)
+                if request.sync_mode == "incremental" and request.start_date is None:
+                    existing = await asyncio.to_thread(load_us_market_frame)
+                    if not existing.empty:
+                        latest = existing.index.max().date()
+                        target_start = max(date(2020, 1, 1), latest - timedelta(days=5))
+
+                progress = SyncProgress(
+                    sync_type="us_market",
+                    status="running",
+                    start_time=datetime.now(),
+                    details={
+                        "run_id": run_id,
+                        "start_date": target_start.isoformat(),
+                        "end_date": target_end.isoformat(),
+                        "sync_mode": request.sync_mode,
+                        "output_dir": str(default_us_market_dir()),
+                    },
+                )
+                await service.persist_sync_progress(progress, run_id=run_id)
+                symbols = (request.relay_options or {}).get("symbols") or list(DEFAULT_US_MARKET_SPECS)
+                sleep_seconds = float((request.relay_options or {}).get("sleep_seconds", 0.5))
+                metadata = await asyncio.to_thread(
+                    sync_us_market_history,
+                    start_date=target_start,
+                    end_date=target_end,
+                    symbol_specs=list(symbols),
+                    output_dir=(request.relay_options or {}).get("output_dir"),
+                    sleep_seconds=sleep_seconds,
+                )
+                progress.status = "completed"
+                progress.end_time = datetime.now()
+                progress.total = int(len(metadata.get("symbols") or []))
+                progress.failed_count = int(len(metadata.get("failed_symbols") or []))
+                progress.success_count = max(0, progress.total - progress.failed_count)
+                progress.current = progress.total
+                progress.details.update(metadata)
             elif request.sync_type == "tushare_relay":
                 progress = await service.sync_tushare_relay(
                     relay_datasets=request.relay_datasets,

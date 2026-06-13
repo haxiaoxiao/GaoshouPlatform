@@ -65,6 +65,47 @@ export interface GridSignalRequest {
   manual_account?: Record<string, unknown> | null
 }
 
+export interface TechSmallCapVariant {
+  key: string
+  name: string
+  description: string
+  params: Record<string, unknown>
+}
+
+export interface TechSmallCapOrder {
+  symbol: string
+  side: 'BUY' | 'SELL'
+  quantity: number
+  reference_price?: number
+  price_type?: string
+  strategy_name?: string
+  remark?: string
+}
+
+export interface TechSmallCapSignalsResponse {
+  timestamp: string
+  strategy: string
+  variant: string
+  trade_date: string
+  account: {
+    cash: number
+    total_asset: number
+    market_value: number
+    source: string
+    error?: string | null
+  }
+  universe_size: number
+  candidate_count: number
+  target_symbols: string[]
+  target_weights: Record<string, number>
+  entry_filter: Record<string, unknown>
+  quote_error?: string | null
+  order_submit_enabled: boolean
+  orders: TechSmallCapOrder[]
+  top_candidates: Record<string, unknown>[]
+  excluded_symbol_count: number
+}
+
 export const gridTradingApi = {
   status: () =>
     request.get<GridStatus>('/grid-trading/status'),
@@ -76,4 +117,10 @@ export const gridTradingApi = {
     request.post<Record<string, unknown>>('/grid-trading/orders/preview', { order_preview: orderPreview }),
   submitOrder: (order: Record<string, unknown>) =>
     request.post<Record<string, unknown>>('/grid-trading/orders/submit', { order }),
+  techSmallCapVariants: () =>
+    request.get<TechSmallCapVariant[]>('/grid-trading/tech-small-cap/variants'),
+  techSmallCapSignals: (data: GridSignalRequest = {}) =>
+    request.post<TechSmallCapSignalsResponse>('/grid-trading/tech-small-cap/signals', data),
+  submitTechSmallCapOrders: (orders: Record<string, unknown>[], confirm = false) =>
+    request.post<Record<string, unknown>>('/grid-trading/tech-small-cap/orders/submit', { orders, confirm }),
 }

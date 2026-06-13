@@ -2,6 +2,14 @@
 
 > 这个文件给不会自动读取 `AGENTS.md` 的外部 agent / 工具使用。完整且权威的规则仍以 `AGENTS.md` 为准；开始任何代码修改前请先阅读它。
 
+## 当前 TSMF 生产化入口
+
+- 科技主线小市值 TSMF 已落到 dev：回测策略模板在 `backend/app/backtest/strategies/tech_small_cap_akquant.py`，通用 AKQuant 执行逻辑在 `backend/app/backtest/strategies/multi_factor_akquant.py`。
+- 生产候选变体有两个：`entry_filter_relaxed_risk`（默认最优候选）和 `us_entry_filter_combined`；参数通过策略记录 `parameters` / 前端“策略参数 JSON”维护，不依赖大模型后台控制。
+- US 隔夜过滤数据统一在公共目录 `E:\Projects\Data\external\us_market\us_market_daily.csv`；同步入口是 `sync_type="us_market"`，默认抓取 QQQ/SMH/SOXX/NVDA。
+- QMT 组合执行入口在 `/api/grid-trading/tech-small-cap/*` 和前端 `/live` 页面；真实下单仍受 `GRID_TRADING_ENABLE_ORDER_SUBMIT=true` 和前端二次确认保护。
+- 运行前确保因子组已预计算：`small_cap_v4_core`、`cn_paper_implemented`、`cn_paper_style_rotation`，股票池默认使用 `399101.SZ` 历史成分。
+
 ## 绝对边界
 
 - `E:\Projects\GaoshouPlatform-prod` 是生产仓库：默认只读，只做验证、日志、健康检查，以及用户明确要求的数据清理。

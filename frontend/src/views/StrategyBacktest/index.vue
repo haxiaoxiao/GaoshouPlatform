@@ -247,6 +247,20 @@
                 active-text="参数优化"
               />
             </div>
+            <div v-if="btEngine === 'akquant'" class="strategy-param-panel">
+              <div class="strategy-param-panel__head">
+                <span>策略参数 JSON</span>
+                <el-button size="small" link @click="resetStrategyParamsText">重置</el-button>
+                <el-button size="small" type="primary" link @click="persistActiveStrategyRunSettings">保存参数</el-button>
+              </div>
+              <el-input
+                v-model="strategyParamsText"
+                type="textarea"
+                :rows="6"
+                resize="vertical"
+                placeholder='{"top_n":20,"us_overnight_entry_filter":"combined_downside"}'
+              />
+            </div>
             <div class="bt-run-progress" v-if="btRunning || btTaskId">
               <div class="bt-run-progress__head">
                 <strong>{{ backtestProgressTitle }}</strong>
@@ -575,6 +589,7 @@ const handleCreate = async (type: string) => {
       created_at: result.created_at,
       updated_at: result.updated_at,
     }
+    setStrategyParamsText(result.parameters as Record<string, unknown> | null)
     if (type === 'expression') {
       editorTab.value = 'expression'
       btMode.value = 'expression'
@@ -673,6 +688,7 @@ const uploadResult = ref<{ strategy_type: string; name: string; code: string; su
 
 const btCode = ref('')
 const btExpression = ref(SAMPLE_EXPRESSION)
+const strategyParamsText = ref('{}')
 
 const codePlaceholder = computed(() =>
   btEngine.value === 'akquant'
@@ -1068,7 +1084,7 @@ const applyBtSettings = (settings?: BtSettings | null) => {
 }
 
 const currentStrategyParameters = () => ({
-  ...((activeStrategy.value?.parameters || {}) as Record<string, unknown>),
+  ...parseStrategyParamsText(),
   backtest_settings: collectBtSettings(),
 })
 
@@ -1191,6 +1207,13 @@ const buildBacktestPayload = () => {
   const isExpression = editorTab.value === 'expression'
   const code = isExpression ? btExpression.value : btCode.value
   const engine = btEngine.value
+  const strategyParams = parseStrategyParamsText()
+  const runtimeStrategyParams = { ...strategyParams }
+  delete runtimeStrategyParams.backtest_settings
+  const riskConfig = strategyParams.risk_config && typeof strategyParams.risk_config === 'object'
+    ? strategyParams.risk_config as Record<string, unknown>
+    : undefined
+  delete runtimeStrategyParams.risk_config
   return {
     engine,
     mode: isExpression ? 'vectorized' : 'event_driven',
@@ -1208,6 +1231,15 @@ const buildBacktestPayload = () => {
     n_groups: isExpression ? btNGroups.value : 5,
     bar_type: btBarType.value,
     benchmark_symbol: selectedBenchmarkSymbol.value || undefined,
+    timer_times: Array.isArray(strategyParams.timer_times) ? strategyParams.timer_times : undefined,
+    strategy_params: !isExpression && engine === 'akquant' ? runtimeStrategyParams : undefined,
+    risk_config: riskConfig,
+    max_positions: typeof riskConfig?.max_positions === 'number'
+      ? riskConfig.max_positions
+      : typeof strategyParams.max_positions === 'number'
+        ? strategyParams.max_positions
+        : undefined,
+    lot_size: typeof strategyParams.lot_size === 'number' ? strategyParams.lot_size : undefined,
     warm_start: engine === 'akquant'
       ? {
           mode: warmStartMode.value,
@@ -1446,6 +1478,7 @@ const handleSaveStrategy = async () => {
 const handleBacktest = async (row: Strategy) => {
   try {
     activeStrategy.value = { ...row }
+    setStrategyParamsText((row.parameters || {}) as Record<string, unknown>)
     const code = row.code || ''
     if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
       editorTab.value = 'rqalpha-code'
@@ -1645,11 +1678,39 @@ const seedMultiFactorStrategy = async () => {
   }
 }
 
+const stripRunSettings = (parameters?: Record<string, unknown> | null) => {
+  const source = { ...(parameters || {}) }
+  delete source.backtest_settings
+  return source
+}
+
+const setStrategyParamsText = (parameters?: Record<string, unknown> | null) => {
+  strategyParamsText.value = JSON.stringify(stripRunSettings(parameters), null, 2)
+}
+
+const resetStrategyParamsText = () => {
+  setStrategyParamsText((activeStrategy.value?.parameters || {}) as Record<string, unknown>)
+}
+
+const parseStrategyParamsText = () => {
+  try {
+    const parsed = JSON.parse(strategyParamsText.value || '{}')
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {}
+  } catch (e: any) {
+    ElMessage.error(`策略参数 JSON 格式错误: ${e?.message || e}`)
+    throw e
+  }
+}
+
 const seedTechSmallCapStrategy = async () => {
-  if (strategyList.value.some(s => s.name === '科技小市值多因子')) return
+  const expectedNames = ['科技小市值 TSMF - 入场过滤放松风控', '科技小市值 TSMF - 美股入场过滤']
+  if (expectedNames.every(name => strategyList.value.some(s => s.name === name))) return
   try {
     const { backtestEngines } = await import('@/api/backtest')
-    await backtestEngines.createTechSmallCapStrategy()
+    await backtestEngines.createTechSmallCapStrategy('entry_filter_relaxed_risk')
+    await backtestEngines.createTechSmallCapStrategy('us_entry_filter_combined')
     await loadStrategies()
   } catch {
     // non-critical: built-in template can still be created manually
@@ -2040,6 +2101,24 @@ onMounted(async () => {
 .bt-config-bar :deep(.el-input__wrapper) {
   background: #141418;
   box-shadow: none;
+}
+.strategy-param-panel {
+  padding: 10px 12px;
+  background: #16161d;
+  border: 1px solid #2a2a35;
+  border-radius: 8px;
+}
+.strategy-param-panel__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #c0c0cc;
+  font-size: 12px;
+}
+.strategy-param-panel :deep(textarea) {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 12px;
 }
 .bt-pool-bar {
   display: flex;

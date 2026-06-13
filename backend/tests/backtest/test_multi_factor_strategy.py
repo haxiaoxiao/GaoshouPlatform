@@ -21,6 +21,7 @@ from app.backtest.strategies.multi_factor_akquant import (
 from app.backtest.strategies.tech_small_cap_akquant import (
     DEFAULT_TECH_SMALL_CAP_PARAMS,
     TECH_SMALL_CAP_STRATEGY_CODE,
+    get_tech_small_cap_params,
 )
 
 
@@ -114,6 +115,8 @@ def test_tech_small_cap_preset_executes():
     assert strategy.stop_loss_pct == 0.08
     assert strategy.high_volume_risk_factor == "high_volume_ratio"
     assert strategy.strict_theme_filter is True
+    assert strategy.use_target_weight_rebalance is True
+    assert strategy.us_overnight_entry_filter == "none"
 
 
 def test_tech_small_cap_builtin_template_is_registered():
@@ -124,3 +127,17 @@ def test_tech_small_cap_builtin_template_is_registered():
     assert payload["bar_type"] == "minute_timer"
     assert payload["strategy_params"]["index_symbol"] == "399101.SZ"
     assert "small_cap_v4_core" in payload["strategy_params"]["required_factor_groups"]
+    assert payload["strategy_params"]["strategy_variant"] == "entry_filter_relaxed_risk"
+
+
+def test_tech_small_cap_variants_expose_research_defaults():
+    us_filter = get_tech_small_cap_params("us_entry_filter_combined")
+    relaxed = get_tech_small_cap_params("entry_filter_relaxed_risk")
+
+    assert us_filter["us_overnight_entry_filter"] == "combined_downside"
+    assert us_filter["stop_loss_pct"] == 0.08
+    assert relaxed["us_overnight_entry_filter"] == "combined_downside"
+    assert relaxed["stop_loss_pct"] == 0.10
+    assert relaxed["trailing_stop_pct"] == 0.16
+    assert relaxed["portfolio_drawdown_stop_pct"] == 0.20
+    assert relaxed["high_volume_risk_max"] == 0.95

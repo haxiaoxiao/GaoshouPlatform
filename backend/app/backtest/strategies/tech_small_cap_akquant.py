@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import re
+from pprint import pformat
 
 from app.backtest.strategies.multi_factor_akquant import (
     DEFAULT_MULTI_FACTOR_PARAMS,
     DEFAULT_MULTI_FACTOR_RISK_CONFIG,
     MULTI_FACTOR_STRATEGY_CODE,
 )
+from app.services.us_market import default_us_market_file
 
 
-_TECH_SMALL_CAP_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
+TECH_SMALL_CAP_FACTOR_CONFIGS = [
     {
         "name": "market_cap",
         "weight": 0.18,
@@ -77,7 +79,9 @@ _TECH_SMALL_CAP_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
         "transform": "rank_pct",
         "industry_zscore": True,
     },
-]'''
+]
+
+_TECH_SMALL_CAP_FACTOR_CONFIGS = "FACTOR_CONFIGS = " + pformat(TECH_SMALL_CAP_FACTOR_CONFIGS, sort_dicts=False)
 
 
 _TECH_INCLUDE_INDUSTRIES = [
@@ -138,6 +142,21 @@ _OLD_ECONOMY_EXCLUDES = [
     "家用电器",
 ]
 
+TECH_SMALL_CAP_FILTER_FACTORS = [
+    {"name": "is_st", "operator": ">=", "value": 0.5},
+    {"name": "is_paused", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
+    {"name": "is_limit_up", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
+    {"name": "is_limit_down", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
+]
+
+TECH_SMALL_CAP_REQUIRED_FACTOR_GROUPS = [
+    "small_cap_v4_core",
+    "cn_paper_implemented",
+    "cn_paper_style_rotation",
+]
+
+TECH_SMALL_CAP_US_MARKET_PATH = str(default_us_market_file())
+
 
 def _replace_assignment_block(source: str, name: str, replacement: str) -> str:
     pattern = rf"{name} = \[.*?\]\n\n"
@@ -149,7 +168,7 @@ def _replace_assignment_block(source: str, name: str, replacement: str) -> str:
 
 def _replace_assignment(source: str, name: str, value: object) -> str:
     replacement = f"{name} = {value!r}"
-    result, count = re.subn(rf"^{name} = .*$", replacement, source, count=1, flags=re.M)
+    result, count = re.subn(rf"^{name} = .*$", lambda _: replacement, source, count=1, flags=re.M)
     if count != 1:
         raise RuntimeError(f"Could not replace {name} assignment in multi-factor strategy template")
     return result
@@ -159,6 +178,11 @@ TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment_block(
     MULTI_FACTOR_STRATEGY_CODE,
     "FACTOR_CONFIGS",
     _TECH_SMALL_CAP_FACTOR_CONFIGS,
+)
+TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment_block(
+    TECH_SMALL_CAP_STRATEGY_CODE,
+    "FILTER_FACTORS",
+    "FILTER_FACTORS = " + pformat(TECH_SMALL_CAP_FILTER_FACTORS, sort_dicts=False),
 )
 for _name, _value in {
     "TOP_N": 20,
@@ -182,6 +206,14 @@ for _name, _value in {
     "HIGH_VOLUME_RISK_MAX": 0.90,
     "HIGH_VOLUME_RISK_PARAMS": {"time": "14:30", "window": 120, "daily_volume_to_share_multiplier": 100.0},
     "RISK_CHECK_TIMES": ["10:00", "14:30"],
+    "HOLD_RANK_BUFFER": 0,
+    "USE_TARGET_WEIGHT_REBALANCE": True,
+    "CANCEL_OPEN_ORDERS_ON_REBALANCE": True,
+    "US_OVERNIGHT_ENTRY_FILTER": "none",
+    "US_OVERNIGHT_DATA_PATH": TECH_SMALL_CAP_US_MARKET_PATH,
+    "US_OVERNIGHT_MAX_LAG_DAYS": 5,
+    "US_OVERNIGHT_CAUTION_EXPOSURE": 0.85,
+    "US_OVERNIGHT_DEFENSIVE_EXPOSURE": 0.70,
 }.items():
     TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment(TECH_SMALL_CAP_STRATEGY_CODE, _name, _value)
 
@@ -211,6 +243,24 @@ DEFAULT_TECH_SMALL_CAP_PARAMS = {
     "theme_min_candidates": 20,
     "strict_theme_filter": True,
     "scorer_type": "linear",
+    "hold_rank_buffer": 0,
+    "use_target_weight_rebalance": True,
+    "cancel_open_orders_on_rebalance": True,
+    "us_overnight_entry_filter": "none",
+    "us_overnight_data_path": TECH_SMALL_CAP_US_MARKET_PATH,
+    "us_overnight_max_lag_days": 5,
+    "us_overnight_caution_exposure": 0.85,
+    "us_overnight_defensive_exposure": 0.70,
+    "us_overnight_qqq_caution_ret": -0.01,
+    "us_overnight_qqq_defensive_ret": -0.02,
+    "us_overnight_semi_caution_ret": -0.02,
+    "us_overnight_semi_defensive_ret": -0.03,
+    "us_overnight_nvda_caution_ret": -0.03,
+    "us_overnight_nvda_defensive_ret": -0.04,
+    "required_factor_groups": TECH_SMALL_CAP_REQUIRED_FACTOR_GROUPS,
+    "required_external_data": {
+        "us_market_daily": TECH_SMALL_CAP_US_MARKET_PATH,
+    },
 }
 
 
@@ -220,3 +270,69 @@ DEFAULT_TECH_SMALL_CAP_RISK_CONFIG = {
     "max_positions": 20,
 }
 
+
+DEFAULT_TECH_SMALL_CAP_PRODUCTION_VARIANT = "entry_filter_relaxed_risk"
+
+TECH_SMALL_CAP_VARIANTS = {
+    "us_entry_filter_combined": {
+        "name": "科技小市值 TSMF - 美股入场过滤",
+        "description": "QQQ/SMH/SOXX/NVDA 前一美股交易日负冲击时，仅阻止次日新买和加仓，不主动降低老仓。",
+        "params": {
+            "strategy_variant": "us_entry_filter_combined",
+            "us_overnight_entry_filter": "combined_downside",
+            "stop_loss_pct": 0.08,
+            "trailing_stop_pct": 0.12,
+            "portfolio_drawdown_stop_pct": 0.15,
+            "high_volume_risk_max": 0.90,
+        },
+        "risk_config": {
+            "max_position_pct": 0.06,
+            "max_positions": 20,
+        },
+    },
+    "entry_filter_relaxed_risk": {
+        "name": "科技小市值 TSMF - 入场过滤放松风控",
+        "description": "当前最优候选：美股隔夜入场过滤 + 更宽的个股止损、移动止盈、组合回撤和放量阈值。",
+        "params": {
+            "strategy_variant": "entry_filter_relaxed_risk",
+            "us_overnight_entry_filter": "combined_downside",
+            "stop_loss_pct": 0.10,
+            "trailing_stop_pct": 0.16,
+            "portfolio_drawdown_stop_pct": 0.20,
+            "high_volume_risk_max": 0.95,
+        },
+        "risk_config": {
+            "max_position_pct": 0.06,
+            "max_positions": 20,
+        },
+    },
+}
+
+
+def normalize_tech_small_cap_variant(variant: str | None) -> str:
+    normalized = str(variant or DEFAULT_TECH_SMALL_CAP_PRODUCTION_VARIANT).strip().replace("-", "_")
+    if normalized in TECH_SMALL_CAP_VARIANTS:
+        return normalized
+    return DEFAULT_TECH_SMALL_CAP_PRODUCTION_VARIANT
+
+
+def get_tech_small_cap_variant(variant: str | None = None) -> dict[str, object]:
+    key = normalize_tech_small_cap_variant(variant)
+    item = TECH_SMALL_CAP_VARIANTS[key]
+    return {"key": key, **item}
+
+
+def get_tech_small_cap_params(variant: str | None = None) -> dict[str, object]:
+    item = get_tech_small_cap_variant(variant)
+    return {
+        **DEFAULT_TECH_SMALL_CAP_PARAMS,
+        **dict(item["params"]),
+    }
+
+
+def get_tech_small_cap_risk_config(variant: str | None = None) -> dict[str, object]:
+    item = get_tech_small_cap_variant(variant)
+    return {
+        **DEFAULT_TECH_SMALL_CAP_RISK_CONFIG,
+        **dict(item["risk_config"]),
+    }
