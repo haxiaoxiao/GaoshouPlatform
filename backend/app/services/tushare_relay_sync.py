@@ -39,6 +39,13 @@ STRUCTURED_RELAY_DATASETS = (
     "stk_auction_replay",
 )
 
+ANALYST_RELAY_DATASETS = (
+    "report_rc",
+    "analyst_rank",
+    "analyst_detail",
+    "analyst_history",
+)
+
 TEXT_RELAY_DATASETS = (
     "anns_d",
     "stock_zh_a_disclosure_report_cninfo",
@@ -151,6 +158,62 @@ RELAY_DATASET_SPECS: dict[str, RelayDatasetSpec] = {
         default_enabled=True,
         default_params={"mode": "summary"},
     ),
+    "report_rc": RelayDatasetSpec(
+        name="report_rc",
+        display_name="卖方盈利预测",
+        api_name="report_rc",
+        storage_dataset="analyst_report_forecasts",
+        date_col="report_date",
+        category="relay_analyst",
+        description="Tushare 卖方研报盈利预测，包含 EPS、净利润、估值、评级和目标价字段；适合离线慢同步。",
+        recommended_frequency="daily",
+        risk_level="high",
+        symbol_scoped=True,
+        default_enabled=False,
+        default_params={"limit": 100},
+    ),
+    "analyst_rank": RelayDatasetSpec(
+        name="analyst_rank",
+        display_name="分析师排名",
+        api_name="analyst_rank",
+        storage_dataset="analyst_rank",
+        date_col="update_date",
+        category="relay_analyst",
+        description="分析师年度排名、行业和 12 个月收益率，用于给研报预测或跟踪事件做质量加权。",
+        recommended_frequency="monthly",
+        risk_level="medium",
+        date_scoped=False,
+        default_enabled=False,
+        default_params={"limit": 50},
+    ),
+    "analyst_detail": RelayDatasetSpec(
+        name="analyst_detail",
+        display_name="分析师当前跟踪",
+        api_name="analyst_detail",
+        storage_dataset="analyst_detail",
+        date_col="latest_rating_date",
+        category="relay_analyst",
+        description="按 analyst_id 下钻的当前跟踪成分股、最新评级和阶段涨跌幅；会先从 analyst_rank 取 analyst_id。",
+        recommended_frequency="weekly",
+        risk_level="high",
+        date_scoped=False,
+        default_enabled=False,
+        default_params={"indicator": "最新跟踪成分股", "limit": 50, "analyst_limit": 50},
+    ),
+    "analyst_history": RelayDatasetSpec(
+        name="analyst_history",
+        display_name="分析师历史跟踪",
+        api_name="analyst_history",
+        storage_dataset="analyst_history",
+        date_col="in_date",
+        category="relay_analyst",
+        description="按 analyst_id 下钻的历史跟踪股票、调入调出日期、调出原因和累计涨跌幅。",
+        recommended_frequency="monthly",
+        risk_level="high",
+        date_scoped=False,
+        default_enabled=False,
+        default_params={"indicator": "历史跟踪成分股", "limit": 100, "analyst_limit": 50},
+    ),
     "anns_d": RelayDatasetSpec(
         name="anns_d",
         display_name="Tushare 公告",
@@ -190,6 +253,7 @@ RELAY_DATASET_SPECS: dict[str, RelayDatasetSpec] = {
         description="研报标题和链接补充源，先用于查询回溯，不直接进入因子。",
         recommended_frequency="manual",
         risk_level="high",
+        symbol_scoped=True,
         default_enabled=False,
         text_source=True,
         default_params={"daily_limit": 200},
@@ -455,6 +519,14 @@ def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
                 "include_by_default": False,
             },
             {
+                "name": "relay_analyst",
+                "display_name": "分析师与研报",
+                "description": "卖方盈利预测、分析师排名、跟踪股票和研报标题事件流。",
+                "sync_types": [],
+                "relay_datasets": [*ANALYST_RELAY_DATASETS, "stock_research_report_em"],
+                "include_by_default": False,
+            },
+            {
                 "name": "relay_text",
                 "display_name": "新闻公告补充",
                 "description": "高噪声文本源，仅限量采集，默认不进入一键同步。",
@@ -622,11 +694,12 @@ async def run_tushare_relay_sync(
 
     ths_index_rows: list[dict[str, Any]] = []
     ths_member_rows: list[dict[str, Any]] = []
+    analyst_rank_rows: list[dict[str, Any]] = []
     for dataset_index, dataset_name in enumerate(requested, start=1):
         spec = RELAY_DATASET_SPECS[dataset_name]
         dataset_rows: list[dict[str, Any]] = []
         dataset_meta: list[dict[str, Any]] = []
-        for key in ("current_symbol", "current_date", "current_ths_code"):
+        for key in ("current_symbol", "current_date", "current_ths_code", "current_analyst_id", "current_indicator"):
             progress.details.pop(key, None)
         progress.details.update(
             {
@@ -659,8 +732,52 @@ async def run_tushare_relay_sync(
                 dataset_rows, member_meta = await _sync_ths_member(client, spec, ths_index_rows=ths_index_rows, options=options, progress=progress)
                 dataset_meta.extend(member_meta)
                 ths_member_rows = dataset_rows
+            elif dataset_name == "report_rc":
+                dataset_rows, dataset_meta = await _sync_report_rc(
+                    client,
+                    spec,
+                    symbols=resolved_symbols,
+                    start=start,
+                    end=end,
+                    options=options,
+                    progress=progress,
+                )
+            elif dataset_name == "analyst_rank":
+                dataset_rows, dataset_meta = await _sync_analyst_rank(
+                    client,
+                    spec,
+                    dates=dates,
+                    options=options,
+                    progress=progress,
+                )
+                analyst_rank_rows = dataset_rows
+            elif dataset_name in {"analyst_detail", "analyst_history"}:
+                if not analyst_rank_rows and not _analyst_ids_from_options(options):
+                    analyst_rank_rows, rank_meta = await _sync_analyst_rank(
+                        client,
+                        RELAY_DATASET_SPECS["analyst_rank"],
+                        dates=dates,
+                        options=options,
+                        progress=progress,
+                    )
+                    dataset_meta.extend(rank_meta)
+                dataset_rows, analyst_meta = await _sync_analyst_followup(
+                    client,
+                    spec,
+                    analyst_rank_rows=analyst_rank_rows,
+                    options=options,
+                    progress=progress,
+                )
+                dataset_meta.extend(analyst_meta)
             elif spec.text_source:
-                dataset_rows, dataset_meta = await _sync_text_dataset(client, spec, dates=dates, options=options, progress=progress)
+                dataset_rows, dataset_meta = await _sync_text_dataset(
+                    client,
+                    spec,
+                    dates=dates,
+                    symbols=resolved_symbols,
+                    options=options,
+                    progress=progress,
+                )
 
             for row in dataset_rows:
                 row.setdefault("source_api", spec.api_name)
@@ -855,12 +972,18 @@ def _estimate_total(names: list[str], dates: list[date], symbols: list[str], opt
         spec = RELAY_DATASET_SPECS[name]
         if name in {"adj_factor", "moneyflow", "stk_auction_replay"}:
             total += max(1, len(symbols) * len(dates))
+        elif name == "report_rc":
+            total += max(1, len(symbols))
         elif name == "block_moneyflow":
             total += max(1, len(dates))
         elif name == "ths_member":
             total += _positive_int(options.get("ths_member_limit")) or int(spec.default_params.get("ths_member_limit", 50))
+        elif name == "analyst_rank":
+            total += max(1, len({item.year for item in dates}))
+        elif name in {"analyst_detail", "analyst_history"}:
+            total += _positive_int(options.get("analyst_limit")) or int(spec.default_params.get("analyst_limit", 50))
         elif spec.text_source:
-            total += max(1, len(dates))
+            total += max(1, len(symbols) * len(dates)) if spec.symbol_scoped else max(1, len(dates))
         else:
             total += 1
     return max(total, 1)
@@ -976,7 +1099,40 @@ async def _sync_ths_member(
     return rows, metas
 
 
-async def _sync_text_dataset(
+async def _sync_report_rc(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    symbols: list[str],
+    start: date,
+    end: date,
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    limit = _positive_int(options.get("report_rc_limit") or options.get("limit")) or int(spec.default_params.get("limit", 100))
+    limit = min(max(limit, 1), 500)
+    for symbol in symbols:
+        progress.details["current_symbol"] = symbol
+        params = {
+            "ts_code": symbol,
+            "start_date": start.strftime("%Y%m%d"),
+            "end_date": end.strftime("%Y%m%d"),
+            "limit": limit,
+        }
+        result = await asyncio.to_thread(client.request, spec.api_name, params)
+        metas.append(_meta_dict(result.meta))
+        for row in result.rows:
+            item = dict(row)
+            item.setdefault("ts_code", symbol)
+            rows.append(item)
+        progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_analyst_rank(
     client: TushareRelayClient,
     spec: RelayDatasetSpec,
     *,
@@ -984,30 +1140,184 @@ async def _sync_text_dataset(
     options: dict[str, Any],
     progress: Any,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    daily_limit = _positive_int(options.get("daily_limit") or options.get("limit")) or int(spec.default_params.get("daily_limit", 200))
-    daily_limit = min(max(daily_limit, 1), 500)
     rows: list[dict[str, Any]] = []
     metas: list[dict[str, Any]] = []
-    for current_date in dates:
-        progress.details["current_date"] = current_date.isoformat()
-        params = _text_params(spec.name, current_date, daily_limit, options)
-        result = await asyncio.to_thread(client.request, spec.api_name, params)
+    years = _analyst_years(dates, options)
+    limit = _positive_int(options.get("analyst_rank_limit") or options.get("analyst_limit") or options.get("limit")) or int(spec.default_params.get("limit", 50))
+    limit = min(max(limit, 1), 500)
+    for year in years:
+        progress.details["current_date"] = str(year)
+        result = await asyncio.to_thread(client.request, spec.api_name, {"year": str(year), "limit": limit})
         metas.append(_meta_dict(result.meta))
-        rows.extend(result.rows[:daily_limit])
+        for row in result.rows:
+            item = dict(row)
+            item.setdefault("\u5e74\u5ea6", str(year))
+            rows.append(item)
         progress.current = min(progress.current + 1, progress.total)
         await asyncio.sleep(0)
     return rows, metas
 
 
-def _text_params(name: str, current_date: date, limit: int, options: dict[str, Any]) -> dict[str, Any]:
+async def _sync_analyst_followup(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    analyst_rank_rows: list[dict[str, Any]],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    analyst_ids = _analyst_ids_from_options(options) or _analyst_ids_from_rank_rows(analyst_rank_rows, options, spec)
+    limit_key = "analyst_detail_limit" if spec.name == "analyst_detail" else "analyst_history_limit"
+    limit = _positive_int(options.get(limit_key) or options.get("analyst_followup_limit") or options.get("limit")) or int(spec.default_params.get("limit", 50))
+    limit = min(max(limit, 1), 500)
+    indicators = _analyst_indicators(spec, options)
+    for analyst_id in analyst_ids:
+        progress.details["current_analyst_id"] = analyst_id
+        for indicator in indicators:
+            progress.details["current_indicator"] = indicator
+            params = {"analyst_id": analyst_id, "indicator": indicator, "limit": limit}
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
+            metas.append(_meta_dict(result.meta))
+            for row in result.rows:
+                item = dict(row)
+                item.setdefault("analyst_id", analyst_id)
+                item.setdefault("indicator", indicator)
+                rows.append(item)
+        progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
+    return rows, metas
+
+
+def _analyst_years(dates: list[date], options: dict[str, Any]) -> list[int]:
+    explicit_years = _parse_int_list(options.get("analyst_years") or options.get("years"))
+    if explicit_years:
+        return sorted({year for year in explicit_years if 1900 <= year <= 2100})
+    if dates:
+        return sorted({item.year for item in dates})
+    current_year = date.today().year
+    return [current_year]
+
+
+def _analyst_ids_from_options(options: dict[str, Any]) -> list[str]:
+    raw = options.get("analyst_ids") or options.get("analyst_id") or []
+    if isinstance(raw, str):
+        raw_values = [part.strip() for part in raw.replace(";", ",").split(",")]
+    elif isinstance(raw, Iterable):
+        raw_values = [str(item).strip() for item in raw]
+    else:
+        raw_values = [str(raw).strip()] if raw else []
+    return [value for value in raw_values if value]
+
+
+def _analyst_ids_from_rank_rows(
+    rows: list[dict[str, Any]],
+    options: dict[str, Any],
+    spec: RelayDatasetSpec,
+) -> list[str]:
+    limit = _positive_int(options.get("analyst_limit")) or int(spec.default_params.get("analyst_limit", 50))
+    ids: list[str] = []
+    seen: set[str] = set()
+    for row in rows:
+        analyst_id = _first_text(row, "analyst_id", "\u5206\u6790\u5e08ID")
+        if not analyst_id or analyst_id in seen:
+            continue
+        seen.add(analyst_id)
+        ids.append(analyst_id)
+        if len(ids) >= limit:
+            break
+    return ids
+
+
+def _analyst_indicators(spec: RelayDatasetSpec, options: dict[str, Any]) -> list[str]:
+    if spec.name == "analyst_detail":
+        return _string_list(options.get("analyst_detail_indicators")) or [
+            str(options.get("analyst_detail_indicator") or spec.default_params.get("indicator") or "\u6700\u65b0\u8ddf\u8e2a\u6210\u5206\u80a1")
+        ]
+    if spec.name == "analyst_history":
+        indicators = _string_list(options.get("analyst_history_indicators"))
+        if indicators:
+            return indicators
+        if bool(options.get("analyst_history_include_index")):
+            return ["\u5386\u53f2\u8ddf\u8e2a\u6210\u5206\u80a1", "\u5386\u53f2\u6307\u6570"]
+        return [str(options.get("analyst_history_indicator") or spec.default_params.get("indicator") or "\u5386\u53f2\u8ddf\u8e2a\u6210\u5206\u80a1")]
+    return [str(options.get("indicator") or spec.default_params.get("indicator") or "\u6700\u65b0\u8ddf\u8e2a\u6210\u5206\u80a1")]
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        parts = [part.strip() for part in value.replace(";", ",").split(",")]
+        return [part for part in parts if part]
+    if isinstance(value, Iterable):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return [str(value).strip()] if str(value).strip() else []
+
+
+def _parse_int_list(value: Any) -> list[int]:
+    items = _string_list(value)
+    years: list[int] = []
+    for item in items:
+        try:
+            years.append(int(item))
+        except (TypeError, ValueError):
+            continue
+    return years
+
+
+def _bare_stock_code(symbol: str | None) -> str | None:
+    normalized = normalize_security_symbol(symbol)
+    if not normalized:
+        return None
+    if "." not in normalized:
+        return normalized
+    code, _suffix = normalized.rsplit(".", 1)
+    return code
+
+
+async def _sync_text_dataset(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    dates: list[date],
+    symbols: list[str],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    daily_limit = _positive_int(options.get("daily_limit") or options.get("limit")) or int(spec.default_params.get("daily_limit", 200))
+    daily_limit = min(max(daily_limit, 1), 500)
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    scoped_symbols = symbols if spec.symbol_scoped else [None]
+    for symbol in scoped_symbols:
+        if symbol:
+            progress.details["current_symbol"] = symbol
+        for current_date in dates:
+            progress.details["current_date"] = current_date.isoformat()
+            params = _text_params(spec.name, current_date, daily_limit, options, symbol=symbol)
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
+            metas.append(_meta_dict(result.meta))
+            for row in result.rows[:daily_limit]:
+                item = dict(row)
+                if symbol:
+                    item.setdefault("symbol", symbol)
+                rows.append(item)
+            progress.current = min(progress.current + 1, progress.total)
+            await asyncio.sleep(0)
+    return rows, metas
+
+
+def _text_params(name: str, current_date: date, limit: int, options: dict[str, Any], *, symbol: str | None = None) -> dict[str, Any]:
     ymd = current_date.strftime("%Y%m%d")
     iso = current_date.isoformat()
     if name == "anns_d":
-        return {"ann_date": ymd, "limit": limit, "ts_code": options.get("symbol") or options.get("ts_code")}
+        return {"ann_date": ymd, "limit": limit, "ts_code": symbol or options.get("symbol") or options.get("ts_code")}
     if name == "stock_zh_a_disclosure_report_cninfo":
-        return {"date": iso, "limit": limit, "symbol": options.get("symbol")}
+        return {"date": iso, "limit": limit, "symbol": _bare_stock_code(symbol) or options.get("symbol")}
     if name == "stock_research_report_em":
-        return {"date": iso, "limit": limit, "symbol": options.get("symbol")}
+        return {"date": iso, "limit": limit, "symbol": _bare_stock_code(symbol) or options.get("symbol")}
     if name == "news_cctv":
         return {"date": ymd, "limit": limit}
     if name == "news_economic_baidu":
@@ -1055,6 +1365,14 @@ def _normalize_dataset_rows(name: str, rows: list[dict[str, Any]], options: dict
             frame["symbol"] = frame["con_code"].astype(str)
         frame["snapshot_date"] = pd.Timestamp(date.today())
         return frame
+    if name == "report_rc":
+        return _normalize_report_rc(rows)
+    if name == "analyst_rank":
+        return _normalize_analyst_rank(rows)
+    if name == "analyst_detail":
+        return _normalize_analyst_detail(rows)
+    if name == "analyst_history":
+        return _normalize_analyst_history(rows)
     if name in {"anns_d", "stock_zh_a_disclosure_report_cninfo"}:
         return _normalize_text(rows, storage="announcements")
     if name == "stock_research_report_em":
@@ -1087,6 +1405,113 @@ def _normalize_common(
     return frame
 
 
+def _normalize_report_rc(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = _normalize_common(rows, date_columns=["report_date", "create_time"], symbol_from="ts_code")
+    if frame.empty:
+        return frame
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
+    title_col = _first_present(frame, ["report_title", "title"])
+    frame["title_hash"] = frame[title_col].map(_hash_title) if title_col else ""
+    if "report_date" in frame.columns:
+        frame = frame[frame["report_date"].notna()].copy()
+    return frame
+
+
+def _normalize_analyst_rank(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    _copy_first(frame, "analyst_name", ["analyst_name", "\u5206\u6790\u5e08\u540d\u79f0"])
+    _copy_first(frame, "org_name", ["org_name", "\u5206\u6790\u5e08\u5355\u4f4d"])
+    _copy_first(frame, "annual_index", ["annual_index", "\u5e74\u5ea6\u6307\u6570"])
+    _copy_first(frame, "return_12m", ["return_12m", "12\u4e2a\u6708\u6536\u76ca\u7387"])
+    _copy_first(frame, "analyst_id", ["analyst_id", "\u5206\u6790\u5e08ID"])
+    _copy_first(frame, "industry", ["industry", "\u884c\u4e1a"])
+    _copy_first(frame, "update_date", ["update_date", "\u66f4\u65b0\u65e5\u671f"])
+    _copy_first(frame, "year", ["year", "\u5e74\u5ea6"])
+    frame["update_date"] = _parse_date_series(frame["update_date"]) if "update_date" in frame.columns else pd.Timestamp(date.today())
+    return _finish_relay_frame(frame, date_columns=["update_date"])
+
+
+def _normalize_analyst_detail(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    _copy_first(frame, "stock_code", ["stock_code", "\u80a1\u7968\u4ee3\u7801", "symbol"])
+    _copy_first(frame, "stock_name", ["stock_name", "\u80a1\u7968\u540d\u79f0", "name"])
+    _copy_first(frame, "in_date", ["in_date", "\u8c03\u5165\u65e5\u671f"])
+    _copy_first(frame, "latest_rating_date", ["latest_rating_date", "\u6700\u65b0\u8bc4\u7ea7\u65e5\u671f"])
+    _copy_first(frame, "rating", ["rating", "\u5f53\u524d\u8bc4\u7ea7\u540d\u79f0"])
+    _copy_first(frame, "latest_price", ["latest_price", "\u6700\u65b0\u4ef7\u683c"])
+    _copy_first(frame, "stage_return", ["stage_return", "\u9636\u6bb5\u6da8\u8dcc\u5e45"])
+    frame["symbol"] = frame["stock_code"].map(_normalize_a_stock_symbol) if "stock_code" in frame.columns else ""
+    frame["in_date"] = _parse_date_series(frame["in_date"]) if "in_date" in frame.columns else pd.NaT
+    frame["latest_rating_date"] = _parse_date_series(frame["latest_rating_date"]) if "latest_rating_date" in frame.columns else frame["in_date"]
+    return _finish_relay_frame(frame, date_columns=["in_date", "latest_rating_date"])
+
+
+def _normalize_analyst_history(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    _copy_first(frame, "stock_code", ["stock_code", "\u80a1\u7968\u4ee3\u7801", "symbol"])
+    _copy_first(frame, "stock_name", ["stock_name", "\u80a1\u7968\u540d\u79f0", "name"])
+    _copy_first(frame, "in_date", ["in_date", "\u8c03\u5165\u65e5\u671f", "date"])
+    _copy_first(frame, "out_date", ["out_date", "\u8c03\u51fa\u65e5\u671f"])
+    _copy_first(frame, "rating_at_in", ["rating_at_in", "\u8c03\u5165\u65f6\u8bc4\u7ea7\u540d\u79f0", "rating"])
+    _copy_first(frame, "out_reason", ["out_reason", "\u8c03\u51fa\u539f\u56e0"])
+    _copy_first(frame, "cumulative_return", ["cumulative_return", "\u7d2f\u8ba1\u6da8\u8dcc\u5e45"])
+    if "stock_code" in frame.columns:
+        frame["symbol"] = frame["stock_code"].map(_normalize_a_stock_symbol)
+    elif "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
+    if "in_date" in frame.columns:
+        frame["in_date"] = _parse_date_series(frame["in_date"])
+    else:
+        frame["in_date"] = pd.Timestamp(date.today())
+    if "out_date" in frame.columns:
+        frame["out_date"] = _parse_date_series(frame["out_date"])
+    return _finish_relay_frame(frame, date_columns=["in_date", "out_date"])
+
+
+def _copy_first(frame: pd.DataFrame, target: str, names: list[str]) -> None:
+    source = _first_present(frame, names)
+    if source:
+        frame[target] = frame[source]
+
+
+def _finish_relay_frame(frame: pd.DataFrame, *, date_columns: list[str]) -> pd.DataFrame:
+    frame = frame.copy()
+    frame["source"] = "indevs_tushare_relay"
+    frame["source_api"] = frame.get("source_api", "")
+    frame["ingested_at"] = pd.Timestamp(datetime.now())
+    for col in date_columns:
+        if col in frame.columns:
+            frame[col] = pd.to_datetime(frame[col], errors="coerce")
+    for col in frame.columns:
+        if col not in {"symbol", "stock_code", "stock_name", "analyst_id", "analyst_name", "org_name", "industry", "indicator", "rating", "rating_at_in", "out_reason", "source", "source_api"}:
+            frame[col] = _coerce_numeric_if_possible(frame[col])
+    return frame
+
+
+def _normalize_a_stock_symbol(symbol: Any) -> str:
+    normalized = normalize_security_symbol(str(symbol) if symbol is not None else "")
+    if not normalized:
+        return ""
+    if "." in normalized:
+        return normalized
+    code = normalized.strip()
+    if len(code) == 6 and code.isdigit():
+        if code.startswith(("6", "9")):
+            return f"{code}.SH"
+        if code.startswith(("0", "2", "3")):
+            return f"{code}.SZ"
+        if code.startswith(("4", "8")):
+            return f"{code}.BJ"
+    return normalized
+
+
 def _derive_moneyflow(frame: pd.DataFrame) -> None:
     buy_amount_cols = [col for col in ("buy_sm_amount", "buy_md_amount", "buy_lg_amount", "buy_elg_amount") if col in frame.columns]
     sell_amount_cols = [col for col in ("sell_sm_amount", "sell_md_amount", "sell_lg_amount", "sell_elg_amount") if col in frame.columns]
@@ -1102,9 +1527,9 @@ def _normalize_text(rows: list[dict[str, Any]], *, storage: str, source_api: str
     frame = pd.DataFrame(rows)
     if frame.empty:
         return frame
-    title_col = _first_present(frame, ["title", "公告标题", "报告名称", "报告标题"])
-    url_col = _first_present(frame, ["url", "公告链接", "报告PDF链接", "link"])
-    symbol_col = _first_present(frame, ["ts_code", "symbol", "代码", "股票代码"])
+    title_col = _first_present(frame, ["title", "\u516c\u544a\u6807\u9898", "\u62a5\u544a\u540d\u79f0", "\u62a5\u544a\u6807\u9898"])
+    url_col = _first_present(frame, ["url", "\u516c\u544a\u94fe\u63a5", "\u62a5\u544aPDF\u94fe\u63a5", "link"])
+    symbol_col = _first_present(frame, ["ts_code", "symbol", "\u4ee3\u7801", "\u80a1\u7968\u4ee3\u7801"])
     if title_col:
         frame["title"] = frame[title_col].astype(str).str.strip()
     else:
@@ -1115,14 +1540,16 @@ def _normalize_text(rows: list[dict[str, Any]], *, storage: str, source_api: str
         frame["source_url"] = ""
     if symbol_col and "symbol" not in frame.columns:
         frame["symbol"] = frame[symbol_col].astype(str)
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
     if storage == "announcements":
-        date_col = _first_present(frame, ["ann_date", "公告时间", "公告日期", "date"])
+        date_col = _first_present(frame, ["ann_date", "\u516c\u544a\u65f6\u95f4", "\u516c\u544a\u65e5\u671f", "date"])
         frame["ann_date"] = _parse_date_series(frame[date_col]) if date_col else pd.Timestamp(date.today())
     elif storage == "research_reports":
-        date_col = _first_present(frame, ["report_date", "日期", "date"])
+        date_col = _first_present(frame, ["report_date", "\u65e5\u671f", "date"])
         frame["report_date"] = _parse_date_series(frame[date_col]) if date_col else pd.Timestamp(date.today())
     else:
-        date_col = _first_present(frame, ["publish_time", "pub_time", "datetime", "date", "日期"])
+        date_col = _first_present(frame, ["publish_time", "pub_time", "datetime", "date", "\u65e5\u671f"])
         frame["publish_time"] = pd.to_datetime(frame[date_col], errors="coerce") if date_col else pd.Timestamp(datetime.now())
     frame = frame[frame["title"].notna() & (frame["title"].str.len() > 0)].copy()
     if source_api:

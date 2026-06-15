@@ -37,11 +37,18 @@ CORE_FACTORS = {
     "is_limit_up",
     "is_limit_down",
     "yesterday_limit_up",
+    "v4gv",
+    "v4gv_signal",
+    "macd_positive",
+    "indicator_buy_signal",
+    "tsmf_overheat_penalty",
+    "v4gv_dead_cross",
 }
 HIGH_VOLUME_FACTORS = {
     "cum_volume_at_time",
     "rolling_max_volume",
     "high_volume_ratio",
+    "avoid_high_volume_ratio",
     "high_volume_signal",
 }
 ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
@@ -243,6 +250,8 @@ def _append_catalog_dependency_check(
     dep = dependency.strip()
     if not dep:
         return
+    if dep in {"v4gv", "v4gv_signal", "macd_positive", "indicator_buy_signal", "v4gv_dead_cross", "tsmf_overheat_penalty"}:
+        dep = "klines_daily"
     if dep.startswith("klines_daily") or dep == "klines_daily":
         checks.setdefault("klines_daily", {
             "dependency": "klines_daily",

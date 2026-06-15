@@ -30,6 +30,10 @@ _PARQUET_DATASETS = [
     "announcements",
     "research_reports",
     "market_news",
+    "analyst_report_forecasts",
+    "analyst_rank",
+    "analyst_detail",
+    "analyst_history",
 ]
 
 _PARQUET_DATE_COLUMNS = {
@@ -50,6 +54,10 @@ _PARQUET_DATE_COLUMNS = {
     "announcements": "ann_date",
     "research_reports": "report_date",
     "market_news": "publish_time",
+    "analyst_report_forecasts": "report_date",
+    "analyst_rank": "update_date",
+    "analyst_detail": "latest_rating_date",
+    "analyst_history": "in_date",
 }
 
 _ALLOWED_FILTER_OPS = {

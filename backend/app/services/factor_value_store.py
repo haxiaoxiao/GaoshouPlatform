@@ -191,6 +191,22 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         dependencies=["v4gv", "v4gv_signal", "macd_positive"],
         lookback_days=140,
     ),
+    "tsmf_overheat_penalty": FactorDefinition(
+        name="tsmf_overheat_penalty",
+        display_name="TSMF Overheat Penalty",
+        factor_type="factor",
+        category="technical_risk",
+        frequency="daily",
+        unit="score",
+        description=(
+            "Crowding/overheat penalty used by the TSMF-OP research branch. "
+            "Higher values mean V4GV and the technical buy signal are stretched; "
+            "use lower_better or a negative weight when scoring long candidates."
+        ),
+        dependencies=["v4gv", "v4gv_signal", "macd_positive", "indicator_buy_signal"],
+        lookback_days=140,
+        data_policy={"direction_hint": "lower_better"},
+    ),
     "v4gv_dead_cross": FactorDefinition(
         name="v4gv_dead_cross",
         display_name="V4GV 死叉",
@@ -247,6 +263,28 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         dependencies=["cum_volume_at_time", "rolling_max_volume"],
         lookback_days=180,
     ),
+    "avoid_high_volume_ratio": FactorDefinition(
+        name="avoid_high_volume_ratio",
+        display_name="Avoid High Volume Ratio",
+        factor_type="factor",
+        category="liquidity_risk",
+        frequency="timer",
+        as_of_time="14:30",
+        unit="score",
+        description=(
+            "Inverse of high_volume_ratio, clipped to 0..1. It is the reusable "
+            "TSMF risk version of the high-volume exit signal: higher means less "
+            "same-day volume crowding and is safer for holding/entry."
+        ),
+        params_schema={
+            "time": {"type": "string", "default": "14:30"},
+            "window": {"type": "integer", "default": 120},
+            "daily_volume_to_share_multiplier": {"type": "number", "default": 100.0},
+        },
+        dependencies=["high_volume_ratio"],
+        lookback_days=180,
+        data_policy={"direction_hint": "higher_better"},
+    ),
     "high_volume_signal": FactorDefinition(
         name="high_volume_signal",
         display_name="放量信号",
@@ -285,10 +323,12 @@ FACTOR_GROUPS: dict[str, dict[str, Any]] = {
             "v4gv_signal",
             "macd_positive",
             "indicator_buy_signal",
+            "tsmf_overheat_penalty",
             "v4gv_dead_cross",
             "cum_volume_at_time",
             "rolling_max_volume",
             "high_volume_ratio",
+            "avoid_high_volume_ratio",
             "high_volume_signal",
         ],
     }

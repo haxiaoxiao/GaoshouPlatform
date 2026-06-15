@@ -52,6 +52,7 @@ def main() -> None:
         "cum_volume_at_time",
         "rolling_max_volume",
         "high_volume_ratio",
+        "avoid_high_volume_ratio",
         "high_volume_signal",
         "market_cap",
         "market_cap_rank",
@@ -60,11 +61,17 @@ def main() -> None:
         "is_limit_up",
         "is_limit_down",
         "yesterday_limit_up",
+        "v4gv",
+        "v4gv_signal",
+        "macd_positive",
+        "indicator_buy_signal",
+        "tsmf_overheat_penalty",
+        "v4gv_dead_cross",
     }
     if args.factor not in supported:
         raise SystemExit(f"Unsupported factor: {args.factor}. Supported: {sorted(supported)}")
 
-    if args.factor in {"cum_volume_at_time", "rolling_max_volume", "high_volume_ratio", "high_volume_signal"}:
+    if args.factor in {"cum_volume_at_time", "rolling_max_volume", "high_volume_ratio", "avoid_high_volume_ratio", "high_volume_signal"}:
         result = precompute_high_volume_features(
             start_date=args.start,
             end_date=args.end,

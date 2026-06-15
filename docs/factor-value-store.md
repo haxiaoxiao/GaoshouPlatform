@@ -1,6 +1,6 @@
 # 因子值缓存
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-10.
 
 因子值缓存（Factor Value Store）是因子研究模块的持久化层，用于保存可复用、point-in-time 的因子或指标截面值。
 
@@ -50,6 +50,23 @@ cd E:\Projects\GaoshouPlatform\backend
 | `POST /api/factor-values/query` | 查询某日截面 |
 
 旧 `/api/features/*` 已移除。新代码只使用 `/api/factor-values/*` 和 `FactorValueStore`。
+
+## 策略数据契约
+
+策略脚本应把 `factor_values` 视为因子层的稳定契约。策略可以通过 `FactorPipeline` 或 `FactorValueStore` 读取 `high_volume_ratio`、`high_volume_signal`、`is_limit_up` 等最终因子，但不应直接读取底层 Parquet、DuckDB、ClickHouse 或内部派生行情缓存。
+
+分钟数据的推荐分工：
+
+```text
+klines_minute
+  -> klines_minute_cum_timer
+  -> factor_values/high_volume_ratio
+  -> strategy
+```
+
+`klines_minute_cum_timer` 是预计算阶段的内部加速缓存，不是策略层契约。策略需要盘中累计量信息时，应读取已经写入 `factor_values` 的 timer 因子。
+
+完整约定见 `docs/strategy-data-contract.md`。
 
 ## Alpha101 定义与解释
 

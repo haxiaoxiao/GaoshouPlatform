@@ -412,6 +412,17 @@ def _compute_daily_factor(frame: pd.DataFrame, factor_name: str) -> pd.Series:
         ]
         return pd.concat(parts, axis=1).mean(axis=1, skipna=True)
 
+    if factor_name == "tsmf_recent_effective_score":
+        growth = pd.to_numeric(_compute_daily_factor(frame, "paper_growth_quality_score"), errors="coerce")
+        value = pd.to_numeric(_compute_daily_factor(frame, "paper_composite_value"), errors="coerce")
+        health = pd.to_numeric(_compute_daily_factor(frame, "paper_financial_health_score"), errors="coerce")
+        parts = [
+            _cs_rank(growth, dates) * 0.40,
+            _cs_rank(value, dates) * 0.35,
+            _cs_rank(health, dates) * 0.25,
+        ]
+        return pd.concat(parts, axis=1).sum(axis=1, min_count=2)
+
     if factor_name == "paper_overnight_turnover_corr":
         prev_close = close.groupby(symbols).shift(1)
         overnight = (open_price / prev_close.replace(0, np.nan) - 1.0).abs()

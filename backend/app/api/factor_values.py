@@ -133,11 +133,18 @@ _CORE_FACTORS = {
     "is_limit_up",
     "is_limit_down",
     "yesterday_limit_up",
+    "v4gv",
+    "v4gv_signal",
+    "macd_positive",
+    "indicator_buy_signal",
+    "tsmf_overheat_penalty",
+    "v4gv_dead_cross",
 }
 _HIGH_VOLUME_FACTORS = {
     "cum_volume_at_time",
     "rolling_max_volume",
     "high_volume_ratio",
+    "avoid_high_volume_ratio",
     "high_volume_signal",
 }
 _ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
@@ -889,7 +896,7 @@ def _build_params(
 ) -> dict[str, Any] | None:
     if factor_name == "cum_volume_at_time":
         return {"time": as_of_time or "14:30"}
-    if factor_name in {"rolling_max_volume", "high_volume_ratio"}:
+    if factor_name in {"rolling_max_volume", "high_volume_ratio", "avoid_high_volume_ratio"}:
         return {
             "time": as_of_time or "14:30",
             "window": int(window or 120),
@@ -908,7 +915,7 @@ def _build_params(
 
 
 def _effective_as_of_time(factor_name: str, as_of_time: str | None, params: dict[str, Any] | None) -> str | None:
-    if factor_name in {"cum_volume_at_time", "rolling_max_volume", "high_volume_ratio", "high_volume_signal"}:
+    if factor_name in {"cum_volume_at_time", "rolling_max_volume", "high_volume_ratio", "avoid_high_volume_ratio", "high_volume_signal"}:
         return as_of_time or "14:30"
     if factor_name in {"is_paused", "is_limit_up", "is_limit_down"}:
         return as_of_time or "10:30"

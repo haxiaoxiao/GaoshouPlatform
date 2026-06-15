@@ -9,6 +9,10 @@ def test_cn_paper_factor_names_are_supported_for_prepare() -> None:
     assert "paper_pb_roe_residual" in module.SUPPORTED_PRECOMPUTE_FACTORS
     assert "paper_trend_fund_vwap_ratio" in module.SUPPORTED_PRECOMPUTE_FACTORS
     assert "paper_size_rotation_score" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "indicator_buy_signal" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "tsmf_overheat_penalty" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "avoid_high_volume_ratio" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "tsmf_recent_effective_score" in module.SUPPORTED_PRECOMPUTE_FACTORS
 
 
 def test_cn_paper_minute_dependency_builds_full_minute_sync_step(monkeypatch) -> None:

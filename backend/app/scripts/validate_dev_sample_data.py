@@ -74,6 +74,10 @@ PARQUET_DATASETS = {
     "announcements": "ann_date",
     "research_reports": "report_date",
     "market_news": "publish_time",
+    "analyst_report_forecasts": "report_date",
+    "analyst_rank": "update_date",
+    "analyst_detail": "latest_rating_date",
+    "analyst_history": "in_date",
 }
 
 INTERFACE_STORAGE_REQUIREMENTS = {
@@ -120,6 +124,10 @@ INTERFACE_STORAGE_REQUIREMENTS = {
             "announcements",
             "research_reports",
             "market_news",
+            "analyst_report_forecasts",
+            "analyst_rank",
+            "analyst_detail",
+            "analyst_history",
         ],
         "notes": "这些表由中继/舆情/公告数据源提供；源端不存在时只能标记为 not_available。",
     },
@@ -152,7 +160,7 @@ INTERFACE_STORAGE_REQUIREMENTS = {
     "sentiment": {
         "routes": ["/api/sentiment/*"],
         "sqlite": ["sentiment_posts", "stocks"],
-        "parquet_optional": ["market_news", "announcements", "research_reports"],
+        "parquet_optional": ["market_news", "announcements", "research_reports", "analyst_report_forecasts", "analyst_rank", "analyst_detail", "analyst_history"],
     },
     "legacy_strategy_signals": {
         "routes": ["/api/strategy/signals/*", "/api/strategy/backtest"],

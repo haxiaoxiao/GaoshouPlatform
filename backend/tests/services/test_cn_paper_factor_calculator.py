@@ -164,6 +164,7 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
             "paper_composite_value",
             "paper_growth_quality_score",
             "paper_financial_health_score",
+            "tsmf_recent_effective_score",
             "paper_overnight_turnover_corr",
             "paper_rsi_reversal_score",
             "paper_new_high_anchor",
@@ -185,6 +186,7 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
     assert result["rows"]["paper_pb_roe_residual"] > 0
     assert result["rows"]["paper_overnight_turnover_corr"] > 0
     assert result["rows"]["paper_new_high_anchor"] > 0
+    assert result["rows"]["tsmf_recent_effective_score"] > 0
     assert result["rows"]["paper_size_rotation_score"] > 0
     assert result["rows"]["paper_value_growth_rotation_score"] > 0
     assert result["rows"]["paper_industry_momentum_20d"] > 0
@@ -193,6 +195,7 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
     assert set(store.frame["factor_name"]).issuperset({
         "paper_composite_value",
         "paper_growth_quality_score",
+        "tsmf_recent_effective_score",
         "paper_high_low_volume_event",
         "paper_size_rotation_score",
         "paper_industry_momentum_20d",

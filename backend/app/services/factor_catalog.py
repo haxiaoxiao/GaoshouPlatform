@@ -369,6 +369,27 @@ CN_PAPER_FACTOR_SPECS: dict[str, dict[str, Any]] = {
         "paper_ids": [24, 31, 44],
         "frequency": "quarterly",
     },
+    "tsmf_recent_effective_score": {
+        "label": "TSMF Recent Effective Score",
+        "category": "tsmf_composite",
+        "dependencies": [
+            "stock_daily_basic.pb",
+            "stock_daily_basic.pe_ttm",
+            "financial_data.revenue_yoy",
+            "financial_data.profit_yoy",
+            "financial_data.roe",
+            "financial_data.gross_margin",
+            "financial_data.total_assets",
+            "financial_data.total_liability",
+            "financial_data.net_profit",
+        ],
+        "description": "TSMF composite factor from the recent-factor audit: growth quality + composite value + financial health.",
+        "lookback": 370,
+        "formula": "0.40 * rank(growth_quality) + 0.35 * rank(composite_value) + 0.25 * rank(financial_health)",
+        "human_description": "TSMF 近期有效复合因子。保留成长质量、综合价值、财务健康三类近期 RankIC 较稳的信号，不把 V4GV/技术买点作为正向加分。",
+        "paper_ids": [19, 21, 22, 24, 31, 44],
+        "frequency": "monthly",
+    },
     "paper_overnight_turnover_corr": {
         "label": "Overnight-Turnover Corr",
         "category": "paper_price_volume",
@@ -620,6 +641,95 @@ PAPER_IMPLEMENTATION_MANIFEST: list[dict[str, Any]] = [
 ]
 
 
+TSMF_FULL_FACTOR_POOL: list[str] = list(dict.fromkeys([
+    "market_cap",
+    "market_cap_rank",
+    "is_st",
+    "is_paused",
+    "is_limit_up",
+    "is_limit_down",
+    "yesterday_limit_up",
+    "v4gv",
+    "v4gv_signal",
+    "macd_positive",
+    "indicator_buy_signal",
+    "tsmf_overheat_penalty",
+    "v4gv_dead_cross",
+    "cum_volume_at_time",
+    "rolling_max_volume",
+    "high_volume_ratio",
+    "avoid_high_volume_ratio",
+    "high_volume_signal",
+    "paper_composite_value",
+    "paper_pb_roe_residual",
+    "paper_growth_quality_score",
+    "paper_financial_health_score",
+    "tsmf_recent_effective_score",
+    "paper_defensive_quality_lowvol",
+    "paper_industry_momentum_20d",
+    "paper_value_growth_rotation_score",
+    "paper_size_rotation_score",
+    "paper_high_low_volume_event",
+    "paper_overnight_turnover_corr",
+    "paper_rsi_reversal_score",
+    "paper_new_high_anchor",
+    "paper_reversal_20d",
+    "paper_asset_allocation_proxy",
+    "paper_trend_fund_vwap_ratio",
+    "paper_trend_fund_support",
+]))
+
+TSMF_PREFERRED_FACTOR_POOL_BUCKETS: dict[str, list[str]] = {
+    "size_core": ["market_cap_rank", "paper_size_rotation_score"],
+    "value": ["paper_composite_value", "paper_pb_roe_residual"],
+    "growth_quality": ["paper_growth_quality_score", "paper_financial_health_score", "tsmf_recent_effective_score"],
+    "risk_quality": ["paper_defensive_quality_lowvol", "avoid_high_volume_ratio", "tsmf_overheat_penalty"],
+    "rotation_momentum": ["paper_industry_momentum_20d", "paper_value_growth_rotation_score"],
+    "minute_flow": ["paper_trend_fund_support", "paper_trend_fund_vwap_ratio"],
+}
+TSMF_PREFERRED_FACTOR_POOL: list[str] = list(dict.fromkeys(
+    name for names in TSMF_PREFERRED_FACTOR_POOL_BUCKETS.values() for name in names
+))
+
+TSMF_STRATEGY_SIGNAL_NOTES: list[dict[str, str]] = [
+    {
+        "name": "rank40_buy_hold_spread",
+        "status": "strategy_rule",
+        "description": "R3 buy/hold spread: buy top20, hold until rank buffer around 40-50 before selling.",
+    },
+    {
+        "name": "risk_score_rebound_reentry",
+        "status": "strategy_state",
+        "description": "Use low risk_score followed by price or breadth repair as a rebound/re-entry signal instead of only cutting exposure.",
+    },
+    {
+        "name": "rebound_price_or_breadth",
+        "status": "strategy_state",
+        "description": "Mild rebound confirmation used by R3 and later tests: price repair or market breadth repair can release cooldown/re-entry.",
+    },
+    {
+        "name": "risk_score",
+        "status": "portfolio_state",
+        "description": "Portfolio-level market state score from the TSMF V2 strategy; useful for factor rotation templates but not a per-stock cross-section.",
+    },
+    {
+        "name": "us_entry_filter_combined_downside",
+        "status": "portfolio_timing",
+        "description": "QQQ/SMH/SOXX/NVDA overnight downside filter; blocks new buys/adds rather than forcing old holdings down.",
+    },
+    {
+        "name": "largecap_lowvol_sleeve",
+        "status": "researched_not_default",
+        "description": "CSI300/large-cap low-vol defensive sleeve. Tested but not selected as default because cash was cleaner.",
+    },
+    {
+        "name": "dividend_lowvol_etf_sleeve",
+        "status": "researched_not_default",
+        "description": "Dividend low-vol ETF/proxy sleeve using 512890.SH when available and 930955.SH as local proxy.",
+    },
+]
+
+
 CATALOG_GROUPS: dict[str, dict[str, Any]] = {
     "ta_lib_core": {
         "name": "ta_lib_core",
@@ -644,6 +754,34 @@ CATALOG_GROUPS: dict[str, dict[str, Any]] = {
         "display_name": "Relay 结构化因子",
         "description": "Lightweight factors derived from Relay moneyflow, block moneyflow and auction replay datasets.",
         "factor_names": list(RELAY_FACTOR_SPECS),
+    },
+    "tsmf_research_factor_library": {
+        "name": "tsmf_research_factor_library",
+        "display_name": "TSMF Research Factor Library",
+        "description": (
+            "Factors and reusable state signals surfaced while developing the "
+            "TSMF technology small-cap strategy, including core filters, value/"
+            "quality/growth legs, overheat penalties, high-volume risk, style "
+            "rotation, and minute trend-fund proxies."
+        ),
+        "factor_names": TSMF_FULL_FACTOR_POOL,
+        "strategy_signals": TSMF_STRATEGY_SIGNAL_NOTES,
+    },
+    "tsmf_preferred_rotation_pool": {
+        "name": "tsmf_preferred_rotation_pool",
+        "display_name": "TSMF Preferred Rotation Pool",
+        "description": (
+            "Curated 2-3 factors per type for later factor-rotation strategies. "
+            "Selected from the current database/catalog based on the recent TSMF "
+            "audit: value, growth/quality, risk quality, style rotation, and "
+            "minute flow."
+        ),
+        "factor_names": TSMF_PREFERRED_FACTOR_POOL,
+        "selection_buckets": TSMF_PREFERRED_FACTOR_POOL_BUCKETS,
+        "strategy_signals": [
+            item for item in TSMF_STRATEGY_SIGNAL_NOTES
+            if item["name"] in {"risk_score_rebound_reentry", "rebound_price_or_breadth", "us_entry_filter_combined_downside"}
+        ],
     },
     "cn_paper_fundamental": {
         "name": "cn_paper_fundamental",

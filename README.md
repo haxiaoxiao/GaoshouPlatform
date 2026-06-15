@@ -1,6 +1,6 @@
 # GaoshouPlatform - 量化投研平台
 
-Last updated: 2026-06-03.
+Last updated: 2026-06-10.
 
 基于 Vue 3 + FastAPI 的 A 股量化投研平台，支持数据管理、因子研究、策略回测和实盘交易。
 
@@ -28,6 +28,7 @@ Last updated: 2026-06-03.
 | `docs/tushare-relay-ingestion.md` | Tushare Relay 接入：配置、同步目录、首批 Parquet 数据集、新闻公告护栏和轻量因子 |
 | `docs/akquant-integration-todo.md` | AKQuant 当前集成状态、验证命令和仍需跟进事项 |
 | `docs/factor-value-store.md` | 因子研究 Factor Value Store：通用特征定义、覆盖率、预计算、Relay 结构化因子和 ID=43 接入方式 |
+| `docs/strategy-data-contract.md` | 策略数据契约：策略只读公开因子/行情契约，内部派生缓存只供预计算任务使用 |
 | `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
 | `docs/frontend-information-architecture.md` | 新版前端页面职责、菜单分层、工作台/运维差异化和颜色语义 |
 | `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |

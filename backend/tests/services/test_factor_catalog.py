@@ -63,11 +63,29 @@ def test_catalog_groups_are_exposed() -> None:
     assert "research_factor_ideas" in groups
     assert "cn_paper_implemented" in groups
     assert "cn_paper_style_rotation" in groups
+    assert "tsmf_research_factor_library" in groups
+    assert "tsmf_preferred_rotation_pool" in groups
     assert get_factor_definition("ta_rsi_14")["source"] == "catalog.ta_lib"
     assert get_factor_definition("alpha101_001")["source"] == "catalog.alpha101"
     assert get_factor_definition("research_low_beta")["source"] == "catalog.research"
     assert get_factor_definition("paper_pb_roe_residual")["source"] == "catalog.cn_paper"
     assert get_factor_definition("paper_size_rotation_score")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("tsmf_recent_effective_score")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("avoid_high_volume_ratio")["source"] == "parquet"
+    assert get_factor_definition("tsmf_overheat_penalty")["source"] == "parquet"
+
+
+def test_tsmf_factor_pools_are_exposed() -> None:
+    groups = {item["name"]: item for item in list_factor_groups()}
+    full = groups["tsmf_research_factor_library"]
+    preferred = groups["tsmf_preferred_rotation_pool"]
+
+    assert "indicator_buy_signal" in full["factor_names"]
+    assert "tsmf_overheat_penalty" in full["factor_names"]
+    assert "tsmf_recent_effective_score" in full["factor_names"]
+    assert "avoid_high_volume_ratio" in preferred["factor_names"]
+    assert "risk_quality" in preferred["selection_buckets"]
+    assert any(item["name"] == "us_entry_filter_combined_downside" for item in preferred["strategy_signals"])
 
 
 def test_cn_paper_manifest_covers_all_report_rows() -> None:

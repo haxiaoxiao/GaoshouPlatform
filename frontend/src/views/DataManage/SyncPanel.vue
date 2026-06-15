@@ -146,6 +146,14 @@
             <el-input-number v-model="relayDailyLimit" :min="1" :max="500" :step="20" controls-position="right" />
           </label>
           <label>
+            <span>盈利预测 limit</span>
+            <el-input-number v-model="reportRcLimit" :min="1" :max="500" :step="20" controls-position="right" />
+          </label>
+          <label>
+            <span>分析师下钻数</span>
+            <el-input-number v-model="analystLimit" :min="1" :max="500" :step="10" controls-position="right" />
+          </label>
+          <label>
             <span>THS 成分上限</span>
             <el-input-number v-model="thsMemberLimit" :min="1" :max="500" :step="10" controls-position="right" />
           </label>
@@ -257,6 +265,7 @@
             <el-option label="行情" value="market" />
             <el-option label="概念" value="concept" />
             <el-option label="Relay 结构化" value="relay_structured" />
+            <el-option label="分析师研报" value="relay_analyst" />
             <el-option label="新闻公告" value="relay_text" />
           </el-select>
         </div>
@@ -388,6 +397,8 @@ const incrementalEndDate = ref(formatDate(today))
 const syncMode = ref<'incremental' | 'range' | 'full'>('incremental')
 const failureStrategy = ref<'skip' | 'retry' | 'stop'>('skip')
 const relayDailyLimit = ref(200)
+const reportRcLimit = ref(100)
+const analystLimit = ref(50)
 const thsMemberLimit = ref(50)
 const blockLimit = ref(5)
 const syncStatus = ref<SyncStatus>(idleStatus())
@@ -575,6 +586,8 @@ const currentCursorLabel = computed(() => {
   const parts = [
     stringValue(syncDetails.value.current_symbol),
     stringValue(syncDetails.value.current_ths_code) ? `THS ${stringValue(syncDetails.value.current_ths_code)}` : '',
+    stringValue(syncDetails.value.current_analyst_id) ? `Analyst ${stringValue(syncDetails.value.current_analyst_id)}` : '',
+    stringValue(syncDetails.value.current_indicator),
     stringValue(syncDetails.value.current_date),
     stringValue(syncDetails.value.download_batch) ? `下载批次 ${stringValue(syncDetails.value.download_batch)}` : '',
     currentBatchLabel.value ? `批次 ${currentBatchLabel.value}` : '',
@@ -982,6 +995,9 @@ function relayOptions(items: QueueItem[]) {
     allow_all_symbols: stockScope.value === 'all',
     allow_text_sources: items.some((item) => item.text_source),
     daily_limit: relayDailyLimit.value,
+    report_rc_limit: reportRcLimit.value,
+    analyst_limit: analystLimit.value,
+    analyst_rank_limit: analystLimit.value,
     block_moneyflow_limit: blockLimit.value,
     ths_member_limit: thsMemberLimit.value,
     rps: catalog.value?.relay.rps || 1,

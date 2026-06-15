@@ -565,7 +565,10 @@ def precompute_small_cap_core_features(
                 if v4_value is not None and signal_value is not None:
                     buy_signal = 1.0 if v4_value > signal_value and v4_value > 0 and macd_value > 0 else 0.0
                     dead_cross = 1.0 if v4_value < signal_value and signal_value > 0 and macd_value <= 0 else 0.0
+                    stretch = max(0.0, v4_value - signal_value) / max(1.0, abs(signal_value))
+                    overheat_penalty = buy_signal + float(np.clip(stretch, 0.0, 3.0))
                     add_feature_row({**common, "factor_name": "indicator_buy_signal", "params_hash": factor_params_hash({}), "value": buy_signal})
+                    add_feature_row({**common, "factor_name": "tsmf_overheat_penalty", "params_hash": factor_params_hash({}), "value": overheat_penalty})
                     add_feature_row({**common, "factor_name": "v4gv_dead_cross", "params_hash": factor_params_hash({}), "value": dead_cross})
 
     report(0.88, "写入核心因子", rows_buffered=writer.rows_buffered)
@@ -713,6 +716,7 @@ def precompute_high_volume_features(
         if max_volume <= 0:
             continue
         ratio = current_volume / max_volume
+        avoid_ratio = float(np.clip(1.0 - ratio, 0.0, 1.0))
         signal = 1.0 if ratio > threshold else 0.0
         common = {
             "symbol": symbol,
@@ -739,6 +743,12 @@ def precompute_high_volume_features(
                 "factor_name": "high_volume_ratio",
                 "params_hash": hash_base,
                 "value": ratio,
+            },
+            {
+                **common,
+                "factor_name": "avoid_high_volume_ratio",
+                "params_hash": hash_base,
+                "value": avoid_ratio,
             },
             {
                 **common,

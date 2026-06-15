@@ -26,6 +26,10 @@ _DATASET_KEY_COLS = {
     "announcements": ["symbol", "ann_date", "title_hash"],
     "research_reports": ["symbol", "report_date", "title_hash"],
     "market_news": ["source_api", "publish_time", "title_hash"],
+    "analyst_report_forecasts": ["symbol", "report_date", "org_name", "author_name", "quarter", "title_hash"],
+    "analyst_rank": ["analyst_id", "year", "update_date"],
+    "analyst_detail": ["analyst_id", "symbol", "latest_rating_date", "indicator"],
+    "analyst_history": ["analyst_id", "symbol", "in_date", "out_date", "indicator"],
 }
 
 

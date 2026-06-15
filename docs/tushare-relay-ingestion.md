@@ -28,6 +28,44 @@ INDEVS_TUSHARE_TIMEOUT_SECONDS=30
 
 `dividend` 暂不接入 Relay，因为平台已有 QMT 分红同步，避免口径重复。
 
+## 分析师与研报数据
+
+2026-06-15 已接入分析师/研报 Relay 数据集，仍然先落本地 Parquet，因子计算和回测只读本地数据。
+
+| Relay dataset | API | Parquet dataset | 分区日期列 | 同步方式 |
+|---|---|---|---|---|
+| `report_rc` | `report_rc` | `analyst_report_forecasts` | `report_date` | 按 `symbols` + `start_date/end_date` 查询卖方盈利预测，单次 `report_rc_limit` 默认 100 |
+| `analyst_rank` | `analyst_rank` | `analyst_rank` | `update_date` | 按年份查询，年份来自同步日期区间或 `relay_options.analyst_years` |
+| `analyst_detail` | `analyst_detail` | `analyst_detail` | `latest_rating_date` | 先从 `analyst_rank` 取 `analyst_id`，再按 `indicator=最新跟踪成分股` 下钻 |
+| `analyst_history` | `analyst_history` | `analyst_history` | `in_date` | 先从 `analyst_rank` 取 `analyst_id`，再按 `indicator=历史跟踪成分股` 下钻 |
+| `stock_research_report_em` | `stock_research_report_em` | `research_reports` | `report_date` | 按股票和日期同步研报标题、评级、机构和 PDF 链接 |
+
+示例：
+
+```json
+POST /api/data/sync
+{
+  "sync_type": "tushare_relay",
+  "relay_datasets": ["report_rc", "analyst_rank", "analyst_history", "stock_research_report_em"],
+  "symbols": ["000001.SZ"],
+  "start_date": "2026-04-01",
+  "end_date": "2026-04-30",
+  "relay_options": {
+    "report_rc_limit": 100,
+    "analyst_limit": 50,
+    "analyst_rank_limit": 50,
+    "daily_limit": 200,
+    "allow_text_sources": true
+  }
+}
+```
+
+注意：
+- `report_rc` 回源慢且可能超时，建议小股票池、低频增量同步，并依赖本地 Parquet 缓存。
+- `analyst_detail` / `analyst_history` 必须有 `analyst_id`；平台默认先同步 `analyst_rank` 并抽取前 `analyst_limit` 个分析师下钻。
+- 如需指定分析师，可传 `relay_options.analyst_ids`，例如 `"11000213851,11000455635"`。
+- `stock_research_report_em` 属于文本源，仍需要 `allow_text_sources=true`。
+
 ## 新闻公告护栏
 
 新闻、公告、研报已登记在同步目录中，但默认不进入一键同步。触发这些数据集时必须显式传入：
