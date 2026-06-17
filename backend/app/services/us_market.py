@@ -110,6 +110,7 @@ def sync_us_market_history(
             frame["source"] = frame.get("source", "local_fallback")
             failures.append({"symbol": symbol, "error": f"network_fallback:{type(exc).__name__}: {exc}"})
 
+        frame = _merge_existing_rows(frame, out_dir / f"{symbol}_daily.csv")
         frame.to_csv(out_dir / f"{symbol}_daily.csv", index=False)
         _try_write_parquet(frame, out_dir / f"{symbol}_daily.parquet")
         frames.append(frame)
@@ -132,6 +133,7 @@ def sync_us_market_history(
             raise RuntimeError(f"No US market data synced: {failures}")
     else:
         combined = pd.concat(frames, ignore_index=True)
+    combined = _merge_existing_rows(combined, out_dir / "us_market_daily.csv")
 
     combined.to_csv(out_dir / "us_market_daily.csv", index=False)
     _try_write_parquet(combined, out_dir / "us_market_daily.parquet")
@@ -365,3 +367,23 @@ def _try_write_parquet(frame: pd.DataFrame, path: Path) -> None:
         frame.to_parquet(path, index=False)
     except Exception:
         pass
+
+
+def _merge_existing_rows(frame: pd.DataFrame, path: Path) -> pd.DataFrame:
+    if path.exists():
+        try:
+            existing = pd.read_csv(path)
+            frame = pd.concat([existing, frame], ignore_index=True)
+        except Exception:
+            pass
+    if "date" in frame.columns:
+        frame = frame.copy()
+        frame["date"] = pd.to_datetime(frame["date"], errors="coerce").dt.date
+        frame = frame.dropna(subset=["date"])
+    subset = [column for column in ("symbol", "date") if column in frame.columns]
+    if subset:
+        frame = frame.drop_duplicates(subset=subset, keep="last")
+    sort_cols = [column for column in ("symbol", "date") if column in frame.columns]
+    if sort_cols:
+        frame = frame.sort_values(sort_cols).reset_index(drop=True)
+    return frame
