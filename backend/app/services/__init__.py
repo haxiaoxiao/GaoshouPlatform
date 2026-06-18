@@ -20,6 +20,7 @@ from .data_skill import (
 from .data_skill import (
     IndustryInfo as SkillIndustryInfo,
 )
+from .financial_pit_store import FinancialPITStore, PITFinancialSnapshot
 from .sync_service import SyncProgress, SyncService
 
 __all__ = [
@@ -37,6 +38,8 @@ __all__ = [
     "StockSnapshot",
     "KlineBar",
     "FinancialReport",
+    "FinancialPITStore",
     "ScreenResult",
     "SkillIndustryInfo",
+    "PITFinancialSnapshot",
 ]
