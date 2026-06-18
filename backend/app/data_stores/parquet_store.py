@@ -30,6 +30,12 @@ _DATASET_KEY_COLS = {
     "analyst_rank": ["analyst_id", "year", "update_date"],
     "analyst_detail": ["analyst_id", "symbol", "latest_rating_date", "indicator"],
     "analyst_history": ["analyst_id", "symbol", "in_date", "out_date", "indicator"],
+    "hsgt_moneyflow": ["trade_date"],
+    "hsgt_holdings": ["symbol", "trade_date", "exchange"],
+    "fund_portfolio_holdings": ["fund_code", "symbol", "end_date", "ann_date"],
+    "financial_income": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
+    "financial_balancesheet": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
+    "financial_cashflow": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
 }
 
 

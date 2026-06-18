@@ -7,7 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.db.sqlite import get_async_session
-from app.services.task_queue import get_task_queue, reset_task_queues
+from app.services.task_queue import QueuedTask, get_task_queue, reset_task_queues
 from app.sync_main import app as sync_app
 
 
@@ -97,6 +97,78 @@ async def test_sync_status_stays_triggerable_while_queue_is_busy(monkeypatch):
     assert body["can_trigger"] is True
     assert body["sync_service_available"] is True
     assert body["details"]["queue_mode"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_cancel_all_cancels_active_and_pending_queue(monkeypatch):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    upserts: list[dict[str, object]] = []
+
+    async def fake_session():
+        yield object()
+
+    class FakeSyncService:
+        def __init__(self, session):
+            self.session = session
+
+        async def get_persisted_sync_status(self):
+            return None
+
+        async def cancel_sync(self):
+            return False
+
+    async def fake_upsert_sync_run(session, **kwargs):
+        upserts.append(kwargs)
+
+    async def active_handler():
+        started.set()
+        await release.wait()
+
+    async def pending_handler():
+        raise AssertionError("pending tasks should be drained before execution")
+
+    reset_task_queues()
+    sync_app.dependency_overrides[get_async_session] = fake_session
+    monkeypatch.setattr("app.api.sync.SyncService", FakeSyncService)
+    monkeypatch.setattr("app.api.sync.upsert_sync_run", fake_upsert_sync_run)
+
+    queue = get_task_queue("data_sync")
+    try:
+        await queue.submit(
+            QueuedTask(
+                task_id="sync-active",
+                title="active",
+                handler=active_handler,
+                metadata={"sync_type": "stock_info"},
+            )
+        )
+        await queue.submit(
+            QueuedTask(
+                task_id="sync-pending",
+                title="pending",
+                handler=pending_handler,
+                metadata={"sync_type": "financial_data"},
+            )
+        )
+        await asyncio.wait_for(started.wait(), timeout=2)
+
+        async with AsyncClient(transport=ASGITransport(app=sync_app), base_url="http://test") as client:
+            response = await client.post("/api/data/sync/cancel-all")
+            assert response.status_code == 200
+            body = response.json()["data"]
+
+        await asyncio.wait_for(queue.join(), timeout=2)
+    finally:
+        release.set()
+        sync_app.dependency_overrides.clear()
+        reset_task_queues()
+
+    assert body["cancelled"] is True
+    assert body["current_cancelled"] is True
+    assert body["pending_cancelled_count"] == 1
+    assert {item["run_id"] for item in upserts} == {"sync-active", "sync-pending"}
+    assert all(item["status"] == "cancelled" for item in upserts)
 
 
 @pytest.mark.asyncio

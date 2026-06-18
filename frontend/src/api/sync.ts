@@ -126,6 +126,14 @@ export const syncApi = {
   cancel: () =>
     request.post<{ cancelled: boolean }>('/data/sync/cancel', {}),
 
+  cancelAll: () =>
+    request.post<{
+      cancelled: boolean
+      current_cancelled: boolean
+      pending_cancelled_count: number
+      cancelled_task_ids: string[]
+    }>('/data/sync/cancel-all', {}),
+
   getCatalog: (params?: { refresh?: boolean }) =>
     request.get<SyncCatalog>('/data/sync/catalog', { params }),
 

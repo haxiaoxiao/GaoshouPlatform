@@ -10,7 +10,16 @@
           草稿 {{ queue.length }} · 后端 {{ queuePendingCount }} · 运行 {{ isRunning ? 1 : 0 }}
         </span>
         <el-button :icon="Refresh" :loading="catalogLoading" @click="loadCatalog(true)">刷新目录</el-button>
-        <el-button v-if="isRunning" type="danger" plain @click="cancelSync">停止任务</el-button>
+        <el-button
+          type="danger"
+          plain
+          :icon="CircleClose"
+          :disabled="stoppingAll || (!isRunning && queuePendingCount === 0)"
+          :loading="stoppingAll"
+          @click="cancelAllSync"
+        >
+          停止全部同步
+        </el-button>
         <el-button type="primary" :icon="VideoPlay" :disabled="queue.length === 0 || !canTriggerSync" :loading="executing" @click="executeQueue">
           执行队列
         </el-button>
@@ -161,6 +170,22 @@
             <span>板块资金流 limit</span>
             <el-input-number v-model="blockLimit" :min="1" :max="100" controls-position="right" />
           </label>
+          <label>
+            <span>港股通持股 limit</span>
+            <el-input-number v-model="hsgtHoldLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+          </label>
+          <label>
+            <span>基金持仓 limit</span>
+            <el-input-number v-model="fundPortfolioLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+          </label>
+          <label>
+            <span>基金报告期数</span>
+            <el-input-number v-model="fundPeriodLimit" :min="1" :max="40" :step="1" controls-position="right" />
+          </label>
+          <label>
+            <span>三表财务 limit</span>
+            <el-input-number v-model="statementLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+          </label>
         </div>
       </section>
     </div>
@@ -266,6 +291,8 @@
             <el-option label="概念" value="concept" />
             <el-option label="Relay 结构化" value="relay_structured" />
             <el-option label="分析师研报" value="relay_analyst" />
+            <el-option label="北向基金" value="relay_institution" />
+            <el-option label="三表财务" value="relay_financial_statement" />
             <el-option label="新闻公告" value="relay_text" />
           </el-select>
         </div>
@@ -351,7 +378,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Delete, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
+import { CircleClose, Delete, Plus, Refresh, VideoPlay } from '@element-plus/icons-vue'
 import { usePageContext } from '@/app/pageContext'
 import { syncApi, type SyncCatalog, type SyncCatalogItem, type SyncLog, type SyncPreset, type SyncStatus } from '@/api/sync'
 
@@ -390,6 +417,7 @@ const keyword = ref('')
 const categoryFilter = ref('all')
 const catalogLoading = ref(false)
 const executing = ref(false)
+const stoppingAll = ref(false)
 const stockScope = ref<'custom' | 'all'>('custom')
 const symbolText = ref('000001.SZ')
 const dateRange = ref<[string, string]>([formatDate(weekAgo), formatDate(today)])
@@ -401,6 +429,10 @@ const reportRcLimit = ref(100)
 const analystLimit = ref(50)
 const thsMemberLimit = ref(50)
 const blockLimit = ref(5)
+const hsgtHoldLimit = ref(3800)
+const fundPortfolioLimit = ref(5000)
+const fundPeriodLimit = ref(8)
+const statementLimit = ref(5000)
 const syncStatus = ref<SyncStatus>(idleStatus())
 const syncModeOptions = [
   { label: '增量', value: 'incremental' },
@@ -587,6 +619,9 @@ const currentCursorLabel = computed(() => {
     stringValue(syncDetails.value.current_symbol),
     stringValue(syncDetails.value.current_ths_code) ? `THS ${stringValue(syncDetails.value.current_ths_code)}` : '',
     stringValue(syncDetails.value.current_analyst_id) ? `Analyst ${stringValue(syncDetails.value.current_analyst_id)}` : '',
+    stringValue(syncDetails.value.current_exchange) ? `Exchange ${stringValue(syncDetails.value.current_exchange)}` : '',
+    stringValue(syncDetails.value.current_fund_code) ? `Fund ${stringValue(syncDetails.value.current_fund_code)}` : '',
+    stringValue(syncDetails.value.current_period) ? `Period ${stringValue(syncDetails.value.current_period)}` : '',
     stringValue(syncDetails.value.current_indicator),
     stringValue(syncDetails.value.current_date),
     stringValue(syncDetails.value.download_batch) ? `下载批次 ${stringValue(syncDetails.value.download_batch)}` : '',
@@ -1000,14 +1035,29 @@ function relayOptions(items: QueueItem[]) {
     analyst_rank_limit: analystLimit.value,
     block_moneyflow_limit: blockLimit.value,
     ths_member_limit: thsMemberLimit.value,
+    hk_hold_limit: hsgtHoldLimit.value,
+    hsgt_hold_limit: hsgtHoldLimit.value,
+    fund_portfolio_limit: fundPortfolioLimit.value,
+    fund_period_limit: fundPeriodLimit.value,
+    statement_limit: statementLimit.value,
     rps: catalog.value?.relay.rps || 1,
     timeout_seconds: catalog.value?.relay.timeout_seconds || 30,
   }
 }
 
-async function cancelSync() {
-  await syncApi.cancel()
-  await refreshStatus()
+async function cancelAllSync() {
+  if (stoppingAll.value) return
+  stoppingAll.value = true
+  try {
+    const result = await syncApi.cancelAll()
+    const cancelledCount = Number(result.pending_cancelled_count || 0) + (result.current_cancelled ? 1 : 0)
+    await Promise.all([refreshStatus(), loadLogs(), loadCatalog(true)])
+    ElMessage.success(cancelledCount > 0 ? `已停止全部同步，取消 ${cancelledCount} 项任务` : '当前没有正在运行的同步任务')
+  } catch (error: any) {
+    ElMessage.error(error?.message || '停止全部同步失败')
+  } finally {
+    stoppingAll.value = false
+  }
 }
 
 function parseSymbols(text: string) {

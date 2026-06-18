@@ -78,6 +78,12 @@ PARQUET_DATASETS = {
     "analyst_rank": "update_date",
     "analyst_detail": "latest_rating_date",
     "analyst_history": "in_date",
+    "hsgt_moneyflow": "trade_date",
+    "hsgt_holdings": "trade_date",
+    "fund_portfolio_holdings": "end_date",
+    "financial_income": "f_ann_date",
+    "financial_balancesheet": "f_ann_date",
+    "financial_cashflow": "f_ann_date",
 }
 
 INTERFACE_STORAGE_REQUIREMENTS = {
@@ -128,6 +134,12 @@ INTERFACE_STORAGE_REQUIREMENTS = {
             "analyst_rank",
             "analyst_detail",
             "analyst_history",
+            "hsgt_moneyflow",
+            "hsgt_holdings",
+            "fund_portfolio_holdings",
+            "financial_income",
+            "financial_balancesheet",
+            "financial_cashflow",
         ],
         "notes": "这些表由中继/舆情/公告数据源提供；源端不存在时只能标记为 not_available。",
     },
@@ -140,7 +152,7 @@ INTERFACE_STORAGE_REQUIREMENTS = {
         "routes": ["/api/factor-values/*"],
         "sqlite": ["stocks", "index_components", "stock_daily_basic", "stock_limit_prices", "financial_data"],
         "parquet": ["factor_values", "klines_daily", "klines_minute", "klines_minute_cum_timer"],
-        "parquet_optional": ["moneyflow", "auction_replay", "ths_member", "block_moneyflow"],
+        "parquet_optional": ["moneyflow", "auction_replay", "ths_member", "block_moneyflow", "hsgt_moneyflow", "hsgt_holdings", "fund_portfolio_holdings", "financial_income", "financial_balancesheet", "financial_cashflow"],
     },
     "factor_research": {
         "routes": ["/api/factor-research/*"],
@@ -160,7 +172,7 @@ INTERFACE_STORAGE_REQUIREMENTS = {
     "sentiment": {
         "routes": ["/api/sentiment/*"],
         "sqlite": ["sentiment_posts", "stocks"],
-        "parquet_optional": ["market_news", "announcements", "research_reports", "analyst_report_forecasts", "analyst_rank", "analyst_detail", "analyst_history"],
+        "parquet_optional": ["market_news", "announcements", "research_reports", "analyst_report_forecasts", "analyst_rank", "analyst_detail", "analyst_history", "hsgt_moneyflow", "hsgt_holdings", "fund_portfolio_holdings", "financial_income", "financial_balancesheet", "financial_cashflow"],
     },
     "legacy_strategy_signals": {
         "routes": ["/api/strategy/signals/*", "/api/strategy/backtest"],

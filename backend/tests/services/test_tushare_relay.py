@@ -1,6 +1,8 @@
 from app.services.tushare_relay import parse_relay_rows
 from app.services.tushare_relay_sync import (
     ANALYST_RELAY_DATASETS,
+    FINANCIAL_STATEMENT_RELAY_DATASETS,
+    INSTITUTION_RELAY_DATASETS,
     STRUCTURED_RELAY_DATASETS,
     build_sync_catalog,
     _normalize_dataset_rows,
@@ -28,10 +30,14 @@ def test_sync_catalog_exposes_relay_guardrails() -> None:
 
     assert set(STRUCTURED_RELAY_DATASETS).issubset(dataset_names)
     assert set(ANALYST_RELAY_DATASETS).issubset(dataset_names)
+    assert set(INSTITUTION_RELAY_DATASETS).issubset(dataset_names)
+    assert set(FINANCIAL_STATEMENT_RELAY_DATASETS).issubset(dataset_names)
     assert "ths_concept" in dataset_names
     assert "dividend" not in dataset_names
     assert presets["relay_structured"]["relay_datasets"] == list(STRUCTURED_RELAY_DATASETS)
     assert presets["relay_analyst"]["relay_datasets"] == [*ANALYST_RELAY_DATASETS, "stock_research_report_em"]
+    assert presets["relay_institution"]["relay_datasets"] == list(INSTITUTION_RELAY_DATASETS)
+    assert presets["relay_financial_statement"]["relay_datasets"] == list(FINANCIAL_STATEMENT_RELAY_DATASETS)
     assert presets["relay_text"]["include_by_default"] is False
     assert catalog["guardrails"]["news_default_daily_limit"] == 200
 
@@ -80,3 +86,84 @@ def test_normalize_stock_research_report_rows() -> None:
     assert frame.iloc[0]["title"] == "2025\u5e74\u62a5\u70b9\u8bc4"
     assert str(frame.iloc[0]["report_date"].date()) == "2026-04-26"
     assert frame.iloc[0]["title_hash"]
+
+
+def test_normalize_hsgt_holding_rows() -> None:
+    frame = _normalize_dataset_rows(
+        "hk_hold",
+        [
+            {
+                "trade_date": "20240614",
+                "ts_code": "000001.SZ",
+                "name": "\u5e73\u5b89\u94f6\u884c",
+                "vol": "123456",
+                "ratio": "2.34",
+                "exchange": "sz",
+            }
+        ],
+        {},
+    )
+
+    assert frame.iloc[0]["symbol"] == "000001.SZ"
+    assert frame.iloc[0]["holding_volume"] == 123456
+    assert frame.iloc[0]["holding_ratio"] == 2.34
+    assert frame.iloc[0]["exchange"] == "SZ"
+
+
+def test_normalize_fund_portfolio_rows() -> None:
+    frame = _normalize_dataset_rows(
+        "fund_portfolio",
+        [
+            {
+                "ts_code": "000001.OF",
+                "ann_date": "20240420",
+                "end_date": "20240331",
+                "symbol": "600519.SH",
+                "mkv": "1024.5",
+                "stk_mkv_ratio": "8.6",
+            }
+        ],
+        {},
+    )
+
+    assert frame.iloc[0]["fund_code"] == "000001.OF"
+    assert frame.iloc[0]["symbol"] == "600519.SH"
+    assert str(frame.iloc[0]["end_date"].date()) == "2024-03-31"
+
+
+def test_normalize_financial_statement_aliases() -> None:
+    balancesheet = _normalize_dataset_rows(
+        "balancesheet",
+        [
+            {
+                "ts_code": "600519.SH",
+                "f_ann_date": "20240403",
+                "end_date": "20231231",
+                "report_type": "1",
+                "comp_type": "1",
+                "intan_assets": "100.5",
+                "goodwill": "20.0",
+                "total_hldr_eqy_exc_min_int": "5000",
+            }
+        ],
+        {},
+    )
+    cashflow = _normalize_dataset_rows(
+        "cashflow",
+        [
+            {
+                "ts_code": "600519.SH",
+                "f_ann_date": "20240403",
+                "end_date": "20231231",
+                "n_cashflow_act": "300.0",
+                "c_pay_acq_const_fiolta": "25.5",
+            }
+        ],
+        {},
+    )
+
+    assert balancesheet.iloc[0]["symbol"] == "600519.SH"
+    assert balancesheet.iloc[0]["intangible_assets"] == 100.5
+    assert balancesheet.iloc[0]["total_equity"] == 5000
+    assert cashflow.iloc[0]["net_operate_cash_flow"] == 300.0
+    assert cashflow.iloc[0]["capex"] == 25.5

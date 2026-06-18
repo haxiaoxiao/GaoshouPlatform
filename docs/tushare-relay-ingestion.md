@@ -1,6 +1,6 @@
 # Tushare Relay 数据接入
 
-Last updated: 2026-05-26.
+Last updated: 2026-06-16.
 
 ## 当前落地状态
 
@@ -88,6 +88,45 @@ POST /api/data/sync
 - 不做历史全量回灌，除非显式指定日期范围。
 - 过滤空标题、坏链接、明显广告/导航内容。
 - 保存原始标题、链接、来源和 `quality_flags`，暂不直接进入因子研究。
+
+## 北向、基金持仓与三表财务
+
+2026-06-16 新增一组从“A股操作指导”审计结果落地的数据集，仍然统一走 `sync_type="tushare_relay"` 并先写入本地 Parquet。
+
+| Relay dataset | API | Parquet dataset | 分区日期列 | 同步方式 |
+|---|---|---|---|---|
+| `moneyflow_hsgt` | `moneyflow_hsgt` | `hsgt_moneyflow` | `trade_date` | 按交易日同步北向/南向聚合资金流，适合市场状态因子 |
+| `hk_hold` | `hk_hold` | `hsgt_holdings` | `trade_date` | 按交易日+交易所，或按股票+交易日同步沪股通/深股通持股明细 |
+| `fund_portfolio` | `fund_portfolio` | `fund_portfolio_holdings` | `end_date` | 按报告期+基金代码、报告期+股票，或显式允许后按报告期同步基金持仓 |
+| `income` | `income` | `financial_income` | `f_ann_date` | 按股票+实际公告日区间同步利润表 |
+| `balancesheet` | `balancesheet` | `financial_balancesheet` | `f_ann_date` | 按股票+实际公告日区间同步资产负债表 |
+| `cashflow` | `cashflow` | `financial_cashflow` | `f_ann_date` | 按股票+实际公告日区间同步现金流量表 |
+
+示例：
+```json
+POST /api/data/sync
+{
+  "sync_type": "tushare_relay",
+  "relay_datasets": ["moneyflow_hsgt", "hk_hold", "fund_portfolio", "income", "balancesheet", "cashflow"],
+  "symbols": ["600519.SH"],
+  "start_date": "2024-01-01",
+  "end_date": "2026-06-16",
+  "relay_options": {
+    "hk_hold_limit": 3800,
+    "fund_portfolio_limit": 5000,
+    "fund_period_limit": 8,
+    "statement_limit": 5000,
+    "rps": 1,
+    "timeout_seconds": 45
+  }
+}
+```
+
+注意：
+- `moneyflow_hsgt` 是聚合资金流，不提供个股截面持仓；个股北向持仓变化应使用 `hk_hold` / `hsgt_holdings`。
+- `fund_portfolio` 默认要求传 `symbols` 或 `relay_options.fund_codes`；只有显式传 `allow_all_symbols=true`、`allow_all_funds=true` 或 `fund_allow_period_only=true` 才会按报告期全量拉取，防止任务过大。
+- 三表财务以 `f_ann_date` 作为本地分区日期，避免按 `end_date` 使用未来数据；同时保留 `end_date` 用于报告期对齐。
+- 三表规范化会补充便于因子使用的别名：`rd_expense`、`intangible_assets`、`rd_capitalized`、`net_operate_cash_flow`、`capex`。
 
 ## API
 

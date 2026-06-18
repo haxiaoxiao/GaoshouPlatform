@@ -34,6 +34,12 @@ _PARQUET_DATASETS = [
     "analyst_rank",
     "analyst_detail",
     "analyst_history",
+    "hsgt_moneyflow",
+    "hsgt_holdings",
+    "fund_portfolio_holdings",
+    "financial_income",
+    "financial_balancesheet",
+    "financial_cashflow",
 ]
 
 _PARQUET_DATE_COLUMNS = {
@@ -58,6 +64,12 @@ _PARQUET_DATE_COLUMNS = {
     "analyst_rank": "update_date",
     "analyst_detail": "latest_rating_date",
     "analyst_history": "in_date",
+    "hsgt_moneyflow": "trade_date",
+    "hsgt_holdings": "trade_date",
+    "fund_portfolio_holdings": "end_date",
+    "financial_income": "f_ann_date",
+    "financial_balancesheet": "f_ann_date",
+    "financial_cashflow": "f_ann_date",
 }
 
 _ALLOWED_FILTER_OPS = {
@@ -186,7 +198,7 @@ def _quick_filters(quick_search: dict[str, Any], columns: list[str]) -> list[Exp
         symbols = [item.strip().upper() for item in symbol_value.replace("，", ",").split(",") if item.strip()]
         filters.append(ExplorerFilter(column="symbol", op="in" if len(symbols) > 1 else "=", value=symbols[0] if len(symbols) == 1 else None, values=symbols if len(symbols) > 1 else None))
 
-    date_col = next((col for col in ("trade_date", "datetime", "date", "snapshot_date", "ann_date", "report_date", "publish_time") if col in columns), None)
+    date_col = next((col for col in ("trade_date", "datetime", "date", "snapshot_date", "ann_date", "f_ann_date", "end_date", "report_date", "publish_time") if col in columns), None)
     start_date = str(quick_search.get("start_date") or "").strip()
     end_date = str(quick_search.get("end_date") or "").strip()
     if date_col and start_date and end_date:

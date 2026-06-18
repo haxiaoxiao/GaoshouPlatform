@@ -980,3 +980,53 @@ async def cancel_sync(
         "message": "同步已取消" if cancelled else "当前没有正在运行的同步任务",
         "data": {"cancelled": cancelled},
     }
+
+
+@router.post("/sync/cancel-all", summary="停止所有同步任务")
+async def cancel_all_sync(
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    try:
+        return await proxy_sync_request("POST", "/api/data/sync/cancel-all", json_body={})
+    except HTTPException as exc:
+        logger.warning("Sync service cancel-all proxy failed: {}", exc.detail)
+        from app.services.sync_run_store import upsert_sync_run
+
+        service = SyncService(session)
+        persisted = await service.get_persisted_sync_status()
+        if persisted and persisted.get("status") in {"queued", "running"}:
+            run_id = str(persisted.get("run_id") or persisted.get("task_id"))
+            await upsert_sync_run(
+                session,
+                run_id=run_id,
+                sync_type=persisted.get("sync_type"),
+                status="cancelled",
+                total=persisted.get("total", 0),
+                current=persisted.get("current", 0),
+                success_count=persisted.get("success_count", 0),
+                failed_count=persisted.get("failed_count", 0),
+                progress_percent=persisted.get("progress_percent", 0.0),
+                end_time=datetime.now(),
+                error_message=f"Cancelled all while sync service was unavailable: {exc.detail}",
+                details={**dict(persisted.get("details") or {}), "cancelled_by": "cancel_all"},
+            )
+            return {
+                "code": 0,
+                "message": "success",
+                "data": {
+                    "cancelled": True,
+                    "current_cancelled": True,
+                    "pending_cancelled_count": 0,
+                    "cancelled_task_ids": [run_id],
+                },
+            }
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "cancelled": False,
+                "current_cancelled": False,
+                "pending_cancelled_count": 0,
+                "cancelled_task_ids": [],
+            },
+        }

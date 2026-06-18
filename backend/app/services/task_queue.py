@@ -86,6 +86,35 @@ class AsyncTaskQueue:
             self._active_handle.cancel()
         return task_id in self._known_ids
 
+    def cancel_all(self) -> dict[str, Any]:
+        """Cancel the active task and drain all pending tasks."""
+        active = self._task_summary(self._active_task)
+        pending: list[QueuedTask] = []
+        while True:
+            try:
+                task = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            pending.append(task)
+            self._queue.task_done()
+
+        pending_ids = [task.task_id for task in pending]
+        for task_id in pending_ids:
+            self._known_ids.discard(task_id)
+            self._cancelled_ids.discard(task_id)
+
+        active_cancelled = False
+        if self._active_task is not None:
+            active_cancelled = self.cancel(self._active_task.task_id)
+
+        return {
+            "active": active,
+            "active_cancelled": active_cancelled,
+            "pending": [self._task_summary(task) for task in pending],
+            "pending_cancelled_count": len(pending),
+            "cancelled_task_ids": ([self._active_task.task_id] if self._active_task else []) + pending_ids,
+        }
+
     async def join(self) -> None:
         await self._queue.join()
 

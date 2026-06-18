@@ -39,6 +39,18 @@ STRUCTURED_RELAY_DATASETS = (
     "stk_auction_replay",
 )
 
+INSTITUTION_RELAY_DATASETS = (
+    "moneyflow_hsgt",
+    "hk_hold",
+    "fund_portfolio",
+)
+
+FINANCIAL_STATEMENT_RELAY_DATASETS = (
+    "income",
+    "balancesheet",
+    "cashflow",
+)
+
 ANALYST_RELAY_DATASETS = (
     "report_rc",
     "analyst_rank",
@@ -157,6 +169,106 @@ RELAY_DATASET_SPECS: dict[str, RelayDatasetSpec] = {
         symbol_scoped=True,
         default_enabled=True,
         default_params={"mode": "summary"},
+    ),
+    "moneyflow_hsgt": RelayDatasetSpec(
+        name="moneyflow_hsgt",
+        display_name="沪深港通资金流",
+        api_name="moneyflow_hsgt",
+        storage_dataset="hsgt_moneyflow",
+        date_col="trade_date",
+        category="relay_institution",
+        description="沪深港通北向/南向聚合资金流，只适合做市场状态或风格 regime，不是个股截面持仓。",
+        recommended_frequency="daily",
+        risk_level="medium",
+        default_enabled=False,
+        default_params={
+            "fields": "trade_date,ggt_ss,ggt_sz,hgt,sgt,north_money,south_money",
+        },
+    ),
+    "hk_hold": RelayDatasetSpec(
+        name="hk_hold",
+        display_name="沪深港通持股",
+        api_name="hk_hold",
+        storage_dataset="hsgt_holdings",
+        date_col="trade_date",
+        category="relay_institution",
+        description="沪股通/深股通个股持股明细，可用于北向持股比例、连续增持和拥挤度变化。",
+        recommended_frequency="weekly",
+        risk_level="high",
+        default_enabled=False,
+        default_params={
+            "exchanges": ["SH", "SZ"],
+            "limit": 3800,
+            "fields": "trade_date,ts_code,name,vol,ratio,exchange",
+        },
+    ),
+    "fund_portfolio": RelayDatasetSpec(
+        name="fund_portfolio",
+        display_name="基金股票持仓",
+        api_name="fund_portfolio",
+        storage_dataset="fund_portfolio_holdings",
+        date_col="end_date",
+        category="relay_institution",
+        description="公募基金季度股票持仓，支持按基金、股票或报告期同步，用于基金持仓超配与抱团降温。",
+        recommended_frequency="quarterly",
+        risk_level="high",
+        default_enabled=False,
+        default_params={
+            "limit": 5000,
+            "period_limit": 8,
+            "fields": "ts_code,ann_date,end_date,symbol,mkv,amount,stk_mkv_ratio,stk_float_ratio",
+        },
+    ),
+    "income": RelayDatasetSpec(
+        name="income",
+        display_name="利润表",
+        api_name="income",
+        storage_dataset="financial_income",
+        date_col="f_ann_date",
+        category="relay_financial_statement",
+        description="Tushare 利润表，按实际公告日落库，补充研发费用、收入、利润等三表字段。",
+        recommended_frequency="weekly",
+        risk_level="medium",
+        symbol_scoped=True,
+        default_enabled=False,
+        default_params={
+            "limit": 5000,
+            "fields": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,total_revenue,revenue,total_cogs,oper_cost,sell_exp,admin_exp,fin_exp,rd_exp,operate_profit,total_profit,n_income,n_income_attr_p,ebit,ebitda,update_flag",
+        },
+    ),
+    "balancesheet": RelayDatasetSpec(
+        name="balancesheet",
+        display_name="资产负债表",
+        api_name="balancesheet",
+        storage_dataset="financial_balancesheet",
+        date_col="f_ann_date",
+        category="relay_financial_statement",
+        description="Tushare 资产负债表，补充无形资产、商誉、研发资本化、资产负债与股东权益字段。",
+        recommended_frequency="weekly",
+        risk_level="medium",
+        symbol_scoped=True,
+        default_enabled=False,
+        default_params={
+            "limit": 5000,
+            "fields": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,total_assets,total_liab,total_hldr_eqy_exc_min_int,total_hldr_eqy_inc_min_int,intan_assets,r_and_d,goodwill,total_cur_assets,total_nca,total_cur_liab,total_ncl,update_flag",
+        },
+    ),
+    "cashflow": RelayDatasetSpec(
+        name="cashflow",
+        display_name="现金流量表",
+        api_name="cashflow",
+        storage_dataset="financial_cashflow",
+        date_col="f_ann_date",
+        category="relay_financial_statement",
+        description="Tushare 现金流量表，补充经营现金流、资本开支与自由现金流字段。",
+        recommended_frequency="weekly",
+        risk_level="medium",
+        symbol_scoped=True,
+        default_enabled=False,
+        default_params={
+            "limit": 5000,
+            "fields": "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type,end_type,net_profit,n_cashflow_act,im_net_cashflow_oper_act,c_pay_acq_const_fiolta,n_cashflow_inv_act,free_cashflow,amort_intang_assets,depr_fa_coga_dpba,stot_out_inv_act,update_flag",
+        },
     ),
     "report_rc": RelayDatasetSpec(
         name="report_rc",
@@ -534,6 +646,22 @@ def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
                 "relay_datasets": list(TEXT_RELAY_DATASETS),
                 "include_by_default": False,
             },
+            {
+                "name": "relay_institution",
+                "display_name": "北向与基金持仓",
+                "description": "沪深港通聚合资金、个股持股明细和公募基金股票持仓。",
+                "sync_types": [],
+                "relay_datasets": list(INSTITUTION_RELAY_DATASETS),
+                "include_by_default": False,
+            },
+            {
+                "name": "relay_financial_statement",
+                "display_name": "Tushare 三表财务",
+                "description": "利润表、资产负债表和现金流量表，按实际公告日落库。",
+                "sync_types": [],
+                "relay_datasets": list(FINANCIAL_STATEMENT_RELAY_DATASETS),
+                "include_by_default": False,
+            },
         ],
         "datasets": [*core_items, *relay_items],
         "relay": {
@@ -661,8 +789,13 @@ async def run_tushare_relay_sync(
     if start > end:
         raise ValueError("start_date must be <= end_date")
 
+    explicit_symbols = [str(symbol).strip().upper() for symbol in (symbols or []) if str(symbol).strip()]
     symbol_scoped = any(RELAY_DATASET_SPECS[name].symbol_scoped for name in requested)
-    resolved_symbols = await _resolve_symbols(session, symbols, allow_all=bool(options.get("allow_all_symbols"))) if symbol_scoped else []
+    resolved_symbols = (
+        await _resolve_symbols(session, symbols, allow_all=bool(options.get("allow_all_symbols")))
+        if symbol_scoped
+        else explicit_symbols
+    )
     symbol_limit = _positive_int(options.get("symbol_limit"))
     if symbol_limit and resolved_symbols:
         resolved_symbols = resolved_symbols[:symbol_limit]
@@ -722,6 +855,26 @@ async def run_tushare_relay_sync(
                 )
             elif dataset_name == "block_moneyflow":
                 dataset_rows, dataset_meta = await _sync_block_moneyflow(client, spec, dates=dates, options=options, progress=progress)
+            elif dataset_name == "moneyflow_hsgt":
+                dataset_rows, dataset_meta = await _sync_moneyflow_hsgt(client, spec, dates=dates, options=options, progress=progress)
+            elif dataset_name == "hk_hold":
+                dataset_rows, dataset_meta = await _sync_hk_hold(
+                    client,
+                    spec,
+                    dates=dates,
+                    symbols=resolved_symbols,
+                    options=options,
+                    progress=progress,
+                )
+            elif dataset_name == "fund_portfolio":
+                dataset_rows, dataset_meta = await _sync_fund_portfolio(
+                    client,
+                    spec,
+                    dates=dates,
+                    symbols=resolved_symbols,
+                    options=options,
+                    progress=progress,
+                )
             elif dataset_name == "ths_index":
                 dataset_rows, dataset_meta = await _sync_ths_index(client, spec, options=options, progress=progress)
                 ths_index_rows = dataset_rows
@@ -769,6 +922,16 @@ async def run_tushare_relay_sync(
                     progress=progress,
                 )
                 dataset_meta.extend(analyst_meta)
+            elif dataset_name in FINANCIAL_STATEMENT_RELAY_DATASETS:
+                dataset_rows, dataset_meta = await _sync_financial_statement(
+                    client,
+                    spec,
+                    symbols=resolved_symbols,
+                    start=start,
+                    end=end,
+                    options=options,
+                    progress=progress,
+                )
             elif spec.text_source:
                 dataset_rows, dataset_meta = await _sync_text_dataset(
                     client,
@@ -972,6 +1135,18 @@ def _estimate_total(names: list[str], dates: list[date], symbols: list[str], opt
         spec = RELAY_DATASET_SPECS[name]
         if name in {"adj_factor", "moneyflow", "stk_auction_replay"}:
             total += max(1, len(symbols) * len(dates))
+        elif name == "moneyflow_hsgt":
+            total += max(1, len(dates))
+        elif name == "hk_hold":
+            exchanges = _hsgt_exchanges(options, spec)
+            total += max(1, (len(symbols) or len(exchanges)) * len(dates))
+        elif name == "fund_portfolio":
+            periods = _fund_periods(dates, options, spec)
+            selectors = _fund_codes(options) or symbols or ["period"]
+            total += max(1, len(periods) * len(selectors))
+        elif name in FINANCIAL_STATEMENT_RELAY_DATASETS:
+            periods = _statement_periods(options)
+            total += max(1, len(symbols) * max(len(periods), 1))
         elif name == "report_rc":
             total += max(1, len(symbols))
         elif name == "block_moneyflow":
@@ -1045,6 +1220,153 @@ async def _sync_block_moneyflow(
         rows.extend(result.rows)
         progress.current = min(progress.current + 1, progress.total)
         await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_moneyflow_hsgt(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    dates: list[date],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    fields = str(options.get("moneyflow_hsgt_fields") or spec.default_params.get("fields") or "")
+    for current_date in dates:
+        progress.details["current_date"] = current_date.isoformat()
+        params: dict[str, Any] = {"trade_date": current_date.strftime("%Y%m%d")}
+        if fields:
+            params["fields"] = fields
+        result = await asyncio.to_thread(client.request, spec.api_name, params)
+        metas.append(_meta_dict(result.meta))
+        for row in result.rows:
+            item = dict(row)
+            item.setdefault("trade_date", current_date.strftime("%Y%m%d"))
+            rows.append(item)
+        progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_hk_hold(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    dates: list[date],
+    symbols: list[str],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    limit = _positive_int(options.get("hk_hold_limit") or options.get("hsgt_hold_limit") or options.get("limit")) or int(spec.default_params.get("limit", 3800))
+    limit = min(max(limit, 1), 10000)
+    fields = str(options.get("hk_hold_fields") or spec.default_params.get("fields") or "")
+    stock_symbols = [_normalize_a_stock_symbol(symbol) for symbol in symbols]
+    stock_symbols = [symbol for symbol in stock_symbols if symbol]
+    exchanges = _hsgt_exchanges(options, spec)
+
+    for current_date in dates:
+        progress.details["current_date"] = current_date.isoformat()
+        if stock_symbols:
+            for symbol in stock_symbols:
+                progress.details["current_symbol"] = symbol
+                params: dict[str, Any] = {
+                    "ts_code": symbol,
+                    "trade_date": current_date.strftime("%Y%m%d"),
+                    "limit": limit,
+                }
+                if fields:
+                    params["fields"] = fields
+                result = await asyncio.to_thread(client.request, spec.api_name, params)
+                metas.append(_meta_dict(result.meta))
+                for row in result.rows:
+                    item = dict(row)
+                    item.setdefault("ts_code", symbol)
+                    item.setdefault("trade_date", current_date.strftime("%Y%m%d"))
+                    rows.append(item)
+                progress.current = min(progress.current + 1, progress.total)
+                await asyncio.sleep(0)
+            continue
+
+        for exchange in exchanges:
+            progress.details["current_exchange"] = exchange
+            params = {
+                "trade_date": current_date.strftime("%Y%m%d"),
+                "exchange": exchange,
+                "limit": limit,
+            }
+            if fields:
+                params["fields"] = fields
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
+            metas.append(_meta_dict(result.meta))
+            for row in result.rows:
+                item = dict(row)
+                item.setdefault("trade_date", current_date.strftime("%Y%m%d"))
+                item.setdefault("exchange", exchange)
+                rows.append(item)
+            progress.current = min(progress.current + 1, progress.total)
+            await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_fund_portfolio(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    dates: list[date],
+    symbols: list[str],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    limit = _positive_int(options.get("fund_portfolio_limit") or options.get("fund_limit") or options.get("limit")) or int(spec.default_params.get("limit", 5000))
+    limit = min(max(limit, 1), 10000)
+    fields = str(options.get("fund_portfolio_fields") or spec.default_params.get("fields") or "")
+    periods = _fund_periods(dates, options, spec)
+    fund_codes = _fund_codes(options)
+    stock_symbols = [_normalize_a_stock_symbol(symbol) for symbol in symbols]
+    stock_symbols = [symbol for symbol in stock_symbols if symbol]
+    allow_period_only = bool(options.get("allow_all_symbols") or options.get("allow_all_funds") or options.get("fund_allow_period_only"))
+
+    if not fund_codes and not stock_symbols and not allow_period_only:
+        raise ValueError("fund_portfolio requires symbols, relay_options.fund_codes, or allow_all_symbols=true")
+
+    selectors: list[tuple[str, str | None]]
+    if fund_codes:
+        selectors = [("ts_code", code) for code in fund_codes]
+    elif stock_symbols:
+        selectors = [("symbol", symbol) for symbol in stock_symbols]
+    else:
+        selectors = [("period", None)]
+
+    for period in periods:
+        progress.details["current_period"] = period
+        for key, value in selectors:
+            if key == "ts_code" and value:
+                progress.details["current_fund_code"] = value
+            elif key == "symbol" and value:
+                progress.details["current_symbol"] = value
+            params: dict[str, Any] = {"period": period, "limit": limit}
+            if value:
+                params[key] = value
+            if fields:
+                params["fields"] = fields
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
+            metas.append(_meta_dict(result.meta))
+            for row in result.rows:
+                item = dict(row)
+                if key == "ts_code" and value:
+                    item.setdefault("ts_code", value)
+                elif key == "symbol" and value:
+                    item.setdefault("symbol", value)
+                item.setdefault("end_date", period)
+                rows.append(item)
+            progress.current = min(progress.current + 1, progress.total)
+            await asyncio.sleep(0)
     return rows, metas
 
 
@@ -1129,6 +1451,62 @@ async def _sync_report_rc(
             rows.append(item)
         progress.current = min(progress.current + 1, progress.total)
         await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_financial_statement(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    symbols: list[str],
+    start: date,
+    end: date,
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    limit = _positive_int(options.get(f"{spec.name}_limit") or options.get("statement_limit") or options.get("limit")) or int(spec.default_params.get("limit", 5000))
+    limit = min(max(limit, 1), 10000)
+    fields = str(options.get(f"{spec.name}_fields") or options.get("statement_fields") or spec.default_params.get("fields") or "")
+    report_type = options.get(f"{spec.name}_report_type") or options.get("report_type")
+    comp_type = options.get(f"{spec.name}_comp_type") or options.get("comp_type")
+    is_calc = options.get("is_calc")
+    periods = _statement_periods(options)
+    stock_symbols = [_normalize_a_stock_symbol(symbol) for symbol in symbols]
+    stock_symbols = [symbol for symbol in stock_symbols if symbol]
+
+    for symbol in stock_symbols:
+        progress.details["current_symbol"] = symbol
+        period_values = periods or [None]
+        for period in period_values:
+            if period:
+                progress.details["current_period"] = period
+            params: dict[str, Any] = {
+                "ts_code": symbol,
+                "limit": limit,
+            }
+            if period:
+                params["period"] = period
+            else:
+                params["start_date"] = start.strftime("%Y%m%d")
+                params["end_date"] = end.strftime("%Y%m%d")
+            if fields:
+                params["fields"] = fields
+            if report_type not in (None, ""):
+                params["report_type"] = report_type
+            if comp_type not in (None, ""):
+                params["comp_type"] = comp_type
+            if is_calc not in (None, ""):
+                params["is_calc"] = is_calc
+            result = await asyncio.to_thread(client.request, spec.api_name, params)
+            metas.append(_meta_dict(result.meta))
+            for row in result.rows:
+                item = dict(row)
+                item.setdefault("ts_code", symbol)
+                rows.append(item)
+            progress.current = min(progress.current + 1, progress.total)
+            await asyncio.sleep(0)
     return rows, metas
 
 
@@ -1267,6 +1645,95 @@ def _parse_int_list(value: Any) -> list[int]:
     return years
 
 
+def _hsgt_exchanges(options: dict[str, Any], spec: RelayDatasetSpec) -> list[str]:
+    raw = (
+        _string_list(options.get("hsgt_exchanges"))
+        or _string_list(options.get("hk_hold_exchanges"))
+        or _string_list(spec.default_params.get("exchanges"))
+    )
+    exchanges = [item.upper() for item in raw if item.upper() in {"SH", "SZ", "HK"}]
+    return exchanges or ["SH", "SZ"]
+
+
+def _fund_codes(options: dict[str, Any]) -> list[str]:
+    raw = (
+        _string_list(options.get("fund_codes"))
+        or _string_list(options.get("fund_ts_codes"))
+        or _string_list(options.get("fund_code"))
+    )
+    return [item.upper() for item in raw]
+
+
+def _statement_periods(options: dict[str, Any]) -> list[str]:
+    periods = (
+        _string_list(options.get("statement_periods"))
+        or _string_list(options.get("financial_periods"))
+        or _string_list(options.get("periods"))
+        or _string_list(options.get("period"))
+    )
+    return _valid_periods(periods)
+
+
+def _fund_periods(dates: list[date], options: dict[str, Any], spec: RelayDatasetSpec) -> list[str]:
+    explicit = (
+        _string_list(options.get("fund_periods"))
+        or _string_list(options.get("periods"))
+        or _string_list(options.get("period"))
+    )
+    period_limit = _positive_int(options.get("fund_period_limit")) or int(spec.default_params.get("period_limit", 8))
+    period_limit = min(max(period_limit, 1), 40)
+    if explicit:
+        return _valid_periods(explicit)[:period_limit]
+
+    end = max(dates) if dates else date.today()
+    start = min(dates) if dates else end - timedelta(days=365 * 2)
+    periods: list[str] = []
+    for year in range(start.year, end.year + 1):
+        for month, day in ((3, 31), (6, 30), (9, 30), (12, 31)):
+            period_date = date(year, month, day)
+            if start <= period_date <= end:
+                periods.append(period_date.strftime("%Y%m%d"))
+    if not periods:
+        periods = _recent_quarter_periods(end, period_limit)
+    return sorted(set(periods), reverse=True)[:period_limit]
+
+
+def _recent_quarter_periods(end: date, limit: int) -> list[str]:
+    year = end.year
+    quarters = [(3, 31), (6, 30), (9, 30), (12, 31)]
+    current = [
+        date(year, month, day)
+        for month, day in quarters
+        if date(year, month, day) <= end
+    ]
+    if not current:
+        year -= 1
+        current = [date(year, month, day) for month, day in quarters]
+    cursor = max(current)
+    periods: list[str] = []
+    while len(periods) < limit:
+        periods.append(cursor.strftime("%Y%m%d"))
+        month = cursor.month
+        if month == 3:
+            cursor = date(cursor.year - 1, 12, 31)
+        elif month == 6:
+            cursor = date(cursor.year, 3, 31)
+        elif month == 9:
+            cursor = date(cursor.year, 6, 30)
+        else:
+            cursor = date(cursor.year, 9, 30)
+    return periods
+
+
+def _valid_periods(values: list[str]) -> list[str]:
+    periods: list[str] = []
+    for value in values:
+        text = str(value).replace("-", "").strip()
+        if len(text) == 8 and text.isdigit():
+            periods.append(text)
+    return sorted(set(periods), reverse=True)
+
+
 def _bare_stock_code(symbol: str | None) -> str | None:
     normalized = normalize_security_symbol(symbol)
     if not normalized:
@@ -1334,6 +1801,14 @@ def _normalize_dataset_rows(name: str, rows: list[dict[str, Any]], options: dict
         frame = _normalize_common(rows, date_columns=["trade_date"], symbol_from="ts_code")
         _derive_moneyflow(frame)
         return frame
+    if name == "moneyflow_hsgt":
+        return _normalize_moneyflow_hsgt(rows)
+    if name == "hk_hold":
+        return _normalize_hk_hold(rows)
+    if name == "fund_portfolio":
+        return _normalize_fund_portfolio(rows)
+    if name in FINANCIAL_STATEMENT_RELAY_DATASETS:
+        return _normalize_financial_statement(name, rows)
     if name == "block_moneyflow":
         frame = _normalize_common(rows, date_columns=["trade_date"])
         if "ts_code" in frame.columns and "block_code" not in frame.columns:
@@ -1402,6 +1877,92 @@ def _normalize_common(
     for col in frame.columns:
         if col not in {"symbol", "ts_code", "con_code", "ths_code", "block_code", "source", "source_api", "mode"}:
             frame[col] = _coerce_numeric_if_possible(frame[col])
+    return frame
+
+
+def _normalize_moneyflow_hsgt(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = _normalize_common(rows, date_columns=["trade_date"])
+    if frame.empty:
+        return frame
+    if "north_money" in frame.columns and "north_money_million" not in frame.columns:
+        frame["north_money_million"] = pd.to_numeric(frame["north_money"], errors="coerce")
+    if "south_money" in frame.columns and "south_money_million" not in frame.columns:
+        frame["south_money_million"] = pd.to_numeric(frame["south_money"], errors="coerce")
+    if "trade_date" in frame.columns:
+        frame = frame[frame["trade_date"].notna()].copy()
+    return frame
+
+
+def _normalize_hk_hold(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = _normalize_common(rows, date_columns=["trade_date"], symbol_from="ts_code")
+    if frame.empty:
+        return frame
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
+    if "vol" in frame.columns and "holding_volume" not in frame.columns:
+        frame["holding_volume"] = pd.to_numeric(frame["vol"], errors="coerce")
+    if "ratio" in frame.columns and "holding_ratio" not in frame.columns:
+        frame["holding_ratio"] = pd.to_numeric(frame["ratio"], errors="coerce")
+    if "exchange" in frame.columns:
+        frame["exchange"] = frame["exchange"].astype(str).str.upper()
+    if "trade_date" in frame.columns:
+        frame = frame[frame["trade_date"].notna()].copy()
+    return frame
+
+
+def _normalize_fund_portfolio(rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = _normalize_common(rows, date_columns=["ann_date", "end_date"])
+    if frame.empty:
+        return frame
+    _copy_first(frame, "fund_code", ["fund_code", "ts_code"])
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
+    if "end_date" not in frame.columns and "period" in frame.columns:
+        frame["end_date"] = _parse_date_series(frame["period"])
+    if "ann_date" not in frame.columns:
+        frame["ann_date"] = pd.NaT
+    if "end_date" in frame.columns:
+        frame = frame[frame["end_date"].notna()].copy()
+    return frame
+
+
+def _normalize_financial_statement(name: str, rows: list[dict[str, Any]]) -> pd.DataFrame:
+    frame = _normalize_common(rows, date_columns=["ann_date", "f_ann_date", "end_date"], symbol_from="ts_code")
+    if frame.empty:
+        return frame
+    if "symbol" in frame.columns:
+        frame["symbol"] = frame["symbol"].map(_normalize_a_stock_symbol)
+    if "f_ann_date" not in frame.columns:
+        frame["f_ann_date"] = pd.NaT
+    if "ann_date" in frame.columns:
+        frame["f_ann_date"] = frame["f_ann_date"].fillna(frame["ann_date"])
+    if "end_date" in frame.columns:
+        frame["f_ann_date"] = frame["f_ann_date"].fillna(frame["end_date"])
+
+    if name == "income":
+        _copy_first(frame, "rd_expense", ["rd_expense", "rd_exp"])
+        _copy_first(frame, "net_profit_attributable", ["net_profit_attributable", "n_income_attr_p"])
+    elif name == "balancesheet":
+        _copy_first(frame, "intangible_assets", ["intangible_assets", "intan_assets"])
+        _copy_first(frame, "rd_capitalized", ["rd_capitalized", "r_and_d"])
+        _copy_first(frame, "total_equity", ["total_equity", "total_hldr_eqy_exc_min_int", "total_hldr_eqy_inc_min_int"])
+    elif name == "cashflow":
+        _copy_first(frame, "net_operate_cash_flow", ["net_operate_cash_flow", "n_cashflow_act", "im_net_cashflow_oper_act"])
+        _copy_first(frame, "capex", ["capex", "c_pay_acq_const_fiolta"])
+
+    for col in (
+        "rd_expense",
+        "net_profit_attributable",
+        "intangible_assets",
+        "rd_capitalized",
+        "total_equity",
+        "net_operate_cash_flow",
+        "capex",
+    ):
+        if col in frame.columns:
+            frame[col] = _coerce_numeric_if_possible(frame[col])
+
+    frame = frame[frame["f_ann_date"].notna()].copy()
     return frame
 
 
@@ -1590,7 +2151,7 @@ def _hash_title(title: str) -> str:
 
 
 def _coerce_numeric_if_possible(series: pd.Series) -> pd.Series:
-    if series.dtype != object:
+    if series.dtype != object and not pd.api.types.is_string_dtype(series.dtype):
         return series
     converted = pd.to_numeric(series.replace("", math.nan), errors="coerce")
     non_empty = series.replace("", math.nan).notna()

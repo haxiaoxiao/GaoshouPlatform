@@ -83,6 +83,73 @@ def _attach_sync_availability(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _mark_queue_task_cancelled(
+    session: AsyncSession,
+    task: dict[str, Any] | None,
+    *,
+    message: str,
+) -> str | None:
+    if not task:
+        return None
+    run_id = str(task.get("task_id") or "").strip()
+    if not run_id:
+        return None
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    await upsert_sync_run(
+        session,
+        run_id=run_id,
+        sync_type=str(metadata.get("sync_type") or "") or None,
+        status="cancelled",
+        end_time=datetime.now(),
+        error_message=message,
+        details={"queue_task": task, "cancelled_by": "cancel_all"},
+    )
+    return run_id
+
+
+async def _cancel_all_sync_work(session: AsyncSession) -> dict[str, Any]:
+    service = SyncService(session)
+    persisted = await service.get_persisted_sync_status()
+    current_cancelled = await service.cancel_sync()
+    queue_result = get_task_queue("data_sync").cancel_all()
+    cancelled_run_ids: set[str] = set()
+
+    for task in [queue_result.get("active"), *list(queue_result.get("pending") or [])]:
+        run_id = await _mark_queue_task_cancelled(
+            session,
+            task,
+            message="User cancelled all sync tasks",
+        )
+        if run_id:
+            cancelled_run_ids.add(run_id)
+
+    if persisted and persisted.get("status") in {"queued", "running"}:
+        run_id = str(persisted.get("run_id") or persisted.get("task_id") or "").strip()
+        if run_id and run_id not in cancelled_run_ids:
+            await upsert_sync_run(
+                session,
+                run_id=run_id,
+                sync_type=persisted.get("sync_type"),
+                status="cancelled",
+                total=persisted.get("total", 0),
+                current=persisted.get("current", 0),
+                success_count=persisted.get("success_count", 0),
+                failed_count=persisted.get("failed_count", 0),
+                progress_percent=persisted.get("progress_percent", 0.0),
+                end_time=datetime.now(),
+                error_message="User cancelled all sync tasks",
+                details={**dict(persisted.get("details") or {}), "cancelled_by": "cancel_all"},
+            )
+            cancelled_run_ids.add(run_id)
+
+    return {
+        "cancelled": bool(current_cancelled or queue_result.get("active_cancelled") or queue_result.get("pending_cancelled_count") or cancelled_run_ids),
+        "current_cancelled": bool(current_cancelled or queue_result.get("active_cancelled")),
+        "pending_cancelled_count": int(queue_result.get("pending_cancelled_count") or 0),
+        "cancelled_task_ids": sorted(cancelled_run_ids),
+    }
+
+
 async def _run_sync_task(
     run_id: str,
     request: SyncRequest,
@@ -469,3 +536,11 @@ async def cancel_sync(
         )
         cancelled = True
     return {"code": 0, "message": "success", "data": {"cancelled": cancelled}}
+
+
+@router.post("/sync/cancel-all")
+async def cancel_all_sync(
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    result = await _cancel_all_sync_work(session)
+    return {"code": 0, "message": "success", "data": result}
