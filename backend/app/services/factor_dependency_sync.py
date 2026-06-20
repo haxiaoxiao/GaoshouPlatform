@@ -295,6 +295,17 @@ def _append_catalog_dependency_check(
             "sync_step": "tushare_daily",
             "reason": f"{factor_name} 需要 stock_daily_basic 数据",
         })
+        return
+    if dep.startswith("stock_limit_prices") or dep == "stock_limit_prices":
+        checks.setdefault("stock_limit_prices", {
+            "dependency": "stock_limit_prices",
+            "label": "stock_limit_prices",
+            "latest_date": _latest_sqlite_date("stock_limit_prices", "trade_date"),
+            "required_start": start_date.isoformat(),
+            "required_end": end_date.isoformat(),
+            "sync_step": "tushare_daily",
+            "reason": f"{factor_name} requires stock_limit_prices data",
+        })
 
 
 def _build_sync_plan(

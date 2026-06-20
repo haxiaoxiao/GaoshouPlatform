@@ -1,4 +1,4 @@
-"""Synchronize sparse timer-minute bars into ClickHouse before backtests."""
+"""Synchronize sparse timer-minute bars into local Parquet before backtests."""
 
 from __future__ import annotations
 
@@ -14,7 +14,6 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.db.clickhouse import get_ch_client
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.backtest_redis_cache import get_backtest_cache
 from app.services.index_components import normalize_index_symbol
@@ -72,10 +71,6 @@ def _normalize_symbol(symbol: str) -> str:
     return normalize_security_symbol(symbol) or ""
 
 
-def _should_use_clickhouse() -> bool:
-    return settings.clickhouse_enabled or settings.market_data_backend == "clickhouse"
-
-
 def _minute_strings(timer_times: tuple[time, ...]) -> tuple[str, ...]:
     return tuple(t.strftime("%H:%M:%S") for t in _bar_timer_times(timer_times))
 
@@ -127,43 +122,17 @@ def _existing_timer_keys(
     timer_minutes = tuple(t.hour * 60 + t.minute for t in timer_times)
     if not timer_minutes:
         return set()
-    if not _should_use_clickhouse():
-        store = get_market_data_store()
-        start_dt = datetime.combine(start, datetime.min.time())
-        end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
-        df = store.load_minute([symbol], start_dt, end_dt, timer_times=_minute_strings(timer_times))
-        if df.empty:
-            return set()
-        values = set()
-        for dt in df.index:
-            ts = pd.Timestamp(dt)
-            values.add((ts.date(), ts.hour * 60 + ts.minute))
-        return values
-    ch = get_ch_client()
-    try:
-        rows = ch.execute(
-            """
-            SELECT toDate(datetime) AS d, toHour(datetime) * 60 + toMinute(datetime) AS m
-            FROM klines_minute
-            WHERE symbol = %(symbol)s
-              AND toDate(datetime) >= %(start)s
-              AND toDate(datetime) <= %(end)s
-              AND (toHour(datetime) * 60 + toMinute(datetime)) IN %(timer_minutes)s
-            GROUP BY d, m
-            """,
-            {
-                "symbol": symbol,
-                "start": start,
-                "end": end,
-                "timer_minutes": timer_minutes,
-            },
-        )
-    finally:
-        try:
-            ch.disconnect()
-        except Exception:
-            pass
-    return {(r[0], int(r[1])) for r in rows}
+    store = get_market_data_store()
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
+    df = store.load_minute([symbol], start_dt, end_dt, timer_times=_minute_strings(timer_times))
+    if df.empty:
+        return set()
+    values = set()
+    for dt in df.index:
+        ts = pd.Timestamp(dt)
+        values.add((ts.date(), ts.hour * 60 + ts.minute))
+    return values
 
 
 def _expected_timer_point_count(
@@ -177,41 +146,13 @@ def _expected_timer_point_count(
     timer_times = _bar_timer_times(timer_times)
     if not timer_times:
         return 0
-    if not _should_use_clickhouse():
-        store = get_market_data_store()
-        df = store.load_daily([symbol], start, end)
-        if not df.empty and {"open", "close"}.issubset(df.columns):
-            df = df[(df["open"].astype(float) > 0) & (df["close"].astype(float) > 0)]
-            trading_days = len(df.index.normalize().unique())
-        else:
-            trading_days = 0
-        if trading_days <= 0:
-            current = start
-            while current <= end:
-                if current.weekday() < 5:
-                    trading_days += 1
-                current += timedelta(days=1)
-        return trading_days * len(timer_times)
-    ch = get_ch_client()
-    try:
-        rows = ch.execute(
-            """
-            SELECT count()
-            FROM klines_daily
-            WHERE symbol = %(symbol)s
-              AND trade_date >= %(start)s
-              AND trade_date <= %(end)s
-              AND open > 0
-              AND close > 0
-            """,
-            {"symbol": symbol, "start": start, "end": end},
-        )
-    finally:
-        try:
-            ch.disconnect()
-        except Exception:
-            pass
-    trading_days = int(rows[0][0]) if rows else 0
+    store = get_market_data_store()
+    df = store.load_daily([symbol], start, end)
+    if not df.empty and {"open", "close"}.issubset(df.columns):
+        df = df[(df["open"].astype(float) > 0) & (df["close"].astype(float) > 0)]
+        trading_days = len(df.index.normalize().unique())
+    else:
+        trading_days = 0
     if trading_days <= 0:
         current = start
         while current <= end:
@@ -232,36 +173,13 @@ def _missing_timer_month_ranges(
     if not timer_times:
         return []
 
-    if not _should_use_clickhouse():
-        store = get_market_data_store()
-        df = store.load_daily([symbol], start, end)
-        if not df.empty and {"open", "close"}.issubset(df.columns):
-            df = df[(df["open"].astype(float) > 0) & (df["close"].astype(float) > 0)]
-            trading_days = [pd.Timestamp(v).date() for v in df.index.unique()]
-        else:
-            trading_days = []
+    store = get_market_data_store()
+    df = store.load_daily([symbol], start, end)
+    if not df.empty and {"open", "close"}.issubset(df.columns):
+        df = df[(df["open"].astype(float) > 0) & (df["close"].astype(float) > 0)]
+        trading_days = [pd.Timestamp(v).date() for v in df.index.unique()]
     else:
-        ch = get_ch_client()
-        try:
-            rows = ch.execute(
-                """
-                SELECT trade_date
-                FROM klines_daily
-                WHERE symbol = %(symbol)s
-                  AND trade_date >= %(start)s
-                  AND trade_date <= %(end)s
-                  AND open > 0
-                  AND close > 0
-                ORDER BY trade_date
-                """,
-                {"symbol": symbol, "start": start, "end": end},
-            )
-        finally:
-            try:
-                ch.disconnect()
-            except Exception:
-                pass
-        trading_days = [r[0] for r in rows]
+        trading_days = []
     if not trading_days:
         current = start
         while current <= end:
@@ -332,30 +250,12 @@ def _filter_timer_rows(
 def _insert_rows(rows: list[dict[str, Any]]) -> None:
     if not rows:
         return
-    if _should_use_clickhouse():
-        ch = get_ch_client()
-        try:
-            ch.execute(
-                """
-                INSERT INTO klines_minute
-                (symbol, datetime, open, high, low, close, volume, amount)
-                VALUES
-                """,
-                rows,
-            )
-        finally:
-            try:
-                ch.disconnect()
-            except Exception:
-                pass
-    if settings.market_data_backend == "parquet":
-        try:
-            import pandas as pd
-            df = pd.DataFrame(rows)
-            store = get_market_data_store()
-            store.write_minute(df, dataset="klines_minute_timer")
-        except Exception as exc:
-            logger.warning("Parquet timer minute write failed: {}", exc)
+    try:
+        df = pd.DataFrame(rows)
+        store = get_market_data_store()
+        store.write_minute(df, dataset="klines_minute_timer")
+    except Exception as exc:
+        logger.warning("Parquet timer minute write failed: {}", exc)
 
 
 async def sync_symbol_timer_minutes(
@@ -444,58 +344,26 @@ def find_earliest_timer_coverage_date(
 
     timer_minutes = tuple(t.hour * 60 + t.minute for t in timer_times)
     required_symbols = max(1, int(len(all_symbols) * min_symbol_coverage))
-    if not _should_use_clickhouse():
-        store = get_market_data_store()
-        df = store.load_minute(
-            all_symbols,
-            datetime.combine(start, datetime.min.time()),
-            datetime.combine(end + timedelta(days=1), datetime.min.time()),
-            timer_times=_minute_strings(timer_times),
+    store = get_market_data_store()
+    df = store.load_minute(
+        all_symbols,
+        datetime.combine(start, datetime.min.time()),
+        datetime.combine(end + timedelta(days=1), datetime.min.time()),
+        timer_times=_minute_strings(timer_times),
+    )
+    rows = []
+    if not df.empty:
+        temp = df.reset_index()
+        temp["d"] = pd.to_datetime(temp["datetime"]).dt.date
+        grouped = temp.groupby("d").agg(
+            symbol_count=("symbol", "nunique"),
+            point_count=("symbol", "count"),
         )
-        rows = []
-        if not df.empty:
-            temp = df.reset_index()
-            temp["d"] = pd.to_datetime(temp["datetime"]).dt.date
-            grouped = temp.groupby("d").agg(
-                symbol_count=("symbol", "nunique"),
-                point_count=("symbol", "count"),
-            )
-            grouped = grouped[grouped["symbol_count"] >= required_symbols].sort_index()
-            rows = [
-                (idx, int(row.symbol_count), int(row.point_count))
-                for idx, row in grouped.iterrows()
-            ]
-    else:
-        ch = get_ch_client()
-        try:
-            rows = ch.execute(
-                """
-                SELECT
-                    toDate(datetime) AS d,
-                    uniqExact(symbol) AS symbol_count,
-                    count() AS point_count
-                FROM klines_minute
-                WHERE symbol IN %(symbols)s
-                  AND datetime >= %(start)s
-                  AND datetime < %(end_plus)s
-                  AND (toHour(datetime) * 60 + toMinute(datetime)) IN %(timer_minutes)s
-                GROUP BY d
-                HAVING symbol_count >= %(required_symbols)s
-                ORDER BY d
-                """,
-                {
-                    "symbols": tuple(all_symbols),
-                    "start": datetime.combine(start, datetime.min.time()),
-                    "end_plus": datetime.combine(end + timedelta(days=1), datetime.min.time()),
-                    "timer_minutes": timer_minutes,
-                    "required_symbols": required_symbols,
-                },
-            )
-        finally:
-            try:
-                ch.disconnect()
-            except Exception:
-                pass
+        grouped = grouped[grouped["symbol_count"] >= required_symbols].sort_index()
+        rows = [
+            (idx, int(row.symbol_count), int(row.point_count))
+            for idx, row in grouped.iterrows()
+        ]
 
     coverage = []
     earliest = None

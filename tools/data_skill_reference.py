@@ -3,7 +3,6 @@
 # 请以原文件为准，此副本仅供参考
 
 # 后端依赖:
-#   from app.db.clickhouse import get_ch_client
 #   from app.db.models import Stock
 #   from app.db.models.financial import FinancialData
 #   from app.engines.qmt_gateway import qmt_gateway

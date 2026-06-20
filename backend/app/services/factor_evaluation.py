@@ -16,12 +16,6 @@ from app.compute.expression import evaluate_expression
 from app.compute.operators import auto_discover
 from app.data_stores import get_market_data_store
 
-try:
-    from app.db.clickhouse import get_ch_client
-except Exception:  # pragma: no cover - compatibility for parquet-only deployments.
-    def get_ch_client():
-        return None
-
 # Ensure operators are registered before any expression evaluation
 auto_discover()
 from app.models.factor import (

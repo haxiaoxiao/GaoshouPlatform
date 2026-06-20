@@ -27,7 +27,6 @@ akquant>=0.2.40
 
 # Trading data dependencies
 apscheduler>=3.10.0
-clickhouse-driver>=0.2.6
 playwright>=1.60.0
 
 # Optional local integrations. Install manually when you need live QMT,

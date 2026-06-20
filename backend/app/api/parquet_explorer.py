@@ -8,31 +8,14 @@ from fastapi import APIRouter, Query
 from app.core.config import settings
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
+from app.services.parquet_dataset_catalog import (
+    PARQUET_DATE_COLUMNS,
+    build_dataset_summary,
+    get_parquet_dataset_spec,
+    iter_parquet_dataset_specs,
+)
 
 router = APIRouter(prefix="/explorer/parquet", tags=["parquet"])
-
-_DATASETS = [
-    "klines_daily",
-    "klines_minute",
-    "klines_minute_timer",
-    "klines_minute_cum_timer",
-    "factor_cache",
-    "factor_values",
-    "stock_indicators",
-    "indicator_timeseries",
-]
-
-_DATASET_DATE_COLUMNS = {
-    "klines_daily": "trade_date",
-    "klines_minute": "datetime",
-    "klines_minute_timer": "datetime",
-    "klines_minute_cum_timer": "datetime",
-    "factor_cache": "trade_date",
-    "factor_values": "trade_date",
-    "stock_indicators": "trade_date",
-    "indicator_timeseries": "datetime",
-}
-
 
 def _is_temp_parquet_path(path) -> bool:
     text = str(path)
@@ -71,18 +54,20 @@ def _partition_summary(path, dataset: str) -> dict[str, Any] | None:
         max_day = calendar.monthrange(max_year, max_month)[1]
         min_date = f"{min_year:04d}-{min_month:02d}-01"
         max_date = f"{max_year:04d}-{max_month:02d}-{max_day:02d}"
-        if _DATASET_DATE_COLUMNS.get(dataset) == "datetime":
+        if PARQUET_DATE_COLUMNS.get(dataset) == "datetime":
             min_date = f"{min_date} 00:00:00"
             max_date = f"{max_date} 23:59:59"
 
-    return {
+    summary = {
         "partition_count": len(partitions),
         "row_count": None,
         "estimated": True,
         "min_date": min_date,
         "max_date": max_date,
-        "date_column": _DATASET_DATE_COLUMNS.get(dataset),
+        "date_column": PARQUET_DATE_COLUMNS.get(dataset),
     }
+    spec = get_parquet_dataset_spec(dataset)
+    return build_dataset_summary(spec, **summary) if spec else {"name": dataset, **summary}
 
 
 def _estimated_total(offset: int, row_count: int, limit: int) -> int:
@@ -94,13 +79,13 @@ async def list_datasets():
     """List Parquet datasets without scanning large file trees."""
     store = _get_store()
     datasets = []
-    for name in _DATASETS:
-        path = store._dataset_path(name)
+    for spec in iter_parquet_dataset_specs(settings.parquet_data_dir):
+        path = store._dataset_path(spec.name)
         if path.exists():
-            summary = _partition_summary(path, name)
+            summary = _partition_summary(path, spec.name)
             if summary is None:
                 continue
-            datasets.append({"name": name, "path": str(path), **summary})
+            datasets.append({"path": str(path), **summary})
     return {"code": 0, "data": datasets}
 
 

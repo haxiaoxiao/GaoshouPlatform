@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 
 class IDataProvider(ABC):
-    """数据提供者抽象 — 屏蔽底层 ClickHouse/SQLite 细节"""
+    """数据提供者抽象 — 屏蔽底层行情存储细节"""
 
     @abstractmethod
     async def load_daily(

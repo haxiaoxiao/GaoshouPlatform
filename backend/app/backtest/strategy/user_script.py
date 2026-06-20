@@ -411,86 +411,57 @@ class UserContext:
         return self._event_source.get_intraday_history(symbol, ed, n_days)
 
     def get_indicator(self, symbol: str, indicator_name: str, trade_date=None) -> float | None:
-        """Query a pre-computed indicator from ClickHouse stock_indicators.
+        """Query a pre-computed indicator from the local indicator store.
 
         Args:
             symbol: stock code
             indicator_name: e.g. 'pe_ttm', 'dividend_yield', 'price_to_ma250w'
             trade_date: date to query (default: latest available)
         """
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
         try:
-            if trade_date is None:
-                row = ch.execute(
-                    "SELECT value FROM stock_indicators "
-                    "WHERE symbol=%(s)s AND indicator_name=%(n)s "
-                    "ORDER BY trade_date DESC LIMIT 1",
-                    {"s": symbol, "n": indicator_name}
-                )
-            else:
-                row = ch.execute(
-                    "SELECT value FROM stock_indicators "
-                    "WHERE symbol=%(s)s AND indicator_name=%(n)s AND trade_date<=%(d)s "
-                    "ORDER BY trade_date DESC LIMIT 1",
-                    {"s": symbol, "n": indicator_name, "d": trade_date}
-                )
-            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+            from app.data_stores import get_indicator_store
+
+            store = get_indicator_store()
+            target = trade_date or store.latest_trade_date([indicator_name], [symbol])
+            if target is None:
+                return None
+            df = store.load_cross_section([indicator_name], target, [symbol])
+            return float(df["value"].iloc[0]) if not df.empty else None
         except Exception:
             return None
 
     def get_weekly_ma(self, symbol: str, period: int = 250, as_of_date=None) -> float | None:
-        """Get weekly moving average from klines_weekly table.
+        """Get moving average from local daily bars.
 
         Args:
             symbol: stock code
             period: MA period in weeks (default 250)
             as_of_date: reference date
         """
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
         try:
-            if as_of_date is None:
-                row = ch.execute(
-                    "SELECT avg(close) FROM ("
-                    "SELECT close FROM klines_weekly "
-                    "WHERE symbol=%(s)s "
-                    "ORDER BY trade_date DESC LIMIT %(p)s"
-                    ")",
-                    {"s": symbol, "p": period}
-                )
-            else:
-                row = ch.execute(
-                    "SELECT avg(close) FROM ("
-                    "SELECT close FROM klines_weekly "
-                    "WHERE symbol=%(s)s AND trade_date<=%(d)s "
-                    "ORDER BY trade_date DESC LIMIT %(p)s"
-                    ")",
-                    {"s": symbol, "p": period, "d": as_of_date}
-                )
-            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+            from app.data_stores import get_market_data_store
+
+            end = as_of_date or self.current_date or date.today()
+            start = end - pd.Timedelta(days=max(period * 8, 365))
+            df = get_market_data_store().load_daily([symbol], start, end, columns=["symbol", "trade_date", "close"])
+            if df.empty:
+                return None
+            closes = df.sort_index()["close"].astype(float).tail(period)
+            return float(closes.mean()) if len(closes) else None
         except Exception:
             return None
 
     def get_daily_close(self, symbol: str, as_of_date=None) -> float | None:
         """Get latest daily close price."""
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
         try:
-            if as_of_date is None:
-                row = ch.execute(
-                    "SELECT close FROM klines_daily "
-                    "WHERE symbol=%(s)s ORDER BY trade_date DESC LIMIT 1",
-                    {"s": symbol}
-                )
-            else:
-                row = ch.execute(
-                    "SELECT close FROM klines_daily "
-                    "WHERE symbol=%(s)s AND trade_date<=%(d)s "
-                    "ORDER BY trade_date DESC LIMIT 1",
-                    {"s": symbol, "d": as_of_date}
-                )
-            return float(row[0][0]) if row and row[0] and row[0][0] is not None else None
+            from app.data_stores import get_market_data_store
+
+            end = as_of_date or self.current_date or date.today()
+            start = end - pd.Timedelta(days=30)
+            df = get_market_data_store().load_daily([symbol], start, end, columns=["symbol", "trade_date", "close"])
+            if df.empty:
+                return None
+            return float(df.sort_index()["close"].iloc[-1])
         except Exception:
             return None
 

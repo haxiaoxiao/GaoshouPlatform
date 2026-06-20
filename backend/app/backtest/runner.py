@@ -82,14 +82,14 @@ class BacktestRunner:
         logger.info("EventBus initialized")
 
         # ── 2. 加载交易日历 ──
-        calendar = await TradingCalendar.from_clickhouse(symbols, start, end)
+        calendar = await TradingCalendar.from_market_data_store(symbols, start, end)
         if len(calendar) == 0:
             logger.warning("No trading dates found, returning empty result")
             return BacktestResult(initial_capital=config.initial_capital)
 
         # ── 3. 加载 Bar 数据 ──
         try:
-            event_source = await BarEventSource.from_clickhouse(symbols, start, end, calendar, bar_type=bar_type)
+            event_source = await BarEventSource.from_market_data_store(symbols, start, end, calendar, bar_type=bar_type)
         except ValueError as e:
             logger.error("BarEventSource load failed: {}", e)
             return BacktestResult(initial_capital=config.initial_capital)

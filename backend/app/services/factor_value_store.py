@@ -155,6 +155,8 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         factor_type="indicator",
         category="technical",
         frequency="daily",
+        # V4GV is a core TSMF technical leg, so it stays in the reusable
+        # factor store rather than living only inside one strategy script.
         description="V4GV technical indicator calculated from daily OHLC windows.",
         dependencies=["klines_daily"],
         lookback_days=140,
@@ -187,6 +189,7 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         category="technical",
         frequency="daily",
         unit="bool",
+        # This is the positive-regime gate used by TSMF-style entries.
         description="1 when V4GV > signal, V4GV > 0, and MACD is positive.",
         dependencies=["v4gv", "v4gv_signal", "macd_positive"],
         lookback_days=140,
@@ -198,6 +201,8 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         category="technical_risk",
         frequency="daily",
         unit="score",
+        # The penalty is intentionally separate from the buy signal so TSMF
+        # can relax entry while still tightening risk management.
         description=(
             "Crowding/overheat penalty used by the TSMF-OP research branch. "
             "Higher values mean V4GV and the technical buy signal are stretched; "
@@ -214,6 +219,8 @@ FACTOR_DEFINITIONS: dict[str, FactorDefinition] = {
         category="technical",
         frequency="daily",
         unit="bool",
+        # Keep the inverse regime flag explicit so research code can filter or
+        # stress-test it without recomputing the whole indicator stack.
         description="1 when V4GV < signal and MACD is not positive.",
         dependencies=["v4gv", "v4gv_signal", "macd_positive"],
         lookback_days=140,

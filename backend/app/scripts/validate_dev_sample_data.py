@@ -177,9 +177,9 @@ INTERFACE_STORAGE_REQUIREMENTS = {
     "legacy_strategy_signals": {
         "routes": ["/api/strategy/signals/*", "/api/strategy/backtest"],
         "sqlite": ["watchlist_groups", "watchlist_stocks"],
-        "parquet": [],
-        "external": ["ClickHouse klines_minute/klines_daily via TrendCapitalStrategy"],
-        "notes": "这组旧接口仍直接依赖 ClickHouse，不会因为 dev_sample Parquet 存在而完全隔离。",
+        "parquet": ["klines_minute", "klines_daily"],
+        "external": [],
+        "notes": "这组接口通过 TrendCapitalStrategy 读取本地 Parquet 行情。",
     },
     "grid_trading": {
         "routes": ["/api/grid-trading/*"],
@@ -503,7 +503,6 @@ def validate_sample(db_path: Path, parquet_dir: Path, *, strict: bool = False) -
             "database_url": settings.database_url,
             "parquet_data_dir": settings.parquet_data_dir,
             "market_data_backend": settings.market_data_backend,
-            "clickhouse_enabled": settings.clickhouse_enabled,
             "enable_sync_scheduler": settings.enable_sync_scheduler,
         },
         "sqlite": {

@@ -53,7 +53,7 @@ cd E:\Projects\GaoshouPlatform\backend
 
 ## 策略数据契约
 
-策略脚本应把 `factor_values` 视为因子层的稳定契约。策略可以通过 `FactorPipeline` 或 `FactorValueStore` 读取 `high_volume_ratio`、`high_volume_signal`、`is_limit_up` 等最终因子，但不应直接读取底层 Parquet、DuckDB、ClickHouse 或内部派生行情缓存。
+策略脚本应把 `factor_values` 视为因子层的稳定契约。策略可以通过 `FactorPipeline` 或 `FactorValueStore` 读取 `high_volume_ratio`、`high_volume_signal`、`is_limit_up` 等最终因子，但不应直接读取底层 Parquet、DuckDB 或内部派生行情缓存。
 
 财务类因子在进入 `factor_values` 前，优先通过 `FinancialPITStore` 读取 point-in-time 财务快照。该服务会把 SQLite `financial_data` 的季度摘要和 Relay 三表 `financial_income`、`financial_balancesheet`、`financial_cashflow` 按 `f_ann_date <= as_of_date` 对齐，避免因子计算直接按报告期 `end_date` 使用未来数据。
 

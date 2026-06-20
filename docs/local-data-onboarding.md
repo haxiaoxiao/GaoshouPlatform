@@ -1,8 +1,8 @@
 # 本地数据接入配置指南
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-20.
 
-本文说明如何在不启动 ClickHouse 的情况下，让平台读取本地 SQLite + Parquet 数据目录，并跑通数据管理、数据浏览器、因子研究和回测页面。
+本文说明如何让平台读取本地 SQLite + Parquet 数据目录，并跑通数据管理、数据浏览器、因子研究和回测页面。
 
 ## 目标
 
@@ -10,7 +10,6 @@ Last updated: 2026-05-25.
 
 ```text
 MARKET_DATA_BACKEND=parquet
-CLICKHOUSE_ENABLED=false
 ```
 
 接入后应满足：
@@ -26,13 +25,13 @@ CLICKHOUSE_ENABLED=false
 当前项目默认数据目录：
 
 ```text
-E:\Projects\Data
+E:\Projects\data\BaiduSyncdisk
 ```
 
 Parquet 数据集默认位于：
 
 ```text
-E:\Projects\Data\parquet\
+E:\Projects\data\BaiduSyncdisk\parquet\
   klines_daily/
   klines_minute/
   klines_minute_timer/
@@ -41,12 +40,19 @@ E:\Projects\Data\parquet\
   factor_cache/
   stock_indicators/
   indicator_timeseries/
+  jq_money_flow_daily/
+  jq_financial_income/
+  jq_financial_balance/
+  jq_financial_cash_flow/
+  jq_index_daily_bars/
+  jq_etf_daily_bars/
+  jq_index_minute_bars/
 ```
 
 SQLite 元数据库默认位于：
 
 ```text
-E:\Projects\Data\gaoshou.db
+E:\Projects\data\BaiduSyncdisk\gaoshou.db
 ```
 
 说明：
@@ -54,6 +60,8 @@ E:\Projects\Data\gaoshou.db
 - `factor_values` 是当前因子值缓存主目录。
 - 旧 `feature_values` 只作为历史迁移来源，不再作为新 API 的目标目录。
 - `klines_minute` 是完整分钟线源数据；`klines_minute_timer` 是固定时点分钟 K 线；`klines_minute_cum_timer` 是累计成交量派生缓存，三者不能互相直接替代。
+- `jq_money_flow_daily` 的日期字段必须使用 `trade_date_1`；原始 `trade_date` 为空，不能作为过滤、覆盖统计或因子日期。
+- JQ 财报三表使用 `available_date` 作为可用日期，前端数据浏览器和系统数据摘要由 `backend/app/services/parquet_dataset_catalog.py` 统一提供日期字段。
 
 ## 环境配置
 
@@ -67,11 +75,10 @@ Windows 示例：
 
 ```text
 MARKET_DATA_BACKEND=parquet
-GAOSHOU_DATA_DIR=E:/Projects/Data
-PARQUET_DATA_DIR=E:/Projects/Data/parquet
-DATABASE_URL=sqlite+aiosqlite:///E:/Projects/Data/gaoshou.db
+GAOSHOU_DATA_DIR=E:/Projects/data/BaiduSyncdisk
+PARQUET_DATA_DIR=E:/Projects/data/BaiduSyncdisk/parquet
+DATABASE_URL=sqlite+aiosqlite:///E:/Projects/data/BaiduSyncdisk/gaoshou.db
 DUCKDB_PATH=:memory:
-CLICKHOUSE_ENABLED=false
 DEBUG=false
 ```
 
@@ -83,7 +90,6 @@ GAOSHOU_DATA_DIR=/Users/albert/MyProjects/Data
 PARQUET_DATA_DIR=/Users/albert/MyProjects/Data/parquet
 DATABASE_URL=sqlite+aiosqlite:////Users/albert/MyProjects/Data/gaoshou.db
 DUCKDB_PATH=:memory:
-CLICKHOUSE_ENABLED=false
 DEBUG=false
 ```
 
@@ -96,42 +102,42 @@ DEBUG=false
 ```powershell
 cd E:\Projects\GaoshouPlatform\backend
 .\.venv\Scripts\activate
-uvicorn app.main:app --host 127.0.0.1 --port 8000
+uvicorn app.main:app --host 127.0.0.1 --port 18800
 ```
 
 前端：
 
 ```powershell
 cd E:\Projects\GaoshouPlatform\frontend
-npm run dev
+npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
-常见开发会话可能使用 `3500`/`8800` 端口，以启动脚本输出为准。
+dev 使用 `13500`/`18800`/`18810`，prod 使用 `3500`/`8800`/`8810`；以启动脚本输出为准。
 
 ## 验证
 
 系统状态：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/system/status
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/system/status
 ```
 
 健康检查：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/system/health
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/system/health
 ```
 
 数据浏览器表：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/explorer/tables
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/explorer/tables
 ```
 
 因子定义：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8000/api/factor-values/definitions
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/factor-values/definitions
 ```
 
 Factor Value Store 覆盖率：
@@ -152,9 +158,9 @@ GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&en
 
 检查：
 
-1. `PARQUET_DATA_DIR` 是否指向公共数据目录下的 `parquet`，如 `E:\Projects\Data\parquet`。
+1. `PARQUET_DATA_DIR` 是否指向公共数据目录下的 `parquet`，如 `E:\Projects\data\BaiduSyncdisk\parquet`。
 2. 目录下是否有 `klines_daily/year=YYYY/month=MM/part-*.parquet`。
-3. 后端启动日志是否显示 `ClickHouse disabled, using Parquet/DuckDB backend`。
+3. 后端启动日志和 `/api/system/status` 是否显示 `market_data_backend=parquet`。
 
 ### 因子看板有因子但没有结果
 

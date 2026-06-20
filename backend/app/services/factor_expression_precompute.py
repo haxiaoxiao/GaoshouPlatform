@@ -101,8 +101,6 @@ def _persist_api_result(cache, expression: str, engine: str, out: dict[str, list
     for trade_date, values in by_date.items():
         series = pd.Series(values, dtype=float)
         cache.save_to_parquet(expr_hash, trade_date, series, expression=expression, engine=engine)
-        if cache.ch_client is not None:
-            cache.save_to_ch(expr_hash, trade_date, series)
         written += int(series.notna().sum())
     return written
 
@@ -144,7 +142,5 @@ def _persist_expression_result(
     for trade_date, row in by_date.items():
         series = pd.Series(row, dtype=float)
         cache.save_to_parquet(expr_hash, trade_date, series, expression=expression, engine=engine)
-        if cache.ch_client is not None:
-            cache.save_to_ch(expr_hash, trade_date, series)
         written += int(series.notna().sum())
     return written

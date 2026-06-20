@@ -1,33 +1,49 @@
 """主题类指标 - 从SQLite theme_annotations表读取人工标注"""
+from functools import lru_cache
+
+from sqlalchemy import create_engine, inspect, text
+
 from app.indicators.base import IndicatorBase, IndicatorContext, IndicatorRegistry
 
 
-def _get_theme_annotation(symbol: str) -> dict | None:
-    """从SQLite读取主题标注"""
+@lru_cache(maxsize=1)
+def _load_theme_annotations() -> dict[str, dict[str, object | None]]:
+    """批量读取主题标注，避免同步时每只股票都单独开库。"""
     try:
-        from sqlalchemy import create_engine, select
-
         from app.core.config import settings
-        from app.db.models.stock import ThemeAnnotation
 
         sync_url = settings.database_url.replace("+aiosqlite", "")
         engine = create_engine(sync_url)
         try:
             with engine.connect() as conn:
-                query = select(ThemeAnnotation).where(ThemeAnnotation.symbol == symbol)
-                result = conn.execute(query)
-                row = result.first()
-                if row:
-                    return {
-                        "business_purity": row.business_purity,
-                        "chain_position": row.chain_position,
-                        "revenue_ratio": row.revenue_ratio,
+                if not inspect(conn).has_table("theme_annotations"):
+                    return {}
+                result = conn.execute(
+                    text(
+                        "SELECT symbol, business_purity, chain_position, revenue_ratio "
+                        "FROM theme_annotations"
+                    )
+                )
+                annotations: dict[str, dict[str, object | None]] = {}
+                for row in result.mappings().all():
+                    symbol = str(row.get("symbol") or "").strip()
+                    if not symbol:
+                        continue
+                    annotations[symbol] = {
+                        "business_purity": row.get("business_purity"),
+                        "chain_position": row.get("chain_position"),
+                        "revenue_ratio": row.get("revenue_ratio"),
                     }
+                return annotations
         finally:
             engine.dispose()
-    except (ImportError, Exception):
-        pass
-    return None
+    except Exception:
+        return {}
+
+
+def _get_theme_annotation(symbol: str) -> dict | None:
+    """从SQLite读取主题标注。"""
+    return _load_theme_annotations().get(symbol)
 
 
 @IndicatorRegistry.register

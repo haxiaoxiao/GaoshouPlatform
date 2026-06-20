@@ -8,7 +8,7 @@ from datetime import date, datetime
 import pandas as pd
 import pytest
 
-from app.backtest.engine.akquant.adapter import ClickHouseFeedAdapter
+from app.backtest.engine.akquant.adapter import MarketDataStoreFeedAdapter
 from app.backtest.engine.data_provider import StoreDataProvider
 from app.data_stores.parquet_store import ParquetMarketDataStore
 
@@ -110,12 +110,8 @@ class TestStoreDataProviderSmoke:
         assert not s.empty
         assert s.name == "000001.SZ"
 
-    async def test_akquant_adapter_bulk_uses_provider_not_clickhouse(self, provider, monkeypatch):
-        def fail_get_ch_client():
-            raise AssertionError("AKQuant adapter should not query ClickHouse in parquet mode")
-
-        monkeypatch.setattr("app.db.clickhouse.get_ch_client", fail_get_ch_client)
-        adapter = ClickHouseFeedAdapter(
+    async def test_akquant_adapter_bulk_uses_provider(self, provider):
+        adapter = MarketDataStoreFeedAdapter(
             provider,
             ["000001.SZ", "600000.SH"],
             date(2025, 6, 2),

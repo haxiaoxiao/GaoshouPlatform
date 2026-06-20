@@ -16,6 +16,13 @@ from app.services.factor_value_store import get_factor_value_store
 RELAY_FACTOR_COLUMNS = {
     "moneyflow_net_mf_amount": ("moneyflow", "trade_date", "net_mf_amount"),
     "moneyflow_net_mf_vol": ("moneyflow", "trade_date", "net_mf_vol"),
+    "jq_moneyflow_net_amount_main": ("jq_money_flow_daily", "trade_date_1", "net_amount_main"),
+    "jq_moneyflow_net_pct_main": ("jq_money_flow_daily", "trade_date_1", "net_pct_main"),
+    "jq_moneyflow_net_amount_xl": ("jq_money_flow_daily", "trade_date_1", "net_amount_xl"),
+    "jq_moneyflow_net_pct_xl": ("jq_money_flow_daily", "trade_date_1", "net_pct_xl"),
+    "jq_moneyflow_net_amount_l": ("jq_money_flow_daily", "trade_date_1", "net_amount_l"),
+    "jq_moneyflow_net_pct_l": ("jq_money_flow_daily", "trade_date_1", "net_pct_l"),
+    "jq_moneyflow_net_mf_amount": ("jq_money_flow_daily", "trade_date_1", "net_mf_amount"),
     "auction_amount": ("auction_replay", "datetime", "amount"),
     "auction_vwap": ("auction_replay", "datetime", "vwap"),
 }
@@ -86,18 +93,29 @@ def _load_direct_factor(factor_name: str, start_date: date, end_date: date, symb
     columns = _dataset_columns(pattern)
     if value_col not in columns:
         raise ValueError(f"Relay dataset {dataset} missing {value_col}; rerun tushare_relay sync")
+    if date_col not in columns:
+        raise ValueError(f"Relay dataset {dataset} missing {date_col}; rerun tushare_relay sync")
+    if "symbol" not in columns:
+        raise ValueError(f"Relay dataset {dataset} missing symbol; rerun tushare_relay sync")
     symbol_filter = f"symbol IN {_list_param(symbols)}"
-    if date_col == "datetime":
-        date_expr = "CAST(datetime AS DATE)"
-    else:
-        date_expr = date_col
+    date_expr = f'CAST("{date_col}" AS DATE)'
+    value_expr = f'"{value_col}"'
     sql = f"""
-        SELECT symbol, {date_expr} AS trade_date, {value_col} AS value
-        FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true)
-        WHERE {symbol_filter}
-          AND {date_expr} >= {_sql_literal(start_date)}
-          AND {date_expr} <= {_sql_literal(end_date)}
-          AND {value_col} IS NOT NULL
+        SELECT symbol, trade_date, value
+        FROM (
+            SELECT
+                symbol,
+                {date_expr} AS trade_date,
+                {value_expr} AS value,
+                row_number() OVER (PARTITION BY symbol, {date_expr} ORDER BY {date_expr} DESC) AS row_rank
+            FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true)
+            WHERE {symbol_filter}
+              AND {date_expr} >= {_sql_literal(start_date)}
+              AND {date_expr} <= {_sql_literal(end_date)}
+              AND {date_expr} IS NOT NULL
+              AND {value_expr} IS NOT NULL
+        )
+        WHERE row_rank = 1
     """
     df = get_duckdb().execute(sql).df()
     return _factor_rows(df, factor_name)

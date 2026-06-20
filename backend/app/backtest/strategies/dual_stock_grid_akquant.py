@@ -1,12 +1,19 @@
-"""Dual-stock bottom-position grid strategy for AKQuant minute backtests."""
+"""双标的底仓网格 AKQuant 分钟回测预设。
+
+这是一类执行型策略，不是横截面选股策略。它只盯住两个固定标的，
+先建立底仓，再围绕锚价用网格方式做加减仓，适合观察执行节奏、仓位
+分层和区间震荡中的盈亏结构。
+"""
 
 DUAL_STOCK_GRID_STRATEGY_CODE = r'''
+# 这份模板刻意做得很窄：它是两只固定标的的执行模式策略，不是横截面
+# 选股器。这样更容易分析网格执行本身的效果。
 from collections import deque
 import akquant as aq
 
 
 class DualStockGridStrategy(aq.Strategy):
-    """Bottom-position grid strategy for 002624.SZ and 300418.SZ."""
+    """面向 002624.SZ 和 300418.SZ 的底仓网格策略。"""
 
     symbols = ["002624.SZ", "300418.SZ"]
 
@@ -47,6 +54,7 @@ class DualStockGridStrategy(aq.Strategy):
             self.initial_cash = float(self.get_cash())
         except Exception:
             pass
+        # 这里不需要预加载历史深度，因为锚价窗口由实时 bar 自己滚动构建。
         self.set_history_depth(0)
         self._windows = {symbol: deque(maxlen=int(self.anchor_window_minutes)) for symbol in self.symbols}
 
@@ -70,6 +78,8 @@ class DualStockGridStrategy(aq.Strategy):
             self._last_grid_price[symbol] = anchor
             self._initialized.add(symbol)
 
+        # 先建立底仓，再允许网格仓位围绕锚价上下波动；只有底仓建立后，
+        # 网格逻辑才会真正接管加减仓。
         current_pos = float(self.get_position(symbol) or 0.0)
         base_qty = float(self._base_position_qty.get(symbol, 0.0) or 0.0)
         if current_pos < base_qty:

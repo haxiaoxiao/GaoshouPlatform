@@ -1,6 +1,19 @@
-"""Generic multi-factor AKQuant strategy template."""
+"""AKQuant 通用多因子策略模板。
+
+这份模板负责“选股 + 调仓 + 风控”的执行骨架，不把具体研究结论写死在
+流程里。因子列表、权重、过滤条件、主题约束、持仓上限、止损止盈和隔夜
+风险都通过顶部常量或前端预设传入，方便同一套执行引擎承载不同策略版本。
+"""
 
 MULTI_FACTOR_STRATEGY_CODE = r'''
+"""AKQuant 通用多因子执行模板。
+
+这是一份偏执行层的模板代码：它负责读取平台传入的因子配置、过滤条件、
+主题约束和风控参数，然后把这些研究配置落成可回测、可实盘对齐的调仓动作。
+默认保留单边多因子、长仓、目标权重调仓和分层风控，方便不同研究版本在
+同一套骨架上替换因子而不改交易流程。
+"""
+
 from datetime import date, datetime
 from typing import Any
 
@@ -14,6 +27,8 @@ from app.services.us_market import (
 
 
 FACTOR_CONFIGS = [
+    # 核心市值因子：默认模板先用市值暴露把风格骨架立住，再由前端预设或
+    # 研究版本去调整其它因子的权重组合。
     {
         "name": "market_cap",
         "weight": 0.45,
@@ -37,16 +52,20 @@ FACTOR_CONFIGS = [
 ]
 
 FILTER_FACTORS = [
+    # 交易性硬过滤：先把 ST、停牌、涨跌停等明显无法有效成交的标的排除，
+    # 再进入因子打分，避免把评分预算浪费在不可交易样本上。
     {"name": "is_st", "operator": ">=", "value": 0.5},
     {"name": "is_paused", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
     {"name": "is_limit_up", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
     {"name": "is_limit_down", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
 ]
 
-# Optional static universe. Leave empty to use the symbols passed by the
-# platform/AKQuant, or the symbols discovered from bars.
+# 可选静态股票池：留空时使用平台传入的标的，或者从行情事件中自动发现
+# 的标的集合。只有在研究或回放需要固定池子时才显式填写。
 DEFAULT_UNIVERSE_SYMBOLS = []
 
+# 调仓和仓位默认值刻意设得保守，目的是让新预设即使漏填某个字段，也能以
+# 相对安全的方式运行，而不是因为默认值过激导致大幅偏离预期。
 TOP_N = 10
 MIN_CANDIDATES = 5
 MIN_FACTOR_COVERAGE = 0.60
@@ -88,27 +107,58 @@ US_OVERNIGHT_SEMI_DEFENSIVE_RET = -0.03
 US_OVERNIGHT_NVDA_CAUTION_RET = -0.03
 US_OVERNIGHT_NVDA_DEFENSIVE_RET = -0.04
 
-# Risk and fees are intentionally controlled by the platform backtest config:
-# risk_config / max_positions / volume_limit_pct, commission_rate,
-# stamp_tax_rate, transfer_fee_rate, min_commission, slippage.
+# 风控和费用统一交给平台回测配置控制：risk_config、max_positions、
+# volume_limit_pct、commission_rate、stamp_tax_rate、transfer_fee_rate、
+# min_commission 和 slippage 都应由外层面板决定，而不是在策略里硬编码。
 
 
 class ModelScorer:
-    """Protocol-like placeholder for future ML scorers."""
+    """模型打分器协议占位符。
+
+    参数:
+        frame: 已完成预处理的因子截面，每一行对应一个股票样本。
+        factor_specs: 因子定义列表，包含名字、方向、变换、权重和行业中性设置。
+
+    作用:
+        预留给未来的机器学习排序器。当前模板默认使用线性因子打分，但如果
+        后续接入 sklearn、PyTorch 或 LightGBM，只要实现这个接口即可复用整
+        套调仓控制流，而不必重写选股和调仓骨架。
+    """
 
     def score(self, frame, factor_specs):
         raise NotImplementedError
 
 
 class CustomModelScorer(ModelScorer):
-    """Reserved extension point for sklearn/PyTorch/LightGBM inference."""
+    """为 sklearn / PyTorch / LightGBM 预留的模型推理扩展点。
+
+    当前实现故意抛出异常，避免策略在没有真正接入模型时悄悄退化成“看起来
+    能跑、其实没按预期打分”的状态。
+
+    一旦后续接入真实模型，这里就应返回与线性打分器同样形状的分数序列。
+    """
 
     def score(self, frame, factor_specs):
         raise NotImplementedError("Set SCORER_TYPE='linear' or implement model inference here.")
 
 
 class MultiFactorStrategy(aq.Strategy):
-    """Generic long-only multi-factor stock selection strategy."""
+    """通用的单边多因子选股策略执行器。
+
+    这个类只负责执行层面的事情：何时调仓、如何筛选候选、如何按权重下单、
+    如何做止损止盈和组合回撤控制。因子读取、预处理和最终排序交给
+    FactorPipeline，因此预设只需要声明“用哪些因子、怎么配权重、要不要做
+    主题约束”即可。
+
+    常用参数含义:
+        TOP_N: 最终持仓数量上限，决定组合有多集中。
+        MIN_CANDIDATES: 候选池最低样本数，样本太少时直接跳过。
+        MIN_FACTOR_COVERAGE: 因子覆盖率下限，越高越强调数据完整性。
+        REBALANCE_EVERY_N_DAYS: 调仓频率，越大越慢、越小越灵敏。
+        CASH_BUFFER_PCT: 预留现金比例，防止调仓后现金过紧。
+        MAX_POSITION_PCT: 单票最大仓位上限。
+        SCORER_TYPE: 打分器类型，当前默认 linear。
+    """
 
     symbols = DEFAULT_UNIVERSE_SYMBOLS
 
@@ -174,6 +224,8 @@ class MultiFactorStrategy(aq.Strategy):
     def on_start(self):
         self.set_history_depth(0)
         self._pipeline = FactorPipeline()
+        # Timer 是可选能力：有些 AKQuant 数据源只提供 bar，不提供定时事件；
+        # 当 timer 可用时，调仓和风控就能在指定时点精确触发一次。
         try:
             self.add_daily_timer(self.rebalance_time, "multi_factor_rebalance")
         except Exception:
@@ -203,8 +255,8 @@ class MultiFactorStrategy(aq.Strategy):
         day_prices[symbol] = price
         self._risk_check_symbol(symbol, price, trade_date, bar_time=self._bar_time(bar))
 
-        # Daily bars do not have intraday timers in some feeds. Once we have a
-        # usable cross-section for the date, run one rebalance for that date.
+        # 有些日线数据源不会显式发出盘中 timer，因此这里做一次日内兜底：
+        # 当当天的截面已经足够完整时，就允许策略在 bar 驱动下完成一次调仓。
         universe = self._universe()
         if trade_date not in self._daily_rebalanced and len(day_prices) >= max(1, int(len(universe) * 0.8)):
             self._rebalance(trade_date, price_map=day_prices)
@@ -226,6 +278,8 @@ class MultiFactorStrategy(aq.Strategy):
     def _rebalance(self, trade_date, price_map):
         if not self._should_rebalance(trade_date):
             return
+        # 只取“当前股票池 ∩ 已有价格”的交集，避免个别标的缺少盘中 bar 时
+        # 把整个调仓流程卡住。
         universe = [symbol for symbol in self._universe() if symbol in price_map and price_map[symbol] > 0]
         if len(universe) < max(1, self.min_candidates):
             self.log(f"MF skip {trade_date}: candidate universe too small ({len(universe)})")
@@ -244,6 +298,8 @@ class MultiFactorStrategy(aq.Strategy):
         if frame.empty or len(frame) < max(1, self.min_candidates):
             self.log(f"MF skip {trade_date}: no usable factor scores")
             return
+        # 主题过滤在行业型预设里可以非常严格，但模板仍然保留显式兜底路径，
+        # 这样候选过少时的行为是可见、可解释的。
         frame = self._apply_theme_filter(frame)
         if frame.empty or len(frame) < max(1, self.min_candidates):
             self.log(f"MF skip {trade_date}: theme-filtered candidates too small ({len(frame)})")
@@ -311,6 +367,8 @@ class MultiFactorStrategy(aq.Strategy):
         )
         self._last_entry_filter_state = dict(entry_filter_state or {})
 
+        # 优先使用引擎原生的目标权重调仓接口；只有适配器不提供高阶下单助手
+        # 时，才退回到手工按手数计算的兼容路径。
         if bool(getattr(self, "use_target_weight_rebalance", False)) and hasattr(self, "order_target_weights"):
             if bool(getattr(self, "cancel_open_orders_on_rebalance", True)):
                 try:
@@ -366,6 +424,8 @@ class MultiFactorStrategy(aq.Strategy):
                     self.sell(symbol=symbol, quantity=sell_qty, price=None)
 
     def _should_rebalance(self, trade_date):
+        # 同一调仓周期内只做一次调仓；如果当天已经触发过风控退出，就不再
+        # 继续补仓，避免“刚风控、又立刻回补”的抖动。
         if trade_date in self._risk_exit_dates:
             return False
         if self._last_rebalance_date == trade_date:
@@ -378,6 +438,7 @@ class MultiFactorStrategy(aq.Strategy):
             return True
 
     def _scorer(self):
+        # 默认保持确定性排序；模型打分是可选扩展，不影响标准模板的复现性。
         if self.scorer_type.lower() == "linear":
             return LinearFactorScorer()
         return CustomModelScorer()
@@ -415,12 +476,16 @@ class MultiFactorStrategy(aq.Strategy):
 
         filtered = frame
         if exclude_terms:
+            # 先执行排除项，这样即便包含列表很宽，也能先把不想要的行业或
+            # 主题剔除掉。
             keep_mask = [
                 not self._row_matches_terms(row, exclude_terms)
                 for _, row in filtered.iterrows()
             ]
             filtered = filtered.loc[keep_mask]
         if include_terms:
+            # 严格主题路径是故意做成“硬约束”的：要么主题候选足够多，要么
+            # 就明确回落到仅排除项后的更宽股票池，避免悄悄混入无关标的。
             themed_mask = [
                 self._row_matches_terms(row, include_terms)
                 for _, row in filtered.iterrows()
@@ -448,6 +513,8 @@ class MultiFactorStrategy(aq.Strategy):
     def _risk_check_all(self, trade_date, price_map):
         if not price_map:
             return
+        # 组合回撤优先于单票检查：一旦触发整体降风险事件，就先整体清仓，
+        # 再去处理单票级风控。
         if self._portfolio_drawdown_hit(trade_date, price_map):
             return
         for symbol, qty in self._positions().items():
@@ -464,6 +531,8 @@ class MultiFactorStrategy(aq.Strategy):
         if self._portfolio_drawdown_hit(trade_date, dict(self._latest_price)):
             return True
 
+        # 把开仓价和峰值价保存在本地状态里，止损/移动止盈就不需要额外的
+        # 状态对象，逻辑更直接也更容易排查。
         cost = float(self._cost_basis.get(symbol, 0.0) or 0.0)
         if cost <= 0:
             cost = price
@@ -494,6 +563,8 @@ class MultiFactorStrategy(aq.Strategy):
         value = self._portfolio_value(price_map)
         if value <= 0:
             return False
+        # 峰值只会单向上移，不会被盘中噪声拉低，因此回撤计算在多次 timer
+        # 触发时仍然稳定。
         self._portfolio_peak_value = max(float(self._portfolio_peak_value or 0.0), value)
         if self._portfolio_peak_value <= 0 or value > self._portfolio_peak_value * (1.0 - stop):
             return False

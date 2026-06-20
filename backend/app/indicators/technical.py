@@ -111,20 +111,11 @@ class MA250Weekly(IndicatorBase):
     unit = "CNY"
 
     def compute(self, context: IndicatorContext) -> float | None:
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
         try:
-            result = ch.execute(
-                """SELECT avg(close) FROM (
-                    SELECT close FROM klines_weekly
-                    WHERE symbol = %(symbol)s
-                    ORDER BY trade_date DESC
-                    LIMIT 250
-                )""",
-                {"symbol": context.symbol}
-            )
-            if result and result[0] and result[0][0]:
-                return round(float(result[0][0]), 4)
+            closes = [float(item.get("close") or 0) for item in context.kline_data[:250]]
+            closes = [value for value in closes if value > 0]
+            if len(closes) >= 20:
+                return round(sum(closes) / len(closes), 4)
         except Exception:
             pass
         return None

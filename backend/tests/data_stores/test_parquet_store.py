@@ -1,4 +1,4 @@
-"""ParquetMarketDataStore 单元测试 — 无需 ClickHouse"""
+"""ParquetMarketDataStore 单元测试"""
 from __future__ import annotations
 
 import shutil
@@ -283,10 +283,10 @@ class TestFactory:
         s = get_market_data_store()
         assert isinstance(s, ParquetMarketDataStore)
 
-    def test_clickhouse_backend(self, monkeypatch):
-        monkeypatch.setattr("app.core.config.settings.market_data_backend", "clickhouse")
-        from app.data_stores.clickhouse_store import ClickHouseMarketDataStore
+    def test_legacy_backend_value_uses_parquet(self, monkeypatch):
+        monkeypatch.setattr("app.core.config.settings.market_data_backend", "legacy")
         from app.data_stores.factory import get_market_data_store
+        from app.data_stores.parquet_store import ParquetMarketDataStore
 
         s = get_market_data_store()
-        assert isinstance(s, ClickHouseMarketDataStore)
+        assert isinstance(s, ParquetMarketDataStore)

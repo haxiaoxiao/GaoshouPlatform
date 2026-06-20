@@ -6,7 +6,7 @@
 
 - 生产数据只读：脚本用 SQLite `mode=ro` 打开 `gaoshou.db`，Parquet 只由 DuckDB 扫描读取。
 - 开发样本仍独立：默认写入公共数据目录里的 `E:\Projects\Data\dev_sample\gaoshou.db` 与 `E:\Projects\Data\dev_sample\parquet\`，不再写入仓库 `data/`。
-- ClickHouse 关闭：开发样本默认 `MARKET_DATA_BACKEND=parquet`、`CLICKHOUSE_ENABLED=false`。
+- 开发样本默认 `MARKET_DATA_BACKEND=parquet`。
 - 同步调度关闭：本地覆盖配置写入 `ENABLE_SYNC_SCHEDULER=false`，避免开发时误触生产同步。
 
 ## 生成样本
@@ -33,7 +33,6 @@ cd E:\Projects\GaoshouPlatform-dev\backend
 DATABASE_URL=sqlite+aiosqlite:///E:/Projects/Data/dev_sample/gaoshou.db
 PARQUET_DATA_DIR=E:/Projects/Data/dev_sample/parquet
 MARKET_DATA_BACKEND=parquet
-CLICKHOUSE_ENABLED=false
 ```
 
 如需回到完整公共数据，将 `.env.<hostname>.local` 改回 `E:/Projects/Data/gaoshou.db` 与 `E:/Projects/Data/parquet` 后重启后端即可。

@@ -8,7 +8,7 @@ import pandas as pd
 
 
 class IndicatorStore(ABC):
-    """指标存储抽象 — 屏蔽底层 Parquet/ClickHouse 细节"""
+    """指标存储抽象 — 当前使用 Parquet/DuckDB"""
 
     @abstractmethod
     def load_cross_section(

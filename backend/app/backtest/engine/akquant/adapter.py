@@ -22,7 +22,7 @@ else:
     FeedSlice = object
 
 
-class ClickHouseFeedAdapter(BasePandasFeedAdapter):
+class MarketDataStoreFeedAdapter(BasePandasFeedAdapter):
     """IDataProvider-backed feed adapter.
 
     Daily data is small enough to preload. Minute data for a broad universe is

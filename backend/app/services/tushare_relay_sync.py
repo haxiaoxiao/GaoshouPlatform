@@ -327,9 +327,10 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
         return copy.deepcopy(fast)
     try:
         pattern = store._glob_pattern(dataset)
+        date_expr = _quote_identifier(date_col)
         row = get_duckdb().execute(
             f"""
-            SELECT count(*) AS row_count, min({date_col}) AS min_date, max({date_col}) AS max_date
+            SELECT count(*) AS row_count, min({date_expr}) AS min_date, max({date_expr}) AS max_date
             FROM read_parquet(?, hive_partitioning=true)
             """,
             [pattern],
@@ -347,6 +348,10 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
         result = {**fast, "error": str(exc)}
         _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
         return copy.deepcopy(result)
+
+
+def _quote_identifier(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
 
 
 def _fast_dataset_coverage(dataset: str, date_col: str) -> dict[str, Any]:

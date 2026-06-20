@@ -1357,7 +1357,7 @@ class QMTGateway:
         data_type: str = "kline",
     ) -> dict[str, int]:
         """
-        清理QMT本地缓存文件，数据已写入ClickHouse后调用。
+        清理QMT本地缓存文件，数据已写入本地存储后调用。
 
         Args:
             symbols: 要清理的股票列表，None则清理全部

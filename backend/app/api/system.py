@@ -3,7 +3,8 @@ import asyncio
 from datetime import date, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,12 +14,23 @@ from app.db.models.financial import FinancialData
 from app.db.models.stock import Stock
 from app.db.sqlite import get_async_session
 from app.services.backtest_redis_cache import get_backtest_cache
+from app.core.dev_data_mode import (
+    apply_dev_data_mode_to_settings,
+    dev_data_mode_payload,
+    set_dev_data_mode,
+)
 from app.services.runtime_tasks import get_task, list_tasks
 from app.services.sentiment import SentimentService
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
+from app.services.parquet_dataset_catalog import get_parquet_date_column
 from app.services.tushare_relay_sync import dataset_coverage
 
 router = APIRouter()
+
+
+class DevDataModeUpdate(BaseModel):
+    use_prod_data: bool
+    acknowledge_warning: bool = False
 
 
 def _iso_or_none(value: Any) -> str | None:
@@ -116,10 +128,10 @@ async def _sqlite_summary(
     return data
 
 
-async def _dataset_coverages(specs: dict[str, tuple[str, str]]) -> dict[str, dict[str, Any]]:
-    async def read_one(dataset: str, date_column: str) -> dict[str, Any]:
+async def _dataset_coverages(specs: dict[str, tuple[str, str] | tuple[str, str, bool]]) -> dict[str, dict[str, Any]]:
+    async def read_one(dataset: str, date_column: str, exact: bool = False) -> dict[str, Any]:
         try:
-            return await asyncio.to_thread(dataset_coverage, dataset, date_column)
+            return await asyncio.to_thread(dataset_coverage, dataset, date_column, exact=exact)
         except Exception as exc:
             return {"row_count": None, "min_date": None, "max_date": None, "error": str(exc)}
 
@@ -131,6 +143,7 @@ async def _dataset_coverages(specs: dict[str, tuple[str, str]]) -> dict[str, dic
 @router.get("/status")
 async def get_system_status():
     """Return system status, backend config, and lightweight data coverage."""
+    apply_dev_data_mode_to_settings()
     parquet_info = {}
 
     if settings.market_data_backend == "parquet":
@@ -169,8 +182,9 @@ async def get_system_status():
         "database": "connected",
         "market_data_backend": settings.market_data_backend,
         "parquet_data_dir": settings.parquet_data_dir,
+        "data_dir": settings.gaoshou_data_dir,
+        "dev_data_mode": dev_data_mode_payload(),
         "duckdb_path": settings.duckdb_path,
-        "clickhouse_enabled": settings.clickhouse_enabled,
         "sync_service": {
             "enabled": True,
             "url": settings.sync_service_url,
@@ -184,6 +198,7 @@ async def get_system_status():
 @router.get("/data-summary")
 async def get_data_summary(session: AsyncSession = Depends(get_async_session)):
     """Return one lightweight freshness contract for frontend cockpit pages."""
+    apply_dev_data_mode_to_settings()
     coverage_specs = {
         "market_daily": ("klines_daily", "trade_date"),
         "market_minute": ("klines_minute", "datetime"),
@@ -192,24 +207,30 @@ async def get_data_summary(session: AsyncSession = Depends(get_async_session)):
         "stock_indicators": ("stock_indicators", "trade_date"),
         "concept_membership": ("ths_member", "snapshot_date"),
         "moneyflow": ("moneyflow", "trade_date"),
+        "jq_money_flow_daily": ("jq_money_flow_daily", get_parquet_date_column("jq_money_flow_daily") or "trade_date_1", True),
+        "jq_financial_income": ("jq_financial_income", get_parquet_date_column("jq_financial_income") or "available_date", True),
+        "jq_financial_balance": ("jq_financial_balance", get_parquet_date_column("jq_financial_balance") or "available_date", True),
+        "jq_financial_cash_flow": ("jq_financial_cash_flow", get_parquet_date_column("jq_financial_cash_flow") or "available_date", True),
+        "jq_index_daily_bars": ("jq_index_daily_bars", get_parquet_date_column("jq_index_daily_bars") or "trade_date"),
+        "jq_etf_daily_bars": ("jq_etf_daily_bars", get_parquet_date_column("jq_etf_daily_bars") or "trade_date"),
+        "tushare_margin_detail": ("tushare_margin_detail", get_parquet_date_column("tushare_margin_detail") or "trade_date"),
+        "tushare_limit_list_d": ("tushare_limit_list_d", get_parquet_date_column("tushare_limit_list_d") or "trade_date"),
     }
     coverage_map = await _dataset_coverages(coverage_specs)
 
-    stocks_summary, financial_summary = await asyncio.gather(
-        _sqlite_summary(
-            session,
-            model=Stock,
-            count_column=Stock.symbol,
-            latest_column=Stock.updated_at,
-            updated_column=Stock.updated_at,
-        ),
-        _sqlite_summary(
-            session,
-            model=FinancialData,
-            count_column=FinancialData.id,
-            latest_column=FinancialData.report_date,
-            updated_column=FinancialData.updated_at,
-        ),
+    stocks_summary = await _sqlite_summary(
+        session,
+        model=Stock,
+        count_column=Stock.symbol,
+        latest_column=Stock.updated_at,
+        updated_column=Stock.updated_at,
+    )
+    financial_summary = await _sqlite_summary(
+        session,
+        model=FinancialData,
+        count_column=FinancialData.id,
+        latest_column=FinancialData.report_date,
+        updated_column=FinancialData.updated_at,
     )
 
     try:
@@ -221,7 +242,7 @@ async def get_data_summary(session: AsyncSession = Depends(get_async_session)):
             "error": str(exc),
         }
 
-    backend_label = "Parquet" if settings.market_data_backend == "parquet" else "ClickHouse"
+    backend_label = "Parquet"
     items = [
         _summary_item(
             key="market_daily",
@@ -314,6 +335,86 @@ async def get_data_summary(session: AsyncSession = Depends(get_async_session)):
             detail="资金流、复权校验和技术/资金类特征依赖。",
         ),
         _summary_item(
+            key="jq_money_flow_daily",
+            label="JQ 个股资金流",
+            source=f"{backend_label} jq_money_flow_daily",
+            storage="jq_money_flow_daily",
+            date_column="trade_date_1",
+            coverage=coverage_map["jq_money_flow_daily"],
+            max_good_days=90,
+            detail="JoinQuant 个股资金流，trade_date 字段为空，统一用 trade_date_1。",
+        ),
+        _summary_item(
+            key="jq_financial_income",
+            label="JQ 利润表",
+            source=f"{backend_label} jq_financial_income",
+            storage="jq_financial_income",
+            date_column="available_date",
+            coverage=coverage_map["jq_financial_income"],
+            max_good_days=140,
+            detail="JoinQuant 利润表，按可用日期做 point-in-time 查询。",
+        ),
+        _summary_item(
+            key="jq_financial_balance",
+            label="JQ 资产负债表",
+            source=f"{backend_label} jq_financial_balance",
+            storage="jq_financial_balance",
+            date_column="available_date",
+            coverage=coverage_map["jq_financial_balance"],
+            max_good_days=140,
+            detail="JoinQuant 资产负债表，按可用日期做 point-in-time 查询。",
+        ),
+        _summary_item(
+            key="jq_financial_cash_flow",
+            label="JQ 现金流量表",
+            source=f"{backend_label} jq_financial_cash_flow",
+            storage="jq_financial_cash_flow",
+            date_column="available_date",
+            coverage=coverage_map["jq_financial_cash_flow"],
+            max_good_days=140,
+            detail="JoinQuant 现金流量表，按可用日期做 point-in-time 查询。",
+        ),
+        _summary_item(
+            key="jq_index_daily_bars",
+            label="JQ 指数日线",
+            source=f"{backend_label} jq_index_daily_bars",
+            storage="jq_index_daily_bars",
+            date_column="trade_date",
+            coverage=coverage_map["jq_index_daily_bars"],
+            max_good_days=90,
+            detail="JoinQuant 指数日线，可用于基准和指数择时特征。",
+        ),
+        _summary_item(
+            key="jq_etf_daily_bars",
+            label="JQ ETF 日线",
+            source=f"{backend_label} jq_etf_daily_bars",
+            storage="jq_etf_daily_bars",
+            date_column="trade_date",
+            coverage=coverage_map["jq_etf_daily_bars"],
+            max_good_days=90,
+            detail="JoinQuant ETF 日线，可用于 ETF 轮动和基准扩展。",
+        ),
+        _summary_item(
+            key="tushare_margin_detail",
+            label="融资融券明细",
+            source=f"{backend_label} tushare_margin_detail",
+            storage="tushare_margin_detail",
+            date_column="trade_date",
+            coverage=coverage_map["tushare_margin_detail"],
+            max_good_days=30,
+            detail="个股融资融券明细，可用于杠杆资金和风险偏好因子。",
+        ),
+        _summary_item(
+            key="tushare_limit_list_d",
+            label="涨跌停明细",
+            source=f"{backend_label} tushare_limit_list_d",
+            storage="tushare_limit_list_d",
+            date_column="trade_date",
+            coverage=coverage_map["tushare_limit_list_d"],
+            max_good_days=30,
+            detail="涨跌停明细，可用于情绪、连板和交易限制特征。",
+        ),
+        _summary_item(
             key="sentiment",
             label="新闻舆情数据",
             source="SQLite sentiment_posts",
@@ -343,9 +444,33 @@ async def get_data_summary(session: AsyncSession = Depends(get_async_session)):
         "overall_status": overall_status,
         "market_data_backend": settings.market_data_backend,
         "parquet_data_dir": settings.parquet_data_dir,
+        "data_dir": settings.gaoshou_data_dir,
+        "dev_data_mode": dev_data_mode_payload(),
         "items": items,
         "by_key": by_key,
     }
+
+
+@router.get("/dev-data-mode")
+async def get_dev_data_mode():
+    """Return the dev-only real-data switch state."""
+    apply_dev_data_mode_to_settings()
+    return dev_data_mode_payload()
+
+
+@router.put("/dev-data-mode")
+async def update_dev_data_mode(payload: DevDataModeUpdate):
+    """Toggle whether dev reads/writes the production real-data directory."""
+    current = dev_data_mode_payload()
+    if not current.get("enabled"):
+        return current
+    if payload.use_prod_data and not payload.acknowledge_warning:
+        raise HTTPException(
+            status_code=400,
+            detail="Enabling production real data in dev requires acknowledge_warning=true",
+        )
+    set_dev_data_mode(payload.use_prod_data)
+    return dev_data_mode_payload()
 
 
 @router.get("/cache")
@@ -374,7 +499,7 @@ async def get_cache_status():
         "compute_cache": {
             "l1": "process_lru",
             "l1_5": "redis",
-            "l2": "factor_cache_parquet_or_clickhouse",
+            "l2": "factor_cache_parquet",
         },
     }
 

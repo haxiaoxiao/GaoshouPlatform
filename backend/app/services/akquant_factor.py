@@ -16,7 +16,7 @@ async def evaluate_akquant_factor(
     start_date: date,
     end_date: date,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Evaluate an AKQuant/Polars factor expression over ClickHouse daily bars."""
+    """Evaluate an AKQuant/Polars factor expression over local daily bars."""
     return await asyncio.to_thread(
         _evaluate_akquant_factor_sync,
         expression,

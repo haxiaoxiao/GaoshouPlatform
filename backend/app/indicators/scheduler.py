@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Any
 
+from loguru import logger
+
 from app.indicators.base import IndicatorContext, IndicatorRegistry
 
 
@@ -20,9 +22,10 @@ class IndicatorScheduler:
                 self._compute_by_data_type("截面", symbols, trade_date)
             elif sync_type in ("kline_daily", "kline_minute"):
                 self._compute_by_data_type("时序", symbols, trade_date)
-        except Exception:
-            # ClickHouse may not be running; indicators are optional post-sync
-            pass
+        except Exception as exc:
+            # Post-sync indicators are best-effort. The sync itself must finish even
+            # when optional stores or slower indicator paths are unavailable.
+            logger.warning("Indicator post-sync compute skipped for {}: {}", sync_type, exc)
 
     def compute_indicators(
         self,
@@ -43,8 +46,14 @@ class IndicatorScheduler:
         target_symbols = symbols or self._get_all_symbols()
         target_date = trade_date or date.today()
 
-        cross_section = [i for i in indicators if i.data_type == "截面"]
-        time_series = [i for i in indicators if i.data_type == "时序"]
+        cross_section = [
+            i for i in indicators
+            if i.data_type == "截面" and (full_compute or i.is_precomputed)
+        ]
+        time_series = [
+            i for i in indicators
+            if i.data_type == "时序" and (full_compute or i.is_precomputed)
+        ]
 
         results: dict[str, int] = {}
 
@@ -88,6 +97,8 @@ class IndicatorScheduler:
         if data_type == "截面":
             stock_info_map = self._load_stock_info_map(target_symbols)
             for indicator_cls in ordered:
+                if not getattr(indicator_cls, "is_precomputed", False):
+                    continue
                 try:
                     indicator = indicator_cls()
                     computed = self._compute_cross_section(
@@ -99,6 +110,8 @@ class IndicatorScheduler:
         else:
             kline_map = self._load_kline_map(target_symbols, limit=120)
             for indicator_cls in ordered:
+                if not getattr(indicator_cls, "is_precomputed", False):
+                    continue
                 try:
                     indicator = indicator_cls()
                     computed = self._compute_time_series(
@@ -169,7 +182,7 @@ class IndicatorScheduler:
         return ordered
 
     def _load_stock_info_map(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
-        from sqlalchemy import create_engine, func, select
+        from sqlalchemy import create_engine, func, inspect, select, text
 
         from app.core.config import settings
         from app.db.models.financial import FinancialData
@@ -209,12 +222,31 @@ class IndicatorScheduler:
                 d = dict(row)
                 fin_map[d["symbol"]] = d
 
+            theme_map: dict[str, dict[str, Any]] = {}
+            if inspect(conn).has_table("theme_annotations"):
+                theme_rows = conn.execute(
+                    text(
+                        "SELECT symbol, business_purity, chain_position, revenue_ratio "
+                        "FROM theme_annotations"
+                    )
+                )
+                for row in theme_rows.mappings().all():
+                    d = dict(row)
+                    symbol = str(d.get("symbol") or "").strip()
+                    if symbol and symbol in symbol_set:
+                        theme_map[symbol] = d
+
         engine.dispose()
 
         for symbol in symbols:
             base = stock_map.get(symbol, {"symbol": symbol})
             fin = fin_map.get(symbol, {})
-            merged: dict[str, Any] = {**base, **{k: v for k, v in fin.items() if v is not None}}
+            theme = theme_map.get(symbol, {})
+            merged: dict[str, Any] = {
+                **base,
+                **{k: v for k, v in fin.items() if v is not None},
+                **{k: v for k, v in theme.items() if v is not None},
+            }
             info_map[symbol] = merged
 
         return info_map

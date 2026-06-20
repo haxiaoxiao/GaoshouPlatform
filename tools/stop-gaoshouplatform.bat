@@ -10,33 +10,26 @@ if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=18810")
 if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=13500")
 set "STOP_REDIS=0"
-set "STOP_CLICKHOUSE=0"
 set "NO_PAUSE=0"
 
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
 if "%GAOSHOU_SKIP_PAUSE%"=="1" set "NO_PAUSE=1"
 if /i "%~1"=="--stop-redis" set "STOP_REDIS=1"
-if /i "%~1"=="--stop-clickhouse" set "STOP_CLICKHOUSE=1"
 if /i "%~2"=="--no-pause" set "NO_PAUSE=1"
 if /i "%~2"=="--stop-redis" set "STOP_REDIS=1"
-if /i "%~2"=="--stop-clickhouse" set "STOP_CLICKHOUSE=1"
 
 set "MARKET_DATA_BACKEND=parquet"
-set "CLICKHOUSE_ENABLED=false"
 if exist "%ENV_FILE%" (
   for /f "usebackq tokens=1,* delims==" %%a in ("%ENV_FILE%") do (
     set "K=%%a"
     set "V=%%b"
     if /i "!K!"=="MARKET_DATA_BACKEND" set "MARKET_DATA_BACKEND=!V!"
-    if /i "!K!"=="CLICKHOUSE_ENABLED" set "CLICKHOUSE_ENABLED=!V!"
     if /i "!K!"=="BACKEND_PORT" if not defined GAOSHOU_BACKEND_PORT set "BACKEND_PORT=!V!"
     if /i "!K!"=="SYNC_SERVICE_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
     if /i "!K!"=="SYNC_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
     if /i "!K!"=="FRONTEND_PORT" if not defined GAOSHOU_FRONTEND_PORT set "FRONTEND_PORT=!V!"
   )
 )
-if /i "%MARKET_DATA_BACKEND%"=="clickhouse" set "STOP_CLICKHOUSE=1"
-if /i "%CLICKHOUSE_ENABLED%"=="true" set "STOP_CLICKHOUSE=1"
 
 echo ========================================
 echo   GaoshouPlatform Shutdown
@@ -62,12 +55,6 @@ if errorlevel 1 (
     if errorlevel 1 (echo       Redis was not running) else (echo       Redis stopped)
   ) else (
     echo       Redis left running. Use --stop-redis to stop it.
-  )
-  if "%STOP_CLICKHOUSE%"=="1" (
-    docker stop clickhouse-server >nul 2>&1
-    if errorlevel 1 (echo       ClickHouse was not running) else (echo       ClickHouse stopped)
-  ) else (
-    echo       ClickHouse left running. Use --stop-clickhouse to stop it.
   )
 )
 

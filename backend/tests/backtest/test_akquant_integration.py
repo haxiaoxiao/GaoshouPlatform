@@ -16,7 +16,7 @@ from app.backtest.api import (
 from app.backtest.config import BacktestConfig
 from app.backtest.engine.akquant.capabilities import get_akquant_capabilities
 from app.backtest.engine.akquant.engine import AkquantEngine
-from app.backtest.engine.data_provider import ClickHouseDataProvider, StoreDataProvider
+from app.backtest.engine.data_provider import StoreDataProvider
 from app.services.akquant_optimize import _load_optimization_data
 from app.services.optimization_result_store import save_optimization_result
 
@@ -137,25 +137,26 @@ async def test_resolve_strategy_code_prefers_inline_code(monkeypatch):
 async def test_load_minute_timer_filters_requested_times(monkeypatch):
     captured: dict = {}
 
-    def fake_execute(self, query, params=None):
-        captured["query"] = query
-        captured["params"] = params
-        return [
-            (
-                "000001.SZ",
-                datetime(2025, 1, 2, 10, 30),
-                10.0,
-                10.2,
-                9.9,
-                10.1,
-                1000,
-                10100.0,
-            )
-        ]
+    class FakeStore:
+        def load_minute(self, symbols, start, end, columns=None, timer_times=None):
+            captured["symbols"] = symbols
+            captured["timer_times"] = timer_times
+            return pd.DataFrame(
+                [
+                    {
+                        "symbol": "000001.SZ",
+                        "datetime": pd.Timestamp("2025-01-02 10:30:00"),
+                        "open": 10.0,
+                        "high": 10.2,
+                        "low": 9.9,
+                        "close": 10.1,
+                        "volume": 1000,
+                        "amount": 10100.0,
+                    }
+                ]
+            ).set_index("datetime")
 
-    monkeypatch.setattr(ClickHouseDataProvider, "_execute", fake_execute)
-
-    provider = ClickHouseDataProvider()
+    provider = StoreDataProvider(FakeStore())
     df = await provider.load_minute(
         ["000001.SZ"],
         date(2025, 1, 1),
@@ -164,8 +165,8 @@ async def test_load_minute_timer_filters_requested_times(monkeypatch):
     )
 
     assert not df.empty
-    assert "toHour(datetime)" in captured["query"]
-    assert captured["params"]["timer_minutes"] == (630, 890)
+    assert captured["symbols"] == ["000001.SZ"]
+    assert captured["timer_times"] == ("10:30:00", "14:50:00")
 
 
 def test_optimization_data_uses_timer_minute_loader(monkeypatch):

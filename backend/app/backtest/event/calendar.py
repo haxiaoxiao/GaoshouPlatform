@@ -19,7 +19,7 @@ class TradingCalendar:
             self._dates_set = set(self._dates)
 
     @classmethod
-    async def from_clickhouse(
+    async def from_market_data_store(
         cls,
         symbols: list[str],
         start_date: date | None = None,
@@ -53,7 +53,7 @@ class TradingCalendar:
 
     def _ensure_loaded(self) -> None:
         if self._dates is None:
-            raise RuntimeError("TradingCalendar not loaded — call from_clickhouse() or from_list() first")
+            raise RuntimeError("TradingCalendar not loaded — call from_market_data_store() or from_list() first")
 
     def is_trading_date(self, d: date) -> bool:
         if self._dates_set is None:

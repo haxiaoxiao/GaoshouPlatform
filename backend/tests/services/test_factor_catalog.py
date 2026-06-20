@@ -65,12 +65,18 @@ def test_catalog_groups_are_exposed() -> None:
     assert "cn_paper_style_rotation" in groups
     assert "tsmf_research_factor_library" in groups
     assert "tsmf_preferred_rotation_pool" in groups
+    assert "independent_ashare_30_20260618" in groups
     assert get_factor_definition("ta_rsi_14")["source"] == "catalog.ta_lib"
     assert get_factor_definition("alpha101_001")["source"] == "catalog.alpha101"
     assert get_factor_definition("research_low_beta")["source"] == "catalog.research"
+    assert get_factor_definition("jq_moneyflow_net_amount_main")["source"] == "catalog.relay"
+    assert "jq_money_flow_daily.trade_date_1" in get_factor_definition("jq_moneyflow_net_amount_main")["dependencies"]
     assert get_factor_definition("paper_pb_roe_residual")["source"] == "catalog.cn_paper"
     assert get_factor_definition("paper_size_rotation_score")["source"] == "catalog.cn_paper"
     assert get_factor_definition("tsmf_recent_effective_score")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("semibeta_downside_avoid_252")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("limit_ecology_quality_combo")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("trend_support")["data_policy"]["alias_of"] == "paper_trend_fund_support"
     assert get_factor_definition("avoid_high_volume_ratio")["source"] == "parquet"
     assert get_factor_definition("tsmf_overheat_penalty")["source"] == "parquet"
 
@@ -86,6 +92,18 @@ def test_tsmf_factor_pools_are_exposed() -> None:
     assert "avoid_high_volume_ratio" in preferred["factor_names"]
     assert "risk_quality" in preferred["selection_buckets"]
     assert any(item["name"] == "us_entry_filter_combined_downside" for item in preferred["strategy_signals"])
+
+
+def test_independent_ashare_30_factor_group_is_exposed() -> None:
+    groups = {item["name"]: item for item in list_factor_groups()}
+    group = groups["independent_ashare_30_20260618"]
+
+    assert len(group["factor_names"]) == 30
+    assert "semibeta_downside_avoid_252" in group["factor_names"]
+    assert "alpha101_001" in group["factor_names"]
+    assert "high_volume_signal" in group["factor_names"]
+    assert group["direction_hints"]["semibeta_upside_capture_252"] == "high"
+    assert group["direction_hints"]["balance_sheet_quality_value_pit"] == "low"
 
 
 def test_cn_paper_manifest_covers_all_report_rows() -> None:

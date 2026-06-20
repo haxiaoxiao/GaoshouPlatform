@@ -13,8 +13,6 @@ async def test_precompute_factor_expressions_builtin(monkeypatch):
     saved: list[tuple[str, date, dict, str]] = []
 
     class FakeCache:
-        ch_client = None
-
         @staticmethod
         def make_key(expression):
             return f"hash-{expression}"

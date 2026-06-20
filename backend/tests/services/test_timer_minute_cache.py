@@ -18,7 +18,6 @@ def test_find_earliest_timer_coverage_uses_redis_cache(monkeypatch):
             raise AssertionError("cache hit should not write")
 
     monkeypatch.setattr(svc, "get_backtest_cache", lambda: FakeCache())
-    monkeypatch.setattr(svc, "_should_use_clickhouse", lambda: False)
 
     result = svc.find_earliest_timer_coverage_date(
         symbols=["000001.SZ"],

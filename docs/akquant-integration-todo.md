@@ -2,7 +2,7 @@
 
 本文只记录当前仍有效的 AKQuant 集成状态和后续事项。历史执行计划已归档到 `docs/archive/`。
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-20.
 
 ## 当前状态
 
@@ -29,7 +29,7 @@ Last updated: 2026-05-25.
 - 回测日期、股票池、资金、费用、滑点、bar type、timer times 必须由前端控制面板或 API payload 传入，策略代码读取 `strategy_params`。
 - 只需要固定盘中时点的策略优先使用 `minute_timer`，避免读取完整分钟线。
 - 指数池通过 `index_symbol` 传递，不能把当前成分静态展开成历史股票池。
-- `MARKET_DATA_BACKEND=parquet` 是默认模式；ClickHouse 保留为可选高性能后端。
+- `MARKET_DATA_BACKEND=parquet` 是当前支持模式；不要再新增外部列式数据库依赖。
 - 因子研究优先使用 Factor Value Store；Alpha101 批量预计算已经走宽表实现，研究结果应在缓存重算后再比较。
 
 ## 仍需跟进

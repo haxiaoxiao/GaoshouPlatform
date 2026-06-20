@@ -39,6 +39,8 @@ class FactorSpec:
     def from_raw(cls, raw: FactorSpec | dict[str, Any]) -> FactorSpec:
         if isinstance(raw, cls):
             return raw
+        # Factor definitions are intentionally data-driven so presets can ship
+        # plain dicts from JSON / YAML without extra adapter code.
         return cls(
             name=str(raw["name"]),
             weight=float(raw.get("weight", 1.0)),
@@ -57,6 +59,7 @@ class FactorSpec:
 
     @property
     def direction_sign(self) -> float:
+        # Normalize direction once here so the preprocessor can stay mechanical.
         text = self.direction.strip().lower()
         if text in {"lower_better", "low", "ascending", "asc", "-1"}:
             return -1.0
@@ -77,6 +80,8 @@ class FilterSpec:
     def from_raw(cls, raw: FilterSpec | dict[str, Any]) -> FilterSpec:
         if isinstance(raw, cls):
             return raw
+        # Filters share the same raw dict shape as factors for simple preset
+        # serialization and API payloads.
         return cls(
             name=str(raw["name"]),
             value=float(raw.get("value", raw.get("threshold", 0.5))),
@@ -146,6 +151,8 @@ class FactorPreprocessor:
         if raw.empty or not specs:
             return pd.DataFrame(index=raw.index)
 
+        # Metadata is aligned once up front so all factor transforms share the
+        # same market-cap / industry view.
         metadata = self._align_metadata(raw.index, metadata)
         output = pd.DataFrame(index=raw.index)
         valid_count = pd.Series(0, index=raw.index, dtype="int64")
@@ -156,8 +163,12 @@ class FactorPreprocessor:
                 continue
             series = pd.to_numeric(raw[spec.name], errors="coerce").astype("float64")
             if spec.neutralize_market_cap:
+                # Neutralization happens before the visible transform so the
+                # downstream rank/z-score is applied to residuals, not raw size.
                 series = self.market_cap_neutralize(series, metadata)
             if spec.industry_zscore:
+                # Industry standardization is applied before rank-like
+                # transforms so sector-relative ordering stays intact.
                 series = self.industry_zscore(series, metadata)
                 if spec.transform.strip().lower() in {"rank", "rank_pct", "percentile"}:
                     series = self.transform(series, spec.transform)
@@ -176,6 +187,8 @@ class FactorPreprocessor:
         output["valid_factor_count"] = valid_count
         output["factor_coverage"] = valid_count / float(len(specs))
         output = output.where(valid_count >= required)
+        # Re-attach the coverage columns after masking so the caller can see
+        # why a row survived or got dropped.
         output["valid_factor_count"] = valid_count
         output["factor_coverage"] = valid_count / float(len(specs))
         return output
@@ -216,6 +229,8 @@ class FactorPreprocessor:
         result = pd.Series(np.nan, index=series.index, dtype="float64")
         if int(valid.sum()) < 3 or x.loc[valid].nunique(dropna=True) < 2:
             return result
+        # Residualize by market cap only when there is enough cross-sectional
+        # variation to fit a meaningful regression.
         design = np.column_stack([np.ones(int(valid.sum())), x.loc[valid].to_numpy(dtype=float)])
         target = y.loc[valid].to_numpy(dtype=float)
         beta, *_ = np.linalg.lstsq(design, target, rcond=None)
@@ -267,6 +282,8 @@ class FactorPipeline:
                 excluded_symbols=set(),
             )
 
+        # Metadata is loaded after the raw matrix so we only fetch rows that
+        # actually survived factor loading.
         metadata = self.load_metadata(list(raw.index))
         excluded = self._load_exclusions(
             filters or [],
@@ -274,6 +291,8 @@ class FactorPipeline:
             symbols=list(raw.index),
         )
         if excluded:
+            # Apply exclusion rules before preprocessing so the coverage ratio
+            # reflects the tradable universe, not the pre-filter universe.
             raw = raw.drop(index=[symbol for symbol in excluded if symbol in raw.index], errors="ignore")
             metadata = metadata.drop(index=[symbol for symbol in excluded if symbol in metadata.index], errors="ignore")
         if raw.empty:
@@ -312,6 +331,8 @@ class FactorPipeline:
         db_path = Path(settings.data_dir) / "gaoshou.db"
         if not db_path.exists():
             return pd.DataFrame(index=pd.Index(symbol_list, name="symbol"))
+        # Metadata comes from the local SQLite snapshot because it is the
+        # cheapest place to assemble industry / market-cap context.
         placeholders = ",".join(["?"] * len(symbol_list))
         sql = f"""
             SELECT symbol, industry, industry2, industry3, sector, concept, circ_mv, total_mv
@@ -346,6 +367,8 @@ class FactorPipeline:
         values_by_factor: dict[str, dict[str, float]] = {}
         all_symbols: set[str] = set()
         for spec in specs:
+            # Cross-section loading is cached per factor/date/symbol set so
+            # repeated preset runs do not hammer the value store.
             values = self._load_cross_section_cached(spec, trade_date=trade_date, symbols=symbols)
             values = {str(symbol): float(value) for symbol, value in values.items()}
             values_by_factor[spec.name] = values
@@ -373,6 +396,8 @@ class FactorPipeline:
             spec = FilterSpec.from_raw(raw_filter)
             values = self._load_cross_section_cached(spec, trade_date=trade_date, symbols=symbols)
             for symbol, value in values.items():
+                # Filter semantics are centralized here so strategy code only
+                # needs to declare thresholds, not implement comparison logic.
                 if self._matches_filter(float(value), spec.operator, spec.value):
                     excluded.add(str(symbol))
         return excluded
@@ -396,6 +421,8 @@ class FactorPipeline:
         cached = self._cross_section_cache.get(cache_key)
         if cached is not None:
             return cached
+        # The factor store is the authoritative source for point-in-time
+        # values, so this method is just a thin cache wrapper.
         values = self.store.load_cross_section(
             spec.name,
             trade_date,

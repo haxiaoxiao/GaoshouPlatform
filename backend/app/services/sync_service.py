@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings as app_settings
 from app.core.retry import async_retry
 from app.data_stores import get_market_data_store
-from app.db.clickhouse import get_ch_client
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
@@ -39,32 +38,6 @@ DATASYNC_INITIAL_INDEX_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_INDEX_DAILY_
 DATASYNC_INITIAL_MINUTE_DAYS = int(os.getenv("DATASYNC_INITIAL_MINUTE_DAYS", "7"))
 TUSHARE_INDEX_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_INDEX_DAILY_PAUSE_SECONDS", "0.2"))
 TUSHARE_SW_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_SW_DAILY_PAUSE_SECONDS", "61"))
-
-
-def _should_write_clickhouse() -> bool:
-    return app_settings.clickhouse_enabled or app_settings.market_data_backend == "clickhouse"
-
-
-def _write_ch_daily(ch_client: Any, rows: list[dict[str, Any]]) -> None:
-    if not rows or ch_client is None:
-        return
-    ch_client.execute(
-        "INSERT INTO klines_daily "
-        "(symbol, trade_date, open, high, low, close, volume, amount) "
-        "VALUES",
-        rows,
-    )
-
-
-def _write_ch_minute(ch_client: Any, rows: list[dict[str, Any]]) -> None:
-    if not rows or ch_client is None:
-        return
-    ch_client.execute(
-        "INSERT INTO klines_minute "
-        "(symbol, datetime, open, high, low, close, volume, amount) "
-        "VALUES",
-        rows,
-    )
 
 
 def _write_store_daily(rows: list[dict[str, Any]]) -> None:
@@ -111,32 +84,9 @@ def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
     return datetime.fromisoformat(str(value)).date()
 
 
-def _latest_clickhouse_date(table: str, date_column: str) -> date | None:
-    ch_client = get_ch_client()
-    try:
-        row = ch_client.execute(f"SELECT max({date_column}) FROM {table}")
-    finally:
-        try:
-            ch_client.disconnect()
-        except Exception:
-            pass
-
-    value = row[0][0] if row and row[0] else None
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return datetime.fromisoformat(str(value)).date()
-
-
 def _latest_market_date(dataset: str) -> date | None:
     date_column = "datetime" if "minute" in dataset else "trade_date"
-    if app_settings.market_data_backend == "parquet":
-        return _latest_parquet_date(dataset, date_column)
-    table = "klines_minute" if "minute" in dataset else "klines_daily"
-    return _latest_clickhouse_date(table, date_column)
+    return _latest_parquet_date(dataset, date_column)
 
 
 def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | None:
@@ -166,18 +116,7 @@ def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | 
             [pattern, *symbols],
         ).fetchall()
     else:
-        table = "klines_minute" if "minute" in dataset else "klines_daily"
-        ch_client = get_ch_client()
-        try:
-            rows = ch_client.execute(
-                f"SELECT symbol, max({date_column}) FROM {table} WHERE symbol IN %(symbols)s GROUP BY symbol",
-                {"symbols": tuple(symbols)},
-            )
-        finally:
-            try:
-                ch_client.disconnect()
-            except Exception:
-                pass
+        rows = []
 
     by_symbol = {row[0]: row[1] for row in rows if row and row[1] is not None}
     if len(by_symbol) != len(set(symbols)):
@@ -519,12 +458,9 @@ class SyncService:
             },
             "steps": ["stock_info", "stock_full", "financial_data", "kline_daily", "index_daily", "kline_minute", "realtime_mv"],
         }
-        if _should_write_clickhouse():
-            plan["steps"].append("dividends")
-        else:
-            plan["skipped"] = {
-                "dividends": "requires ClickHouse stock_indicators",
-            }
+        plan["skipped"] = {
+            "dividends": "stored in Parquet indicators; not part of the default sync plan",
+        }
         return plan
 
     async def sync_datasync(
@@ -1242,7 +1178,11 @@ class SyncService:
             except Exception:
                 pass
 
-            indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+            if app_settings.qmt_daily_compute_indicators_after_sync:
+                indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+                progress.details["indicator_compute"] = "completed"
+            else:
+                progress.details["indicator_compute"] = "skipped"
 
             progress.status = "completed"
             progress.end_time = datetime.now()
@@ -1529,7 +1469,11 @@ class SyncService:
             except Exception:
                 pass
 
-            indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+            if app_settings.qmt_financial_compute_indicators_after_sync:
+                indicator_scheduler.run_after_sync("stock_full", symbols=symbols, trade_date=date.today())
+                progress.details["indicator_compute"] = "completed"
+            else:
+                progress.details["indicator_compute"] = "skipped"
 
             progress.status = "completed"
             progress.end_time = datetime.now()
@@ -1643,8 +1587,6 @@ class SyncService:
         await self._upsert_index_catalog_entries(items)
         await self.session.commit()
 
-        write_ch = _should_write_clickhouse()
-        ch_client = get_ch_client() if write_ch else None
         empty_symbols: list[str] = []
         failed_symbols: list[dict[str, str]] = []
         skipped_symbols: list[str] = []
@@ -1712,13 +1654,6 @@ class SyncService:
                         rows = []
 
                 if rows:
-                    if full_sync and ch_client is not None:
-                        ch_client.execute(
-                            "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
-                            "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
-                            {"symbol": item.symbol, "start_date": start_date, "end_date": end_date},
-                        )
-                    _write_ch_daily(ch_client, rows)
                     _write_store_daily(rows)
                     total_rows += len(rows)
                     progress.success_count += 1
@@ -1817,11 +1752,6 @@ class SyncService:
             await self.session.commit()
             raise
         finally:
-            if ch_client is not None:
-                try:
-                    ch_client.disconnect()
-                except Exception:
-                    pass
             _current_sync = None
 
         return progress
@@ -1916,11 +1846,6 @@ class SyncService:
             _current_sync = None
             return progress
 
-        # ClickHouse is optional. In parquet mode without clickhouse_enabled,
-        # sync writes directly to Parquet and does not require Docker/CH.
-        write_ch = _should_write_clickhouse()
-        ch_client = get_ch_client() if write_ch else None
-
         try:
             # 如果没有指定股票列表，获取所有股票
             if symbols is None:
@@ -1934,16 +1859,6 @@ class SyncService:
             # 全量同步时先删除已有数据
             if full_sync and symbols:
                 progress.details["message"] = "正在删除已有数据..."
-                for symbol in symbols:
-                    try:
-                        if ch_client is not None:
-                            ch_client.execute(
-                                "DELETE FROM klines_daily WHERE symbol = %(symbol)s "
-                                "AND trade_date >= %(start_date)s AND trade_date <= %(end_date)s",
-                                {"symbol": symbol, "start_date": start_date, "end_date": end_date},
-                            )
-                    except Exception:
-                        pass
                 progress.details["message"] = "删除完成，开始同步..."
 
             failed_symbols: list[dict[str, str]] = []
@@ -1991,7 +1906,6 @@ class SyncService:
                         batch_success += 1
 
                     if batch_rows:
-                        _write_ch_daily(ch_client, batch_rows)
                         try:
                             _write_store_daily(batch_rows)
                         except Exception as e:
@@ -2035,15 +1949,6 @@ class SyncService:
                                 )
                                 retry_success += 1
                             if retry_rows:
-                                retry_ch = get_ch_client() if write_ch else None
-                                try:
-                                    _write_ch_daily(retry_ch, retry_rows)
-                                finally:
-                                    if retry_ch is not None:
-                                        try:
-                                            retry_ch.disconnect()
-                                        except Exception:
-                                            pass
                                 _write_store_daily(retry_rows)
                                 nonlocal total_klines
                                 total_klines += len(retry_rows)
@@ -2138,11 +2043,6 @@ class SyncService:
             await self.session.commit()
             raise
         finally:
-            if ch_client is not None:
-                try:
-                    ch_client.disconnect()
-                except Exception:
-                    pass
             _current_sync = None
 
         return progress
@@ -2244,11 +2144,6 @@ class SyncService:
             _current_sync = None
             return progress
 
-        # ClickHouse is optional. In parquet mode without clickhouse_enabled,
-        # sync writes directly to Parquet and does not require Docker/CH.
-        write_ch = _should_write_clickhouse()
-        ch_client = get_ch_client() if write_ch else None
-
         try:
             # 如果没有指定股票列表，获取所有股票
             if symbols is None:
@@ -2262,16 +2157,6 @@ class SyncService:
             # 全量同步时先删除已有数据
             if full_sync and symbols:
                 progress.details["message"] = "正在删除已有数据..."
-                for symbol in symbols:
-                    try:
-                        if ch_client is not None:
-                            ch_client.execute(
-                                "DELETE FROM klines_minute WHERE symbol = %(symbol)s "
-                                "AND toDate(datetime) >= %(start_date)s AND toDate(datetime) <= %(end_date)s",
-                                {"symbol": symbol, "start_date": start_date, "end_date": end_date},
-                            )
-                    except Exception:
-                        pass
                 progress.details["message"] = "删除完成，开始同步..."
 
             failed_symbols: list[dict[str, str]] = []
@@ -2299,7 +2184,6 @@ class SyncService:
                     return False
                 rows = _minute_rows(klines)
                 if rows:
-                    _write_ch_minute(ch_client, rows)
                     _write_store_minute(rows)
                     total_klines += len(rows)
                 return True
@@ -2337,7 +2221,6 @@ class SyncService:
                         rows.extend(_minute_rows(klines))
 
                     if rows:
-                        _write_ch_minute(ch_client, rows)
                         try:
                             _write_store_minute(rows)
                         except Exception as e:
@@ -2455,11 +2338,6 @@ class SyncService:
             raise
 
         finally:
-            if ch_client is not None:
-                try:
-                    ch_client.disconnect()
-                except Exception:
-                    pass
             _current_sync = None
 
         return progress
@@ -2474,7 +2352,7 @@ class SyncService:
         full_sync: bool = False,
     ) -> SyncProgress:
         """
-        同步周K线数据 — 从 ClickHouse 日线直接聚合，不走 QMT
+        同步周K线数据 — 从本地日线数据聚合，不走 QMT
 
         Args:
             symbols: 股票代码列表，为空则同步所有股票
@@ -2508,7 +2386,6 @@ class SyncService:
         )
         _current_sync = progress
 
-        ch_client = get_ch_client()
         BATCH_SIZE = 50
 
         try:
@@ -2521,10 +2398,7 @@ class SyncService:
 
             if full_sync:
                 progress.details["message"] = "正在删除已有数据..."
-                ch_client.execute(
-                    "DELETE FROM klines_weekly WHERE trade_date >= %(start)s AND trade_date <= %(end)s",
-                    {"start": start_date, "end": end_date},
-                )
+                progress.details["message"] = "Full weekly resync will overwrite matching Parquet partitions"
                 progress.details["message"] = "删除完成，开始同步..."
 
             total_klines = 0
@@ -2532,24 +2406,19 @@ class SyncService:
             for batch_start in range(0, len(symbols), BATCH_SIZE):
                 batch = symbols[batch_start:batch_start + BATCH_SIZE]
 
-                # Batch query daily data from ClickHouse
-                daily_rows = ch_client.execute(
-                    "SELECT symbol, trade_date, open, high, low, close, volume, amount "
-                    "FROM klines_daily "
-                    "WHERE symbol IN %(syms)s "
-                    "  AND trade_date >= %(start)s AND trade_date <= %(end)s "
-                    "ORDER BY symbol, trade_date",
-                    {"syms": tuple(batch), "start": start_date, "end": end_date},
+                df = get_market_data_store().load_daily(
+                    batch,
+                    start_date,
+                    end_date,
+                    columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"],
                 )
-                if not daily_rows:
+                if df.empty:
                     progress.current = min(batch_start + BATCH_SIZE, len(symbols))
                     continue
 
-                # Build DataFrame
-                df = pd.DataFrame(
-                    daily_rows,
-                    columns=["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"],
-                )
+                df = df.reset_index(drop=False)
+                if "trade_date" not in df.columns and "index" in df.columns:
+                    df = df.rename(columns={"index": "trade_date"})
                 for col in ["open", "high", "low", "close", "amount"]:
                     df[col] = df[col].astype(float)
                 df["trade_date"] = pd.to_datetime(df["trade_date"])
@@ -2575,20 +2444,12 @@ class SyncService:
                         })
 
                 if weekly_rows:
-                    # Split by month to stay under 100-partition limit
                     weekly_rows.sort(key=lambda r: r["trade_date"])
-                    chunk_start = 0
-                    while chunk_start < len(weekly_rows):
-                        chunk_end = chunk_start
-                        chunk_month = weekly_rows[chunk_start]["trade_date"].strftime("%Y%m")
-                        while chunk_end < len(weekly_rows) and weekly_rows[chunk_end]["trade_date"].strftime("%Y%m") == chunk_month:
-                            chunk_end += 1
-                        ch_client.execute(
-                            "INSERT INTO klines_weekly "
-                            "(symbol, trade_date, open, high, low, close, volume, amount) VALUES",
-                            weekly_rows[chunk_start:chunk_end],
-                        )
-                        chunk_start = chunk_end
+                    get_market_data_store().write_dataset(
+                        pd.DataFrame(weekly_rows),
+                        dataset="klines_weekly",
+                        date_col="trade_date",
+                    )
                     total_klines += len(weekly_rows)
 
                 progress.current = min(batch_start + BATCH_SIZE, len(symbols))
@@ -3189,7 +3050,7 @@ class SyncService:
         同步分红送股数据 + 计算股息率
 
         1. 从 QMT 批量下载分红数据
-        2. 写入 dividend_cash 到 ClickHouse
+        2. 写入 dividend_cash 到本地指标存储
         3. 批量计算 dividend_yield（历史时间点）
         """
         global _current_sync
@@ -3205,8 +3066,6 @@ class SyncService:
         )
         _current_sync = progress
 
-        ch_client = get_ch_client()
-
         try:
             if symbols is None:
                 query = select(Stock.symbol)
@@ -3219,6 +3078,7 @@ class SyncService:
             progress.details["phase"] = "download"
             all_rows = []
             symbols_with_cash = set()
+            cash_by_symbol: dict[str, list[tuple[date, float]]] = {}
 
             for i, symbol in enumerate(symbols):
                 progress.current = i + 1
@@ -3239,6 +3099,7 @@ class SyncService:
                                 "value": float(cash),
                             })
                             symbols_with_cash.add(symbol)
+                            cash_by_symbol.setdefault(symbol, []).append((dt, float(cash)))
 
                     progress.success_count += 1
                 except Exception:
@@ -3250,22 +3111,10 @@ class SyncService:
             # ========== 阶段2: 批量写入 dividend_cash ==========
             if all_rows:
                 progress.details["phase"] = "insert_cash"
-                ch_client.execute(
-                    "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_cash'"
-                )
-                # Sort and batch by month to avoid partition limit
                 all_rows.sort(key=lambda r: r["trade_date"])
-                batch_start = 0
-                while batch_start < len(all_rows):
-                    batch_end = batch_start
-                    month = all_rows[batch_start]["trade_date"].strftime("%Y%m")
-                    while batch_end < len(all_rows) and all_rows[batch_end]["trade_date"].strftime("%Y%m") == month:
-                        batch_end += 1
-                    ch_client.execute(
-                        "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
-                        all_rows[batch_start:batch_end],
-                    )
-                    batch_start = batch_end
+                from app.data_stores import get_indicator_store
+
+                get_indicator_store().write_cross_section(pd.DataFrame(all_rows))
 
             # ========== 阶段3: 批量计算 dividend_yield ==========
             progress.details["phase"] = "yield"
@@ -3277,33 +3126,30 @@ class SyncService:
             for symbol in symbols_with_cash:
                 progress.current += 1
                 try:
-                    # Query dividend_cash for this symbol, sorted ASC for sliding window
-                    cash_rows = ch_client.execute(
-                        "SELECT trade_date, value FROM stock_indicators "
-                        "WHERE symbol=%(s)s AND indicator_name='dividend_cash' "
-                        "ORDER BY trade_date ASC",
-                        {"s": symbol},
-                    )
+                    cash_rows = sorted(cash_by_symbol.get(symbol, []), key=lambda item: item[0])
                     if not cash_rows:
                         continue
 
-                    # Get prices only at ex-dates (not all klines!)
                     ex_dates = [r[0] for r in cash_rows]
                     min_date, max_date = ex_dates[0], ex_dates[-1]
-                    price_rows = ch_client.execute(
-                        "SELECT trade_date, close FROM klines_daily "
-                        "WHERE symbol=%(s)s AND trade_date>=%(min)s AND trade_date<=%(max)s "
-                        "ORDER BY trade_date ASC",
-                        {"s": symbol, "min": min_date, "max": max_date},
+                    price_df = get_market_data_store().load_daily(
+                        [symbol],
+                        min_date,
+                        max_date,
+                        columns=["symbol", "trade_date", "close"],
                     )
-                    if not price_rows:
+                    if price_df.empty:
                         continue
+                    price_df = price_df.reset_index(drop=False)
+                    if "trade_date" not in price_df.columns and "index" in price_df.columns:
+                        price_df = price_df.rename(columns={"index": "trade_date"})
+                    price_df = price_df.sort_values("trade_date")
 
                     # Sliding window: O(n) trailing 12-month sum
                     dates = [r[0] for r in cash_rows]
                     values = [float(r[1] or 0) for r in cash_rows]
-                    price_dates = [r[0] for r in price_rows]
-                    price_values = [float(r[1]) for r in price_rows]
+                    price_dates = [pd.Timestamp(item).date() for item in price_df["trade_date"].tolist()]
+                    price_values = [float(item) for item in price_df["close"].tolist()]
 
                     p_idx = 0
                     trailing_sum = 0.0
@@ -3338,22 +3184,10 @@ class SyncService:
                     continue
 
             if yield_rows:
-                ch_client.execute(
-                    "DELETE FROM stock_indicators WHERE indicator_name = 'dividend_yield'"
-                )
-                # Sort and batch by month to avoid partition limit
                 yield_rows.sort(key=lambda r: r["trade_date"])
-                y_start = 0
-                while y_start < len(yield_rows):
-                    y_end = y_start
-                    y_month = yield_rows[y_start]["trade_date"].strftime("%Y%m")
-                    while y_end < len(yield_rows) and yield_rows[y_end]["trade_date"].strftime("%Y%m") == y_month:
-                        y_end += 1
-                    ch_client.execute(
-                        "INSERT INTO stock_indicators (symbol, indicator_name, trade_date, value) VALUES",
-                        yield_rows[y_start:y_end],
-                    )
-                    y_start = y_end
+                from app.data_stores import get_indicator_store
+
+                get_indicator_store().write_cross_section(pd.DataFrame(yield_rows))
 
             progress.details["yield_rows"] = len(yield_rows)
 

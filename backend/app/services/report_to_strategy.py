@@ -13,9 +13,9 @@ _SYSTEM_PROMPT = """你是量化策略开发专家。你精通 A 股数据分析
 
 ## 平台数据能力
 
-ClickHouse 日K线 (klines_daily): 2006~2026, 5204只, 字段: symbol/trade_date/open/high/low/close/volume/amount
-ClickHouse 周K线 (klines_weekly): 2011~2026, 从日线聚合, 同上字段
-ClickHouse 指标 (stock_indicators): symbol/indicator_name/trade_date/value
+Parquet 日K线 (klines_daily): 2006~2026, 5204只, 字段: symbol/trade_date/open/high/low/close/volume/amount
+Parquet 周K线 (klines_weekly): 2011~2026, 从日线聚合, 同上字段
+Parquet 指标/因子缓存: symbol/indicator_name/trade_date/value 或 symbol/expr_hash/trade_date/value
 
 可用指标: pe_ttm(2011~2026), pb, dividend_yield(2006~2026), dividend_cash(1993~2026),
 return_5d/20d/60d, volatility_20d, ma5/ma10/ma20, rsi_14, roe, turnover_rate, ma250_weekly, price_to_ma250w
@@ -33,7 +33,7 @@ Python 脚本: def init(context) + def handle_bar(context, bar_dict)
 适用: 多条件选股+定时调仓
 
 ### 3. 内置策略 (builtin=builtin) — 独立 Python 类
-批量 ClickHouse 查询, class DeepValueStrategy: def screen() + def run()
+批量本地数据查询, class DeepValueStrategy: def screen() + def run()
 一次查询全量数据, 批量筛选, 不依赖事件引擎
 适用: 全市场筛选+高频批量查询
 

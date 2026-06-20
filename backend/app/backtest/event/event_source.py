@@ -1,4 +1,4 @@
-"""Bar 数据源 — 从 ClickHouse 加载日线数据"""
+"""Bar 数据源 — 从 MarketDataStore 加载行情数据"""
 from __future__ import annotations
 
 import asyncio
@@ -242,7 +242,7 @@ class BarEventSource:
         self._all_dates_sorted: list = []
 
     @classmethod
-    async def from_clickhouse(
+    async def from_market_data_store(
         cls,
         symbols: list[str],
         start_date: date,

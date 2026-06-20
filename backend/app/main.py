@@ -6,10 +6,9 @@ from loguru import logger
 
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
-from app.core.config import settings
 from app.core.logging import setup_logging
 from app.db import init_db
-from app.db.clickhouse import init_clickhouse_tables
+from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 
 # 配置日志
 setup_logging(debug=True)
@@ -19,20 +18,11 @@ setup_logging(debug=True)
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("Starting application...")
+    apply_dev_data_mode_to_settings()
 
     # 初始化数据库
     await init_db()
     logger.info("Database initialized")
-
-    # 初始化 ClickHouse 表（Parquet 模式无需 ClickHouse）
-    if settings.clickhouse_enabled:
-        try:
-            init_clickhouse_tables()
-            logger.info("ClickHouse tables initialized")
-        except Exception as e:
-            logger.warning(f"ClickHouse not available, skipping: {e}")
-    else:
-        logger.info("ClickHouse disabled, using Parquet/DuckDB backend")
 
     # 启动调度器
     logger.info("Sync scheduler is owned by the isolated sync service")
@@ -71,6 +61,12 @@ app = FastAPI(
 
 # 注册 API 路由
 app.include_router(api_router, prefix="/api")
+
+
+@app.middleware("http")
+async def apply_dev_data_mode_middleware(request, call_next):
+    apply_dev_data_mode_to_settings()
+    return await call_next(request)
 
 
 @app.get("/health")

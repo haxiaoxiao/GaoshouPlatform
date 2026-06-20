@@ -1,7 +1,7 @@
 """
 VeighNa 回测引擎封装
 
-提供简洁的回测接口，从 ClickHouse 加载数据
+提供简洁的回测接口，从本地行情存储加载数据
 """
 from dataclasses import dataclass
 from datetime import date
@@ -71,7 +71,7 @@ class VnEngine:
         # WARNING: This is a mock implementation returning simulated data.
         # TODO: 实现 VeighNa 回测逻辑
         logger.warning("run_backtest is using mock data - implementation pending")
-        # 1. 从 ClickHouse 加载 K线数据
+        # 1. 从本地行情存储加载 K线数据
         # 2. 动态加载策略代码
         # 3. 运行回测
         # 4. 统计结果

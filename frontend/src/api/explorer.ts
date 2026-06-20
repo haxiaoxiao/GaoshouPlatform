@@ -2,12 +2,17 @@ import request from './request'
 
 export interface TableInfo {
   name: string
+  label?: string
+  category?: string
   row_count: number | null
   min_date?: string | null
   max_date?: string | null
   estimated?: boolean
   partition_count?: number
   date_column?: string | null
+  symbol_column?: string | null
+  description?: string
+  factor_ready?: boolean
 }
 
 export interface ColumnInfo {

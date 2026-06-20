@@ -1,4 +1,8 @@
-"""AKQuant strategy presets for domestic paper style-rotation factors."""
+"""国内研报风格轮动因子组合的 AKQuant 预设。
+
+这组预设强调的是风格切换能力，不追求单一行业长期压制市场，而是通过
+大小盘、成长价值、行业动量和防御因子去适应不同市场阶段。
+"""
 
 from __future__ import annotations
 
@@ -11,12 +15,16 @@ from app.backtest.strategies.multi_factor_akquant import (
 )
 
 _STYLE_ROTATION_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
+    # 风格轮动先从市值偏好切入，这样预设就能在小盘和中盘之间切换，
+    # 不需要再额外写一套股票池规则。
     {
         "name": "paper_size_rotation_score",
         "weight": 0.24,
         "direction": "higher_better",
         "transform": "rank_pct",
     },
+    # 估值 + 成长负责把风格偏好钉在相对稳定的基本面上，其它腿再跟随
+    # 市场阶段做轮动。
     {
         "name": "paper_value_growth_rotation_score",
         "weight": 0.24,
@@ -54,6 +62,8 @@ _STYLE_ROTATION_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
 
 
 _DEFENSIVE_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
+    # 防御配置是一个低 beta 兄弟版本：质量和低波动优先，估值放在最后，
+    # 这样在反弹阶段也不会完全错过市场。
     {
         "name": "paper_defensive_quality_lowvol",
         "weight": 0.36,
@@ -98,7 +108,11 @@ def _preset_code(factor_configs: str, *, top_n: int, rebalance_days: int, max_po
     code = code.replace("MIN_CANDIDATES = 5", "MIN_CANDIDATES = 20")
     code = code.replace("REBALANCE_EVERY_N_DAYS = 1", f"REBALANCE_EVERY_N_DAYS = {rebalance_days}")
     code = code.replace("MAX_POSITION_PCT = 0.12", f"MAX_POSITION_PCT = {max_position_pct}")
-    return code
+    return (
+        "# 中文研报风格轮动预设：执行骨架不变，但因子侧重点和仓位配置\n"
+        "# 会根据轮动版 / 防御版做不同调整。\n"
+        + code
+    )
 
 
 CN_PAPER_STYLE_ROTATION_STRATEGY_CODE = _preset_code(

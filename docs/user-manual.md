@@ -1,6 +1,6 @@
 # GaoshouPlatform 使用手册
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-20.
 
 本文面向平台使用者和策略调试者，覆盖启动、数据同步、AKQuant 回测、ID=43 小市值策略和常用排错流程。
 
@@ -29,14 +29,7 @@ npm run dev
 | `http://localhost:8000/docs` | FastAPI Swagger |
 | `http://localhost:8000/health` | 健康检查 |
 
-本机桌面脚本或开发会话可能使用 `3500`/`8800` 端口；以启动脚本输出和 `/api/system/health` 为准。
-
-ClickHouse 默认端口：
-
-| 协议 | 端口 |
-|---|---:|
-| Native | `19000` |
-| HTTP | `18123` |
+dev 桌面脚本使用 `13500`/`18800`/`18810`，prod 使用 `3500`/`8800`/`8810`；以启动脚本输出和 `/api/system/health` 为准。
 
 ## 2. 数据源使用原则
 
@@ -49,8 +42,9 @@ ClickHouse 默认端口：
 | 在市股票日线 | miniQMT | Tushare / AKShare |
 | 退市/历史股票日线 | Tushare | AKShare |
 | 指数历史成分 | Tushare `index_weight` | 手工快照 |
-| 固定时间点分钟线 | Parquet/DuckDB 或 ClickHouse 已落库分钟线 | miniQMT 本地缓存 |
+| 固定时间点分钟线 | Parquet/DuckDB 已落库分钟线 | miniQMT 本地缓存 |
 | 完整历史 1 分钟线 | 本地 JQ 分钟文件 → Parquet `klines_minute` | miniQMT/Indevs 补缺口 |
+| JQ 个股资金流 | 本地 Parquet `jq_money_flow_daily` | 后续清洗数据 | 日期字段必须用 `trade_date_1`，不要用空的 `trade_date` |
 
 更详细的数据源经验见 `docs/data-source-cheatsheet.md`。
 
@@ -63,8 +57,8 @@ ClickHouse 默认端口：
 | `stock_info` | 股票基础信息 | SQLite `stocks` |
 | `stock_full` | 股票完整信息，含市值/财务 | SQLite `stocks` |
 | `financial_data` | 财务数据 | SQLite `financial_data` |
-| `kline_daily` | 日 K | Parquet / ClickHouse |
-| `kline_minute` | 分钟 K | Parquet / ClickHouse |
+| `kline_daily` | 日 K | Parquet |
+| `kline_minute` | 分钟 K | Parquet |
 | `realtime_mv` | 实时市值 | SQLite `stocks` |
 
 xtquant 是同步阻塞 SDK。后端代码中所有 QMT 调用都应通过 `asyncio.get_running_loop().run_in_executor()` 或 `asyncio.to_thread()` 包装。
@@ -78,10 +72,12 @@ xtquant 是同步阻塞 SDK。后端代码中所有 QMT 调用都应通过 `asyn
 1. 使用 miniQMT 主动下载 1 分钟数据。
 2. 从本地缓存读取分钟线。
 3. 抽取策略需要的时间点，例如 `10:00`、`10:30`、`14:30`、`14:50`。
-4. 写入 Parquet `klines_minute_timer` 或 ClickHouse `klines_minute`。
+4. 写入 Parquet `klines_minute_timer`。
 5. 回测使用 `bar_type="minute_timer"`。
 
 如果使用当前默认 Parquet 后端，timer 数据也可以来自公共目录 `E:\Projects\Data\parquet\klines_minute` 或 `E:\Projects\Data\parquet\klines_minute_timer`。当前本地已导入聚宽版全 A 1 分钟线，覆盖 `2005-01-04` 至 `2026-05-15`，因此 ID=43 这类固定时点策略可以直接从 Parquet/DuckDB 抽取 `10:30` 等分钟点。
+
+当前 BaiduSyncdisk 数据根 `E:\Projects\data\BaiduSyncdisk\parquet` 已登记到数据浏览器和系统数据摘要。`jq_money_flow_daily` 共 `13,424,052` 行，规范日期字段为 `trade_date_1`，覆盖 `2010-01-04` 至 `2026-04-17`；原始 `trade_date` 字段为空且不要接入因子或筛选逻辑。
 
 示例：
 

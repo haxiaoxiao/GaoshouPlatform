@@ -9,7 +9,7 @@ import pandas as pd
 
 
 class MarketDataStore(ABC):
-    """行情数据存储抽象 — 屏蔽底层 Parquet/ClickHouse 细节
+    """行情数据存储抽象 — 当前使用 Parquet/DuckDB
 
     所有方法均为同步方法，由上层 DataProvider 通过 asyncio.to_thread 调用。
     """

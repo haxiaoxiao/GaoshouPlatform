@@ -2,7 +2,7 @@
 """数据技能模块 — 为策略模块提供统一数据访问接口
 
 设计原则:
-1. 策略只需调用 DataSkill 的方法，无需关心数据来自 QMT/SQLite/ClickHouse
+1. 策略只需调用 DataSkill 的方法，无需关心数据来自 QMT/SQLite/Parquet
 2. 优先从本地数据库读取（已同步的数据），无数据时才实时请求 QMT
 3. 所有方法均为 async，QMT 调用自动包装 run_in_executor
 4. 返回值使用纯 dataclass 或 dict，不暴露 ORM 模型或 QMT 内部结构
@@ -19,9 +19,7 @@ from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.data_stores import get_market_data_store
-from app.db.clickhouse import get_ch_client
 from app.db.models import Stock
 from app.db.models.financial import FinancialData
 from app.engines.qmt_gateway import qmt_gateway
@@ -156,7 +154,7 @@ class DataSkill:
     - 行情快照 (实时)
     - 选股筛选 (条件过滤)
     - 行业统计
-    - 指标查询 (ClickHouse)
+    - 指标查询 (Parquet)
     """
 
     def __init__(self, session: AsyncSession):
@@ -280,7 +278,7 @@ class DataSkill:
         end_date: date | None = None,
         limit: int = 500,
     ) -> list[KlineBar]:
-        """获取日K线数据（ClickHouse 优先，无数据时从 QMT 请求）
+        """获取日K线数据（Parquet 优先，无数据时从 QMT 请求）
 
         Args:
             symbol: 股票代码
@@ -298,7 +296,7 @@ class DataSkill:
             start_date = end_date - timedelta(days=max(limit * 2, 30))
         if start_date > end_date:
             return []
-        # MarketDataStore queries are synchronous (DuckDB/ClickHouse). Run in a worker thread to avoid
+        # MarketDataStore queries are synchronous (DuckDB). Run in a worker thread to avoid
         # blocking the FastAPI event loop under load.
         bars = await asyncio.to_thread(self._query_market_klines, symbol, start_date, end_date, limit)
         if bars:
@@ -317,7 +315,7 @@ class DataSkill:
         limit: int = 500,
         timer_times: list[str] | None = None,
     ) -> list[KlineBar]:
-        """获取分钟K线数据（Parquet/ClickHouse 优先，无数据时从 QMT 请求）
+        """获取分钟K线数据（Parquet 优先，无数据时从 QMT 请求）
 
         Args:
             timer_times: 可选的分钟时间点过滤（如 ["10:00", "10:30", "14:50"]）。
@@ -520,34 +518,7 @@ class DataSkill:
         if value is not None:
             return value
 
-        # Parquet-first mode should not require ClickHouse; only attempt CH when explicitly enabled.
-        if not settings.clickhouse_enabled:
-            return None
-
-        def _load_from_clickhouse() -> float | None:
-            ch = get_ch_client()
-            try:
-                if trade_date:
-                    rows = ch.execute(
-                        "SELECT value FROM stock_indicators "
-                        "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                        "AND trade_date = %(dt)s ORDER BY updated_at DESC LIMIT 1",
-                        {"sym": symbol, "name": indicator_name, "dt": trade_date},
-                    )
-                else:
-                    rows = ch.execute(
-                        "SELECT value FROM stock_indicators "
-                        "WHERE symbol = %(sym)s AND indicator_name = %(name)s "
-                        "ORDER BY trade_date DESC LIMIT 1",
-                        {"sym": symbol, "name": indicator_name},
-                    )
-            except Exception:
-                return None
-            if rows and rows[0] and rows[0][0] is not None:
-                return float(rows[0][0])
-            return None
-
-        return await asyncio.to_thread(_load_from_clickhouse)
+        return None
 
     async def get_indicators_batch(
         self,
@@ -590,38 +561,7 @@ class DataSkill:
                 for _, r in df.iterrows()
             ]
 
-        if not settings.clickhouse_enabled:
-            return []
-
-        def _load_rows_from_clickhouse():
-            ch = get_ch_client()
-            try:
-                if trade_date:
-                    return ch.execute(
-                        "SELECT symbol, indicator_name, value, trade_date "
-                        "FROM stock_indicators WHERE symbol IN %(syms)s AND trade_date = %(dt)s "
-                        "ORDER BY symbol, indicator_name",
-                        {"syms": symbols, "dt": trade_date},
-                    )
-                return ch.execute(
-                    "SELECT symbol, indicator_name, value, trade_date "
-                    "FROM stock_indicators WHERE symbol IN %(syms)s "
-                    "ORDER BY symbol, indicator_name, trade_date DESC",
-                    {"syms": symbols},
-                )
-            except Exception:
-                return []
-
-        rows = await asyncio.to_thread(_load_rows_from_clickhouse)
-        return [
-            {
-                "symbol": r[0],
-                "indicator_name": r[1],
-                "value": float(r[2]) if r[2] is not None else None,
-                "trade_date": r[3],
-            }
-            for r in (rows or [])
-        ]
+        return []
 
     async def get_indicator_timeseries(
         self,
@@ -631,7 +571,7 @@ class DataSkill:
         end_date: date,
         limit: int = 5000,
     ) -> list[dict[str, Any]]:
-        """查询单只股票的指标时序数据（Parquet/ClickHouse 指标库优先）"""
+        """查询单只股票的指标时序数据（Parquet 指标库优先）"""
         symbol = normalize_security_symbol(symbol) or symbol
         return await self.get_indicators_timeseries_batch(
             symbols=[symbol],
@@ -701,45 +641,7 @@ class DataSkill:
                 )
             return result
 
-        if not settings.clickhouse_enabled:
-            return []
-
-        def _load_rows_from_clickhouse():
-            ch = get_ch_client()
-            try:
-                return ch.execute(
-                    "SELECT symbol, indicator_name, datetime, value, updated_at "
-                    "FROM indicator_timeseries "
-                    "WHERE symbol IN %(syms)s "
-                    "AND indicator_name IN %(names)s "
-                    "AND datetime >= %(start)s AND datetime < %(end_plus)s "
-                    "ORDER BY symbol, indicator_name, datetime",
-                    {
-                        "syms": tuple(symbols),
-                        "names": tuple(names),
-                        "start": datetime.combine(start_date, datetime.min.time()),
-                        "end_plus": datetime.combine(end_date, datetime.min.time()) + timedelta(days=1),
-                    },
-                )
-            except Exception as exc:
-                logger.warning("DataSkill.get_indicators_timeseries_batch: ClickHouse query failed: {}", exc)
-                return []
-
-        rows = await asyncio.to_thread(_load_rows_from_clickhouse)
-        if not rows:
-            return []
-        if len(rows) > limit:
-            rows = rows[-limit:]
-        return [
-            {
-                "symbol": r[0],
-                "indicator_name": r[1],
-                "datetime": r[2],
-                "value": float(r[3]) if r[3] is not None else None,
-                "updated_at": r[4] if len(r) > 4 else None,
-            }
-            for r in rows
-        ]
+        return []
 
     # ─── 股票列表 ──────────────────────────────────────────
 

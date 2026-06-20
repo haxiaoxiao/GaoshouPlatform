@@ -16,7 +16,6 @@ dependencies = [
     "redis>=5.0.0",
     "hiredis>=2.0.0",
     "apscheduler>=3.10.0",
-    "clickhouse-driver>=0.2.0",
     "duckdb>=1.0.0",
     "pandas>=2.0.0",
     "pyarrow>=15.0.0",

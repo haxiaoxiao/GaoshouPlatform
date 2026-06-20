@@ -1,4 +1,4 @@
-# 克隆自聚宽文章：https://www.joinquant.com/post/71632
+# 来源：聚宽文章 https://www.joinquant.com/post/71632
 # 标题：小市值选股V4版  收益：​1056.55%
 # 作者：ffzzsh
 
@@ -10,27 +10,27 @@ import pandas as pd
 from datetime import datetime, timedelta
 import talib as ta
 
-# 初始化函数 
+# 初始化函数
 def initialize(context):
-    # 开启防未来函数
+    # 开启防未来函数，避免使用未来数据。
     set_option('avoid_future_data', True)
-    # 设定基准
+    # 设定基准指数。
     set_benchmark('000001.XSHG')
-    # 用真实价格交易
+    # 用真实价格交易。
     set_option('use_real_price', True)
-    # 将滑点设置为0
+    # 将滑点设置为 0。
     set_slippage(FixedSlippage(3/10000))
-    # 设置交易成本
+    # 设置交易成本。
     set_order_cost(OrderCost(open_tax=0, close_tax=0.001, 
                             open_commission=2.5/10000, 
                             close_commission=2.5/10000, 
                             close_today_commission=0, min_commission=5), type='stock')
-    # 过滤日志
+    # 过滤日志输出。
     log.set_level('order', 'error')
     log.set_level('system', 'error')
     log.set_level('strategy', 'debug')
     
-    # 初始化全局变量
+    # 初始化全局变量。
     g.no_trading_today_signal = False  # 是否为可交易日
     g.pass_april = True  # 是否四月空仓
     g.run_stoploss = True  # 是否进行止损
@@ -45,7 +45,7 @@ def initialize(context):
     g.stoploss_limit = 0.88  # 止损线
     g.stoploss_market = 0.94  # 市场止损参数
     
-    # 指标相关参数（优化点1：动态参数）
+    # 指标相关参数（优化点 1：动态参数）
     g.enable_indicator = True  # 是否启用主力资金指标
     g.HV_control = True  # 是否启用放量检测
     g.HV_duration = 120  # 放量检测周期
@@ -53,11 +53,11 @@ def initialize(context):
     g.dynamic_params = True  # 启用动态参数调整
     g.volatility_lookback = 30  # 波动率观察期
     
-    # 新增行业风控参数（优化点2：行业分散）
+    # 新增行业风控参数（优化点 2：行业分散）
     g.max_industry_weight = 0.3  # 单一行业最大权重
     g.enable_industry_filter = True  # 启用行业过滤
     
-    # 设置交易运行时间（优化点3：时序调整）
+    # 设置交易运行时间（优化点 3：时序调整）
     run_daily(prepare_stock_list, '9:15')  # 延后到9:15避免集合竞价
     run_weekly(weekly_adjustment, 2, '10:30')
     run_daily(sell_stocks, time='10:00')  # 止损函数
@@ -67,7 +67,7 @@ def initialize(context):
 
 # 计算市场波动率（新增函数）
 def get_market_volatility(context, days=30):
-    """计算市场波动率用于动态参数调整"""
+    """计算市场波动率，用于动态调整 V4GV 周期参数。"""
     index = '399101.XSHE'
     end_date = context.previous_date
     start_date = end_date - timedelta(days=days+10)
@@ -85,13 +85,13 @@ def get_market_volatility(context, days=30):
 
 # 计算动态周期参数（新增函数）
 def get_dynamic_periods(context):
-    """根据波动率动态调整V4GV周期"""
+    """根据波动率动态调整 V4GV 周期。"""
     if not g.dynamic_params:
         return 55, 34  # 默认值
     
     volatility = get_market_volatility(context, g.volatility_lookback)
     
-    # 波动率高时使用较短周期，低时使用较长周期
+    # 波动率高时使用较短周期，低时使用较长周期。
     if volatility > 0.025:  # 高波动市场
         return 40, 25
     elif volatility > 0.015:  # 中等波动
@@ -99,7 +99,7 @@ def get_dynamic_periods(context):
     else:  # 低波动市场
         return 55, 34
 
-# 计算主力资金指标 (支持动态周期)
+# 计算主力资金。指标（支持动态周期）
 def calculate_indicator(security, context, n=None, m=None):
     """
     计算主力资金指标
@@ -114,72 +114,72 @@ def calculate_indicator(security, context, n=None, m=None):
     if n is None or m is None:
         n, m = get_dynamic_periods(context)
     
-    # 获取历史数据
+    # 获取历史数据。
     end_date = context.previous_date
     start_date = end_date - timedelta(days=max(n, m) * 2)
     df = get_price(security, start_date=start_date, end_date=end_date, 
                   frequency='daily', fields=['close', 'high', 'low'], 
                   skip_paused=False, fq='pre', panel=False)
     
-    # 数据完整性检查（修复inputs are all NaN错误）
+    # 数据完整性检查（修复 inputs are all NaN 错误）。
     if df is None or len(df) < max(n, m) + 5:
         log.warning(f"数据不足[{security}]: {len(df) if df is not None else 0} < {max(n, m) + 5}")
         return (None, None)
     
-    # 检查数据是否全为NaN
+    # 检查数据是否全为 NaN。
     if df['close'].isnull().all() or df['high'].isnull().all() or df['low'].isnull().all():
         log.warning(f"数据全为NaN[{security}]")
         return (None, None)
     
-    # 填充缺失值
+    # 填充缺失值。
     df = df.fillna(method='ffill').fillna(method='bfill')
     
     close = df['close'].values
     high = df['high'].values
     low = df['low'].values
     
-    # 计算VAR1
+    # 计算 VAR1。
     llv34 = ta.MIN(low, 34)
     hhv34 = ta.MAX(high, 34)
-    # 避免分母为零
+    # 避免分母为零。
     denominator = np.where(hhv34 - llv34 == 0, 1e-6, hhv34 - llv34)
     rsv = 100 * (close - llv34) / denominator
     var1 = ta.SMA(rsv, 5) - 20
     
-    # 计算A1
+    # 计算 A1。
     llv55 = ta.MIN(low, 55)
     hhv55 = ta.MAX(high, 55)
     denominator = np.where(hhv55 - llv55 == 0, 1e-6, hhv55 - llv55)
     rsv2 = 100 * (close - llv55) / denominator
     
-    # 计算SMA
+    # 计算 SMA。
     sma1 = ta.EMA(rsv2, 5)
     a1 = 3 * sma1 - 2 * sma1  # 原始公式，实际是sma1
     
-    # 修复EMA周期问题：周期1的EMA就是原始值
+    # 修复 EMA 周期问题：周期 1 的 EMA 就是原始值。
     a12 = (a1 + var1) / 2  # 相当于EMA(...,1)就是原值
     
-    # 计算主力资金
+    # 计算主力资金。
     rsv3 = 100 * (close - ta.MIN(low, 34)) / np.where(ta.MAX(high, 34) - ta.MIN(low, 34) == 0, 
                       1e-6, ta.MAX(high, 34) - ta.MIN(low, 34))
     main_fund = ta.EMA(rsv3, 3)
     
-    # 计算D0
+    # 计算 D0。
     rsv4 = -100 * (hhv34 - close) / denominator
     d0 = ta.EMA(rsv4, 4) + 100
     
-    # 计算V4GV
+    # 计算 V4GV。
     v4gv = ((main_fund + d0) / 2 + a12) / 2
     
-    # 计算V4GV21 (2日均线)
+    # 计算 V4GV。21 (2日均线)
     v4gv21 = (v4gv + ta.SMA(v4gv, 2)) / 2
     
-    # 返回最新值
+    # 返回最新值。
     return (v4gv[-1], v4gv21[-1])
 
-# 获取MACD信号（新增函数，优化点4：信号增强）
+# 获取 MACD 信号（新增函数，优化点 4：信号增强）
 def get_macd_signal(security, context):
-    """获取MACD指标信号作为确认"""
+    """获取 MACD 指标信号，作为卖出确认。"""
     end_date = context.previous_date
     start_date = end_date - timedelta(days=50)
     
@@ -192,31 +192,31 @@ def get_macd_signal(security, context):
     close = df['close'].values
     macd, signal, hist = ta.MACD(close, fastperiod=12, slowperiod=26, signalperiod=9)
     
-    # MACD金叉且为正值
+    # MACD 金叉且为正值。
     return macd[-1] > signal[-1] and macd[-1] > 0
 
 # 检查买卖信号（增强版）
 def check_trading_signals(context):
-    """检查主力资金指标买卖信号"""
+    """检查主力资金指标买卖信号。"""
     if not g.enable_indicator:
         return
     
     current_data = get_current_data()
     
-    # 检查持仓股的卖出信号
+    # 检查持仓股的卖出信号。
     for stock in list(context.portfolio.positions.keys()):
         if current_data[stock].paused:
             continue
             
-        # 获取指标值
+        # 获取指标值。
         try:
             v4gv, v4gv21 = calculate_indicator(stock, context)
             if v4gv is None or v4gv21 is None:
                 continue
                 
-            # 检查死叉信号 (卖出) + MACD确认
+            # 检查死叉信号（卖出）+ MACD 确认。
             if v4gv < v4gv21 and v4gv21 > 0:
-                # 获取MACD确认
+                # 获取 MACD 确认。
                 macd_confirm = not get_macd_signal(stock, context)  # MACD死叉确认
                 if macd_confirm:
                     log.info(f"检测到死叉信号(V4GV:{v4gv:.2f} < V4GV21:{v4gv21:.2f})，卖出[{stock}]")
@@ -229,12 +229,12 @@ def check_trading_signals(context):
 
 # 获取行业信息（新增函数）
 def get_stock_industry(stock_list):
-    """获取股票行业信息"""
+    """获取股票行业信息。"""
     industry_dict = {}
     for stock in stock_list:
         try:
             industry = get_industry(stock)
-            # 取一级行业
+            # 取一级行业。
             for industry_code in industry:
                 if industry[industry_code]['industry_type'] == 'sw_l1':
                     industry_dict[stock] = industry_code
@@ -243,19 +243,19 @@ def get_stock_industry(stock_list):
             industry_dict[stock] = 'unknown'
     return industry_dict
 
-# 行业过滤（新增函数，优化点5：行业风控）
+# 行业过滤。（新增函数，优化点 5：行业风控）
 def filter_by_industry(stock_list, current_holdings):
-    """根据行业分布过滤股票"""
+    """根据行业分布过滤股票。"""
     if not g.enable_industry_filter or not stock_list:
         return stock_list
     
-    # 获取当前持仓行业分布
+    # 获取当前持仓行业分布。
     hold_industries = get_stock_industry(current_holdings)
     industry_count = {}
     for stock, industry in hold_industries.items():
         industry_count[industry] = industry_count.get(industry, 0) + 1
     
-    # 获取候选股票行业
+    # 获取候选股票行业。
     candidate_industries = get_stock_industry(stock_list)
     filtered_list = []
     
@@ -268,12 +268,12 @@ def filter_by_industry(stock_list, current_holdings):
     
     return filtered_list
 
-# 准备股票池
+# 准备股票池。
 def prepare_stock_list(context):
-    # 获取已持有列表
+    # 获取已持有列表。
     g.hold_list = [pos.security for pos in context.portfolio.positions.values()]
     
-    # 获取昨日涨停列表
+    # 获取昨日涨停列表。
     if g.hold_list:
         df = get_price(g.hold_list, end_date=context.previous_date, 
                       frequency='daily', fields=['close', 'high_limit'], 
@@ -286,7 +286,7 @@ def prepare_stock_list(context):
     else:
         g.yesterday_HL_list = []
     
-    # 判断今天是否为账户资金再平衡的日期
+    # 判断今天是否为账户资金再平衡的日期。
     g.no_trading_today_signal = today_is_between(context)
 
 # 选股模块（增强版）
@@ -300,7 +300,7 @@ def get_stock_list(context):
     initial_list = filter_limitup_stock(context, initial_list)
     initial_list = filter_limitdown_stock(context, initial_list)
     
-    # 按市值排序
+    # 按市值排序。
     q = query(valuation.code, valuation.market_cap).filter(
         valuation.code.in_(initial_list)).order_by(valuation.market_cap.asc())
     df = get_fundamentals(q)
@@ -310,10 +310,10 @@ def get_stock_list(context):
     
     stock_list = list(df.code)[:100]  # 取前100小市值
     
-    # 行业过滤
+    # 行业过滤。
     stock_list = filter_by_industry(stock_list, g.hold_list)
     
-    # 如果启用指标，进一步筛选
+    # 如果启用指标，进一步筛选。
     if g.enable_indicator:
         filtered_list = []
         for stock in stock_list:

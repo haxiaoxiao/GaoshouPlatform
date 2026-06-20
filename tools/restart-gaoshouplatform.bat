@@ -3,7 +3,8 @@ setlocal EnableExtensions
 chcp 65001 >nul
 title GaoshouPlatform Restart
 
-set "ROOT=E:\Projects\GaoshouPlatform"
+for %%I in ("%~dp0..") do set "SCRIPT_ROOT=%%~fI"
+if defined GAOSHOU_ROOT (set "ROOT=%GAOSHOU_ROOT%") else (set "ROOT=%SCRIPT_ROOT%")
 set "STOP=%ROOT%\tools\stop-gaoshouplatform.bat"
 set "START=%ROOT%\tools\start-gaoshouplatform.bat"
 

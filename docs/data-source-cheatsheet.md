@@ -2,11 +2,11 @@
 
 本文记录 ID=43 小市值策略对齐聚宽过程中验证过的数据源经验。平台默认仍以 miniQMT/xtquant 为主数据源；Tushare 和 AKShare 用作补历史缺口、指数成分和退市股数据的兜底。
 
-Last updated: 2026-05-25.
+Last updated: 2026-06-20.
 
 Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。第一批接入 `adj_factor`、`moneyflow`、`ths_index`、`ths_member`、`block_moneyflow`、`stk_auction_replay`，统一落到本地 Parquet；新闻、公告、研报保留为受限补充源，默认不做全量抓取。
 
-当前默认运行方式是 `MARKET_DATA_BACKEND=parquet`：同步和补数仍以 miniQMT/xtquant、Tushare、Indevs/Tushare Replay 等数据源为入口，但回测、因子研究和 DataSkill 应优先读取本地 SQLite + Parquet/DuckDB。策略运行时不要反复访问外部数据源。
+当前默认运行方式是 `MARKET_DATA_BACKEND=parquet`：同步和补数仍以 miniQMT/xtquant、Tushare、Indevs/Tushare Replay、JQ 本地 Parquet 等数据源为入口，但回测、因子研究和 DataSkill 应优先读取本地 SQLite + Parquet/DuckDB。策略运行时不要反复访问外部数据源。
 
 ## 总体优先级
 
@@ -19,8 +19,9 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 | 指数日线 | miniQMT | Tushare `index_daily` | `000001.SH` 这类指数 QMT 可用；Tushare 指数接口也可用。 |
 | 指数历史成分 | Tushare `index_weight` | 手工快照 / 现有自选池临时降级 | 小市值指数成分必须 point-in-time，不能用当前 960 只代替。 |
 | 财务/股本/历史市值 | Tushare `daily_basic` | miniQMT 财务缓存 / AKShare 个股信息 | 退市股股本和市值用 Tushare 更完整。 |
-| 固定时间点分钟线 | Parquet/DuckDB 或 ClickHouse 已落库分钟线 | miniQMT 本地缓存 | 回测只读本地列式库；不要在策略运行时反复打 QMT。 |
+| 固定时间点分钟线 | Parquet/DuckDB 已落库分钟线 | miniQMT 本地缓存 | 回测只读本地列式库；不要在策略运行时反复打 QMT。 |
 | 完整历史 1 分钟线 | 本地 JQ 分钟文件 → Parquet `klines_minute` | miniQMT/Indevs 补缺口 | 已导入 2005-01-04 至 2026-05-15 全 A 分钟线，适合回测和 timer 抽点。 |
+| JQ 个股资金流 | 本地 Parquet `jq_money_flow_daily` | 后续清洗数据 | 日期字段统一用 `trade_date_1`，覆盖 2010-01-04 至 2026-04-17；不要用空的 `trade_date`。 |
 | 因子值缓存 | Parquet `factor_values` | 重新预计算 | 当前因子研究、Alpha101、TA-Lib 和小市值因子统一写入 Factor Value Store。 |
 
 ## miniQMT / xtquant
@@ -44,7 +45,7 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 - `download_history_data2` 是当前验证可真实落盘的主动下载入口；旧 `download_history_data` 对同一历史区间可能返回 `None` 但 DAT 文件不增长。分钟线网关应优先使用 `download_history_data2`，再兜底旧接口。
 - `get_market_data_ex(period='1m', start_time='YYYYMMDDHHMMSS', end_time='YYYYMMDDHHMMSS')` 对未缓存/服务端不下发的历史区间会返回空；`start_time='' + end_time + count` 只能回退本地已缓存切片，不能自动补齐 2021 年历史。
 - 批量补 timer 分钟线要按月或更小区间分片，并设置单票超时，避免一次请求多年数据时无法判断进度。
-- 对 timer 回测，先以 Parquet/ClickHouse 中 `(10:00,10:30,14:30,14:50)` 稀疏分钟点的覆盖率探测最早可跑日期。主动补数只能补 QMT 当前还能下发的缺口；完整 JQ 分钟 Parquet 已覆盖更长历史。
+- 对 timer 回测，先以 Parquet 中 `(10:00,10:30,14:30,14:50)` 稀疏分钟点的覆盖率探测最早可跑日期。主动补数只能补 QMT 当前还能下发的缺口；完整 JQ 分钟 Parquet 已覆盖更长历史。
 
 ### miniQMT 分钟线下载和读取流程
 
@@ -52,14 +53,14 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 
 1. 先用 `download_history_data2(stock_list, period='1m', start_time, end_time, callback, incrementally=True)` 主动补充历史分钟数据。
 2. 下载完成后优先用 `get_local_data(..., period='1m', data_dir=...)` 或平台封装读取本地数据，避免每次回测都打 QMT 服务端。
-3. 平台只抽取策略需要的固定时间点，例如 `10:00`、`10:30`、`14:30`、`14:50`，写入 Parquet `klines_minute_timer` 或 ClickHouse `klines_minute`。
-4. 回测阶段从 Parquet/ClickHouse 读 `bar_type="minute_timer"`，不直接读 QMT，不加载完整分钟线。
+3. 平台只抽取策略需要的固定时间点，例如 `10:00`、`10:30`、`14:30`、`14:50`，写入 Parquet `klines_minute_timer`。
+4. 回测阶段从 Parquet 读 `bar_type="minute_timer"`，不直接读 QMT，不加载完整分钟线。
 
 注意：
 
 - `data_dir` 应指向 miniQMT 配套的 `userdata_mini` 数据目录。用户本机手动下载目录可从 QMT 客户端配置或 `xtdata.data_dir` 确认。
 - 手动客户端能下载的区间，不代表脚本已经正确读取到本地文件；要分别验证“下载完成”和“本地读取返回行数”。
-- 对 960 只左右的中小综指动态成分池，稀疏 timer 数据量可控，适合先同步进 Parquet/ClickHouse 再回测。
+- 对 960 只左右的中小综指动态成分池，稀疏 timer 数据量可控，适合先同步进 Parquet 再回测。
 - 不建议在策略运行中按股票即时调用 QMT 拉分钟线；会导致回测不可复现、速度慢，也更难定位缺口。
 
 推荐检查：
@@ -150,6 +151,30 @@ $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版
 - 节假日小样本归档不能直接作为交易日使用，需用 `clean_minute_parquet_dates.py` 清洗。
 - 回测和 DataSkill 读取应通过 `get_market_data_store()` / `ParquetMarketDataStore`，不要直接拼接文件路径。
 
+## 本地 JQ 结构化 Parquet
+
+当前 BaiduSyncdisk 下已有一批 JQ 结构化历史数据，公共根目录：
+
+```text
+E:\Projects\data\BaiduSyncdisk\parquet
+```
+
+已登记到数据浏览器和系统摘要的数据集包括：
+
+| 数据集 | 日期字段 | 说明 |
+|---|---|---|
+| `jq_money_flow_daily` | `trade_date_1` | 个股资金流，`13,424,052` 行，覆盖 `2010-01-04` 至 `2026-04-17` |
+| `jq_financial_income` | `available_date` | JQ 利润表，后续用于 PIT 财务因子 |
+| `jq_financial_balance` | `available_date` | JQ 资产负债表 |
+| `jq_financial_cash_flow` | `available_date` | JQ 现金流量表 |
+| `jq_index_daily_bars` | `trade_date` | 指数日线 |
+| `jq_etf_daily_bars` | `trade_date` | ETF 日线 |
+| `jq_index_minute_bars` | `datetime` | 指数分钟线 |
+
+`jq_money_flow_daily` 的原始 `trade_date` 字段为空，来自 Tushare schema 污染，不得接入查询筛选、覆盖统计或因子计算。统一使用 `trade_date_1`，它由原始 JQ 老数据的 `date` 和新批次的 `time` 规范合并而来。
+
+已接入的资金流因子：`jq_moneyflow_net_amount_main`、`jq_moneyflow_net_pct_main`、`jq_moneyflow_net_amount_xl`、`jq_moneyflow_net_pct_xl`、`jq_moneyflow_net_amount_l`、`jq_moneyflow_net_pct_l`、`jq_moneyflow_net_mf_amount`。
+
 ## Tushare
 
 优势：
@@ -167,7 +192,7 @@ $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版
 
 注意事项：
 - 环境变量可能没有 `TUSHARE_TOKEN`/`TS_TOKEN`，但本机 `tushare.get_token()` 可能已有本地 token；脚本应按 `env -> ts.get_token()` 顺序读取。
-- `pro.daily` 股票日线的 `amount` 单位是千元，落到 ClickHouse `klines_daily.amount` 时应乘以 `1000`。
+- `pro.daily` 股票日线的 `amount` 单位是千元，落到平台 `klines_daily.amount` 时应乘以 `1000`。
 - `index_daily.amount` 通常也是千元口径，和现有 QMT 数据对齐时要检查单位。
 - `index_weight` 不是每天都有快照。策略应在调仓日用 `trade_date <= as_of` 的最近一次快照，而不是要求当天必须有成分。
 - `stock_basic` 默认只查在市股票；退市股要显式 `list_status='D'`。
@@ -216,8 +241,8 @@ $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版
 3. `bar_type` 选择 `minute_timer`。
 4. timer 时间从控制面板传入，例如 `10:00,10:30,14:30,14:50`。
 5. 先跑 timer 覆盖检查，确认最早可用日期。
-6. 对缺失区间先用 miniQMT 主动下载，再同步所需 timer 点到 Parquet/ClickHouse。
-7. 回测只从 Parquet/ClickHouse 读取数据。
+6. 对缺失区间先用 miniQMT 主动下载，再同步所需 timer 点到 Parquet。
+7. 回测只从 Parquet 读取数据。
 8. 若和聚宽结果差异大，按年度导出持仓、订单、日志，对比以下差异点：
    - 指数成分快照
    - 市值排序输入

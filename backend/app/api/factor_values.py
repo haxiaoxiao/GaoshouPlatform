@@ -38,6 +38,7 @@ from app.services.factor_value_store import (
     list_factor_groups,
 )
 from app.services.index_components import load_index_symbols
+from app.services.ml_score_factor_calculator import ML_SCORE_FACTOR_SPECS, precompute_ml_score_factors
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
 from app.services.ta_factor_calculator import precompute_ta_factors
@@ -152,8 +153,9 @@ _TA_FACTORS = set(TA_FACTOR_SPECS)
 _RESEARCH_FACTORS = set(RESEARCH_FACTOR_SPECS)
 _RELAY_FACTORS = set(RELAY_FACTOR_SPECS)
 _CN_PAPER_FACTORS = set(CN_PAPER_FACTOR_SPECS)
+_ML_SCORE_FACTORS = set(ML_SCORE_FACTOR_SPECS)
 _CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS | _RELAY_FACTORS | _CN_PAPER_FACTORS
-_SUPPORTED_PRECOMPUTE_FACTORS = _CORE_FACTORS | _HIGH_VOLUME_FACTORS | _CATALOG_FACTORS
+_SUPPORTED_PRECOMPUTE_FACTORS = _CORE_FACTORS | _HIGH_VOLUME_FACTORS | _CATALOG_FACTORS | _ML_SCORE_FACTORS
 
 
 @router.get("/definitions")
@@ -557,13 +559,14 @@ async def _execute_factor_bundle(
     research_names = [name for name in names if name in _RESEARCH_FACTORS]
     relay_names = [name for name in names if name in _RELAY_FACTORS]
     cn_paper_names = [name for name in names if name in _CN_PAPER_FACTORS]
+    ml_score_names = [name for name in names if name in _ML_SCORE_FACTORS]
     unknown = [name for name in names if name not in _SUPPORTED_PRECOMPUTE_FACTORS]
     if unknown:
         raise ValueError(f"Unsupported precompute factors: {unknown}")
 
     results: list[dict[str, Any]] = []
     updater = _progress_updater(task_id)
-    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names, relay_names, cn_paper_names]) or 1
+    total_steps = sum(bool(items) for items in [small_cap_names, ta_names, alpha_names, research_names, relay_names, cn_paper_names, ml_score_names]) or 1
     current_step = 0
 
     def wrap_progress(offset: int):
@@ -644,6 +647,16 @@ async def _execute_factor_bundle(
         results.append(await run_in_thread(
             precompute_cn_paper_factors,
             factor_names=cn_paper_names,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbol_list,
+            progress_callback=wrap_progress(current_step - 1),
+        ))
+    if ml_score_names:
+        current_step += 1
+        results.append(await run_in_thread(
+            precompute_ml_score_factors,
+            factor_names=ml_score_names,
             start_date=start_date,
             end_date=end_date,
             symbols=symbol_list,

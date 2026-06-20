@@ -1,6 +1,6 @@
 """因子评估服务测试"""
 from datetime import date
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import numpy as np
 import pandas as pd
@@ -10,49 +10,23 @@ from app.models.factor import BoardQuery, BoardRow
 from app.services.factor_evaluation import FactorEvaluationService
 
 
-def _make_fake_ohlcv(symbols, n_days=100):
-    """生成模拟 OHLCV 数据，与 ClickHouse execute() 返回格式一致"""
-    np.random.seed(42)
-    start = date(2024, 1, 2)
-    rows = []
-    for sym in symbols:
-        for i in range(n_days):
-            rows.append((
-                sym,
-                start,
-                10.0 + 0.01 * i,    # open
-                11.0 + 0.01 * i,    # high
-                9.0 + 0.01 * i,     # low
-                10.5 + 0.01 * i,    # close
-                1_000_000 + i * 100,  # volume
-                10_500_000.0 + i * 1000,  # amount
-                0.01 + 0.001 * i,   # turnover_rate
-            ))
-    return rows
-
-
-def _make_fake_close_data(symbols, n_days=100):
-    """生成模拟收盘价数据"""
-    np.random.seed(42)
-    start = date(2024, 1, 2)
-    rows = []
-    for sym in symbols:
-        for i in range(n_days):
-            rows.append((sym, start, 10.5 + 0.01 * i))
-    return rows
-
-
 @pytest.fixture
-def mock_ch_client():
-    """Mock ClickHouse 客户端 — 返回固定数据"""
+def fake_matrices():
+    """生成模拟因子矩阵和收益矩阵"""
     symbols = ["000001.SZ", "000002.SZ", "000003.SZ"]
-    ohlcv_rows = _make_fake_ohlcv(symbols, 100)
-    close_rows = _make_fake_close_data(symbols, 100)
-
-    mock_client = MagicMock()
-    # Return ohlcv for the factor matrix query, close for return matrix query
-    mock_client.execute.side_effect = [ohlcv_rows, close_rows]
-    return mock_client
+    dates = pd.date_range("2024-01-02", periods=100, freq="B")
+    rng = np.random.default_rng(42)
+    factor_matrix = pd.DataFrame(
+        rng.normal(size=(len(dates), len(symbols))),
+        index=dates,
+        columns=symbols,
+    )
+    return_matrix = pd.DataFrame(
+        rng.normal(scale=0.01, size=(len(dates), len(symbols))),
+        index=dates,
+        columns=symbols,
+    )
+    return factor_matrix, return_matrix
 
 
 @pytest.fixture
@@ -72,9 +46,11 @@ def mock_evaluate_expression():
 
 
 @pytest.mark.asyncio
-async def test_run_ic_analysis_structure(mock_ch_client, mock_evaluate_expression):
+async def test_run_ic_analysis_structure(fake_matrices, mock_evaluate_expression):
     """IC 分析返回结构完整性"""
-    with patch("app.services.factor_evaluation.get_ch_client", return_value=mock_ch_client):
+    factor_matrix, return_matrix = fake_matrices
+    with patch.object(FactorEvaluationService, "_load_factor_matrix", return_value=factor_matrix), \
+         patch.object(FactorEvaluationService, "_load_return_matrix", return_value=return_matrix):
         service = FactorEvaluationService()
         result = await service.run_ic_analysis(
             expression="Mean($close, 5)",
@@ -109,12 +85,10 @@ async def test_run_ic_analysis_structure(mock_ch_client, mock_evaluate_expressio
 
 
 @pytest.mark.asyncio
-async def test_run_ic_analysis_empty_data(mock_ch_client):
+async def test_run_ic_analysis_empty_data():
     """空数据时 IC 分析返回默认值"""
-    mock_empty = MagicMock()
-    mock_empty.execute.return_value = []
-
-    with patch("app.services.factor_evaluation.get_ch_client", return_value=mock_empty):
+    with patch.object(FactorEvaluationService, "_load_factor_matrix", return_value=pd.DataFrame()), \
+         patch.object(FactorEvaluationService, "_load_return_matrix", return_value=pd.DataFrame()):
         service = FactorEvaluationService()
         result = await service.run_ic_analysis(
             expression="Mean($close, 5)",
@@ -132,7 +106,7 @@ async def test_run_ic_analysis_empty_data(mock_ch_client):
 
 
 @pytest.mark.asyncio
-async def test_run_quantile_backtest_delegates(mock_ch_client):
+async def test_run_quantile_backtest_delegates():
     """分层回测委托给 BacktestRunner"""
     from app.backtest.config import BacktestResult
 
@@ -147,8 +121,7 @@ async def test_run_quantile_backtest_delegates(mock_ch_client):
     mock_runner = AsyncMock()
     mock_runner.run.return_value = fake_result
 
-    with patch("app.services.factor_evaluation.get_ch_client", return_value=mock_ch_client), \
-         patch("app.services.factor_evaluation.get_backtest_runner", return_value=mock_runner):
+    with patch("app.services.factor_evaluation.get_backtest_runner", return_value=mock_runner):
         service = FactorEvaluationService()
         result = await service.run_quantile_backtest(
             expression="Mean($close, 5)",
@@ -176,7 +149,7 @@ async def test_run_quantile_backtest_delegates(mock_ch_client):
 
 
 @pytest.mark.asyncio
-async def test_run_full_report_merges(mock_ch_client):
+async def test_run_full_report_merges(fake_matrices):
     """完整报告合并 IC 分析和分层回测结果"""
     from app.backtest.config import BacktestResult
 
@@ -190,7 +163,9 @@ async def test_run_full_report_merges(mock_ch_client):
     mock_runner = AsyncMock()
     mock_runner.run.return_value = fake_result
 
-    with patch("app.services.factor_evaluation.get_ch_client", return_value=mock_ch_client), \
+    factor_matrix, return_matrix = fake_matrices
+    with patch.object(FactorEvaluationService, "_load_factor_matrix", return_value=factor_matrix), \
+         patch.object(FactorEvaluationService, "_load_return_matrix", return_value=return_matrix), \
          patch("app.services.factor_evaluation.get_backtest_runner", return_value=mock_runner), \
          patch("app.services.factor_evaluation.evaluate_expression") as mock_eval_expr:
         # Mock evaluate_expression to return known data

@@ -94,31 +94,13 @@ class PriceToMA250W(IndicatorBase):
     unit = "x"
 
     def compute(self, context: IndicatorContext) -> float | None:
-        from app.db.clickhouse import get_ch_client
-        ch = get_ch_client()
         try:
-            close_result = ch.execute(
-                """SELECT close FROM klines_daily
-                WHERE symbol = %(symbol)s
-                ORDER BY trade_date DESC LIMIT 1""",
-                {"symbol": context.symbol}
-            )
-            if not close_result or not close_result[0][0]:
+            closes = [float(item.get("close") or 0) for item in context.kline_data[:250]]
+            closes = [value for value in closes if value > 0]
+            if len(closes) < 20:
                 return None
-            close = float(close_result[0][0])
-
-            ma_result = ch.execute(
-                """SELECT avg(close) FROM (
-                    SELECT close FROM klines_weekly
-                    WHERE symbol = %(symbol)s
-                    ORDER BY trade_date DESC
-                    LIMIT 250
-                )""",
-                {"symbol": context.symbol}
-            )
-            if not ma_result or not ma_result[0] or not ma_result[0][0]:
-                return None
-            ma250 = float(ma_result[0][0])
+            close = closes[0]
+            ma250 = sum(closes) / len(closes)
             if ma250 <= 0:
                 return None
             return round(close / ma250, 4)
@@ -140,22 +122,16 @@ class DividendYield(IndicatorBase):
     unit = "%"
 
     def compute(self, context: IndicatorContext) -> float | None:
-        from app.db.clickhouse import get_ch_client
-
-        ch = get_ch_client()
         try:
-            result = ch.execute(
-                """
-                SELECT value FROM stock_indicators
-                WHERE symbol = %(symbol)s
-                AND indicator_name = 'dividend_yield'
-                ORDER BY trade_date DESC
-                LIMIT 1
-                """,
-                {"symbol": context.symbol}
-            )
-            if result and result[0]:
-                return result[0][0]
+            from app.data_stores import get_indicator_store
+
+            store = get_indicator_store()
+            latest_date = store.latest_trade_date(["dividend_yield"], [context.symbol])
+            if latest_date is None:
+                return None
+            df = store.load_cross_section(["dividend_yield"], latest_date, [context.symbol])
+            if not df.empty:
+                return float(df["value"].iloc[0])
         except Exception:
             pass
         return None

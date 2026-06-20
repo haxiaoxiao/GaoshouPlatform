@@ -7,12 +7,18 @@ from app.compute.operators.base import Operator
 
 
 class OperatorRegistry:
-    """算子注册表"""
+    """算子注册表.
+
+    The registry is the single source of truth for expression parsing and UI
+    introspection, so module import side effects must populate it early.
+    """
 
     _operators: dict[str, Operator] = {}
 
     @classmethod
     def register(cls, op: Operator) -> Operator:
+        # Later imports are allowed to replace earlier entries so operator
+        # definitions can evolve without breaking module loading order.
         """注册一个算子（同名则覆盖）"""
         cls._operators[op.name] = op
         return op
@@ -44,6 +50,8 @@ class OperatorRegistry:
 
     @classmethod
     def to_api_list(cls) -> list[dict[str, Any]]:
+        # Keep API payloads flat and serializable; the frontend only needs a
+        # compact catalog, not the operator objects themselves.
         """返回为前端 API 准备的数据格式"""
         return [
             {

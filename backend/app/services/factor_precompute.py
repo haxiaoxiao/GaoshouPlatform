@@ -283,6 +283,8 @@ def _ema(values: Sequence[float], period: int) -> np.ndarray:
 
 
 def _compute_v4gv_series(close: Sequence[float], high: Sequence[float], low: Sequence[float]) -> tuple[np.ndarray, np.ndarray]:
+    # V4GV is treated as a technical leg inside TSMF, so the precompute keeps
+    # the exact same daily OHLC formulation used by the strategy code.
     close_arr = _fill_nan(close)
     high_arr = _fill_nan(high)
     low_arr = _fill_nan(low)
@@ -563,6 +565,8 @@ def precompute_small_cap_core_features(
                     add_feature_row({**common, "factor_name": "v4gv_signal", "params_hash": factor_params_hash({}), "value": signal_value})
                 add_feature_row({**common, "factor_name": "macd_positive", "params_hash": factor_params_hash({}), "value": macd_value})
                 if v4_value is not None and signal_value is not None:
+                    # The technical buy signal is the positive regime gate;
+                    # the overheat penalty adds stretch/crowding pressure on top.
                     buy_signal = 1.0 if v4_value > signal_value and v4_value > 0 and macd_value > 0 else 0.0
                     dead_cross = 1.0 if v4_value < signal_value and signal_value > 0 and macd_value <= 0 else 0.0
                     stretch = max(0.0, v4_value - signal_value) / max(1.0, abs(signal_value))

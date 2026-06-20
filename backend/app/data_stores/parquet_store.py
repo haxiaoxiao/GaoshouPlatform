@@ -36,6 +36,17 @@ _DATASET_KEY_COLS = {
     "financial_income": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
     "financial_balancesheet": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
     "financial_cashflow": ["symbol", "end_date", "report_type", "comp_type", "f_ann_date"],
+    "jq_money_flow_daily": ["symbol", "trade_date_1"],
+    "jq_financial_income": ["symbol", "statDate", "pubDate", "available_date"],
+    "jq_financial_balance": ["symbol", "statDate", "pubDate", "available_date"],
+    "jq_financial_cash_flow": ["symbol", "statDate", "pubDate", "available_date"],
+    "jq_etf_daily_bars": ["symbol", "trade_date"],
+    "jq_index_daily_bars": ["symbol", "trade_date"],
+    "jq_index_minute_bars": ["symbol", "datetime"],
+    "jq_stock_static_snapshot": ["symbol", "snapshot_date"],
+    "tushare_margin_detail": ["symbol", "trade_date"],
+    "tushare_limit_list_d": ["symbol", "trade_date"],
+    "tushare_stk_limit": ["symbol", "trade_date"],
 }
 
 
@@ -58,7 +69,9 @@ class ParquetMarketDataStore(MarketDataStore):
 
     def __init__(self, data_dir: str | None = None):
         from app.core.config import settings
+        from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 
+        apply_dev_data_mode_to_settings()
         self._data_dir = Path(data_dir or settings.parquet_data_dir)
 
     # ------------------------------------------------------------------

@@ -1,4 +1,12 @@
-"""Technology-mainline small-cap multi-factor AKQuant preset."""
+"""科技主线小市值多因子 AKQuant 预设。
+
+这份文件负责把通用多因子模板改造成“科技主线 + 小市值 + 研报因子”
+的标准研究版本。它本身不承载交易逻辑，而是定义：
+1. 主题行业和关键词范围；
+2. 采用哪些研报因子与技术因子；
+3. 采用什么节奏调仓；
+4. 如何在回测和实盘信号里保持一致。
+"""
 
 from __future__ import annotations
 
@@ -13,6 +21,9 @@ from app.backtest.strategies.multi_factor_akquant import (
 from app.services.us_market import default_us_market_file
 
 
+# 这个预设保留轻度小市值倾向，但排序主力交给研报类质量、成长、
+# 风格轮动和技术信号。生成出来的策略代码会直接出现在回测列表里，
+# 所以这里的注释本身也是策略说明的一部分。
 TECH_SMALL_CAP_FACTOR_CONFIGS = [
     {
         "name": "market_cap",
@@ -84,6 +95,8 @@ TECH_SMALL_CAP_FACTOR_CONFIGS = [
 _TECH_SMALL_CAP_FACTOR_CONFIGS = "FACTOR_CONFIGS = " + pformat(TECH_SMALL_CAP_FACTOR_CONFIGS, sort_dicts=False)
 
 
+# 主题主线的核心行业：科技和先进制造。显式列出行业有两个好处：
+# 一是便于审计，二是后续做版本对比时能一眼看出主题边界有没有变。
 _TECH_INCLUDE_INDUSTRIES = [
     "电子",
     "计算机",
@@ -94,6 +107,8 @@ _TECH_INCLUDE_INDUSTRIES = [
     "电力设备",
 ]
 
+# 概念关键词用来捕捉那些无法完整映射到行业字段的主题标签。
+# 这是一个“宽松覆盖层”，用于在行业标签不完整时仍尽量贴住科技主线。
 _TECH_INCLUDE_KEYWORDS = [
     "半导体",
     "芯片",
@@ -121,6 +136,8 @@ _TECH_INCLUDE_KEYWORDS = [
     "储能",
 ]
 
+# 显式排除传统周期和防御板块，避免科技主线策略在行业标签模糊时
+# 不小心滑回旧经济方向。
 _OLD_ECONOMY_EXCLUDES = [
     "银行",
     "非银金融",
@@ -142,6 +159,8 @@ _OLD_ECONOMY_EXCLUDES = [
     "家用电器",
 ]
 
+# 可交易性过滤与通用模板保持一致，保证导出的预设仍然能独立阅读、
+# 独立运行，不依赖隐式外部规则。
 TECH_SMALL_CAP_FILTER_FACTORS = [
     {"name": "is_st", "operator": ">=", "value": 0.5},
     {"name": "is_paused", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
@@ -149,6 +168,8 @@ TECH_SMALL_CAP_FILTER_FACTORS = [
     {"name": "is_limit_down", "operator": ">=", "value": 0.5, "as_of_time": "10:30", "params": {"time": "10:30"}},
 ]
 
+# 这个预设依赖基础小市值核心、研报因子组和风格轮动因子组。
+# 也就是说，它不是纯技术面策略，而是“主题 + 基础面 + 技术面”的融合版。
 TECH_SMALL_CAP_REQUIRED_FACTOR_GROUPS = [
     "small_cap_v4_core",
     "cn_paper_implemented",
@@ -174,6 +195,112 @@ def _replace_assignment(source: str, name: str, value: object) -> str:
     return result
 
 
+def _localize_generated_code(source: str) -> str:
+    """把生成出来的策略脚本注释统一成中文，方便前端和数据库保持一致口径。"""
+    replacements = [
+        (
+            "# Generic multi-factor template: keep the execution shell simple, and let\n"
+            "# factor definitions plus portfolio/risk parameters drive most behavior.\n",
+            "# 通用多因子模板：执行外壳保持简洁，把主要行为交给因子定义、组合参数和风控参数来决定。\n",
+        ),
+        (
+            "# Core size tilt stays dominant in the generic preset, then the other\n"
+            "# factors can be swapped or extended without rewriting execution.\n",
+            "# 通用预设里市值偏好仍是主骨架，其它因子可以替换或扩展，而不用重写执行流程。\n",
+        ),
+        (
+            "# Hard tradeability filters remove ST, suspended, and limit-locked\n"
+            "# names before the strategy spends time scoring them.\n",
+            "# 先用硬性可交易过滤把 ST、停牌和涨跌停锁死的标的剔除，再让策略去打分。\n",
+        ),
+        (
+            "# Optional static universe. Leave empty to use the symbols passed by the\n"
+            "# platform/AKQuant, or the symbols discovered from bars.\n",
+            "# 可选静态股票池：留空时使用平台或 AKQuant 传入的标的，或者使用 bar 自动发现的标的。\n",
+        ),
+        (
+            "# Default sizing/rebalance settings are intentionally conservative so a\n"
+            "# newly cloned preset behaves safely before custom tuning.\n",
+            "# 默认仓位和调仓参数刻意设得保守，这样新克隆的预设在自定义调整前也能相对稳妥地运行。\n",
+        ),
+        (
+            "# Risk and fees are intentionally controlled by the platform backtest config:\n"
+            "# risk_config / max_positions / volume_limit_pct, commission_rate,\n"
+            "# stamp_tax_rate, transfer_fee_rate, min_commission, slippage.\n",
+            "# 风控和费用统一交给平台回测配置控制：risk_config、max_positions、volume_limit_pct、commission_rate、stamp_tax_rate、transfer_fee_rate、min_commission 和 slippage 都应由外层面板决定，不要在策略里硬编码。\n",
+        ),
+        (
+            "# Parameter hydration keeps the saved strategy asset self-contained:\n"
+            "# a database copy can run on its own without preset helper imports.\n",
+            "# 参数注入让保存后的策略文件保持自包含：即使只从数据库拷贝一份，也能独立运行，不依赖预设辅助模块。\n",
+        ),
+        (
+            "# Startup wires the factor pipeline and timers only; actual stock\n"
+            "# selection waits for bars so the script works on daily/minute_timer feeds.\n",
+            "# 启动阶段只初始化因子流水线和定时器；真正的选股等到 bar 到来再做，这样日线和 minute_timer 两种数据源都能工作。\n",
+        ),
+        (
+            "# The bar handler continuously refreshes price state, then delegates\n"
+            "# cross-sectional decisions to rebalance and risk helper functions.\n",
+            "# bar 处理函数持续刷新价格状态，然后把截面决策交给调仓和风控辅助函数。\n",
+        ),
+        (
+            "# Rebalance builds the active universe for the day, scores it, then\n"
+            "# turns the ranked names into target holdings under current risk rules.\n",
+            "# 调仓阶段先构建当日可交易股票池，再完成打分排序，最后在当前风控规则下把排名结果转换成目标持仓。\n",
+        ),
+        (
+            "# Execution prefers engine-native target-weight rebalance; the manual\n"
+            "# lot-based path exists as a compatibility fallback for lean adapters.\n",
+            "# 执行时优先使用引擎原生的目标权重调仓接口；手工按手数计算的路径只是给能力较弱的适配器准备的兼容兜底。\n",
+        ),
+        (
+            "# Portfolio-level drawdown checks run first so a broad de-risk event\n"
+            "# can flatten exposure before the code drills into single-name exits.\n",
+            "# 组合级回撤检查优先执行，这样一旦需要整体降风险，就能先把整体敞口压平，再进入单票退出逻辑。\n",
+        ),
+        (
+            "# Single-name risk combines hard stop, trailing stop, take-profit, and\n"
+            "# abnormal-volume exits using locally tracked cost/peak state.\n",
+            "# 单票风控把硬止损、移动止盈、止盈和异常放量退出合在一起，并使用本地维护的成本价和峰值价状态来判断。\n",
+        ),
+        (
+            "# Daily bars do not have intraday timers in some feeds. Once we have a\n"
+            "# usable cross-section for the date, run one rebalance for that date.\n",
+            "# 某些日线数据源不会显式提供盘中 timer。只要当天的截面已经足够完整，就在 bar 驱动下补做一次当天调仓。\n",
+        ),
+        (
+            "# Tradeability gates are applied before scoring so the selector avoids\n"
+            "# obvious non-tradable names at the time of rebalance.\n",
+            "# 在打分前先套可交易门槛，这样调仓时就不会把明显不可交易的标的放进候选池。\n",
+        ),
+        (
+            "# The preset still keeps a small-cap tilt, but paper-derived quality and\n"
+            "# rotation factors do most of the ranking work on the tech mainline.\n",
+            "# 这个预设仍保留轻度小市值倾向，但真正负责排序的是研报派生的质量、成长和轮动因子。\n",
+        ),
+        (
+            "# This preset is intentionally more concentrated and slower-moving than\n"
+            "# the generic template because it trades a themed, higher-conviction book.\n",
+            "# 这个预设刻意比通用模板更集中、换手更慢，因为它交易的是主题更明确、确定性更高的组合。\n",
+        ),
+        (
+            "# Risk and fees are intentionally controlled by the platform backtest config:\n"
+            "# risk_config / max_positions / volume_limit_pct, commission_rate,\n"
+            "# stamp_tax_rate, transfer_fee_rate, min_commission, slippage.\n",
+            "# 风控和费用统一由平台回测配置控制：risk_config、max_positions、volume_limit_pct、commission_rate、stamp_tax_rate、transfer_fee_rate、min_commission 和 slippage 都应放在外层配置里管理。\n",
+        ),
+        (
+            "# The preset still keeps a small-cap tilt, but paper-derived quality and\n"
+            "# rotation factors do most of the ranking work on the tech mainline.\n",
+            "# 这个预设仍保留轻度小市值倾向，但排序主力交给研报类质量、成长、风格轮动和技术因子。\n",
+        ),
+    ]
+    for old, new in replacements:
+        source = source.replace(old, new)
+    return source
+
+
 TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment_block(
     MULTI_FACTOR_STRATEGY_CODE,
     "FACTOR_CONFIGS",
@@ -184,6 +311,8 @@ TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment_block(
     "FILTER_FACTORS",
     "FILTER_FACTORS = " + pformat(TECH_SMALL_CAP_FILTER_FACTORS, sort_dicts=False),
 )
+# 这个预设刻意做得更集中、换手更慢，因为科技主线策略更看重中期确定性，
+# 不是通用模板那种“每天都能换仓”的风格。
 for _name, _value in {
     "TOP_N": 20,
     "MIN_CANDIDATES": 25,
@@ -217,7 +346,18 @@ for _name, _value in {
 }.items():
     TECH_SMALL_CAP_STRATEGY_CODE = _replace_assignment(TECH_SMALL_CAP_STRATEGY_CODE, _name, _value)
 
+TECH_SMALL_CAP_STRATEGY_CODE = _localize_generated_code(TECH_SMALL_CAP_STRATEGY_CODE)
 
+TECH_SMALL_CAP_STRATEGY_CODE = (
+    "# TSMF 预设：科技主线小市值多因子策略。\n"
+    "# 组合特点：周频调仓，盘中用 minute_timer 做止损、追踪止损和异常放量风控。\n"
+    "# 适用场景：研究侧想要一条主题明确、风控钩子固定、便于和实盘节奏对齐的 A 股科技小市值组合。\n"
+    + TECH_SMALL_CAP_STRATEGY_CODE
+)
+
+
+# 让导出预设、生成代码、前端展示和保存配置描述同一套行为，避免用户在
+# 列表里看到的是一个版本，实际执行的却是另一个版本。
 DEFAULT_TECH_SMALL_CAP_PARAMS = {
     **DEFAULT_MULTI_FACTOR_PARAMS,
     "top_n": 20,
@@ -275,8 +415,8 @@ DEFAULT_TECH_SMALL_CAP_PRODUCTION_VARIANT = "entry_filter_relaxed_risk"
 
 TECH_SMALL_CAP_VARIANTS = {
     "us_entry_filter_combined": {
-        "name": "科技小市值 TSMF - 美股入场过滤",
-        "description": "QQQ/SMH/SOXX/NVDA 前一美股交易日负冲击时，仅阻止次日新买和加仓，不主动降低老仓。",
+    "name": "科技小市值 TSMF - 美股入场过滤",
+    "description": "美股隔夜风险偏弱时，只限制次日新开仓和加仓，不主动削减既有持仓。",
         "params": {
             "strategy_variant": "us_entry_filter_combined",
             "us_overnight_entry_filter": "combined_downside",
@@ -291,8 +431,8 @@ TECH_SMALL_CAP_VARIANTS = {
         },
     },
     "entry_filter_relaxed_risk": {
-        "name": "科技小市值 TSMF - 入场过滤放松风控",
-        "description": "当前最优候选：美股隔夜入场过滤 + 更宽的个股止损、移动止盈、组合回撤和放量阈值。",
+    "name": "科技小市值 TSMF - 入场过滤放松风控",
+    "description": "当前稳健默认版本：美股隔夜入场过滤叠加更宽松的个股止损、移动止盈、组合回撤和放量阈值。",
         "params": {
             "strategy_variant": "entry_filter_relaxed_risk",
             "us_overnight_entry_filter": "combined_downside",

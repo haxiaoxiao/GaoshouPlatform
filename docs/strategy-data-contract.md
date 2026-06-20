@@ -30,7 +30,7 @@ AKQuant strategy scripts / UserScript strategies
 ## 策略禁止直读
 
 - 不直接 `read_parquet` 或硬编码 `E:/Projects/Data/parquet`。
-- 不直接查询 DuckDB 或 ClickHouse。
+- 不直接查询 DuckDB 或底层存储。
 - 不直接读取 `klines_minute_cum_timer` 这类派生行情缓存。
 - 不把 `klines_minute_timer` 当作因子来源；timer bar 只能通过 AKQuant data feed 进入撮合/事件循环。
 

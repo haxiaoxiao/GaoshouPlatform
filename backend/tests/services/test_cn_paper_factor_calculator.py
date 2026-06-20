@@ -59,17 +59,30 @@ def _paper_daily_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     financial_rows: list[dict[str, object]] = []
     for symbol_index, symbol in enumerate(symbols, start=1):
         for day_index, trade_date in enumerate(dates, start=1):
-            close = 10 + symbol_index * 2 + day_index * (0.02 + symbol_index * 0.002)
+            close = (
+                10
+                + symbol_index * 2
+                + day_index * (0.02 + symbol_index * 0.002)
+                + 1.6 * np.sin(day_index / 8)
+                + 0.6 * np.sin(day_index / (5 + symbol_index))
+                + 0.25 * np.cos(day_index / 11 + symbol_index)
+            )
+            open_price = close * (1 + 0.006 * np.sin(day_index / 3 + symbol_index))
+            high = max(open_price, close) * (1.01 + 0.002 * (day_index % 4))
+            low = min(open_price, close) * (0.99 - 0.001 * (day_index % 3))
+            prev_base = 10 + symbol_index * 2 + max(day_index - 1, 1) * (0.02 + symbol_index * 0.002)
             daily_rows.append({
                 "symbol": symbol,
                 "trade_date": trade_date,
-                "open": close * (1 + 0.001 * ((day_index % 5) - 2)),
-                "high": close * 1.02,
-                "low": close * 0.98,
+                "open": open_price,
+                "high": high,
+                "low": low,
                 "close": close,
                 "volume": 1000 + symbol_index * 120 + day_index * (3 + symbol_index),
                 "amount": close * (1000 + day_index * 3) * 100,
                 "turnover_rate": 1.0 + symbol_index * 0.15 + (day_index % 20) * 0.01,
+                "up_limit": prev_base * 1.10,
+                "down_limit": prev_base * 0.90,
             })
             basic_rows.append({
                 "symbol": symbol,
@@ -144,6 +157,11 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
     daily, daily_basic, financial = _paper_daily_inputs()
     monkeypatch.setattr(module, "_load_daily", lambda *args, **kwargs: daily)
     monkeypatch.setattr(module, "_load_daily_basic", lambda *args, **kwargs: daily_basic)
+    monkeypatch.setattr(
+        module,
+        "_load_limit_prices",
+        lambda *args, **kwargs: daily[["symbol", "trade_date", "up_limit", "down_limit"]],
+    )
     monkeypatch.setattr(module, "_load_financial", lambda *args, **kwargs: financial)
     monkeypatch.setattr(
         module,
@@ -175,6 +193,23 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
             "paper_industry_momentum_20d",
             "paper_defensive_quality_lowvol",
             "paper_asset_allocation_proxy",
+            "semibeta_downside_avoid_252",
+            "semibeta_upside_capture_252",
+            "balance_sheet_quality_value_pit",
+            "asset_backed_value_proxy_pit",
+            "growth_duration_proxy_pit",
+            "garp_duration_proxy_pit",
+            "elasticity_amount_resilience_20d",
+            "jump_intraday_tail_20d",
+            "limit_ecology_quality_combo",
+            "low_beta_252",
+            "overnight_momentum_20",
+            "amihud_low_impact_20",
+            "low_max_return_20",
+            "low_idio_vol_60",
+            "low_downside_vol_60",
+            "return_autocorr_20",
+            "momentum_120_skip20",
         ],
         start_date=date(2024, 12, 2),
         end_date=date(2025, 2, 21),
@@ -192,6 +227,11 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
     assert result["rows"]["paper_industry_momentum_20d"] > 0
     assert result["rows"]["paper_defensive_quality_lowvol"] > 0
     assert result["rows"]["paper_asset_allocation_proxy"] > 0
+    assert result["rows"]["semibeta_downside_avoid_252"] > 0
+    assert result["rows"]["balance_sheet_quality_value_pit"] > 0
+    assert result["rows"]["elasticity_amount_resilience_20d"] > 0
+    assert result["rows"]["limit_ecology_quality_combo"] > 0
+    assert result["rows"]["low_idio_vol_60"] > 0
     assert set(store.frame["factor_name"]).issuperset({
         "paper_composite_value",
         "paper_growth_quality_score",
@@ -199,13 +239,17 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
         "paper_high_low_volume_event",
         "paper_size_rotation_score",
         "paper_industry_momentum_20d",
+        "semibeta_upside_capture_252",
+        "growth_duration_proxy_pit",
+        "limit_ecology_quality_combo",
+        "momentum_120_skip20",
     })
     assert store.frame["value"].replace([np.inf, -np.inf], np.nan).notna().all()
 
 
 def test_precompute_cn_paper_minute_factors(monkeypatch) -> None:
     minute_rows: list[dict[str, object]] = []
-    days = pd.date_range("2024-01-02", periods=8, freq="B")
+    days = pd.date_range("2024-01-02", periods=18, freq="B")
     for symbol in ["000001.SZ", "000002.SZ"]:
         for day_index, trade_day in enumerate(days, start=1):
             for minute_index, stamp in enumerate(pd.date_range(f"{trade_day.date()} 09:31", periods=40, freq="min"), start=1):
@@ -225,13 +269,20 @@ def test_precompute_cn_paper_minute_factors(monkeypatch) -> None:
     store = DummyFactorStore()
 
     result = module.precompute_cn_paper_factors(
-        factor_names=["paper_trend_fund_vwap_ratio", "paper_trend_fund_support"],
-        start_date=date(2024, 1, 9),
-        end_date=date(2024, 1, 11),
+        factor_names=["paper_trend_fund_vwap_ratio", "paper_trend_fund_support", "trend_support", "intraday_shape_composite"],
+        start_date=date(2024, 1, 22),
+        end_date=date(2024, 1, 24),
         symbols=["000001.SZ", "000002.SZ"],
         store=store,
     )
 
     assert result["rows"]["paper_trend_fund_vwap_ratio"] > 0
     assert result["rows"]["paper_trend_fund_support"] > 0
-    assert set(store.frame["factor_name"]) == {"paper_trend_fund_vwap_ratio", "paper_trend_fund_support"}
+    assert result["rows"]["trend_support"] > 0
+    assert result["rows"]["intraday_shape_composite"] > 0
+    assert set(store.frame["factor_name"]).issuperset({
+        "paper_trend_fund_vwap_ratio",
+        "paper_trend_fund_support",
+        "trend_support",
+        "intraday_shape_composite",
+    })

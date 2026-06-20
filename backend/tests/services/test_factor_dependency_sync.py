@@ -13,6 +13,9 @@ def test_cn_paper_factor_names_are_supported_for_prepare() -> None:
     assert "tsmf_overheat_penalty" in module.SUPPORTED_PRECOMPUTE_FACTORS
     assert "avoid_high_volume_ratio" in module.SUPPORTED_PRECOMPUTE_FACTORS
     assert "tsmf_recent_effective_score" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "semibeta_downside_avoid_252" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "limit_ecology_quality_combo" in module.SUPPORTED_PRECOMPUTE_FACTORS
+    assert "trend_support" in module.SUPPORTED_PRECOMPUTE_FACTORS
 
 
 def test_cn_paper_minute_dependency_builds_full_minute_sync_step(monkeypatch) -> None:
@@ -74,3 +77,34 @@ def test_cn_paper_fundamental_dependencies_build_data_sync_steps(monkeypatch) ->
     assert plan is not None
     assert [step["type"] for step in plan["steps"]] == ["tushare_daily", "financial_data"]
     assert plan["steps"][0]["datasets"] == ["stock_daily_basic"]
+
+
+def test_independent_limit_ecology_dependency_builds_limit_sync(monkeypatch) -> None:
+    monkeypatch.setattr(module, "_latest_market_date", lambda dataset, **kwargs: "2024-02-01")
+    monkeypatch.setattr(module, "_latest_sqlite_date", lambda table, column: None)
+
+    gaps = module._build_coverage_gaps(
+        factor_names=["limit_ecology_quality_combo"],
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 2, 1),
+        index_symbol=None,
+        params={},
+    )
+
+    dependencies = {item["dependency"] for item in gaps}
+    assert dependencies == {"stock_limit_prices"}
+    plan = module._build_sync_plan(
+        coverage_gaps=gaps,
+        start_date=date(2024, 1, 1),
+        end_date=date(2024, 2, 1),
+        symbols=["000001.SZ"],
+        index_symbol=None,
+    )
+
+    assert plan is not None
+    assert plan["steps"] == [{
+        "type": "tushare_daily",
+        "start_date": "2024-01-01",
+        "end_date": "2024-02-01",
+        "datasets": ["stock_limit_prices"],
+    }]

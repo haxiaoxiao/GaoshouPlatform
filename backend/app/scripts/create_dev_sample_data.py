@@ -628,7 +628,6 @@ def _write_host_env(target_data_dir: Path) -> Path:
                 f"PARQUET_DATA_DIR={parquet_path}",
                 f"DATABASE_URL=sqlite+aiosqlite:///{sqlite_path}",
                 "DUCKDB_PATH=:memory:",
-                "CLICKHOUSE_ENABLED=false",
                 "ENABLE_SYNC_SCHEDULER=false",
                 "GRID_TRADING_ENABLE_ORDER_SUBMIT=false",
                 "",
@@ -824,7 +823,7 @@ def create_sample(args: argparse.Namespace) -> dict[str, object]:
         "host_env": str(env_path.resolve()) if env_path else None,
         "safety": {
             "source_sqlite_mode": "read-only",
-            "clickhouse_enabled": False,
+            "market_data_backend": "parquet",
             "target_isolated": True,
         },
     }

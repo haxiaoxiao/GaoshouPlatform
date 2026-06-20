@@ -25,7 +25,6 @@ if "%GAOSHOU_SKIP_OPTIONAL_CHECKS%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 if "%GAOSHOU_SKIP_DOCKER%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 
 set "MARKET_DATA_BACKEND=parquet"
-set "CLICKHOUSE_ENABLED=false"
 set "REDIS_PORT=16379"
 set "QMT_ACCOUNT_ID="
 set "QMT_TRADER_PATH="
@@ -35,7 +34,6 @@ if exist "%ENV_FILE%" (
     set "K=%%a"
     set "V=%%b"
     if /i "!K!"=="MARKET_DATA_BACKEND" set "MARKET_DATA_BACKEND=!V!"
-    if /i "!K!"=="CLICKHOUSE_ENABLED" set "CLICKHOUSE_ENABLED=!V!"
     if /i "!K!"=="REDIS_PORT" set "REDIS_PORT=!V!"
     if /i "!K!"=="QMT_ACCOUNT_ID" set "QMT_ACCOUNT_ID=!V!"
     if /i "!K!"=="QMT_TRADER_PATH" set "QMT_TRADER_PATH=!V!"
@@ -63,7 +61,7 @@ echo Env file:  %ENV_FILE%
 echo Backend:   http://%BACKEND_HOST%:%BACKEND_PORT%
 echo Sync:      http://%SYNC_HOST%:%SYNC_PORT%
 echo Frontend:  %FRONTEND_URL%
-echo Data mode: %MARKET_DATA_BACKEND%  ClickHouse=%CLICKHOUSE_ENABLED%
+echo Data mode: %MARKET_DATA_BACKEND%  storage=Parquet/DuckDB
 echo miniQMT:   account %QMT_ACCOUNT_STATUS%  order_submit=%GRID_TRADING_ENABLE_ORDER_SUBMIT%
 echo.
 
@@ -115,34 +113,11 @@ if "%SKIP_OPTIONAL_CHECKS%"=="1" (
   )
 )
 
-echo [3/7] ClickHouse handling...
-set "NEED_CLICKHOUSE=0"
-if /i "%MARKET_DATA_BACKEND%"=="clickhouse" set "NEED_CLICKHOUSE=1"
-if /i "%CLICKHOUSE_ENABLED%"=="true" set "NEED_CLICKHOUSE=1"
-if "%SKIP_OPTIONAL_CHECKS%"=="1" (
-  if "%NEED_CLICKHOUSE%"=="1" (
-    echo       WARN: optional Docker checks skipped, but ClickHouse appears enabled.
-  ) else (
-    echo       SKIP: optional ClickHouse/Docker checks disabled for this startup.
-  )
-) else (
-  if "%NEED_CLICKHOUSE%"=="1" (
-    where docker >nul 2>&1
-    if errorlevel 1 (
-      echo       WARN: Docker not found. ClickHouse cannot be started.
-    ) else (
-      docker start clickhouse-server >nul 2>&1
-      docker ps --format "{{.Names}}" 2>nul | findstr /x "clickhouse-server" >nul 2>&1
-      if errorlevel 1 (
-        echo       WARN: ClickHouse is not running.
-      ) else (
-        echo       OK
-      )
-    )
-  ) else (
-    echo       SKIP: Parquet/DuckDB mode does not require ClickHouse.
-  )
+echo [3/7] Market data storage...
+if /i not "%MARKET_DATA_BACKEND%"=="parquet" (
+  echo       WARN: MARKET_DATA_BACKEND=%MARKET_DATA_BACKEND% is ignored; Parquet/DuckDB is the only supported backend.
 )
+echo       OK: Parquet/DuckDB mode
 
 echo [4/7] Starting sync service on %SYNC_HOST%:%SYNC_PORT%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','uvicorn','app.sync_main:app','--host','%SYNC_HOST%','--port','%SYNC_PORT%') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"

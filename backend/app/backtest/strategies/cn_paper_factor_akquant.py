@@ -1,4 +1,9 @@
-"""AKQuant strategy presets for implemented domestic paper factors."""
+"""国内已落地研报因子组合的 AKQuant 预设。
+
+这类预设不重新发明策略框架，而是复用通用多因子执行模板，把已经在研究
+和预计算侧验证过的研报因子放进同一套长仓调仓骨架里，形成可回测、可复现
+的标准组合。
+"""
 
 from __future__ import annotations
 
@@ -11,6 +16,8 @@ from app.backtest.strategies.multi_factor_akquant import (
 )
 
 _CN_PAPER_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
+    # 核心价值锚：把综合估值信号放在最显眼的位置，确保这个预设一眼看上去
+    # 仍然是“研报因子组合”，而不是被技术信号带偏的杂糅版本。
     {
         "name": "paper_composite_value",
         "weight": 0.18,
@@ -18,6 +25,8 @@ _CN_PAPER_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
         "transform": "rank_pct",
         "industry_zscore": True,
     },
+    # 残差质量项：用 PB 和 ROE 的关系搭一座更干净的质量-价值桥梁，
+    # 比只看单纯估值或单纯质量更容易保留组合解释性。
     {
         "name": "paper_pb_roe_residual",
         "weight": 0.14,
@@ -25,6 +34,8 @@ _CN_PAPER_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
         "transform": "zscore",
         "industry_zscore": True,
     },
+    # 成长与资产负债表强度放在中间权重，目的不是追最便宜，而是奖励更
+    # 可持续的基本面质量。
     {
         "name": "paper_growth_quality_score",
         "weight": 0.16,
@@ -39,6 +50,7 @@ _CN_PAPER_FACTOR_CONFIGS = '''FACTOR_CONFIGS = [
         "transform": "zscore",
         "industry_zscore": True,
     },
+    # 时序/节奏型覆盖层权重更小，只负责修剪拥挤和短线过热，不喧宾夺主。
     {
         "name": "paper_overnight_turnover_corr",
         "weight": 0.08,
@@ -88,6 +100,11 @@ CN_PAPER_FACTOR_STRATEGY_CODE = _replace_assignment_block(
 CN_PAPER_FACTOR_STRATEGY_CODE = CN_PAPER_FACTOR_STRATEGY_CODE.replace("TOP_N = 10", "TOP_N = 30")
 CN_PAPER_FACTOR_STRATEGY_CODE = CN_PAPER_FACTOR_STRATEGY_CODE.replace("MIN_CANDIDATES = 5", "MIN_CANDIDATES = 20")
 CN_PAPER_FACTOR_STRATEGY_CODE = CN_PAPER_FACTOR_STRATEGY_CODE.replace("REBALANCE_EVERY_N_DAYS = 1", "REBALANCE_EVERY_N_DAYS = 20")
+CN_PAPER_FACTOR_STRATEGY_CODE = (
+    "# 中文研报因子组合预设：候选池更宽、调仓更慢，但仍沿用通用多因子\n"
+    "# 的执行骨架，方便和其它版本直接对比。\n"
+    + CN_PAPER_FACTOR_STRATEGY_CODE
+)
 
 
 DEFAULT_CN_PAPER_FACTOR_PARAMS = {

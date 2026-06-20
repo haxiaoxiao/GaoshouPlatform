@@ -16,7 +16,9 @@ class ParquetIndicatorStore(IndicatorStore):
 
     def __init__(self, data_dir: str | None = None):
         from app.core.config import settings
+        from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 
+        apply_dev_data_mode_to_settings()
         self._data_dir = Path(data_dir or settings.parquet_data_dir)
         self._cross_section_dataset = self._first_existing_dataset(
             "stock_indicators",

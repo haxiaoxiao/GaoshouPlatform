@@ -26,6 +26,41 @@
       </article>
     </section>
 
+    <section v-if="devDataMode?.enabled" class="panel-card dev-data-mode-card" :class="{ 'dev-data-mode-card--prod': devDataMode.use_prod_data }">
+      <div>
+        <span class="section-kicker">DEV DATA MODE</span>
+        <h3>开发环境真实数据开关</h3>
+        <p>
+          当前数据源：
+          <strong>{{ devDataMode.use_prod_data ? '生产真实数据' : '开发隔离数据' }}</strong>
+          <span> · {{ devDataMode.active_data_dir }}</span>
+        </p>
+        <small>
+          影响范围：数据同步写入目标、策略运行读取的 SQLite/Parquet 行情、财务和因子数据。
+        </small>
+      </div>
+      <div class="dev-data-mode-card__actions">
+        <el-button
+          class="dev-data-mode-card__button"
+          :type="devDataMode.use_prod_data ? 'warning' : 'primary'"
+          :loading="switchingDataMode"
+          @click="toggleDevDataMode"
+        >
+          {{ devDataMode.use_prod_data ? '切回开发隔离数据' : '切换到生产真实数据' }}
+        </el-button>
+        <small class="dev-data-mode-card__hint">
+          {{ devDataMode.use_prod_data ? '当前 dev 正在使用生产真实数据' : '点击后会弹出危险操作确认' }}
+        </small>
+        <el-alert
+          v-if="devDataMode.use_prod_data"
+          title="危险：dev 将直接读写生产真实数据目录"
+          type="warning"
+          show-icon
+          :closable="false"
+        />
+      </div>
+    </section>
+
     <section class="ops-command-grid">
       <article class="panel-card incident-panel">
         <div class="panel-card__head">
@@ -152,8 +187,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
-import { systemApi, type DataSummary, type DataSummaryItem, type SystemStatus } from '@/api/system'
+import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
 import { gridTradingApi, type GridStatus } from '@/api/gridTrading'
@@ -202,6 +238,8 @@ const runtimeTasks = ref<RuntimeTask[]>([])
 const syncLogs = ref<SyncLog[]>([])
 const dataSummary = ref<DataSummary | null>(null)
 const gridStatus = ref<GridStatus | null>(null)
+const devDataMode = ref<DevDataMode | null>(null)
+const switchingDataMode = ref(false)
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
@@ -397,13 +435,14 @@ const datasetRows = computed<DatasetRow[]>(() => [
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, gridResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, gridResult, devModeResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
       syncApi.getLogs({ limit: 20 }),
       systemApi.dataSummary(),
       gridTradingApi.status(),
+      systemApi.getDevDataMode(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -411,9 +450,60 @@ async function loadOps() {
     if (logsResult.status === 'fulfilled') syncLogs.value = logsResult.value
     if (summaryResult.status === 'fulfilled') dataSummary.value = summaryResult.value
     if (gridResult.status === 'fulfilled') gridStatus.value = gridResult.value
+    if (devModeResult.status === 'fulfilled') devDataMode.value = devModeResult.value
   } finally {
     loading.value = false
   }
+}
+
+async function confirmDevDataModeSwitch(): Promise<boolean> {
+  if (!devDataMode.value) return false
+  const nextUseProd = !devDataMode.value.use_prod_data
+  if (!nextUseProd) {
+    await ElMessageBox.confirm(
+      '切回开发隔离数据后，后续同步和策略运行会写入/读取 dev 本地数据目录，不再使用生产真实数据。',
+      '切换到开发隔离数据',
+      { confirmButtonText: '确认切换', cancelButtonText: '取消', type: 'info' },
+    )
+    return true
+  }
+  await ElMessageBox.confirm(
+    devDataMode.value.warning || 'dev 将直接读写生产真实数据目录。数据同步可能改写真实 SQLite/Parquet，策略会读取真实行情、财务和因子数据。',
+    '危险操作：使用生产真实数据',
+    {
+      confirmButtonText: '我已确认，切换到真实数据',
+      cancelButtonText: '取消',
+      type: 'warning',
+      distinguishCancelAndClose: true,
+    },
+  )
+  return true
+}
+
+async function handleDevDataModeChange(value: string | number | boolean) {
+  const useProdData = Boolean(value)
+  switchingDataMode.value = true
+  try {
+    devDataMode.value = await systemApi.setDevDataMode({
+      use_prod_data: useProdData,
+      acknowledge_warning: useProdData,
+    })
+    ElMessage.success(useProdData ? 'dev 已切换为生产真实数据' : 'dev 已切换为开发隔离数据')
+    await loadOps()
+  } catch (error) {
+    ElMessage.error('数据模式切换失败，已刷新当前状态')
+    await loadOps()
+  } finally {
+    switchingDataMode.value = false
+  }
+}
+
+async function toggleDevDataMode() {
+  if (!devDataMode.value || switchingDataMode.value) return
+  const nextUseProdData = !devDataMode.value.use_prod_data
+  const confirmed = await confirmDevDataModeSwitch().catch(() => false)
+  if (!confirmed) return
+  await handleDevDataModeChange(nextUseProdData)
 }
 
 function datasetRow(label: string, name: string): DatasetRow {
@@ -636,6 +726,58 @@ onMounted(loadOps)
   box-shadow: 0 0 18px rgba(239, 68, 68, 0.34);
 }
 
+.dev-data-mode-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(360px, auto);
+  gap: var(--space-4);
+  align-items: center;
+  min-height: 132px;
+  margin-bottom: var(--space-4);
+  padding: var(--space-4);
+  border-color: rgba(56, 189, 248, 0.24);
+  background: linear-gradient(90deg, rgba(14, 165, 233, 0.1), rgba(15, 23, 42, 0.72));
+}
+
+.dev-data-mode-card--prod {
+  border-color: rgba(245, 158, 11, 0.54);
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.16), rgba(15, 23, 42, 0.74));
+}
+
+.dev-data-mode-card h3 {
+  margin: var(--space-1) 0 var(--space-2);
+}
+
+.dev-data-mode-card p,
+.dev-data-mode-card small {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.dev-data-mode-card strong {
+  color: var(--text-bright);
+}
+
+.dev-data-mode-card__actions {
+  display: flex;
+  min-width: 340px;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--space-2);
+  justify-content: center;
+}
+
+.dev-data-mode-card__button {
+  min-width: 180px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.dev-data-mode-card__hint {
+  color: var(--text-muted);
+}
+
 .ops-command-grid,
 .ops-grid {
   display: grid;
@@ -790,6 +932,7 @@ onMounted(loadOps)
 
 @media (max-width: 1020px) {
   .ops-hero,
+  .dev-data-mode-card,
   .ops-command-grid,
   .ops-grid {
     grid-template-columns: 1fr;
@@ -797,6 +940,11 @@ onMounted(loadOps)
 
   .ops-actions {
     justify-content: flex-start;
+  }
+
+  .dev-data-mode-card__actions {
+    min-width: 0;
+    align-items: flex-start;
   }
 }
 

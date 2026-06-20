@@ -17,8 +17,11 @@
             :class="{ 'table-item--selected': selectedTable === table.name }"
             @click="selectTable(table.name)"
           >
-            <span>{{ table.name }}</span>
-            <small>{{ formatRowCount(table.row_count) }}</small>
+            <span>
+              <strong>{{ table.label || table.name }}</strong>
+              <em>{{ table.name }}</em>
+            </span>
+            <small>{{ table.category || 'parquet' }} · {{ formatRowCount(table.row_count) }}</small>
           </button>
         </div>
       </section>
@@ -53,9 +56,12 @@
           <span class="panel-kicker">DATA EXPLORER</span>
           <h2>{{ selectedTable || '选择数据表' }}</h2>
           <p v-if="selectedTableInfo">
-            {{ formatRowCount(selectedTableInfo.row_count) }}
+            {{ selectedTableInfo.label || selectedTableInfo.name }} · {{ formatRowCount(selectedTableInfo.row_count) }}
             <template v-if="selectedTableInfo.min_date || selectedTableInfo.max_date">
               · {{ selectedTableInfo.min_date || '-' }} 至 {{ selectedTableInfo.max_date || '-' }}
+            </template>
+            <template v-if="selectedTableInfo.date_column">
+              · 日期字段 {{ selectedTableInfo.date_column }}
             </template>
           </p>
           <p v-else>选择左侧表后，通过快捷筛选或条件构造器查询。</p>
@@ -85,7 +91,7 @@
             <el-form-item v-if="hasColumn('symbol')" label="股票代码">
               <el-input v-model="quickSearch.symbol" clearable placeholder="600519.SH, 000001.SZ" @keyup.enter="applySearch" />
             </el-form-item>
-            <el-form-item v-if="dateColumn" label="日期范围" class="date-range-item">
+            <el-form-item v-if="dateColumn" :label="`日期范围（${dateColumn}）`" class="date-range-item">
               <div class="date-pair">
                 <el-date-picker
                   v-model="quickSearch.start_date"
@@ -361,9 +367,40 @@ const filteredTables = computed(() => {
 })
 
 const selectedTableInfo = computed(() => tables.value.find(table => table.name === selectedTable.value))
-const keyColumns = computed(() => new Set(['symbol', 'trade_date', 'datetime', 'factor_name', 'indicator_name', 'as_of_time']))
+const keyColumns = computed(() => new Set([
+  'symbol',
+  'trade_date',
+  'trade_date_1',
+  'datetime',
+  'available_date',
+  'snapshot_date',
+  'ann_date',
+  'f_ann_date',
+  'end_date',
+  'report_date',
+  'factor_name',
+  'indicator_name',
+  'as_of_time',
+]))
 const suggestibleColumns = computed(() => new Set(['symbol', 'factor_name', 'indicator_name', 'source', 'as_of_time']))
-const dateColumn = computed(() => schema.value.find(column => ['trade_date', 'datetime', 'date'].includes(column.name))?.name || '')
+const dateColumn = computed(() => {
+  const preferred = selectedTableInfo.value?.date_column
+  if (preferred && hasColumn(preferred)) return preferred
+  return schema.value.find(column => [
+    'trade_date_1',
+    'trade_date',
+    'datetime',
+    'available_date',
+    'date',
+    'snapshot_date',
+    'ann_date',
+    'f_ann_date',
+    'end_date',
+    'report_date',
+    'publish_time',
+    'time',
+  ].includes(column.name))?.name || ''
+})
 const visibleColumns = computed(() => result.value.columns.filter(column => !hiddenColumns.value.has(column)))
 const tableRows = computed<ExplorerRow[]>(() => result.value.rows.map((row, rowIndex) => ({
   ...row,
@@ -436,7 +473,9 @@ function formatCell(value: unknown): string {
 
 function getColumnWidth(column: string) {
   const type = schema.value.find(item => item.name === column)?.type?.toLowerCase() || ''
-  if (['symbol', 'trade_date', 'datetime'].includes(column)) return column === 'datetime' ? 180 : 132
+  if (['symbol', 'trade_date', 'trade_date_1', 'datetime', 'available_date'].includes(column)) {
+    return column === 'datetime' ? 180 : 132
+  }
   if (type.includes('int') || type.includes('float') || type.includes('double') || type.includes('decimal')) return 132
   if (column.includes('name')) return 160
   return 180
@@ -794,6 +833,33 @@ onMounted(async () => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.table-item span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.table-item strong,
+.table-item em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table-item strong {
+  color: var(--text-bright);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.table-item em {
+  color: var(--text-secondary);
+  font-family: var(--font-data);
+  font-size: 10px;
+  font-style: normal;
 }
 
 .table-item small,

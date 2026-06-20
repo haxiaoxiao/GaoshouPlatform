@@ -1,8 +1,9 @@
-"""三级缓存管理器 — L1 内存 LRU → L1.5 Redis → L2 Parquet/ClickHouse → L3 原始数据"""
+"""Compute result cache: process LRU + Redis + Parquet factor_cache."""
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import threading
 from collections import OrderedDict
@@ -10,16 +11,12 @@ from datetime import date
 from typing import Any
 
 import pandas as pd
-from clickhouse_driver import Client
 from loguru import logger
 
 from app.cache.redis_cache import get_redis_client as _get_redis_client
-from app.core.config import settings
 
 
 class LRUCache:
-    """线程安全的 LRU 内存缓存"""
-
     def __init__(self, max_size: int = 256):
         self._max_size = max_size
         self._cache: OrderedDict[str, Any] = OrderedDict()
@@ -49,63 +46,32 @@ class LRUCache:
 
 
 class ComputeCache:
-    """三级因子计算缓存
-
-    L1: 进程内 LRU dict（请求级复用）
-    L2: Parquet/ClickHouse factor_cache（跨请求持久化，由 MARKET_DATA_BACKEND 决定）
-    L3: MarketDataStore klines_daily（原始数据）
-    """
-
-    def __init__(self, ch_client: Client | None = None):
+    def __init__(self):
         self.l1 = LRUCache(max_size=256)
-        self._ch = ch_client
-
-    @property
-    def ch_client(self) -> Client | None:
-        if settings.market_data_backend == "parquet" and not settings.clickhouse_enabled:
-            return None
-        if self._ch is None:
-            from app.db.clickhouse import get_ch_client
-            self._ch = get_ch_client()
-        return self._ch
 
     @staticmethod
     def make_key(full_expression: str) -> str:
-        """生成规范化表达式 hash key（16 字符 hex）"""
         normalized = full_expression.strip().lower().replace(" ", "")
         return hashlib.sha256(normalized.encode()).hexdigest()[:16]
 
     def get(self, expression: str) -> dict[str, pd.Series] | None:
-        """从缓存获取计算结果
-
-        L1: 进程内 LRU → L1.5: Redis → 回源（调用方自行走 L2 ClickHouse）
-        """
         key = self.make_key(expression)
-
-        # L1: 内存 LRU（最快）
         cached = self.l1.get(key)
         if cached is not None:
             return cached
 
-        # L1.5: Redis（跨进程共享）
         try:
             redis_val = _get_redis_client().get(key)
             if redis_val is not None:
                 deserialized = self._deserialize_result(redis_val)
                 if deserialized is not None:
-                    # 回写 L1（缓存预热）
                     self.l1.set(key, deserialized)
                     return deserialized
         except Exception:
             logger.debug("Redis get failed for key=%s", key[:8], exc_info=True)
-
         return None
 
     def set(self, expression: str, result: dict[str, pd.Series]) -> None:
-        """写入缓存
-
-        L1 内存 LRU + L1.5 Redis（TTL=3600s）
-        """
         key = self.make_key(expression)
         max_points = int(os.getenv("COMPUTE_CACHE_MAX_POINTS", "200000"))
         total_points = sum(len(series) for series in result.values())
@@ -123,90 +89,36 @@ class ComputeCache:
             logger.debug("Compute cache serialization failed for key=%s", key[:8], exc_info=True)
             return
 
-        # L1: 内存 LRU
         self.l1.set(key, result)
-
-        # L1.5: Redis（后台写入，失败静默降级）
         try:
             _get_redis_client().set(key, serialized, ttl=3600)
         except Exception:
             logger.debug("Redis set failed for key=%s", key[:8], exc_info=True)
 
-    # ------------------------------------------------------------------
-    # 序列化 / 反序列化 helper（dict[str, pd.Series] <-> JSON str）
-    # ------------------------------------------------------------------
-
     @staticmethod
     def _serialize_result(result: dict[str, pd.Series]) -> str:
-        """将 dict[str, pd.Series] 序列化为 JSON 字符串（NaN → None 保证跨平台兼容）"""
-        import math
-
         serialized: dict[str, dict] = {}
-        for sym, ser in result.items():
-            d = ser.to_dict()
-            d = {k: (None if isinstance(v, float) and math.isnan(v) else v) for k, v in d.items()}
-            serialized[sym] = d
+        for symbol, series in result.items():
+            values = series.to_dict()
+            serialized[symbol] = {
+                key: (None if isinstance(value, float) and math.isnan(value) else value)
+                for key, value in values.items()
+            }
         return json.dumps(serialized, default=str)
 
     @staticmethod
     def _deserialize_result(raw: str) -> dict[str, pd.Series] | None:
-        """将 JSON 字符串反序列化为 dict[str, pd.Series]（None → NaN）"""
         try:
             data = json.loads(raw)
             result = {}
-            for sym, vals in data.items():
-                ser = pd.Series(vals)
-                if ser.dtype == object:
-                    ser = ser.replace({None: float("nan")})
-                result[sym] = ser
+            for symbol, values in data.items():
+                series = pd.Series(values)
+                if series.dtype == object:
+                    series = series.replace({None: float("nan")})
+                result[symbol] = series
             return result
         except Exception:
             return None
-
-    def get_from_ch(
-        self,
-        expr_hash: str,
-        symbols: list[str],
-        trade_date: date,
-    ) -> pd.Series | None:
-        """从 L2 ClickHouse 读取预计算结果"""
-        try:
-            rows = self.ch_client.execute(
-                """
-                SELECT symbol, value FROM factor_cache
-                WHERE expr_hash = %(h)s AND trade_date = %(d)s
-                AND symbol IN %(syms)s
-                """,
-                {"h": expr_hash, "d": trade_date, "syms": symbols},
-            )
-            if rows:
-                return pd.Series({r[0]: r[1] for r in rows})
-        except Exception:
-            pass
-        return None
-
-    def save_to_ch(
-        self,
-        expr_hash: str,
-        trade_date: date,
-        series: pd.Series,
-    ) -> None:
-        """写入 L2 ClickHouse 预计算结果"""
-        try:
-            rows = [
-                {"symbol": sym, "trade_date": trade_date, "expr_hash": expr_hash, "value": float(val)}
-                for sym, val in series.dropna().items()
-            ]
-            if rows:
-                self.ch_client.execute(
-                    """
-                    INSERT INTO factor_cache (symbol, trade_date, expr_hash, value)
-                    VALUES
-                    """,
-                    rows,
-                )
-        except Exception:
-            pass
 
     def save_to_parquet(
         self,
@@ -216,25 +128,27 @@ class ComputeCache:
         expression: str = "",
         engine: str = "builtin",
     ) -> None:
-        """写入 L2 Parquet factor_cache"""
         from app.data_stores import get_market_data_store
 
         try:
-            store = get_market_data_store()
-            rows = []
-            for sym, val in series.dropna().items():
-                rows.append({
-                    "symbol": sym,
+            rows = [
+                {
+                    "symbol": symbol,
                     "trade_date": trade_date,
                     "expr_hash": expr_hash,
-                    "value": float(val),
+                    "value": float(value),
                     "engine": engine,
                     "expression": expression,
                     "updated_at": pd.Timestamp.now(),
-                })
+                }
+                for symbol, value in series.dropna().items()
+            ]
             if rows:
-                df = pd.DataFrame(rows)
-                store._write_partitioned(df, dataset="factor_cache", date_col="trade_date")
+                get_market_data_store().write_dataset(
+                    pd.DataFrame(rows),
+                    dataset="factor_cache",
+                    date_col="trade_date",
+                )
         except Exception:
             logger.debug("Parquet factor cache save failed", exc_info=True)
 
@@ -244,40 +158,34 @@ class ComputeCache:
         symbols: list[str],
         trade_date: date,
     ) -> pd.Series | None:
-        """从 L2 Parquet 读取预计算结果"""
-        from app.data_stores import get_market_data_store
-
         try:
-            store = get_market_data_store()
+            from app.data_stores import get_market_data_store
             from app.data_stores.parquet_store import _list_param
-
-            store_impl = store
-            if not store_impl._exists("factor_cache"):
-                return None
-
             from app.db.duckdb import get_duckdb
-            pattern = store_impl._glob_pattern("factor_cache")
-            sym_list = _list_param(symbols)
-            sql = f"""
-                SELECT symbol, value FROM read_parquet('{pattern}', hive_partitioning=true)
+
+            store = get_market_data_store()
+            if not store._exists("factor_cache"):
+                return None
+            pattern = store._glob_pattern("factor_cache")
+            rows = get_duckdb().execute(
+                f"""
+                SELECT symbol, value
+                FROM read_parquet('{pattern}', hive_partitioning=true)
                 WHERE expr_hash = '{expr_hash}'
                   AND trade_date = '{trade_date}'
-                  AND symbol IN {sym_list}
-            """
-            db = get_duckdb()
-            rows = db.execute(sql).fetchall()
+                  AND symbol IN {_list_param(symbols)}
+                """
+            ).fetchall()
             if rows:
-                return pd.Series({r[0]: r[1] for r in rows})
+                return pd.Series({row[0]: row[1] for row in rows})
         except Exception:
             logger.debug("Parquet factor cache read failed", exc_info=True)
         return None
 
     def clear_l1(self) -> None:
-        """清空 L1 缓存"""
         self.l1.clear()
 
 
-# 全局单例
 _compute_cache: ComputeCache | None = None
 
 

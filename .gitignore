@@ -48,6 +48,7 @@ data/
 *.duckdb.wal
 
 # Generated runtime artifacts
+.runtime/
 .tmp/
 .tmp_*
 *.tmp.*

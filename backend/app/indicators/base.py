@@ -5,7 +5,11 @@ from typing import Any
 
 
 class IndicatorContext:
-    """指标计算上下文"""
+    """指标计算上下文.
+
+    Keep this object small and explicit so indicators can be evaluated in
+    batch without pulling in extra service-layer state.
+    """
 
     def __init__(
         self,
@@ -21,7 +25,12 @@ class IndicatorContext:
 
 
 class IndicatorBase:
-    """指标基类"""
+    """指标基类.
+
+    Concrete indicators should describe their data dependency via metadata,
+    then implement compute() with as little strategy-specific coupling as
+    possible.
+    """
 
     name: str = ""
     display_name: str = ""
@@ -41,6 +50,8 @@ class IndicatorBase:
         symbols: list[str],
         context: IndicatorContext,
     ) -> dict[str, float | None]:
+        # Batch mode reuses the same ambient context while swapping symbol, so
+        # indicators only need to care about per-symbol math.
         results: dict[str, float | None] = {}
         for symbol in symbols:
             ctx = IndicatorContext(
@@ -57,6 +68,7 @@ class IndicatorBase:
 
 
 _CATEGORY_LABELS: dict[str, str] = {
+    # Human-friendly labels used in the UI and API responses.
     "valuation": "估值",
     "growth": "成长",
     "quality": "质量",
@@ -69,7 +81,11 @@ _CATEGORY_LABELS: dict[str, str] = {
 
 
 class IndicatorRegistry:
-    """指标注册表"""
+    """指标注册表.
+
+    Auto-discovery keeps indicator files modular while still making the final
+    registry available as a single lookup surface.
+    """
 
     _registry: dict[str, type[IndicatorBase]] = {}
 
@@ -96,6 +112,8 @@ class IndicatorRegistry:
 
     @classmethod
     def categories(cls) -> list[dict[str, Any]]:
+        # Category counts are derived from the registry so the UI stays in sync
+        # with whatever indicators are actually importable.
         cat_counts: dict[str, int] = {}
         for indicator_cls in cls._registry.values():
             cat_counts[indicator_cls.category] = cat_counts.get(indicator_cls.category, 0) + 1
@@ -115,6 +133,8 @@ class IndicatorRegistry:
 
         from app import indicators as pkg
 
+        # Import every concrete indicator module once so its registration side
+        # effect runs before the API asks the registry for contents.
         for _importer, modname, _ispkg in pkgutil.iter_modules(pkg.__path__):
             if modname in ("base", "scheduler", "__init__"):
                 continue

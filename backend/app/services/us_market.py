@@ -195,6 +195,8 @@ def us_overnight_entry_filter_state(
         return {"entry_filter_enabled": False}
 
     frame = load_us_market_frame(data_path)
+    # The overlay is a soft risk gate: it can reduce new exposure, but it
+    # should never depend on the current A-share book structure.
     base_state: dict[str, Any] = {
         "entry_filter_enabled": True,
         "us_overnight_overlay": overlay,
@@ -244,6 +246,8 @@ def us_overnight_entry_filter_state(
     )
     state = {
         **base_state,
+        # Exposure < 1.0 means the overlay is active; the downstream order
+        # helper will cap fresh risk rather than forcing a full liquidation.
         "entry_filter_block_buys": float(exposure or 1.0) < 0.999,
         "us_overnight_exposure": exposure,
         "us_overnight_reason": reason,
@@ -276,9 +280,12 @@ def apply_entry_filter_to_target_weights(
         price = float(price_map.get(symbol, 0.0) or 0.0)
         current_weight = quantity * price / portfolio_value if quantity > 0 and price > 0 else 0.0
         if current_weight <= 0 and target > 0:
+            # New positions are blocked outright when the overlay is active.
             blocked_new += 1
             continue
         if target > current_weight:
+            # Adds are clipped back to the current weight so the overlay only
+            # preserves existing exposure rather than expanding it.
             blocked_add += 1
             target = current_weight
         if target > 0:
@@ -312,6 +319,8 @@ def _us_overnight_exposure(row: Any, **kwargs: Any) -> tuple[float, str]:
             return caution, "semi_caution"
         return 1.0, "clear"
     if overlay == "combined_downside":
+        # Combined downside is the strictest overlay: any broad weakness in
+        # QQQ, semis, or NVDA can switch the overlay on.
         if (
             (_finite(qqq) and qqq <= float(kwargs["qqq_defensive_ret"]))
             or any(value <= float(kwargs["semi_defensive_ret"]) for value in semi_values)

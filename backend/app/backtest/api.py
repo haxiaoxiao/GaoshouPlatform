@@ -345,7 +345,7 @@ async def _prepare_backtest_config(
                 }
             if not config.strategy_code:
                 config.strategy_code = strategy.code
-            stored_params = dict(strategy.parameters or {})
+            stored_params = dict(getattr(strategy, "parameters", None) or {})
             strategy_defaults = {
                 key: value
                 for key, value in stored_params.items()

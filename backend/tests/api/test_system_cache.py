@@ -26,4 +26,4 @@ async def test_system_cache_status_route(monkeypatch):
     assert resp.status_code == 200
     assert body["redis"]["available"] is True
     assert body["backtest_cache"]["namespace"] == "bt:test"
-    assert "factor_cache_parquet_or_clickhouse" == body["compute_cache"]["l2"]
+    assert "factor_cache_parquet" == body["compute_cache"]["l2"]

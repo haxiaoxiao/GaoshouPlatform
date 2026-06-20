@@ -1,4 +1,4 @@
-"""AKQuant engine adapter for the platform backtest interface."""
+﻿"""AKQuant engine adapter for the platform backtest interface."""
 from __future__ import annotations
 
 import asyncio
@@ -24,7 +24,7 @@ if AKQUANT_AVAILABLE:
     from akquant.config import BacktestConfig as AQBacktestConfig
     from akquant.config import InstrumentConfig, RiskConfig, StrategyConfig
 
-from app.backtest.engine.akquant.adapter import ClickHouseFeedAdapter
+from app.backtest.engine.akquant.adapter import MarketDataStoreFeedAdapter
 from app.backtest.engine.akquant.normalizer import normalize_result
 from app.backtest.engine.akquant.reporter import REPORTS_DIR, generate_report
 from app.services.benchmark_series import attach_benchmark_result
@@ -128,7 +128,7 @@ class AkquantEngine(IBacktestEngine):
             if config.bar_type == "minute_timer"
             else None
         )
-        adapter = ClickHouseFeedAdapter(
+        adapter = MarketDataStoreFeedAdapter(
             data_provider,
             config.symbols,
             start_date,
@@ -333,7 +333,7 @@ class AkquantEngine(IBacktestEngine):
         config: BacktestConfig,
         start_date: date,
         end_date: date,
-        adapter: ClickHouseFeedAdapter,
+        adapter: MarketDataStoreFeedAdapter,
         progress_callback: Callable[[float, dict | None], None] | None,
     ) -> Any:
         self._emit_progress(
@@ -532,7 +532,7 @@ class AkquantEngine(IBacktestEngine):
         loop = asyncio.get_running_loop()
         try:
             for idx, (chunk_start, chunk_end) in enumerate(chunks, start=1):
-                segment_adapter = ClickHouseFeedAdapter(
+                segment_adapter = MarketDataStoreFeedAdapter(
                     data_provider,
                     config.symbols,
                     chunk_start,

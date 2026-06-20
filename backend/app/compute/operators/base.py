@@ -17,6 +17,8 @@ class Operator(ABC):
 
     @abstractmethod
     def evaluate(self, df: pd.DataFrame, **kwargs) -> pd.Series:
+        # Keep the contract narrow: every operator only needs to map a frame
+        # to a single aligned series.
         """对 DataFrame 计算该算子，返回一维 Series"""
         ...
 
@@ -37,6 +39,8 @@ class RawFieldOperator(Operator):
         self.description = description or f"原始字段: {column}"
 
     def evaluate(self, df: pd.DataFrame, **kwargs) -> pd.Series:
+        # Missing raw fields are schema errors, not a signal to silently
+        # continue with NaNs.
         if self.column not in df.columns:
             raise KeyError(f"Column '{self.column}' not found in DataFrame")
         return df[self.column].astype(float)

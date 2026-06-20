@@ -235,7 +235,7 @@ async def run_deep_value_backtest(
     req: DeepValueBacktestRequest,
     session: AsyncSession = Depends(get_async_session),
 ):
-    """深度价值策略独立回测 — 每年5月调仓，直接查ClickHouse筛选，结果自动保存"""
+    """深度价值策略独立回测 — 每年5月调仓，直接查本地数据筛选，结果自动保存"""
     from app.strategies.deep_value import DeepValueStrategy
 
     # Resolve pool
@@ -311,16 +311,14 @@ async def _ensure_pool_cache():
     global _POOL_CACHE
     if _POOL_CACHE:
         return
-    from app.db.clickhouse import get_ch_client
-    ch = get_ch_client()
+    from app.data_stores import get_market_data_store
+
+    store = get_market_data_store()
+    start_date = date.today() - timedelta(days=365)
+    end_date = date.today()
+    symbols = await asyncio.to_thread(store.top_by_avg_amount, start_date, end_date, 500)
     for pool_name, limit in [("top100", 100), ("top300", 300), ("top500", 500)]:
-        rows = ch.execute(
-            "SELECT symbol FROM klines_daily "
-            "WHERE trade_date >= %(s)s AND amount > 0 AND close > 0 "
-            "GROUP BY symbol ORDER BY avg(amount) DESC LIMIT %(n)s",
-            {"s": (date.today() - timedelta(days=365)).isoformat(), "n": limit},
-        )
-        _POOL_CACHE[pool_name] = [r[0] for r in rows]
+        _POOL_CACHE[pool_name] = symbols[:limit]
 
 
 @router.post("/from-report", summary="研报转策略 — 上传 PDF/TXT 自动生成策略代码")

@@ -64,13 +64,6 @@ class Settings(BaseSettings):
     # 数据库配置
     database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"
 
-    # ClickHouse 配置
-    clickhouse_host: str = "localhost"
-    clickhouse_port: int = 19000
-    clickhouse_database: str = "gaoshou"
-    clickhouse_user: str = "default"
-    clickhouse_password: str = ""
-
     # Redis 缓存配置
     redis_host: str = "localhost"
     redis_port: int = 16379
@@ -78,13 +71,16 @@ class Settings(BaseSettings):
     redis_password: str = ""
 
     # 行情数据存储配置
-    market_data_backend: str = "parquet"  # parquet | clickhouse
+    market_data_backend: str = "parquet"
     parquet_data_dir: str = str(_DATA_DIR / "parquet")
     duckdb_path: str = ":memory:"
-    clickhouse_enabled: bool = False
+    dev_local_data_dir: str = str(_BASE_DIR / "data")
+    dev_prod_data_dir: str = str(_DATA_DIR)
+    dev_data_mode_file: str = str(_BASE_DIR / ".runtime" / "dev_data_mode.json")
     parquet_minute_append_only: bool = True
     qmt_daily_clean_cache_after_sync: bool = False
     qmt_daily_compute_indicators_after_sync: bool = False
+    qmt_financial_compute_indicators_after_sync: bool = False
     qmt_minute_clean_cache_after_sync: bool = False
     qmt_minute_compute_indicators_after_sync: bool = False
     sync_service_url: str = "http://127.0.0.1:18810"
