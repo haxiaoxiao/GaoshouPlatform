@@ -282,8 +282,8 @@ def run_runtime_checks(base_url: str) -> list[dict[str, Any]]:
         ("GET", "/api/system/data-summary", None),
         ("GET", "/api/data/stocks/600519.SH", None),
         ("GET", "/api/data/sync/status", None),
-        ("GET", "/api/grid-trading/status", None),
-        ("POST", "/api/grid-trading/signals", {"params": {}, "manual_account": None}),
+        ("GET", "/api/live-trading/status", None),
+        ("POST", "/api/live-trading/signals", {"params": {}, "manual_account": None}),
     ]
     results: list[dict[str, Any]] = []
     for method, path, payload in probes:

@@ -29,9 +29,9 @@
 ## 回测与实盘
 
 - 回测入口：前端 `/backtest`，内置策略会自动创建两个 TSMF 变体。
-- 实盘/信号入口：前端 `/live` 的“科技小市值组合执行”面板。
+- 实盘/信号入口：前端 `/trade` 的可配置模拟/实盘策略执行台。
 - API 入口：
-  - `GET /api/grid-trading/tech-small-cap/variants`
-  - `POST /api/grid-trading/tech-small-cap/signals`
-  - `POST /api/grid-trading/tech-small-cap/orders/submit`
-- 真实下单必须设置 `GRID_TRADING_ENABLE_ORDER_SUBMIT=true`，且提交接口需要 `confirm=true`。
+  - `GET /api/live-trading/strategy-profiles`
+  - `POST /api/live-trading/signals`
+  - `POST /api/live-trading/orders/submit`
+- 真实下单必须设置 `LIVE_TRADING_ENABLE_ORDER_SUBMIT=true`，且提交接口需要 `confirm=true`。

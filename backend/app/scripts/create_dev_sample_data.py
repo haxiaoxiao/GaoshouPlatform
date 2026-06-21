@@ -629,7 +629,7 @@ def _write_host_env(target_data_dir: Path) -> Path:
                 f"DATABASE_URL=sqlite+aiosqlite:///{sqlite_path}",
                 "DUCKDB_PATH=:memory:",
                 "ENABLE_SYNC_SCHEDULER=false",
-                "GRID_TRADING_ENABLE_ORDER_SUBMIT=false",
+                "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false",
                 "",
             ]
         ),

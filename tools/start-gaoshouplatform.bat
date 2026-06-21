@@ -28,7 +28,7 @@ set "MARKET_DATA_BACKEND=parquet"
 set "REDIS_PORT=16379"
 set "QMT_ACCOUNT_ID="
 set "QMT_TRADER_PATH="
-set "GRID_TRADING_ENABLE_ORDER_SUBMIT=false"
+set "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false"
 if exist "%ENV_FILE%" (
   for /f "usebackq tokens=1,* delims==" %%a in ("%ENV_FILE%") do (
     set "K=%%a"
@@ -37,7 +37,7 @@ if exist "%ENV_FILE%" (
     if /i "!K!"=="REDIS_PORT" set "REDIS_PORT=!V!"
     if /i "!K!"=="QMT_ACCOUNT_ID" set "QMT_ACCOUNT_ID=!V!"
     if /i "!K!"=="QMT_TRADER_PATH" set "QMT_TRADER_PATH=!V!"
-    if /i "!K!"=="GRID_TRADING_ENABLE_ORDER_SUBMIT" set "GRID_TRADING_ENABLE_ORDER_SUBMIT=!V!"
+    if /i "!K!"=="LIVE_TRADING_ENABLE_ORDER_SUBMIT" set "LIVE_TRADING_ENABLE_ORDER_SUBMIT=!V!"
     if /i "!K!"=="BACKEND_PORT" if not defined GAOSHOU_BACKEND_PORT set "BACKEND_PORT=!V!"
     if /i "!K!"=="SYNC_SERVICE_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
     if /i "!K!"=="SYNC_PORT" if not defined GAOSHOU_SYNC_PORT set "SYNC_PORT=!V!"
@@ -62,7 +62,7 @@ echo Backend:   http://%BACKEND_HOST%:%BACKEND_PORT%
 echo Sync:      http://%SYNC_HOST%:%SYNC_PORT%
 echo Frontend:  %FRONTEND_URL%
 echo Data mode: %MARKET_DATA_BACKEND%  storage=Parquet/DuckDB
-echo miniQMT:   account %QMT_ACCOUNT_STATUS%  order_submit=%GRID_TRADING_ENABLE_ORDER_SUBMIT%
+echo miniQMT:   account %QMT_ACCOUNT_STATUS%  order_submit=%LIVE_TRADING_ENABLE_ORDER_SUBMIT%
 echo.
 
 if not exist "%ROOT%" (
@@ -146,7 +146,7 @@ if not defined QMT_ACCOUNT_ID (
   echo       SKIP: miniQMT account is optional and QMT_TRADER_PATH is not configured.
 ) else (
   echo       OPTIONAL: miniQMT account config found. Open the miniQMT client before using /live.
-  echo       OPTIONAL: status can be checked at http://%BACKEND_HOST%:%BACKEND_PORT%/api/grid-trading/status
+  echo       OPTIONAL: status can be checked at http://%BACKEND_HOST%:%BACKEND_PORT%/api/live-trading/status
 )
 
 echo [7/7] Starting frontend on %FRONTEND_HOST%:%FRONTEND_PORT%...

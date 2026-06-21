@@ -78,7 +78,7 @@ class MyStrategy(aq.Strategy):
 
       <section id="examples">
         <h2>示例</h2>
-        <p>重仓双股网格策略可在策略回测页通过“重仓双股网格”预设加载；盘中人工执行信号在实盘交易页查看。</p>
+        <p>CashAware 策略可先在策略回测页验证参数，再进入模拟 / 实盘页通过 Profile 白名单生成信号、审计订单并按权限提交。</p>
       </section>
     </main>
   </div>

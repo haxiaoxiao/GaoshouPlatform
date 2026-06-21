@@ -97,8 +97,11 @@ class Settings(BaseSettings):
     indevs_tushare_rps: float = 1.0
     indevs_tushare_timeout_seconds: int = 30
 
-    # 网格交易信号配置
-    grid_trading_enable_order_submit: bool = False
+    # 模拟 / 实盘交易配置
+    live_trading_enable_order_submit: bool = False
+    live_trading_auto_execute_enabled: bool = False
+    live_trading_default_profile: str = "tsmf_cashaware_stable"
+    live_trading_seed_strategy_ids: str = "62,63"
     qmt_account_id: str = ""
     qmt_account_type: str = "STOCK"
     qmt_trader_path: str = ""

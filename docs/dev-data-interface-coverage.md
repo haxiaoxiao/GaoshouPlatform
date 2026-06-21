@@ -18,7 +18,7 @@ Last updated: 2026-06-01.
 仍需明确边界：
 
 - 旧 `/api/strategy/signals/*` 与 `/api/strategy/backtest` 里的 `TrendCapitalStrategy` 仍属于外部依赖路径，不是 dev Parquet 隔离链路。
-- `/api/grid-trading/*` 是 QMT/账户桥接型接口，不应该用真实账户数据做 dev 数据替身；当前通过 `GRID_TRADING_ENABLE_ORDER_SUBMIT=false` 保持安全。
+- `/api/live-trading/*` 是 QMT/账户桥接型接口，不应该用真实账户数据做 dev 数据替身；当前通过 `LIVE_TRADING_ENABLE_ORDER_SUBMIT=false` 保持安全。
 - `factor_cache`、`block_moneyflow`、`announcements`、`research_reports`、`market_news` 当前源端没有可抽样数据，因此 dev 样本标记为 optional missing；页面如果要展示新闻/公告，应先走 SQLite `sentiment_posts` 或后续接入真实源数据后再抽样。
 - `backtests` 有 6 条记录引用已经不存在的 `strategies.id`，生产源库也存在同样问题；当前审计作为 warning，不回写 prod。
 
@@ -38,7 +38,7 @@ Last updated: 2026-06-01.
 | Backtest | `/api/backtest/*`、`/api/v2/backtest/*` | covered | `strategies`、`backtests`、指数成分、行情、因子值 |
 | Sentiment | `/api/sentiment/*` | core covered | `sentiment_posts`；Parquet 新闻/公告源端暂无 |
 | Legacy strategy signals | `/api/strategy/signals/*` | external dependency | 仍走旧外部依赖路径 |
-| Grid trading | `/api/grid-trading/*` | external dependency | QMT/账户桥接，dev 不模拟真实账户 |
+| Live trading | `/api/live-trading/*` | external dependency | QMT/账户桥接，dev 默认只允许模拟/信号 |
 
 ## 当前样本数据规模
 

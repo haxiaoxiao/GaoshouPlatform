@@ -181,9 +181,9 @@ INTERFACE_STORAGE_REQUIREMENTS = {
         "external": [],
         "notes": "这组接口通过 TrendCapitalStrategy 读取本地 Parquet 行情。",
     },
-    "grid_trading": {
-        "routes": ["/api/grid-trading/*"],
-        "sqlite": [],
+    "live_trading": {
+        "routes": ["/api/live-trading/*"],
+        "sqlite": ["live_strategy_profiles", "live_order_audits", "live_paper_accounts"],
         "parquet": [],
         "external": ["optional QMT account bridge"],
     },

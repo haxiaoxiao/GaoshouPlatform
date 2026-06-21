@@ -120,7 +120,7 @@ import { systemApi, type DataSummary, type DataSummaryItem, type SystemStatus } 
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
 import { backtestApi, type Backtest } from '@/api/backtest'
-import { gridTradingApi, type GridStatus } from '@/api/gridTrading'
+import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral'
 
@@ -158,14 +158,14 @@ const syncStatus = ref<SyncStatus | null>(null)
 const syncLogs = ref<SyncLog[]>([])
 const runtimeTasks = ref<RuntimeTask[]>([])
 const latestBacktests = ref<Backtest[]>([])
-const gridStatus = ref<GridStatus | null>(null)
+const liveStatus = ref<LiveTradingStatus | null>(null)
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
 const latestBacktest = computed(() => latestBacktests.value[0] || null)
 const dataReadyCount = computed(() => researchInputRows.value.filter(row => row.tone === 'good').length)
 const hasBlockingSync = computed(() => ['queued', 'running'].includes(syncStatus.value?.status || ''))
-const tradeRiskOpen = computed(() => gridStatus.value?.order_submit_enabled === true)
+const tradeRiskOpen = computed(() => liveStatus.value?.order_submit_enabled === true)
 
 const readinessScore = computed(() => {
   let score = 40
@@ -227,7 +227,7 @@ const focusCards = computed<FocusCard[]>(() => [
     key: 'guard',
     label: '交易护栏',
     value: tradeRiskOpen.value ? '真实下单开启' : '仅信号',
-    hint: gridStatus.value?.account_id || 'QMT 为可选外部依赖',
+    hint: liveStatus.value?.account_id || 'QMT 为可选外部依赖',
     tone: tradeRiskOpen.value ? 'bad' : 'good',
   },
 ])
@@ -343,14 +343,14 @@ const pipelineStages = [
 async function loadWorkbench() {
   loading.value = true
   try {
-    const [systemResult, summaryResult, syncStatusResult, logsResult, tasksResult, backtestsResult, gridResult] = await Promise.allSettled([
+    const [systemResult, summaryResult, syncStatusResult, logsResult, tasksResult, backtestsResult, liveTradingResult] = await Promise.allSettled([
       systemApi.getStatus(),
       systemApi.dataSummary(),
       syncApi.getStatus(),
       syncApi.getLogs({ limit: 8 }),
       runtimeTaskApi.list(true),
       backtestApi.list({ page: 1, page_size: 5 }),
-      gridTradingApi.status(),
+      liveTradingApi.status(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (summaryResult.status === 'fulfilled') dataSummary.value = summaryResult.value
@@ -358,7 +358,7 @@ async function loadWorkbench() {
     if (logsResult.status === 'fulfilled') syncLogs.value = logsResult.value
     if (tasksResult.status === 'fulfilled') runtimeTasks.value = tasksResult.value
     if (backtestsResult.status === 'fulfilled') latestBacktests.value = backtestsResult.value.items
-    if (gridResult.status === 'fulfilled') gridStatus.value = gridResult.value
+    if (liveTradingResult.status === 'fulfilled') liveStatus.value = liveTradingResult.value
   } finally {
     loading.value = false
   }

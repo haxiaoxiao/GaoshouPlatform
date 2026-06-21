@@ -88,16 +88,16 @@ class GridTradingService:
                 "error": account.error,
             },
             "quote_error": quote_error,
-            "order_submit_enabled": bool(settings.grid_trading_enable_order_submit),
+            "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "signals": signals,
         }
 
     async def submit_order_preview(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not settings.grid_trading_enable_order_submit:
+        if not settings.live_trading_enable_order_submit:
             return {
                 "enabled": False,
                 "submitted": False,
-                "message": "GRID_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
+                "message": "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
                 "order_preview": payload,
             }
         return {

@@ -192,7 +192,7 @@ import { usePageContext } from '@/app/pageContext'
 import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
-import { gridTradingApi, type GridStatus } from '@/api/gridTrading'
+import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral'
 
@@ -237,7 +237,7 @@ const syncStatus = ref<SyncStatus | null>(null)
 const runtimeTasks = ref<RuntimeTask[]>([])
 const syncLogs = ref<SyncLog[]>([])
 const dataSummary = ref<DataSummary | null>(null)
-const gridStatus = ref<GridStatus | null>(null)
+const liveStatus = ref<LiveTradingStatus | null>(null)
 const devDataMode = ref<DevDataMode | null>(null)
 const switchingDataMode = ref(false)
 
@@ -274,16 +274,16 @@ const serviceNodes = computed<ServiceNode[]>(() => [
   {
     key: 'qmt',
     label: 'QMT / Quote',
-    value: gridStatus.value?.quote_connected ? '行情在线' : gridStatus.value?.xtdata_available ? '未连接' : '不可用',
-    detail: gridStatus.value?.error || (gridStatus.value?.xttrader_available ? 'xttrader 可用' : 'xttrader 未确认'),
-    tone: gridStatus.value?.quote_connected ? 'good' : 'warn',
+    value: liveStatus.value?.quote_connected ? '行情在线' : liveStatus.value?.xtdata_available ? '未连接' : '不可用',
+    detail: liveStatus.value?.error || (liveStatus.value?.xttrader_available ? 'xttrader 可用' : 'xttrader 未确认'),
+    tone: liveStatus.value?.quote_connected ? 'good' : 'warn',
   },
   {
     key: 'orders',
     label: 'Order Guard',
-    value: gridStatus.value?.order_submit_enabled ? '真实下单开启' : '仅信号',
-    detail: gridStatus.value?.account_id || '未配置账户',
-    tone: gridStatus.value?.order_submit_enabled ? 'bad' : 'good',
+    value: liveStatus.value?.order_submit_enabled ? '真实下单开启' : '仅信号',
+    detail: liveStatus.value?.account_id || '未配置账户',
+    tone: liveStatus.value?.order_submit_enabled ? 'bad' : 'good',
   },
 ])
 
@@ -357,12 +357,12 @@ const incidentRows = computed<IncidentRow[]>(() => {
       tone: 'warn',
     })
   }
-  if (gridStatus.value?.order_submit_enabled) {
+  if (liveStatus.value?.order_submit_enabled) {
     rows.push({
       key: 'order-open',
       scope: 'TRADE',
       title: '真实下单护栏已开启',
-      detail: gridStatus.value.account_id || '账户未返回',
+      detail: liveStatus.value.account_id || '账户未返回',
       action: '复核',
       path: '/trade',
       tone: 'bad',
@@ -435,13 +435,13 @@ const datasetRows = computed<DatasetRow[]>(() => [
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, gridResult, devModeResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
       syncApi.getLogs({ limit: 20 }),
       systemApi.dataSummary(),
-      gridTradingApi.status(),
+      liveTradingApi.status(),
       systemApi.getDevDataMode(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
@@ -449,7 +449,7 @@ async function loadOps() {
     if (tasksResult.status === 'fulfilled') runtimeTasks.value = tasksResult.value
     if (logsResult.status === 'fulfilled') syncLogs.value = logsResult.value
     if (summaryResult.status === 'fulfilled') dataSummary.value = summaryResult.value
-    if (gridResult.status === 'fulfilled') gridStatus.value = gridResult.value
+    if (liveTradingResult.status === 'fulfilled') liveStatus.value = liveTradingResult.value
     if (devModeResult.status === 'fulfilled') devDataMode.value = devModeResult.value
   } finally {
     loading.value = false
@@ -590,7 +590,7 @@ const pageContextBlocks = computed(() => [
       { label: 'API', value: isApiHealthy.value ? '在线' : '异常', tone: isApiHealthy.value ? 'good' : 'bad' },
       { label: '同步服务', value: syncServiceReady.value ? syncStatusLabel(syncStatus.value?.status || 'idle') : '不可用', tone: syncServiceReady.value ? 'good' : 'bad' },
       { label: '后端排队', value: `${queuePendingCount.value} 项`, tone: queuePendingCount.value ? 'warn' : 'good' },
-      { label: '真实下单', value: gridStatus.value?.order_submit_enabled ? '开启' : '关闭', tone: gridStatus.value?.order_submit_enabled ? 'bad' : 'good' },
+      { label: '真实下单', value: liveStatus.value?.order_submit_enabled ? '开启' : '关闭', tone: liveStatus.value?.order_submit_enabled ? 'bad' : 'good' },
     ],
   },
   {

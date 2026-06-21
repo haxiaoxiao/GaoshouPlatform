@@ -3,6 +3,13 @@
 from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis, FactorResearchRun, FactorResearchRunItem
 from .financial import FinancialData
+from .live_trading import (
+    LiveOrderAudit,
+    LivePaperAccount,
+    LivePositionState,
+    LiveStrategyProfile,
+    LiveTradingRun,
+)
 from .sentiment import SentimentPost
 from .stock import Stock, StockConceptMembership
 from .strategy import Backtest, Order, Strategy, Trade
@@ -23,6 +30,11 @@ __all__ = [
     "FactorResearchRun",
     "FactorResearchRunItem",
     "FinancialData",
+    "LiveStrategyProfile",
+    "LiveTradingRun",
+    "LiveOrderAudit",
+    "LivePositionState",
+    "LivePaperAccount",
     "SentimentPost",
     "WatchlistGroup",
     "WatchlistStock",

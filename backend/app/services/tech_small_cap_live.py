@@ -174,7 +174,7 @@ class TechSmallCapLiveService:
             "target_weights": filtered_weights,
             "entry_filter": entry_state,
             "quote_error": quote_error,
-            "order_submit_enabled": bool(settings.grid_trading_enable_order_submit),
+            "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "orders": orders,
             "top_candidates": self._top_candidates(frame, limit=30),
             "excluded_symbol_count": int(len(result.excluded_symbols)),
@@ -182,11 +182,11 @@ class TechSmallCapLiveService:
 
     async def submit_orders(self, orders: list[dict[str, Any]], *, confirm: bool = False) -> dict[str, Any]:
         """把目标订单提交给 QMT；未确认时只返回草稿。"""
-        if not settings.grid_trading_enable_order_submit:
+        if not settings.live_trading_enable_order_submit:
             return {
                 "enabled": False,
                 "submitted": False,
-                "message": "GRID_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
+                "message": "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
                 "orders": orders,
             }
         if not confirm:
@@ -399,7 +399,7 @@ class TechSmallCapLiveService:
             "target_weights": {},
             "entry_filter": {},
             "quote_error": reason,
-            "order_submit_enabled": bool(settings.grid_trading_enable_order_submit),
+            "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "orders": [],
             "top_candidates": [],
             "excluded_symbol_count": 0,

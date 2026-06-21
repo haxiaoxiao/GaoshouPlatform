@@ -52,6 +52,7 @@ async_session_factory = DynamicAsyncSessionFactory()
 
 async def init_db():
     """初始化数据库（创建所有表）"""
+    import app.db.models  # noqa: F401 - ensure all model tables are registered on Base.metadata
     from app.db.models.base import Base
 
     apply_dev_data_mode_to_settings()

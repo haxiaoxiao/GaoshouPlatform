@@ -93,7 +93,7 @@ class QmtTradingService:
             "account_type": settings.qmt_account_type,
             "trader_path": settings.qmt_trader_path,
             "data_dir": data_dir,
-            "order_submit_enabled": bool(settings.grid_trading_enable_order_submit),
+            "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "error": error,
         }
 
@@ -165,11 +165,11 @@ class QmtTradingService:
         return await asyncio.to_thread(_read)
 
     async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        if not settings.grid_trading_enable_order_submit:
+        if not settings.live_trading_enable_order_submit:
             return {
                 "enabled": False,
                 "submitted": False,
-                "message": "GRID_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
+                "message": "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
                 "order": payload,
             }
         if not payload.get("confirm"):
@@ -217,7 +217,7 @@ class QmtTradingService:
                 price_type,
                 price,
                 str(payload.get("strategy_name") or "GaoshouPlatform"),
-                str(payload.get("remark") or "manual grid signal"),
+                str(payload.get("remark") or "manual live-trading signal"),
             )
             return {
                 "enabled": True,

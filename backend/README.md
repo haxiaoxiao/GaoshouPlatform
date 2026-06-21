@@ -44,7 +44,7 @@ Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/data/sync/status
 | `/api/backtest/*` | `app/api/backtest.py` | 回测、AKQuant、优化、timer 覆盖。 |
 | `/api/factor/*` | `app/api/factor.py` | 因子定义相关接口。 |
 | `/api/factor-values/*` | `app/api/factor_values.py` | Factor Value Store、预计算、覆盖率、研报因子。 |
-| `/api/grid-trading/*` | `app/api/grid_trading.py` | QMT/账户桥接、信号、订单预览、真实下单护栏。 |
+| `/api/live-trading/*` | `app/api/live_trading.py` | 可配置模拟/实盘策略执行、账户桥接、订单审计和真实下单护栏。 |
 
 ## 同步状态契约
 
@@ -81,5 +81,5 @@ DUCKDB_PATH=:memory:
 
 - 不要硬编码 token、账户、QMT 路径，使用 `.env.local` 或 `.env.<hostname>.local`。
 - dev 默认使用 `E:\Projects\GaoshouPlatform-dev`、`18800/18810`；prod 默认使用 `E:\Projects\GaoshouPlatform-prod`、`8800/8810`。
-- `GRID_TRADING_ENABLE_ORDER_SUBMIT=false` 是默认安全状态；真实下单需要显式开启并保留前端二次确认。
+- `LIVE_TRADING_ENABLE_ORDER_SUBMIT=false` 是默认安全状态；真实下单需要显式开启并保留前端二次确认。
 - xtquant 同步阻塞，所有 QMT 调用必须放入 executor 或 `asyncio.to_thread()`。

@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from app.api.factor_research import router as factor_research_router
 from app.api.factor_values import router as factor_values_router
 from app.api.factors import router as factors_router
-from app.api.grid_trading import router as grid_trading_router
+from app.api.live_trading import router as live_trading_router
 from app.api.sentiment import router as sentiment_router
 from app.backtest.api import router as backtest_engine_router
 from app.compute.api import router as compute_router
@@ -35,7 +35,7 @@ api_router.include_router(compute_router, prefix="/v2/compute", tags=["计算引
 api_router.include_router(backtest_engine_router, prefix="/v2/backtest", tags=["回测引擎 deprecated"])
 api_router.include_router(indicator_router, prefix="/indicators", tags=["指标"])
 api_router.include_router(strategy_router, prefix="/strategy", tags=["策略"])
-api_router.include_router(grid_trading_router)
+api_router.include_router(live_trading_router)
 api_router.include_router(akshare_router, tags=["AKShare"])
 api_router.include_router(parquet_explorer_router, tags=["Parquet浏览器"])
 api_router.include_router(evaluation_router, prefix="/evaluation", tags=["因子评估"])
