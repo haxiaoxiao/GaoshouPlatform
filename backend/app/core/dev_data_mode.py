@@ -70,10 +70,18 @@ def _active_paths(use_prod_data: bool) -> tuple[Path, str, Path]:
     return data_dir, database_url, parquet_dir
 
 
+def _sqlite_path_for_data_dir(data_dir: Path) -> Path:
+    return data_dir / "gaoshou.db"
+
+
 def get_dev_data_mode_state() -> DevDataModeState:
     enabled = is_dev_environment()
     payload = _read_payload() if enabled else {}
     use_prod_data = bool(payload.get("use_prod_data", _default_use_prod_data())) if enabled else False
+    if enabled and not use_prod_data:
+        local_data_dir = _resolve(settings.dev_local_data_dir)
+        if not _sqlite_path_for_data_dir(local_data_dir).exists():
+            use_prod_data = True
     data_dir, database_url, parquet_dir = _active_paths(use_prod_data) if enabled else (
         settings.data_dir,
         settings.database_url,
@@ -96,6 +104,11 @@ def get_dev_data_mode_state() -> DevDataModeState:
 def set_dev_data_mode(use_prod_data: bool) -> DevDataModeState:
     if not is_dev_environment():
         return get_dev_data_mode_state()
+    if not use_prod_data:
+        data_dir, _, _ = _active_paths(False)
+        sqlite_path = _sqlite_path_for_data_dir(data_dir)
+        if not sqlite_path.exists():
+            raise FileNotFoundError(f"Dev local SQLite database does not exist: {sqlite_path}")
     path = _mode_file()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -113,6 +126,10 @@ def apply_dev_data_mode_to_settings() -> DevDataModeState:
 
     active_data_dir = Path(state.active_data_dir)
     active_parquet_dir = Path(state.active_parquet_data_dir)
+    if not state.use_prod_data:
+        sqlite_path = _sqlite_path_for_data_dir(active_data_dir)
+        if not sqlite_path.exists():
+            raise FileNotFoundError(f"Dev local SQLite database does not exist: {sqlite_path}")
     active_data_dir.mkdir(parents=True, exist_ok=True)
     active_parquet_dir.mkdir(parents=True, exist_ok=True)
 

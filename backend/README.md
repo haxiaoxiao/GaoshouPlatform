@@ -67,11 +67,11 @@ cd E:\Projects\GaoshouPlatform-dev
 默认开发口径：
 
 ```text
-GAOSHOU_DATA_DIR=E:/Projects/Data
+GAOSHOU_DATA_DIR=E:/Projects/data/BaiduSyncdisk
 MARKET_DATA_BACKEND=parquet
 CLICKHOUSE_ENABLED=false
-PARQUET_DATA_DIR=E:/Projects/Data/parquet
-DATABASE_URL=sqlite+aiosqlite:///E:/Projects/Data/gaoshou.db
+PARQUET_DATA_DIR=E:/Projects/data/BaiduSyncdisk/parquet
+DATABASE_URL=sqlite+aiosqlite:///E:/Projects/data/BaiduSyncdisk/gaoshou.db
 DUCKDB_PATH=:memory:
 ```
 

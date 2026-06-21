@@ -5,7 +5,7 @@
 ## 隔离原则
 
 - 生产数据只读：脚本用 SQLite `mode=ro` 打开 `gaoshou.db`，Parquet 只由 DuckDB 扫描读取。
-- 开发样本仍独立：默认写入公共数据目录里的 `E:\Projects\Data\dev_sample\gaoshou.db` 与 `E:\Projects\Data\dev_sample\parquet\`，不再写入仓库 `data/`。
+- 开发样本是可选隔离副本；默认只保留公共同步目录里的 `E:\Projects\data\BaiduSyncdisk\gaoshou.db`。只有显式生成样本时才写入 `E:\Projects\data\BaiduSyncdisk\dev_sample\`。
 - 开发样本默认 `MARKET_DATA_BACKEND=parquet`。
 - 同步调度关闭：本地覆盖配置写入 `ENABLE_SYNC_SCHEDULER=false`，避免开发时误触生产同步。
 
@@ -14,8 +14,8 @@
 ```powershell
 cd E:\Projects\GaoshouPlatform-dev\backend
 .\.venv\Scripts\python.exe -m app.scripts.create_dev_sample_data `
-  --source-data-dir E:\Projects\Data `
-  --target-data-dir E:\Projects\Data\dev_sample `
+  --source-data-dir E:\Projects\data\BaiduSyncdisk `
+  --target-data-dir E:\Projects\data\BaiduSyncdisk\dev_sample `
   --start-date 2026-05-01 `
   --end-date 2026-05-15 `
   --max-symbols 60 `
@@ -30,18 +30,18 @@ cd E:\Projects\GaoshouPlatform-dev\backend
 生成后后端实际使用：
 
 ```text
-DATABASE_URL=sqlite+aiosqlite:///E:/Projects/Data/dev_sample/gaoshou.db
-PARQUET_DATA_DIR=E:/Projects/Data/dev_sample/parquet
+DATABASE_URL=sqlite+aiosqlite:///E:/Projects/data/BaiduSyncdisk/dev_sample/gaoshou.db
+PARQUET_DATA_DIR=E:/Projects/data/BaiduSyncdisk/dev_sample/parquet
 MARKET_DATA_BACKEND=parquet
 ```
 
-如需回到完整公共数据，将 `.env.<hostname>.local` 改回 `E:/Projects/Data/gaoshou.db` 与 `E:/Projects/Data/parquet` 后重启后端即可。
+如需回到完整公共数据，将 `.env.<hostname>.local` 改回 `E:/Projects/data/BaiduSyncdisk/gaoshou.db` 与 `E:/Projects/data/BaiduSyncdisk/parquet` 后重启后端即可。
 
 ## 验证
 
 ```powershell
 cd E:\Projects\GaoshouPlatform-dev
-Get-Content E:\Projects\Data\dev_sample\manifest.json
+Get-Content E:\Projects\data\BaiduSyncdisk\dev_sample\manifest.json
 ```
 
 后端启动后检查：
@@ -50,14 +50,14 @@ Get-Content E:\Projects\Data\dev_sample\manifest.json
 Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/system/status
 ```
 
-确认响应里的 `parquet_data_dir` 指向 `E:\Projects\Data\dev_sample\parquet`。
+确认响应里的 `parquet_data_dir` 指向 `E:\Projects\data\BaiduSyncdisk\dev_sample\parquet`。
 
 也可以直接校验 SQLite 里的配置/任务/策略/因子/自选股，以及 Parquet 缓存覆盖：
 
 ```powershell
 cd E:\Projects\GaoshouPlatform-dev\backend
 .\.venv\Scripts\python.exe -m app.scripts.validate_dev_sample_data `
-  --json-report E:\Projects\Data\dev_sample\validation-report.json
+  --json-report E:\Projects\data\BaiduSyncdisk\dev_sample\validation-report.json
 ```
 
 校验会覆盖：

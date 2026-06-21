@@ -34,7 +34,9 @@ def _env_file_value(name: str) -> str | None:
     return value
 
 
-_DATA_DIR = Path(os.getenv("GAOSHOU_DATA_DIR") or _env_file_value("GAOSHOU_DATA_DIR") or (_BASE_DIR.parent / "Data")).expanduser()
+_DEFAULT_SYNCED_DATA_DIR = _BASE_DIR.parent / "data" / "BaiduSyncdisk"
+_DEFAULT_DATA_DIR = _DEFAULT_SYNCED_DATA_DIR if _DEFAULT_SYNCED_DATA_DIR.exists() else (_BASE_DIR.parent / "Data")
+_DATA_DIR = Path(os.getenv("GAOSHOU_DATA_DIR") or _env_file_value("GAOSHOU_DATA_DIR") or _DEFAULT_DATA_DIR).expanduser()
 _DATA_DIR.mkdir(parents=True, exist_ok=True)
 _DB_PATH = _DATA_DIR / "gaoshou.db"
 _LEGACY_DB_PATHS = (
@@ -74,7 +76,7 @@ class Settings(BaseSettings):
     market_data_backend: str = "parquet"
     parquet_data_dir: str = str(_DATA_DIR / "parquet")
     duckdb_path: str = ":memory:"
-    dev_local_data_dir: str = str(_BASE_DIR / "data")
+    dev_local_data_dir: str = str(_DATA_DIR)
     dev_prod_data_dir: str = str(_DATA_DIR)
     dev_data_mode_file: str = str(_BASE_DIR / ".runtime" / "dev_data_mode.json")
     parquet_minute_append_only: bool = True

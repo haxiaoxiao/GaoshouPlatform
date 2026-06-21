@@ -469,7 +469,10 @@ async def update_dev_data_mode(payload: DevDataModeUpdate):
             status_code=400,
             detail="Enabling production real data in dev requires acknowledge_warning=true",
         )
-    set_dev_data_mode(payload.use_prod_data)
+    try:
+        set_dev_data_mode(payload.use_prod_data)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return dev_data_mode_payload()
 
 
