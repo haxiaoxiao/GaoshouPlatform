@@ -19,6 +19,14 @@ class LiveSignalRequest(BaseModel):
     manual_account: dict[str, Any] | None = None
 
 
+class LivePreflightRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="paper", pattern="^(paper|live)$")
+    params: dict[str, Any] = Field(default_factory=dict)
+    manual_account: dict[str, Any] | None = None
+    evaluate_pipeline: bool = True
+
+
 class LiveProfileCreateRequest(BaseModel):
     strategy_id: int
     profile_key: str
@@ -61,6 +69,13 @@ class LiveSubmitOrdersRequest(BaseModel):
     confirm: bool = False
 
 
+class LiveStrategyAccountInitRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="paper", pattern="^(paper|live)$")
+    capital: float = Field(gt=0)
+    reset_existing: bool = False
+
+
 def _ok(data: Any) -> dict[str, Any]:
     return {"code": 0, "data": data}
 
@@ -73,6 +88,32 @@ def _error(exc: Exception) -> HTTPException:
 async def live_status() -> dict[str, Any]:
     try:
         return _ok(await live_trading_service.status())
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/account")
+async def live_account(
+    mode: str = Query(default="live", pattern="^(paper|live)$"),
+    profile_key: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return _ok(await live_trading_service.account_snapshot(mode=mode, profile_key=profile_key))
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/account/initialize")
+async def initialize_strategy_account(req: LiveStrategyAccountInitRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.initialize_strategy_account(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                capital=req.capital,
+                reset_existing=req.reset_existing,
+            )
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -98,6 +139,22 @@ async def update_strategy_profile(profile_key: str, req: LiveProfileUpdateReques
     try:
         payload = req.model_dump(exclude_unset=True)
         return _ok(await live_trading_service.update_profile(profile_key, payload))
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/preflight")
+async def live_preflight(req: LivePreflightRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.preflight(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                params=req.params,
+                manual_account=req.manual_account,
+                evaluate_pipeline=req.evaluate_pipeline,
+            )
+        )
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -170,5 +227,63 @@ async def order_audit(
 ) -> dict[str, Any]:
     try:
         return _ok(await live_trading_service.list_audits(limit=limit, profile_key=profile_key))
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/orders/pending")
+async def pending_orders(
+    profile_key: str | None = Query(default=None),
+    mode: str = Query(default="live", pattern="^(paper|live)$"),
+    limit: int = Query(default=100, ge=1, le=500),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.list_pending_orders(
+                limit=limit,
+                profile_key=profile_key,
+                mode=mode,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/trades")
+async def trade_records(
+    profile_key: str | None = Query(default=None),
+    mode: str | None = Query(default=None, pattern="^(paper|live)$"),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.list_trade_records(
+                limit=limit,
+                profile_key=profile_key,
+                mode=mode,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.get("/trades/weekly")
+async def weekly_trade_analysis(
+    profile_key: str | None = Query(default=None),
+    mode: str | None = Query(default=None, pattern="^(paper|live)$"),
+    week_start: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.weekly_analysis(
+                week_start=week_start,
+                profile_key=profile_key,
+                mode=mode,
+            )
+        )
     except Exception as exc:
         raise _error(exc) from exc
