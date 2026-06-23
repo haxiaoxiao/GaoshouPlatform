@@ -114,6 +114,8 @@ class Settings(BaseSettings):
     nga_cookie: str = ""
     nga_data_dir: str = str(_DATA_DIR / "sentiment" / "NGAdata")
     nga_board_fid: int = 706
+    wechat_sogou_queries: str = "开盘啦 创始人 股票,开盘啦 A股 股票,龙虎榜 A股 游资,短线 A股 股票,涨停板 A股"
+    wechat_sogou_cookie: str = ""
 
     # API 配置
     api_prefix: str = "/api"

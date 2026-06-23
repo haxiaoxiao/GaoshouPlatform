@@ -15,6 +15,7 @@ from app.services.sentiment import (
     _inject_xueqiu_cookie,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
+    _parse_wechat_sogou_articles,
     _post_mentions_symbol,
     _resolve_chrome_path,
     _verify_xueqiu_login,
@@ -25,6 +26,8 @@ from app.services.sentiment import (
     normalize_nga_data_posts,
     normalize_nga_thread,
     normalize_sentiment_source,
+    normalize_wechat_sogou_data_post,
+    normalize_wechat_sogou_thread,
     normalize_xueqiu_spyder_post,
     parse_sources,
 )
@@ -66,10 +69,11 @@ async def sentiment_session():
 
 def test_parse_sources_validates_supported_values():
     assert parse_sources("xueqiu,nga") == ["xueqiu_spyder", "flocktrader"]
-    assert parse_sources("xueqiu_spyder,eastmoney,jisilu,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"]
+    assert parse_sources("xueqiu_spyder,eastmoney,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader"]
     assert normalize_sentiment_source("xueqiu-spyder") == "xueqiu_spyder"
     assert normalize_sentiment_source("股吧") == "eastmoney_guba"
     assert normalize_sentiment_source("集思录") == "jisilu"
+    assert normalize_sentiment_source("公众号") == "wechat_sogou"
     with pytest.raises(ValueError):
         parse_sources("reddit")
 
@@ -258,6 +262,7 @@ async def test_sentiment_service_overview_counts_sources_and_runtime_status(sent
     assert overview["latest_published_at"] == "2026-05-11T10:00:00"
     assert rows["xueqiu_spyder"]["ready"] is True
     assert rows["xueqiu_spyder"]["cookie_configured"] is True
+    assert rows["wechat_sogou"]["ready"] is True
     assert rows["flocktrader"]["ready"] is True
     assert rows["flocktrader"]["cache_file_count"] == 1
 
@@ -289,16 +294,17 @@ async def test_sentiment_ingest_service_run_many_combines_sources(sentiment_sess
     service.run = fake_run  # type: ignore[method-assign]
     result = await service.run_many("600519.SH")
 
-    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"]
-    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu"]
+    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader"]
+    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou"]
     assert result["failed_sources"] == ["flocktrader"]
     assert result["all_succeeded"] is False
-    assert result["total_upserted"] == 6
+    assert result["total_upserted"] == 8
     assert result["results"][0]["ok"] is True
     assert result["results"][1]["ok"] is True
     assert result["results"][2]["ok"] is True
-    assert result["results"][3]["ok"] is False
-    assert "NGA cookie missing" in result["results"][3]["error"]
+    assert result["results"][3]["ok"] is True
+    assert result["results"][4]["ok"] is False
+    assert "NGA cookie missing" in result["results"][4]["error"]
 
 
 @pytest.mark.asyncio
@@ -744,6 +750,93 @@ async def test_collect_jisilu_filters_pages_dates_and_matches_symbols(sentiment_
     assert stats["collected"] == 2
     assert [post.source_post_id for post in posts] == ["1:600519.SH"]
     assert posts[0].content == "贵州茅台 600519 看多反弹。"
+
+
+def test_parse_and_normalize_wechat_sogou_payload():
+    html = """
+    <ul class="news-list">
+      <li d="wechat-article-1" id="sogou_vr_11002601_box_0">
+        <div class="txt-box">
+          <h3>
+            <a href="/link?url=abc&amp;type=2" target="_blank">
+              开盘啦创始人: 贵州茅台 600519 短线情绪观察
+            </a>
+          </h3>
+          <p class="txt-info">狂龙十八段聊A股，贵州茅台今天资金分歧。</p>
+          <div class="s-p">
+            <span class="all-time-y2">撬动木星</span>
+            <span class="s2"><script>document.write(timeConvert('1773582544'))</script></span>
+          </div>
+        </div>
+      </li>
+    </ul>
+    """
+    rows = _parse_wechat_sogou_articles(html, query="开盘啦 创始人 股票", page=1)
+
+    assert len(rows) == 1
+    assert rows[0]["source_thread_id"] == "wechat-article-1"
+    assert rows[0]["author"] == "撬动木星"
+    assert rows[0]["url"] == "https://weixin.sogou.com/link?url=abc&type=2"
+
+    raw = {
+        **rows[0],
+        "stock_codes": ["600519.SH"],
+        "keywords": ["贵州茅台", "600519.SH"],
+        "sentiment_score": 0.55,
+        "sentiment_label": "neutral",
+    }
+    post = normalize_wechat_sogou_data_post(raw, symbol="600519.SH")
+    thread = normalize_wechat_sogou_thread(raw)
+
+    assert post is not None
+    assert post.source == "wechat_sogou"
+    assert post.source_post_id == "wechat-article-1:600519.SH"
+    assert post.author == "撬动木星"
+    assert thread is not None
+    assert thread.source == "wechat_sogou"
+    assert thread.symbols == ["600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_collect_wechat_sogou_matches_symbols_and_threads(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    html = """
+    <ul class="news-list">
+      <li d="wechat-article-1" id="sogou_vr_11002601_box_0">
+        <div class="txt-box">
+          <h3><a href="/link?url=abc&amp;type=2">开盘啦创始人聊贵州茅台 600519</a></h3>
+          <p class="txt-info">A股短线资金对贵州茅台有分歧。</p>
+          <div class="s-p"><span class="all-time-y2">撬动木星</span><span class="s2"><script>document.write(timeConvert('1773582544'))</script></span></div>
+        </div>
+      </li>
+      <li d="wechat-article-2" id="sogou_vr_11002601_box_1">
+        <div class="txt-box">
+          <h3><a href="/link?url=def&amp;type=2">无关楼盘开盘</a></h3>
+          <p class="txt-info">这是一篇楼市文章。</p>
+          <div class="s-p"><span class="all-time-y2">楼市号</span></div>
+        </div>
+      </li>
+    </ul>
+    """
+
+    def fake_fetch(query: str, page: int = 1) -> str:
+        assert query == "开盘啦 创始人 股票"
+        return html if page == 1 else ""
+
+    monkeypatch.setattr("app.services.sentiment._fetch_wechat_sogou_page", fake_fetch)
+    posts, threads, stats = service._collect_wechat_sogou(
+        None,
+        None,
+        [("贵州茅台", "600519.SH")],
+        ["开盘啦 创始人 股票"],
+        2,
+    )
+
+    assert stats["collected"] == 2
+    assert len(threads) == 2
+    assert len(posts) == 1
+    assert posts[0].symbol == "600519.SH"
+    assert posts[0].source == "wechat_sogou"
 
 
 def test_normalize_flocktrader_post_maps_analyzed_post():

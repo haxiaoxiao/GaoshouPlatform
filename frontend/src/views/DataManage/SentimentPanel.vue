@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">DATA SENTIMENT</div>
         <h2>情绪数据模块</h2>
-        <p>把雪球个股讨论和 NGA 主题讨论统一进平台内的数据面板，按股票汇总、缓存和回看。</p>
+        <p>把雪球、东财股吧、集思录、微信公众号搜索和 NGA 主题讨论统一进平台内的数据面板，按股票汇总、缓存和回看。</p>
       </div>
       <div class="sentiment-actions">
         <el-button :icon="Refresh" :loading="isRefreshing" @click="reloadAll">刷新面板</el-button>
@@ -37,7 +37,7 @@
       <section class="panel controls-panel">
         <div class="panel-title">
           <h3>查询与抓取</h3>
-          <span>单一入口，统一控制两类舆情源</span>
+          <span>单一入口，统一控制多类舆情源</span>
         </div>
 
         <div class="control-grid">
@@ -61,7 +61,7 @@
               />
             </el-select>
             <small class="field-hint">
-              {{ requiresSymbolForIngest ? '雪球抓取需要股票；东财热门吧、集思录、NGA 可按全市场讨论抓取。' : '抓取东财热门吧、集思录或 NGA 时这里可以留空。' }}
+              {{ requiresSymbolForIngest ? '雪球抓取需要股票；东财热门吧、集思录、搜狗微信、NGA 可按全市场讨论抓取。' : '抓取东财热门吧、集思录、搜狗微信或 NGA 时这里可以留空。' }}
             </small>
           </label>
 
@@ -340,6 +340,7 @@ const sourceOptions: Array<{ value: SentimentSource; label: string }> = [
   { value: 'xueqiu_spyder', label: '雪球' },
   { value: 'eastmoney_guba', label: '东方财富股吧' },
   { value: 'jisilu', label: '集思录股票' },
+  { value: 'wechat_sogou', label: '搜狗微信' },
   { value: 'flocktrader', label: 'NGA' },
 ]
 
@@ -431,7 +432,7 @@ function sourceLabel(source: SentimentSource) {
 
 function ingestTargetLabel(result?: SentimentIngestBatchResult | null) {
   if (!result) return '-'
-  return result.symbol || 'NGA 日期抓取'
+  return result.symbol || '全市场/主题抓取'
 }
 
 function formatNumber(value: number) {

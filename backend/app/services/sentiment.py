@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -13,6 +14,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
+from urllib.parse import urlencode, urljoin
 
 import requests
 from sqlalchemy import func, or_, select
@@ -23,7 +25,7 @@ from app.db.models.sentiment import SentimentPost, SentimentThread
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader")
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader")
 CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
@@ -38,6 +40,15 @@ SOURCE_ALIASES = {
     "jisilu": "jisilu",
     "jsl": "jisilu",
     "集思录": "jisilu",
+    "wechat": "wechat_sogou",
+    "weixin": "wechat_sogou",
+    "wechat-sogou": "wechat_sogou",
+    "wechat_sogou": "wechat_sogou",
+    "sogou_wechat": "wechat_sogou",
+    "weixin_sogou": "wechat_sogou",
+    "公众号": "wechat_sogou",
+    "微信": "wechat_sogou",
+    "搜狗微信": "wechat_sogou",
     "flocktrader": "flocktrader",
     "flock-trader": "flocktrader",
     "nga": "flocktrader",
@@ -46,10 +57,18 @@ LEGACY_SOURCE_NAMES = {
     "xueqiu_spyder": {"xueqiu", "xueqiu_spyder"},
     "eastmoney_guba": {"eastmoney_guba"},
     "jisilu": {"jisilu"},
+    "wechat_sogou": {"wechat_sogou"},
     "flocktrader": {"nga", "flocktrader"},
 }
 SUPPORTED_SOURCES = set(SOURCE_ALIASES)
 SentimentProgressCallback = Callable[[dict[str, Any]], None]
+DEFAULT_WECHAT_SOGOU_QUERIES = (
+    "开盘啦 创始人 股票",
+    "开盘啦 A股 股票",
+    "龙虎榜 A股 游资",
+    "短线 A股 股票",
+    "涨停板 A股",
+)
 
 
 @dataclass
@@ -435,6 +454,147 @@ def _fetch_eastmoney_hot_bars(limit: int = 30) -> list[dict[str, str]]:
         if len(bars) >= limit:
             break
     return bars
+
+
+def _wechat_sogou_query_values() -> list[str]:
+    raw = _config_value("WECHAT_SOGOU_QUERIES", "wechat_sogou_queries", "")
+    values = re.split(r"[,;，；\n]+", raw) if raw else list(DEFAULT_WECHAT_SOGOU_QUERIES)
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _wechat_sogou_queries(symbol: str | None = None, stock: Stock | None = None) -> list[str]:
+    configured = _wechat_sogou_query_values()
+    if not symbol:
+        return configured
+    normalized = normalize_sentiment_symbol(symbol)
+    code = normalized.split(".", 1)[0]
+    stock_terms = [code]
+    if stock is not None:
+        stock_terms.extend(
+            [
+                str(stock.name or "").strip(),
+                str(stock.company_name or "").strip(),
+                str(_short_company_name(stock.company_name) or "").strip(),
+            ]
+        )
+    queries: list[str] = []
+    for term in stock_terms:
+        if not term:
+            continue
+        for suffix in ("股票", "A股", "股价"):
+            query = f"{term} {suffix}".strip()
+            if query not in queries:
+                queries.append(query)
+    for query in configured:
+        if query not in queries:
+            queries.append(query)
+    return queries
+
+
+def _wechat_sogou_url(query: str, page: int = 1) -> str:
+    params = {"type": "2", "query": query, "ie": "utf8"}
+    if page > 1:
+        params["page"] = str(page)
+    return "https://weixin.sogou.com/weixin?" + urlencode(params)
+
+
+def _wechat_sogou_headers(query: str) -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://weixin.sogou.com/",
+    }
+    cookie = _config_value("WECHAT_SOGOU_COOKIE", "wechat_sogou_cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _fetch_wechat_sogou_page(query: str, page: int = 1) -> str:
+    response = requests.get(
+        _wechat_sogou_url(query, page),
+        headers=_wechat_sogou_headers(query),
+        timeout=20,
+    )
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    text = response.text
+    if "请输入验证码" in text or "antispider" in response.url.lower():
+        raise RuntimeError("Sogou WeChat returned a verification page; configure WECHAT_SOGOU_COOKIE or retry later")
+    return text
+
+
+def _wechat_clean_text(value: str | None) -> str:
+    text = str(value or "")
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.S)
+    text = re.sub(r"<script\b.*?</script>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _wechat_article_id(link: str, title: str, account: str, published_at: datetime | None) -> str:
+    source = "|".join([link, title, account, published_at.isoformat() if published_at else ""])
+    return hashlib.sha1(source.encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+def _parse_wechat_sogou_articles(html_text: str, *, query: str, page: int = 1) -> list[dict[str, Any]]:
+    articles: list[dict[str, Any]] = []
+    for match in re.finditer(r"<li\b(?P<attrs>[^>]*)>(?P<body>.*?)</li>", html_text, flags=re.I | re.S):
+        attrs = match.group("attrs") or ""
+        body = match.group("body") or ""
+        if "txt-box" not in body or "sogou_vr_11002601" not in attrs + body:
+            continue
+        title_match = re.search(r"<h3[^>]*>.*?<a\b(?P<attrs>[^>]*)>(?P<title>.*?)</a>", body, flags=re.I | re.S)
+        if not title_match:
+            continue
+        href_match = re.search(r"href=[\"'](?P<href>.*?)[\"']", title_match.group("attrs") or "", flags=re.I | re.S)
+        raw_link = html.unescape(href_match.group("href")) if href_match else ""
+        if raw_link.startswith("//"):
+            link = "https:" + raw_link
+        elif raw_link:
+            link = urljoin("https://weixin.sogou.com/", raw_link)
+        else:
+            link = ""
+        title = _wechat_clean_text(title_match.group("title"))
+        summary_match = re.search(
+            r"<p\b[^>]*class=[\"'][^\"']*txt-info[^\"']*[\"'][^>]*>(?P<summary>.*?)</p>",
+            body,
+            flags=re.I | re.S,
+        )
+        summary = _wechat_clean_text(summary_match.group("summary")) if summary_match else ""
+        account_match = re.search(
+            r"<span\b[^>]*class=[\"'][^\"']*all-time-y2[^\"']*[\"'][^>]*>(?P<account>.*?)</span>",
+            body,
+            flags=re.I | re.S,
+        )
+        account = _wechat_clean_text(account_match.group("account")) if account_match else ""
+        ts_match = re.search(r"timeConvert\(['\"]?(?P<ts>\d{10})['\"]?\)", body)
+        published_at = _parse_datetime(int(ts_match.group("ts"))) if ts_match else None
+        d_match = re.search(r"\bd=[\"'](?P<d>[^\"']+)[\"']", attrs)
+        source_thread_id = str(d_match.group("d")).strip() if d_match else _wechat_article_id(link, title, account, published_at)
+        if not title and not summary:
+            continue
+        articles.append(
+            {
+                "source_thread_id": source_thread_id,
+                "title": title,
+                "content": summary,
+                "account": account,
+                "author": account,
+                "published_at": published_at.isoformat() if published_at else None,
+                "url": link,
+                "query": query,
+                "page": page,
+            }
+        )
+    return articles
 
 
 def _jisilu_category_url(page: int) -> str:
@@ -1284,6 +1444,32 @@ class SentimentIngestService:
                 "page_url": "https://www.jisilu.cn/category/8",
                 **jisilu_stats,
             }
+        elif source == "wechat_sogou":
+            aliases = None
+            stock = await self.session.get(Stock, symbol) if symbol else None
+            stock_aliases = await self._load_stock_aliases() if not symbol else None
+            if symbol:
+                aliases = _symbol_aliases_from_parts(symbol, stock)
+            queries = _wechat_sogou_queries(symbol, stock)
+            posts, threads, wechat_stats = await asyncio.to_thread(
+                self._collect_wechat_sogou,
+                symbol,
+                aliases,
+                stock_aliases,
+                queries,
+                max_pages,
+                start_date,
+                end_date,
+            )
+            threads_upserted = await self.service.upsert_threads(threads)
+            stats = {
+                "mode": "public_account_search",
+                "collected": wechat_stats["collected"],
+                "matched": len(posts),
+                "threads_upserted": threads_upserted,
+                "page_url": "https://weixin.sogou.com/weixin?type=2",
+                **wechat_stats,
+            }
         elif source == "flocktrader":
             posts, threads, nga_stats = await self._collect_flocktrader_by_date(
                 symbol,
@@ -1574,6 +1760,89 @@ class SentimentIngestService:
         return [post for post in normalized if post.source_post_id], {
             "collected": raw_count,
             "pages": page_rows,
+        }
+
+    def _collect_wechat_sogou(
+        self,
+        symbol: str | None,
+        aliases: list[str] | None,
+        stock_aliases: list[tuple[str, str]] | None,
+        queries: list[str],
+        max_pages: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], list[SentimentThreadInput], dict[str, Any]]:
+        normalized: list[SentimentPostInput] = []
+        threads: list[SentimentThreadInput] = []
+        raw_count = 0
+        query_rows: list[dict[str, Any]] = []
+        seen_articles: set[str] = set()
+        for query_index, query in enumerate(queries, start=1):
+            query_raw_count = 0
+            query_matched_before = len(normalized)
+            for page in range(1, max_pages + 1):
+                self._emit_progress(
+                    "wechat_sogou.page_fetch",
+                    source="wechat_sogou",
+                    current_step="wechat_sogou_page",
+                    current_page=page,
+                    page_limit=max_pages,
+                    query_index=query_index,
+                    query_count=len(queries),
+                    current_title=query,
+                    page_url=_wechat_sogou_url(query, page),
+                )
+                rows = _parse_wechat_sogou_articles(_fetch_wechat_sogou_page(query, page), query=query, page=page)
+                if not rows:
+                    break
+                raw_count += len(rows)
+                query_raw_count += len(rows)
+                for raw in rows:
+                    article_id = str(raw.get("source_thread_id") or "").strip()
+                    if not article_id or article_id in seen_articles:
+                        continue
+                    seen_articles.add(article_id)
+                    if not _in_date_window(_parse_datetime(raw.get("published_at")), start_date, end_date):
+                        continue
+                    text = _post_text(raw)
+                    article_symbols = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+                    raw["stock_codes"] = article_symbols
+                    raw["keywords"] = _nga_keywords(text, article_symbols)
+                    score, label = _nga_sentiment(text)
+                    raw["sentiment_score"] = score
+                    raw["sentiment_label"] = label
+                    thread = normalize_wechat_sogou_thread(raw, stock_aliases=stock_aliases)
+                    if thread is not None:
+                        threads.append(thread)
+                    if symbol:
+                        if not _post_mentions_symbol(raw, symbol, aliases):
+                            continue
+                        normalized.extend(normalize_wechat_sogou_data_posts(raw, symbol=symbol, aliases=aliases))
+                    else:
+                        normalized.extend(normalize_wechat_sogou_data_posts(raw, stock_aliases=stock_aliases))
+                self._emit_progress(
+                    "wechat_sogou.page_parsed",
+                    source="wechat_sogou",
+                    current_step="wechat_sogou_page",
+                    current_page=page,
+                    page_limit=max_pages,
+                    query_index=query_index,
+                    query_count=len(queries),
+                    current_title=query,
+                    rows_on_page=len(rows),
+                    posts_collected=len(normalized),
+                    threads_collected=len(threads),
+                )
+            query_rows.append(
+                {
+                    "query": query,
+                    "raw_count": query_raw_count,
+                    "matched": len(normalized) - query_matched_before,
+                }
+            )
+        return [post for post in normalized if post.source_post_id], threads, {
+            "collected": raw_count,
+            "queries": query_rows,
         }
 
     def _collect_flocktrader(self, symbol: str, max_pages: int) -> list[SentimentPostInput]:
@@ -2195,6 +2464,17 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "ready": True,
         }
 
+    if source == "wechat_sogou":
+        return {
+            "label": "搜狗微信",
+            "project_dir": "https://weixin.sogou.com/weixin?type=2",
+            "project_ready": True,
+            "cookie_configured": bool(_config_value("WECHAT_SOGOU_COOKIE", "wechat_sogou_cookie").strip()),
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
     if source == "flocktrader":
         project_dir = _flocktrader_project_dir()
         cache_dir = _nga_data_dir()
@@ -2345,6 +2625,98 @@ def normalize_jisilu_data_posts(
         if post is not None:
             normalized.append(post)
     return normalized
+
+
+def normalize_wechat_sogou_data_post(
+    raw: dict[str, Any],
+    *,
+    symbol: str,
+    aliases: list[str] | None = None,
+) -> SentimentPostInput | None:
+    article_id = str(raw.get("source_thread_id") or "").strip()
+    if not article_id:
+        return None
+    symbol = normalize_sentiment_symbol(symbol)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    if aliases:
+        for alias in aliases:
+            if alias and alias not in keywords and len(str(alias)) >= 2:
+                keywords.append(str(alias))
+    return SentimentPostInput(
+        source="wechat_sogou",
+        source_post_id=f"{article_id}:{symbol}",
+        symbol=symbol,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or raw.get("account") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or "") or None,
+        reply_count=0,
+        like_count=0,
+        comment_count=0,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_wechat_sogou_data_posts(
+    raw: dict[str, Any],
+    *,
+    symbol: str | None = None,
+    aliases: list[str] | None = None,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[SentimentPostInput]:
+    target_symbols = [normalize_sentiment_symbol(symbol)] if symbol else _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    normalized: list[SentimentPostInput] = []
+    for target_symbol in target_symbols:
+        post = normalize_wechat_sogou_data_post(raw, symbol=target_symbol, aliases=aliases if symbol else None)
+        if post is not None:
+            normalized.append(post)
+    return normalized
+
+
+def normalize_wechat_sogou_thread(
+    raw: dict[str, Any],
+    *,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> SentimentThreadInput | None:
+    article_id = str(raw.get("source_thread_id") or "").strip()
+    if not article_id:
+        return None
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    symbols = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    for symbol in symbols:
+        if symbol not in keywords:
+            keywords.append(symbol)
+    return SentimentThreadInput(
+        source="wechat_sogou",
+        source_thread_id=article_id,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or raw.get("account") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        last_reply_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or "") or None,
+        reply_count=0,
+        comment_count=0,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        symbols=symbols,
+        keywords=keywords,
+        raw=raw,
+    )
 
 
 def normalize_flocktrader_post(post: Any, *, symbol: str) -> SentimentPostInput | None:
