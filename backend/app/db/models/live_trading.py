@@ -69,6 +69,34 @@ class LiveOrderAudit(Base, TimestampMixin):
     skip_reason: Mapped[str | None] = mapped_column(Text)
 
 
+class LiveTradeRecord(Base, TimestampMixin):
+    """Standalone paper/live trade journal used for weekly review."""
+
+    __tablename__ = "live_trade_records"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    record_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    profile_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    strategy_id: Mapped[int] = mapped_column(ForeignKey("strategies.id"), nullable=False, index=True)
+    trade_date: Mapped[date | None] = mapped_column(Date, index=True)
+    signal_hash: Mapped[str | None] = mapped_column(String(96), index=True)
+    trigger_source: Mapped[str] = mapped_column(String(30), nullable=False, default="manual")
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="paper", index=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    stock_name: Mapped[str | None] = mapped_column(String(120))
+    side: Mapped[str] = mapped_column(String(10), nullable=False)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    reference_price: Mapped[Decimal] = mapped_column(Numeric(18, 4), nullable=False, default=Decimal("0"))
+    order_value: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    order_id: Mapped[str | None] = mapped_column(String(80), index=True)
+    message: Mapped[str | None] = mapped_column(Text)
+    order_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    result_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    account_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
 class LivePositionState(Base, TimestampMixin):
     """Small persisted state bag for live adapters."""
 
@@ -93,3 +121,23 @@ class LivePaperAccount(Base, TimestampMixin):
     total_asset: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("1000000"))
     market_value: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
     positions: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+
+
+class LiveEquitySnapshot(Base, TimestampMixin):
+    """Strategy-pool equity point used for review and drawdown metrics."""
+
+    __tablename__ = "live_equity_snapshots"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    snapshot_id: Mapped[str] = mapped_column(String(80), nullable=False, unique=True, index=True)
+    profile_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id"), index=True)
+    mode: Mapped[str] = mapped_column(String(20), nullable=False, default="paper", index=True)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    cash: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    market_value: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    total_asset: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    realized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    unrealized_pnl: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, default=Decimal("0"))
+    source: Mapped[str | None] = mapped_column(String(80))
+    meta: Mapped[dict[str, Any] | None] = mapped_column(JSON)

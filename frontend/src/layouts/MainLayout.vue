@@ -126,7 +126,17 @@
         <span class="context-badge">{{ contextBadge }}</span>
       </div>
 
-      <section v-for="block in contextBlocks" :key="block.title" class="context-card">
+      <section
+        v-for="block in contextBlocks"
+        :key="block.title"
+        class="context-card"
+        :class="{ 'context-card--actionable': Boolean(block.action) }"
+        :role="block.action ? 'button' : undefined"
+        :tabindex="block.action ? 0 : undefined"
+        @click="handleContextAction(block)"
+        @keydown.enter.prevent="handleContextAction(block)"
+        @keydown.space.prevent="handleContextAction(block)"
+      >
         <h3>{{ block.title }}</h3>
         <div class="context-list">
           <div v-for="row in block.rows" :key="`${block.title}-${row.label}`" class="context-row">
@@ -196,6 +206,13 @@ function toggleContextRail() {
 
 function toggleNotificationPanel() {
   showNotifications.value = !showNotifications.value
+}
+
+function handleContextAction(block: ContextBlock) {
+  if (!block.action) return
+  window.dispatchEvent(new CustomEvent('page-context-action', {
+    detail: { action: block.action, title: block.title },
+  }))
 }
 
 function closeNotificationPanel(e: MouseEvent) {
@@ -714,6 +731,20 @@ onUnmounted(() => {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
   background: rgba(255, 255, 255, 0.025);
+}
+
+.context-card--actionable {
+  cursor: pointer;
+  outline: none;
+  transition:
+    border-color var(--duration-fast) var(--ease-out),
+    background var(--duration-fast) var(--ease-out);
+}
+
+.context-card--actionable:hover,
+.context-card--actionable:focus-visible {
+  border-color: rgba(125, 211, 252, 0.48);
+  background: rgba(14, 116, 144, 0.12);
 }
 
 .context-card h3 {

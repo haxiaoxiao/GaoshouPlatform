@@ -52,6 +52,16 @@ export interface DevDataMode {
   updated_at?: string | null
 }
 
+export interface LiveTradingGuardrails {
+  enable_order_submit: boolean
+  auto_execute_enabled: boolean
+  env_file: string
+  env_values: Record<string, string | null>
+  requires_restart: boolean
+  confirm_text: string
+  updated_at: string
+}
+
 export const systemApi = {
   getStatus: () => request.get<SystemStatus>('/system/status'),
 
@@ -63,4 +73,14 @@ export const systemApi = {
 
   setDevDataMode: (payload: { use_prod_data: boolean; acknowledge_warning?: boolean }) =>
     request.put<DevDataMode>('/system/dev-data-mode', payload),
+
+  getLiveTradingGuardrails: () =>
+    request.get<LiveTradingGuardrails>('/system/live-trading-guardrails'),
+
+  setLiveTradingGuardrails: (payload: {
+    enable_order_submit: boolean
+    auto_execute_enabled: boolean
+    acknowledge_risk?: boolean
+    confirm_text?: string | null
+  }) => request.put<LiveTradingGuardrails>('/system/live-trading-guardrails', payload),
 }

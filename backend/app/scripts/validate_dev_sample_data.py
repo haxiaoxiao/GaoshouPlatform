@@ -32,6 +32,7 @@ REQUIRED_SQLITE_TABLES = (
     "sync_runs",
     "sync_logs",
     "sentiment_posts",
+    "sentiment_threads",
 )
 
 JSON_COLUMNS = {
@@ -41,6 +42,7 @@ JSON_COLUMNS = {
     "sync_logs": ("details",),
     "factor_research_runs": ("params", "summary", "detail"),
     "sentiment_posts": ("keywords_json", "raw_json"),
+    "sentiment_threads": ("symbols_json", "keywords_json", "raw_json"),
     "factors": ("parameters",),
     "factor_analysis": ("details",),
 }
@@ -51,6 +53,7 @@ DATE_COLUMNS = {
     "financial_data": "report_date",
     "index_components": "trade_date",
     "sentiment_posts": "published_at",
+    "sentiment_threads": "last_reply_at",
     "sync_runs": "start_time",
     "sync_logs": "start_time",
     "factor_research_runs": "start_date",
@@ -171,7 +174,7 @@ INTERFACE_STORAGE_REQUIREMENTS = {
     },
     "sentiment": {
         "routes": ["/api/sentiment/*"],
-        "sqlite": ["sentiment_posts", "stocks"],
+        "sqlite": ["sentiment_posts", "sentiment_threads", "stocks"],
         "parquet_optional": ["market_news", "announcements", "research_reports", "analyst_report_forecasts", "analyst_rank", "analyst_detail", "analyst_history", "hsgt_moneyflow", "hsgt_holdings", "fund_portfolio_holdings", "financial_income", "financial_balancesheet", "financial_cashflow"],
     },
     "legacy_strategy_signals": {
@@ -183,7 +186,7 @@ INTERFACE_STORAGE_REQUIREMENTS = {
     },
     "live_trading": {
         "routes": ["/api/live-trading/*"],
-        "sqlite": ["live_strategy_profiles", "live_order_audits", "live_paper_accounts"],
+        "sqlite": ["live_strategy_profiles", "live_order_audits", "live_trade_records", "live_paper_accounts"],
         "parquet": [],
         "external": ["optional QMT account bridge"],
     },

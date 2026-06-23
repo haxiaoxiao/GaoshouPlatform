@@ -91,6 +91,14 @@ export interface LiveSignalsResponse {
   target_symbols: string[]
   target_weights: Record<string, number>
   entry_filter: Record<string, unknown>
+  pending_order_sync?: Record<string, unknown> | null
+  pending_order_adjustment?: {
+    count: number
+    cash_reserved: number
+    cash_effect: number
+    position_deltas: Record<string, number>
+    details: Array<Record<string, unknown>>
+  } | null
   quote_error?: string | null
   heat_filter_note?: string | null
   order_submit_enabled: boolean
@@ -150,6 +158,18 @@ export interface LiveOrderAudit {
   trigger_source: string
   mode: LiveTradingMode
   status: string
+  event_type?: string | null
+  symbol?: string | null
+  stock_name?: string | null
+  side?: 'BUY' | 'SELL' | string | null
+  quantity?: number | null
+  filled_quantity?: number | null
+  remaining_quantity?: number | null
+  reference_price?: number | null
+  filled_price?: number | null
+  order_value?: number | null
+  order_id?: string | null
+  message?: string | null
   order_payload: Record<string, unknown>
   result_payload?: Record<string, unknown> | null
   skip_reason?: string | null
@@ -207,6 +227,35 @@ export interface LiveSubmitOrdersResponse {
   results?: LiveSubmitOrderResult[]
 }
 
+export interface LiveOrderSyncResponse {
+  synced: boolean
+  mode: LiveTradingMode
+  updated_count: number
+  pending_count: number
+  filled_count?: number
+  error?: string | null
+  orders?: Array<Record<string, unknown>>
+  trades?: Array<Record<string, unknown>>
+  fill_events?: Array<Record<string, unknown>>
+}
+
+export interface LiveCancelOrdersResponse {
+  cancelled: boolean
+  cancel_count: number
+  message?: string | null
+  results?: Array<Record<string, unknown>>
+  sync_result?: LiveOrderSyncResponse
+  orders?: LiveTradeRecord[]
+}
+
+export interface LiveCancelResubmitResponse {
+  cancel_result: LiveCancelOrdersResponse
+  signal_result?: LiveSignalsResponse
+  submit_result?: LiveSubmitOrdersResponse
+  submitted: boolean
+  message?: string | null
+}
+
 export interface LiveWeeklyAnalysis {
   generated_at: string
   week_start: string
@@ -217,17 +266,31 @@ export interface LiveWeeklyAnalysis {
     total_records: number
     completed_records: number
     failed_records: number
+    cancelled_records?: number
     buy_notional: number
     sell_notional: number
     net_notional: number
     paper_realized_pnl: number
     live_submitted_records: number
+    weekly_pnl?: number | null
+    weekly_return_pct?: number | null
+    weekly_max_drawdown_pct?: number | null
+    all_time_pnl?: number | null
+    all_time_return_pct?: number | null
+    all_time_max_drawdown_pct?: number | null
+    weekly_equity_snapshot_points?: number
+    all_time_equity_snapshot_points?: number
+    equity_snapshot_points?: {
+      weekly: number
+      all_time: number
+    }
   }
   by_day: Array<{
     trade_date: string
     records: number
     buy_notional: number
     sell_notional: number
+    cancelled?: number
     failed: number
     paper_realized_pnl: number
   }>
@@ -252,6 +315,34 @@ export interface LiveWeeklyAnalysis {
     notional: number
     net_notional: number
   }>
+  equity_curve?: Array<{
+    snapshot_id: string
+    trade_date?: string | null
+    created_at?: string | null
+    cash: number
+    market_value: number
+    total_asset: number
+    realized_pnl: number
+    unrealized_pnl: number
+    pnl: number
+    return_pct?: number | null
+    drawdown_pct?: number | null
+    source?: string | null
+  }>
+  weekly_equity_curve?: Array<{
+    snapshot_id: string
+    trade_date?: string | null
+    created_at?: string | null
+    cash: number
+    market_value: number
+    total_asset: number
+    realized_pnl: number
+    unrealized_pnl: number
+    pnl: number
+    return_pct?: number | null
+    drawdown_pct?: number | null
+    source?: string | null
+  }>
   notes: string[]
 }
 
@@ -261,10 +352,18 @@ export interface LiveAccountPosition {
   quantity: number
   available: number
   avg_cost: number
+  last_price?: number | null
   market_value: number
   cost_value?: number
   unrealized_pnl?: number
   unrealized_pnl_pct?: number | null
+  position_pct?: number | null
+  volume_ratio?: number | null
+  today_change_pct?: number | null
+  turnover_rate?: number | null
+  amount?: number | null
+  total_value?: number | null
+  float_value?: number | null
 }
 
 export interface LiveAccountSnapshot {
@@ -274,6 +373,8 @@ export interface LiveAccountSnapshot {
   total_asset: number
   market_value: number
   unrealized_pnl: number
+  total_pnl?: number
+  total_pnl_pct?: number | null
   position_count: number
   positions: LiveAccountPosition[]
   positions_by_symbol: Record<string, Record<string, unknown>>
@@ -285,10 +386,15 @@ export interface LiveAccountSnapshot {
 
 export const liveTradingApi = {
   status: () => request.get<LiveTradingStatus>('/live-trading/status'),
-  account: (mode: LiveTradingMode = 'live', profileKey?: string) => {
-    const query = new URLSearchParams({ mode })
+  account: (mode: LiveTradingMode = 'live', profileKey?: string, includeBroker = true) => {
+    const query = new URLSearchParams({ mode, include_broker: includeBroker ? 'true' : 'false' })
     if (profileKey) query.set('profile_key', profileKey)
     return request.get<LiveAccountSnapshot>(`/live-trading/account?${query.toString()}`)
+  },
+  accountStreamUrl: (mode: LiveTradingMode = 'live', profileKey?: string, intervalSeconds = 5) => {
+    const query = new URLSearchParams({ mode, interval_seconds: String(intervalSeconds) })
+    if (profileKey) query.set('profile_key', profileKey)
+    return `/api/live-trading/account/stream?${query.toString()}`
   },
   initializeAccount: (data: { profile_key?: string | null; mode: LiveTradingMode; capital: number; reset_existing?: boolean }) =>
     request.post<LiveAccountSnapshot>('/live-trading/account/initialize', data),
@@ -322,9 +428,10 @@ export const liveTradingApi = {
     request.post<LiveTradingStatus['runner']>('/live-trading/runner/takeover', { reason }),
   submitOrders: (data: { mode: LiveTradingMode; orders: Record<string, unknown>[]; confirm?: boolean }) =>
     request.post<LiveSubmitOrdersResponse>('/live-trading/orders/submit', data),
-  audits: (params?: { profile_key?: string; limit?: number }) => {
+  audits: (params?: { profile_key?: string; mode?: LiveTradingMode; limit?: number }) => {
     const query = new URLSearchParams()
     if (params?.profile_key) query.set('profile_key', params.profile_key)
+    if (params?.mode) query.set('mode', params.mode)
     if (params?.limit) query.set('limit', String(params.limit))
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request.get<LiveOrderAudit[]>(`/live-trading/orders/audit${suffix}`)
@@ -337,6 +444,28 @@ export const liveTradingApi = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request.get<LiveTradeRecord[]>(`/live-trading/orders/pending${suffix}`)
   },
+  syncOrders: (data: { profile_key?: string | null; mode?: LiveTradingMode; limit?: number }) =>
+    request.post<LiveOrderSyncResponse>('/live-trading/orders/sync', data),
+  cancelOrders: (data: {
+    profile_key?: string | null
+    mode?: LiveTradingMode
+    limit?: number
+    min_age_seconds?: number
+    record_ids?: string[]
+    order_ids?: string[]
+    confirm?: boolean
+  }) => request.post<LiveCancelOrdersResponse>('/live-trading/orders/cancel', data),
+  cancelAndResubmit: (data: {
+    profile_key?: string | null
+    mode?: LiveTradingMode
+    params?: Record<string, unknown>
+    limit?: number
+    min_age_seconds?: number
+    record_ids?: string[]
+    order_ids?: string[]
+    confirm_cancel?: boolean
+    confirm_submit?: boolean
+  }) => request.post<LiveCancelResubmitResponse>('/live-trading/orders/cancel-resubmit', data),
   trades: (params?: { profile_key?: string; mode?: LiveTradingMode; start_date?: string; end_date?: string; limit?: number }) => {
     const query = new URLSearchParams()
     if (params?.profile_key) query.set('profile_key', params.profile_key)

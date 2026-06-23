@@ -12,32 +12,44 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 
 import requests
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models.sentiment import SentimentPost
+from app.db.models.sentiment import SentimentPost, SentimentThread
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "flocktrader")
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader")
 CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
     "xueqiu-spyder": "xueqiu_spyder",
     "xueqiu_spyder": "xueqiu_spyder",
+    "eastmoney": "eastmoney_guba",
+    "eastmoney-guba": "eastmoney_guba",
+    "eastmoney_guba": "eastmoney_guba",
+    "dfcfw": "eastmoney_guba",
+    "guba": "eastmoney_guba",
+    "股吧": "eastmoney_guba",
+    "jisilu": "jisilu",
+    "jsl": "jisilu",
+    "集思录": "jisilu",
     "flocktrader": "flocktrader",
     "flock-trader": "flocktrader",
     "nga": "flocktrader",
 }
 LEGACY_SOURCE_NAMES = {
     "xueqiu_spyder": {"xueqiu", "xueqiu_spyder"},
+    "eastmoney_guba": {"eastmoney_guba"},
+    "jisilu": {"jisilu"},
     "flocktrader": {"nga", "flocktrader"},
 }
 SUPPORTED_SOURCES = set(SOURCE_ALIASES)
+SentimentProgressCallback = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -60,13 +72,37 @@ class SentimentPostInput:
 
 
 @dataclass
+class SentimentThreadInput:
+    source: str
+    source_thread_id: str
+    title: str | None = None
+    content: str | None = None
+    author: str | None = None
+    published_at: datetime | None = None
+    last_reply_at: datetime | None = None
+    url: str | None = None
+    reply_count: int = 0
+    comment_count: int = 0
+    sentiment_score: float | None = None
+    sentiment_label: str | None = None
+    symbols: list[str] = field(default_factory=list)
+    keywords: list[str] = field(default_factory=list)
+    raw: dict[str, Any] | None = None
+
+
+@dataclass
 class NgaIngestStats:
     loaded_dates: list[str] = field(default_factory=list)
     crawled_dates: list[str] = field(default_factory=list)
     date_files: list[str] = field(default_factory=list)
+    extra_date_files: list[str] = field(default_factory=list)
+    empty_dates: list[str] = field(default_factory=list)
+    scan_time_basis: str = "last_reply_time"
+    cache_partition: str = "publish_time"
     total_posts: int = 0
     analyzed_posts: int = 0
     matched_posts: int = 0
+    thread_upserted: int = 0
 
 
 def normalize_sentiment_source(source: str) -> str:
@@ -221,6 +257,47 @@ def _write_json_list(path: Path, posts: list[Any]) -> None:
     path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _nga_post_key(post: dict[str, Any]) -> str:
+    tid = str(post.get("tid") or "").strip()
+    if tid:
+        return f"tid:{tid}"
+    title = str(post.get("title") or "").strip()
+    publish_time = str(post.get("publish_time") or "").strip()
+    return f"fallback:{title}:{publish_time}"
+
+
+def _merge_nga_post_lists(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for group in groups:
+        for post in group:
+            if not isinstance(post, dict):
+                continue
+            key = _nga_post_key(post)
+            if key not in merged:
+                order.append(key)
+            merged[key] = post
+    return [merged[key] for key in order]
+
+
+def _nga_publish_day(post: dict[str, Any]) -> date | None:
+    publish_time = _parse_datetime(post.get("publish_time"))
+    if publish_time is not None:
+        return publish_time.date()
+    fallback_time = _parse_datetime(post.get("last_reply_time"))
+    return fallback_time.date() if fallback_time is not None else None
+
+
+def _bucket_nga_posts_by_publish_day(posts: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
+    buckets: dict[date, list[dict[str, Any]]] = {}
+    for post in posts:
+        publish_day = _nga_publish_day(post)
+        if publish_day is None:
+            continue
+        buckets.setdefault(publish_day, []).append(post)
+    return buckets
+
+
 def _text_parts(raw: dict[str, Any]) -> list[str]:
     parts = [str(raw.get("title") or ""), str(raw.get("content") or "")]
     comments = raw.get("comments") or []
@@ -300,6 +377,153 @@ def _xueqiu_project_dir() -> Path:
 
 def _flocktrader_project_dir() -> Path:
     return Path(_config_value("FLOCKTRADER_DIR", "flocktrader_dir", r"E:\Projects\flocktrader")).expanduser()
+
+
+def _eastmoney_guba_url(code: str, page: int, page_size: int = 20) -> str:
+    return (
+        "https://gbapi.eastmoney.com/webarticlelist/api/Article/Articlelist"
+        f"?code={code}&sorttype=1&page={page}&ps={page_size}"
+        "&deviceid=web&version=300&product=Guba&plat=web"
+    )
+
+
+def _eastmoney_headers(code: str) -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json,text/plain,*/*",
+        "Referer": f"https://guba.eastmoney.com/list,{code}.html",
+    }
+
+
+def _fetch_eastmoney_guba_page(code: str, page: int, page_size: int = 20) -> dict[str, Any]:
+    response = requests.get(
+        _eastmoney_guba_url(code, page, page_size),
+        headers=_eastmoney_headers(code),
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Eastmoney guba API returned non-object payload")
+    return payload
+
+
+def _fetch_eastmoney_hot_bars(limit: int = 30) -> list[dict[str, str]]:
+    response = requests.get(
+        "https://guba.eastmoney.com/remenba.aspx",
+        headers={
+            "User-Agent": "Mozilla/5.0",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://guba.eastmoney.com/",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    bars: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for match in re.finditer(
+        r'href="(?:https?://guba\.eastmoney\.com/)?list,(?P<code>\d{6})\.html"[^>]*>\((?P=code)\)(?P<name>.*?)</a>',
+        response.text,
+        re.S,
+    ):
+        code = match.group("code")
+        if code in seen:
+            continue
+        seen.add(code)
+        bars.append({"code": code, "name": _nga_clean_text(match.group("name"))})
+        if len(bars) >= limit:
+            break
+    return bars
+
+
+def _jisilu_category_url(page: int) -> str:
+    if page <= 1:
+        return "https://www.jisilu.cn/category/8"
+    return f"https://www.jisilu.cn/home/explore/sort_type-new__category-8__day-0__page-{page}"
+
+
+def _jisilu_headers() -> dict[str, str]:
+    return {
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": "https://www.jisilu.cn/category/8",
+    }
+
+
+def _fetch_jisilu_html(url: str) -> str:
+    response = requests.get(url, headers=_jisilu_headers(), timeout=20)
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    return response.text
+
+
+def _parse_jisilu_list_posts(html_text: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for chunk in html_text.split('<div class="aw-item">')[1:]:
+        if "aw-question-replay-count" not in chunk or "aw-questoin-content" not in chunk:
+            continue
+        reply_match = re.search(r'<span class="aw-question-replay-count[^"]*">\s*<em>(?P<count>\d+)</em>', chunk, re.S)
+        title_match = re.search(
+            r'<h4>\s*<a[^>]+href="(?P<url>https://www\.jisilu\.cn/question/(?P<qid>\d+))"[^>]*>(?P<title>.*?)</a>',
+            chunk,
+            re.S,
+        )
+        if title_match is None:
+            continue
+        author_match = re.search(
+            r'<a[^>]+class="aw-user-name"[^>]*>(?P<author>.*?)</a>.*?(?P<active_time>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}).*?(?P<view_count>\d+)\s*次浏览',
+            chunk,
+            re.S,
+        )
+        meta_text = _nga_clean_text(author_match.group(0)) if author_match else _nga_clean_text(chunk)
+        rows.append(
+            {
+                "question_id": title_match.group("qid"),
+                "title": _nga_clean_text(title_match.group("title")),
+                "url": title_match.group("url"),
+                "reply_count": _to_int(reply_match.group("count") if reply_match else 0),
+                "author": _nga_clean_text(author_match.group("author")) if author_match else None,
+                "active_time": author_match.group("active_time") if author_match else None,
+                "view_count": _to_int(author_match.group("view_count") if author_match else 0),
+                "meta_text": meta_text,
+            }
+        )
+    return rows
+
+
+def _parse_jisilu_detail(html_text: str) -> dict[str, Any]:
+    title_match = re.search(r"<h1>(?P<title>.*?)</h1>", html_text, re.S)
+    content_match = re.search(
+        r'<div class="aw-question-detail-txt markitup-box">(?P<content>.*?)</div>',
+        html_text,
+        re.S,
+    )
+    published_match = re.search(r"发表时间\s*(?P<published>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", html_text)
+    comments: list[dict[str, Any]] = []
+    for answer in re.finditer(
+        r'<div class="markitup-box"\s*>(?P<content>.*?)</div>.*?'
+        r'<span class="pull-left aw-text-color-999">(?P<publish_time>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})',
+        html_text,
+        re.S,
+    ):
+        content = _nga_clean_text(answer.group("content"))
+        if not content:
+            continue
+        comments.append(
+            {
+                "content": content,
+                "publish_time": answer.group("publish_time"),
+            }
+        )
+        if len(comments) >= 20:
+            break
+    return {
+        "detail_title": _nga_clean_text(title_match.group("title")) if title_match else None,
+        "content": _nga_clean_text(content_match.group("content")) if content_match else None,
+        "question_published_time": published_match.group("published") if published_match else None,
+        "comments": comments,
+    }
 
 
 def _xueqiu_debug_port() -> int:
@@ -603,6 +827,54 @@ class SentimentService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    async def upsert_threads(self, threads: list[SentimentThreadInput]) -> int:
+        count = 0
+        for thread in threads:
+            thread.source = normalize_sentiment_source(thread.source)
+            if not thread.source_thread_id:
+                raise ValueError("source_thread_id is required")
+            symbols = [
+                normalize_sentiment_symbol(symbol)
+                for symbol in thread.symbols
+                if normalize_security_symbol(symbol)
+            ]
+            symbols = list(dict.fromkeys(symbols))
+            label = _normalize_sentiment_label(thread.sentiment_label, thread.sentiment_score)
+            storage_sources = _source_storage_values([thread.source]) or [thread.source]
+            stmt = select(SentimentThread).where(
+                SentimentThread.source.in_(storage_sources),
+                SentimentThread.source_thread_id == str(thread.source_thread_id),
+            )
+            existing_rows = list((await self.session.execute(stmt)).scalars().all())
+            existing = next((row for row in existing_rows if row.source == thread.source), None)
+            existing = existing or (existing_rows[0] if existing_rows else None)
+            for duplicate in existing_rows:
+                if existing is not None and duplicate.id != existing.id:
+                    await self.session.delete(duplicate)
+            target = existing or SentimentThread(
+                source=thread.source,
+                source_thread_id=str(thread.source_thread_id),
+            )
+            target.source = thread.source
+            target.title = thread.title
+            target.content = thread.content
+            target.author = thread.author
+            target.published_at = thread.published_at
+            target.last_reply_at = thread.last_reply_at
+            target.url = thread.url
+            target.reply_count = max(int(thread.reply_count or 0), 0)
+            target.comment_count = max(int(thread.comment_count or 0), 0)
+            target.sentiment_score = thread.sentiment_score
+            target.sentiment_label = label
+            target.symbols_json = _json_list(symbols)
+            target.keywords_json = _json_list(thread.keywords)
+            target.raw_json = json.dumps(thread.raw or {}, ensure_ascii=False)
+            if existing is None:
+                self.session.add(target)
+            count += 1
+        await self.session.flush()
+        return count
+
     async def upsert_posts(self, posts: list[SentimentPostInput]) -> int:
         count = 0
         for post in posts:
@@ -646,6 +918,39 @@ class SentimentService:
             count += 1
         await self.session.flush()
         return count
+
+    async def list_threads(
+        self,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        sources: list[str] | None = None,
+        symbol: str | None = None,
+        limit: int = 50,
+    ) -> list[SentimentThread]:
+        start, end = _date_bounds(start_date, end_date)
+        thread_time = func.coalesce(SentimentThread.last_reply_at, SentimentThread.published_at)
+        stmt = select(SentimentThread)
+        if start is not None:
+            stmt = stmt.where(thread_time >= start)
+        if end is not None:
+            stmt = stmt.where(thread_time < end)
+        storage_sources = _source_storage_values(sources)
+        if storage_sources:
+            stmt = stmt.where(SentimentThread.source.in_(storage_sources))
+        if symbol:
+            normalized_symbol = normalize_sentiment_symbol(symbol)
+            code = normalized_symbol.split(".", 1)[0]
+            stmt = stmt.where(
+                or_(
+                    SentimentThread.symbols_json.like(f'%"{normalized_symbol}"%'),
+                    SentimentThread.symbols_json.like(f'%"{code}"%'),
+                )
+            )
+        stmt = stmt.order_by(
+            SentimentThread.reply_count.desc(),
+            thread_time.desc().nullslast(),
+        ).limit(max(1, min(limit, 200)))
+        return list((await self.session.execute(stmt)).scalars().all())
 
     async def list_posts(
         self,
@@ -776,12 +1081,66 @@ def serialize_post(post: SentimentPost) -> dict[str, Any]:
     }
 
 
+def serialize_thread(thread: SentimentThread) -> dict[str, Any]:
+    try:
+        raw = json.loads(thread.raw_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
+    raw_comments = raw.get("comments") if isinstance(raw, dict) else None
+    comments = [
+        {
+            "content": str(comment.get("content") or ""),
+            "publish_time": comment.get("publish_time"),
+        }
+        for comment in (raw_comments or [])
+        if isinstance(comment, dict) and str(comment.get("content") or "").strip()
+    ]
+    full_text_parts = [str(thread.title or ""), str(thread.content or "")]
+    full_text_parts.extend(str(comment["content"]) for comment in comments)
+    return {
+        "id": thread.id,
+        "source": normalize_sentiment_source(thread.source),
+        "source_thread_id": thread.source_thread_id,
+        "title": thread.title,
+        "content": thread.content,
+        "author": thread.author,
+        "published_at": thread.published_at.isoformat() if thread.published_at else None,
+        "last_reply_at": thread.last_reply_at.isoformat() if thread.last_reply_at else None,
+        "url": thread.url,
+        "reply_count": thread.reply_count,
+        "comment_count": thread.comment_count,
+        "sentiment_score": thread.sentiment_score,
+        "sentiment_label": thread.sentiment_label,
+        "symbols": _loads_list(thread.symbols_json),
+        "keywords": _loads_list(thread.keywords_json),
+        "comments": comments,
+        "full_text": "\n".join(part for part in full_text_parts if part.strip()),
+    }
+
+
 class SentimentIngestService:
     """Best-effort wrapper around local external crawler projects."""
 
-    def __init__(self, session: AsyncSession):
+    def __init__(
+        self,
+        session: AsyncSession,
+        progress_callback: SentimentProgressCallback | None = None,
+    ):
         self.session = session
         self.service = SentimentService(session)
+        self.progress_callback = progress_callback
+
+    def _emit_progress(self, stage: str, **payload: Any) -> None:
+        if self.progress_callback is None:
+            return
+        self.progress_callback(
+            {
+                "stage": stage,
+                "source": "flocktrader",
+                "updated_at": datetime.now().isoformat(),
+                **payload,
+            }
+        )
 
     async def run_many(
         self,
@@ -873,22 +1232,80 @@ class SentimentIngestService:
                 "page_url": f"https://xueqiu.com/S/{_to_xueqiu_symbol(symbol)}",
                 **xueqiu_stats,
             }
+        elif source == "eastmoney_guba":
+            if symbol:
+                posts, eastmoney_stats = await asyncio.to_thread(
+                    self._collect_eastmoney_guba,
+                    symbol,
+                    max_pages,
+                    min_reply,
+                    start_date,
+                    end_date,
+                )
+                mode = "stock_bar"
+                page_url = f"https://guba.eastmoney.com/list,{symbol.split('.', 1)[0]}.html"
+            else:
+                posts, eastmoney_stats = await asyncio.to_thread(
+                    self._collect_eastmoney_guba_hot_bars,
+                    max_pages,
+                    min_reply,
+                    start_date,
+                    end_date,
+                )
+                mode = "hot_bars"
+                page_url = "https://guba.eastmoney.com/remenba.aspx"
+            stats = {
+                "mode": mode,
+                "collected": eastmoney_stats["collected"],
+                "matched": len(posts),
+                "page_url": page_url,
+                **eastmoney_stats,
+            }
+        elif source == "jisilu":
+            aliases: list[str] | None = None
+            stock_aliases = await self._load_stock_aliases() if not symbol else None
+            if symbol:
+                stock = await self.session.get(Stock, symbol)
+                aliases = _symbol_aliases_from_parts(symbol, stock)
+            posts, jisilu_stats = await asyncio.to_thread(
+                self._collect_jisilu,
+                symbol,
+                aliases,
+                stock_aliases,
+                max_pages,
+                min_reply,
+                start_date,
+                end_date,
+            )
+            stats = {
+                "mode": "topic_board",
+                "collected": jisilu_stats["collected"],
+                "matched": len(posts),
+                "page_url": "https://www.jisilu.cn/category/8",
+                **jisilu_stats,
+            }
         elif source == "flocktrader":
-            posts, nga_stats = await self._collect_flocktrader_by_date(
+            posts, threads, nga_stats = await self._collect_flocktrader_by_date(
                 symbol,
                 max_pages=max_pages,
                 start_date=start_date,
                 end_date=end_date,
                 force_refresh=force_refresh,
             )
+            nga_stats.thread_upserted = await self.service.upsert_threads(threads)
             stats = {
                 "mode": "daily_cache",
                 "collected": nga_stats.total_posts,
                 "analyzed": nga_stats.analyzed_posts,
                 "matched": nga_stats.matched_posts,
+                "threads_upserted": nga_stats.thread_upserted,
                 "loaded_dates": nga_stats.loaded_dates,
                 "crawled_dates": nga_stats.crawled_dates,
                 "date_files": nga_stats.date_files,
+                "extra_date_files": nga_stats.extra_date_files,
+                "empty_dates": nga_stats.empty_dates,
+                "scan_time_basis": nga_stats.scan_time_basis,
+                "cache_partition": nga_stats.cache_partition,
             }
         else:
             raise ValueError(f"unsupported sentiment source: {source}")
@@ -925,6 +1342,239 @@ class SentimentIngestService:
             return [post for post in normalized if post.source_post_id], {"auth": auth}
         finally:
             crawler.close()
+
+    def _collect_eastmoney_guba(
+        self,
+        symbol: str,
+        max_pages: int,
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], dict[str, Any]]:
+        code = normalize_sentiment_symbol(symbol).split(".", 1)[0]
+        normalized: list[SentimentPostInput] = []
+        raw_count = 0
+        page_rows: list[dict[str, Any]] = []
+        for page in range(1, max_pages + 1):
+            self._emit_progress(
+                "eastmoney_guba.page_fetch",
+                source="eastmoney_guba",
+                current_step="eastmoney_guba_page",
+                current_symbol=symbol,
+                current_page=page,
+                page_limit=max_pages,
+            )
+            payload = _fetch_eastmoney_guba_page(code, page)
+            rows = payload.get("re") or []
+            if not isinstance(rows, list) or not rows:
+                page_rows.append({"page": page, "raw_count": 0, "matched": 0})
+                break
+            raw_count += len(rows)
+            matched_before = len(normalized)
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                post = normalize_eastmoney_guba_post(raw, symbol=symbol)
+                if post is None:
+                    continue
+                if post.comment_count < min_reply:
+                    continue
+                if not _in_date_window(post.published_at, start_date, end_date):
+                    continue
+                normalized.append(post)
+            page_rows.append({"page": page, "raw_count": len(rows), "matched": len(normalized) - matched_before})
+            self._emit_progress(
+                "eastmoney_guba.page_parsed",
+                source="eastmoney_guba",
+                current_step="eastmoney_guba_page",
+                current_symbol=symbol,
+                current_page=page,
+                page_limit=max_pages,
+                rows_on_page=len(rows),
+                posts_collected=len(normalized),
+            )
+        return [post for post in normalized if post.source_post_id], {
+            "collected": raw_count,
+            "pages": page_rows,
+            "bar_code": code,
+        }
+
+    def _collect_eastmoney_guba_hot_bars(
+        self,
+        max_pages: int,
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], dict[str, Any]]:
+        bar_limit = max(max_pages, 1) * 10
+        self._emit_progress(
+            "eastmoney_guba.hot_bars_fetch",
+            source="eastmoney_guba",
+            current_step="eastmoney_hot_bars",
+            bar_limit=bar_limit,
+        )
+        bars = _fetch_eastmoney_hot_bars(bar_limit)
+        normalized: list[SentimentPostInput] = []
+        raw_count = 0
+        bar_rows: list[dict[str, Any]] = []
+        seen_posts: set[tuple[str, str]] = set()
+        for bar_index, bar in enumerate(bars, start=1):
+            code = bar["code"]
+            symbol = normalize_security_symbol(code, _infer_market_from_code(code))
+            if not symbol:
+                continue
+            self._emit_progress(
+                "eastmoney_guba.bar_fetch",
+                source="eastmoney_guba",
+                current_step="eastmoney_hot_bar",
+                current_symbol=symbol,
+                current_page=bar_index,
+                page_limit=len(bars),
+                current_title=bar.get("name"),
+            )
+            payload = _fetch_eastmoney_guba_page(code, 1)
+            rows = payload.get("re") or []
+            if not isinstance(rows, list):
+                rows = []
+            raw_count += len(rows)
+            matched_before = len(normalized)
+            for raw in rows:
+                if not isinstance(raw, dict):
+                    continue
+                post = normalize_eastmoney_guba_post(raw, symbol=symbol)
+                if post is None:
+                    continue
+                dedupe_key = (post.symbol, post.source_post_id)
+                if dedupe_key in seen_posts:
+                    continue
+                seen_posts.add(dedupe_key)
+                if post.comment_count < min_reply:
+                    continue
+                if not _in_date_window(post.published_at, start_date, end_date):
+                    continue
+                normalized.append(post)
+            bar_rows.append(
+                {
+                    "symbol": symbol,
+                    "code": code,
+                    "name": bar.get("name"),
+                    "raw_count": len(rows),
+                    "matched": len(normalized) - matched_before,
+                }
+            )
+            self._emit_progress(
+                "eastmoney_guba.bar_parsed",
+                source="eastmoney_guba",
+                current_step="eastmoney_hot_bar",
+                current_symbol=symbol,
+                current_page=bar_index,
+                page_limit=len(bars),
+                current_title=bar.get("name"),
+                rows_on_page=len(rows),
+                posts_collected=len(normalized),
+            )
+        return [post for post in normalized if post.source_post_id], {
+            "collected": raw_count,
+            "bar_limit": bar_limit,
+            "bars": bar_rows,
+        }
+
+    def _collect_jisilu(
+        self,
+        symbol: str | None,
+        aliases: list[str] | None,
+        stock_aliases: list[tuple[str, str]] | None,
+        max_pages: int,
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], dict[str, Any]]:
+        normalized: list[SentimentPostInput] = []
+        raw_count = 0
+        page_rows: list[dict[str, Any]] = []
+        seen_questions: set[str] = set()
+        for page in range(1, max_pages + 1):
+            url = _jisilu_category_url(page)
+            self._emit_progress(
+                "jisilu.page_fetch",
+                source="jisilu",
+                current_step="jisilu_page",
+                current_page=page,
+                page_limit=max_pages,
+                page_url=url,
+            )
+            rows = _parse_jisilu_list_posts(_fetch_jisilu_html(url))
+            if not rows:
+                page_rows.append({"page": page, "raw_count": 0, "matched": 0})
+                break
+            raw_count += len(rows)
+            matched_before = len(normalized)
+            for topic_index, row in enumerate(rows, start=1):
+                question_id = str(row.get("question_id") or "").strip()
+                if not question_id or question_id in seen_questions:
+                    continue
+                seen_questions.add(question_id)
+                if _to_int(row.get("reply_count")) < min_reply:
+                    continue
+                active_time = _parse_datetime(row.get("active_time"))
+                if active_time is not None and not _in_date_window(active_time, start_date, end_date):
+                    continue
+                self._emit_progress(
+                    "jisilu.thread.fetch",
+                    source="jisilu",
+                    current_step="thread_detail",
+                    current_page=page,
+                    page_limit=max_pages,
+                    topic_index=topic_index,
+                    topics_on_page=len(rows),
+                    current_tid=question_id,
+                    current_title=str(row.get("title") or "")[:120],
+                    posts_collected=len(normalized),
+                )
+                detail = _parse_jisilu_detail(_fetch_jisilu_html(str(row.get("url"))))
+                raw = {**row, **detail}
+                raw["published_time"] = raw.get("question_published_time") or raw.get("active_time")
+                text = _post_text(raw)
+                stock_codes = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+                raw["stock_codes"] = stock_codes
+                raw["keywords"] = _nga_keywords(text, stock_codes)
+                score, label = _nga_sentiment(text)
+                raw["sentiment_score"] = score
+                raw["sentiment_label"] = label
+                if symbol:
+                    if not _post_mentions_symbol(raw, symbol, aliases):
+                        continue
+                    normalized.extend(normalize_jisilu_data_posts(raw, symbol=symbol, aliases=aliases))
+                else:
+                    normalized.extend(normalize_jisilu_data_posts(raw, stock_aliases=stock_aliases))
+                self._emit_progress(
+                    "jisilu.thread.collected",
+                    source="jisilu",
+                    current_step="thread_detail",
+                    current_page=page,
+                    page_limit=max_pages,
+                    topic_index=topic_index,
+                    topics_on_page=len(rows),
+                    current_tid=question_id,
+                    current_title=str(raw.get("title") or "")[:120],
+                    reply_count=_to_int(raw.get("reply_count")),
+                    comments_count=len(raw.get("comments") or []),
+                    posts_collected=len(normalized),
+                )
+            page_rows.append({"page": page, "raw_count": len(rows), "matched": len(normalized) - matched_before})
+            self._emit_progress(
+                "jisilu.page_parsed",
+                source="jisilu",
+                current_step="jisilu_page",
+                current_page=page,
+                page_limit=max_pages,
+                rows_on_page=len(rows),
+                posts_collected=len(normalized),
+            )
+        return [post for post in normalized if post.source_post_id], {
+            "collected": raw_count,
+            "pages": page_rows,
+        }
 
     def _collect_flocktrader(self, symbol: str, max_pages: int) -> list[SentimentPostInput]:
         project_dir = Path(_config_value("FLOCKTRADER_DIR", "flocktrader_dir", r"E:\Projects\flocktrader"))
@@ -967,7 +1617,7 @@ class SentimentIngestService:
         start_date: date | None,
         end_date: date | None,
         force_refresh: bool,
-    ) -> tuple[list[SentimentPostInput], NgaIngestStats]:
+    ) -> tuple[list[SentimentPostInput], list[SentimentThreadInput], NgaIngestStats]:
         today = date.today()
         start = start_date or end_date or today
         end = end_date or start
@@ -990,6 +1640,12 @@ class SentimentIngestService:
         analyzed = self._analyze_nga_posts(raw_posts)
         stats.analyzed_posts = len(analyzed)
 
+        threads = [
+            thread
+            for raw in analyzed
+            if (thread := normalize_nga_thread(raw, stock_aliases=stock_aliases)) is not None
+        ]
+
         normalized: list[SentimentPostInput] = []
         for raw in analyzed:
             if symbol:
@@ -999,7 +1655,7 @@ class SentimentIngestService:
                 continue
             normalized.extend(normalize_nga_data_posts(raw, stock_aliases=stock_aliases))
         stats.matched_posts = len(normalized)
-        return normalized, stats
+        return normalized, threads, stats
 
     def _load_or_crawl_nga_date_posts(
         self,
@@ -1011,45 +1667,211 @@ class SentimentIngestService:
     ) -> tuple[list[dict[str, Any]], NgaIngestStats]:
         stats = NgaIngestStats()
         data_dir = _nga_data_dir()
-        raw_posts: list[dict[str, Any]] = []
-        for day in _date_range(start, end):
+        crawled_posts: list[dict[str, Any]] = []
+        requested_days = list(_date_range(start, end))
+        requested_day_set = set(requested_days)
+        missing_days: list[date] = []
+        posts_by_day: dict[date, list[dict[str, Any]]] = {}
+        self._emit_progress(
+            "nga.prepare",
+            current_step="prepare",
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            requested_dates=[day.isoformat() for day in requested_days],
+            force_refresh=force_refresh,
+            cache_partition=stats.cache_partition,
+            scan_time_basis=stats.scan_time_basis,
+        )
+        for day in requested_days:
             path = data_dir / _date_file_name(day)
+            self._emit_progress(
+                "nga.cache.check",
+                current_step="cache_check",
+                current_date=day.isoformat(),
+                current_date_file=str(path),
+            )
             if path.exists() and not force_refresh:
                 posts = _read_json_list(path)
+                posts_by_day[day] = posts
                 stats.loaded_dates.append(day.isoformat())
-            else:
-                posts = self._crawl_nga_day(day, max_pages=max_pages)
+                self._emit_progress(
+                    "nga.cache.loaded",
+                    current_step="cache_loaded",
+                    current_date=day.isoformat(),
+                    current_date_file=str(path),
+                    cache_posts=len(posts),
+                )
+                continue
+            missing_days.append(day)
+
+        if missing_days:
+            crawl_start = min(missing_days)
+            crawl_end = max(missing_days)
+            self._emit_progress(
+                "nga.crawl.range_start",
+                current_step="crawl_range",
+                crawl_start=crawl_start.isoformat(),
+                crawl_end=crawl_end.isoformat(),
+                missing_dates=[day.isoformat() for day in missing_days],
+            )
+            crawled_posts = self._crawl_nga_range(crawl_start, crawl_end, max_pages=max_pages)
+            crawled_by_day = _bucket_nga_posts_by_publish_day(crawled_posts)
+            for day, posts in sorted(crawled_by_day.items()):
+                path = data_dir / _date_file_name(day)
+                if day in requested_day_set:
+                    existing = posts_by_day.get(day, [])
+                    posts_by_day[day] = _merge_nga_post_lists(existing, posts)
+                    _write_json_list(path, posts_by_day[day])
+                    self._emit_progress(
+                        "nga.cache.write",
+                        current_step="cache_write",
+                        current_date=day.isoformat(),
+                        current_date_file=str(path),
+                        cache_posts=len(posts_by_day[day]),
+                    )
+                    continue
+                if path.exists():
+                    posts = _merge_nga_post_lists(_read_json_list(path), posts)
                 _write_json_list(path, posts)
+                stats.extra_date_files.append(str(path))
+                self._emit_progress(
+                    "nga.cache.write_extra",
+                    current_step="cache_write_extra",
+                    current_date=day.isoformat(),
+                    current_date_file=str(path),
+                    cache_posts=len(posts),
+                )
+            for day in missing_days:
+                posts = posts_by_day.get(day, [])
+                if day not in crawled_by_day:
+                    path = data_dir / _date_file_name(day)
+                    _write_json_list(path, posts)
+                    self._emit_progress(
+                        "nga.cache.write_empty",
+                        current_step="cache_write",
+                        current_date=day.isoformat(),
+                        current_date_file=str(path),
+                        cache_posts=0,
+                    )
                 stats.crawled_dates.append(day.isoformat())
+                if not posts:
+                    stats.empty_dates.append(day.isoformat())
+
+        raw_posts: list[dict[str, Any]] = []
+        for day in requested_days:
+            path = data_dir / _date_file_name(day)
             stats.date_files.append(str(path))
-            raw_posts.extend(posts)
-        return raw_posts, stats
+            raw_posts.extend(posts_by_day.get(day, []))
+        extra_posts = [
+            post
+            for post in crawled_posts
+            if (publish_day := _nga_publish_day(post)) is not None and publish_day not in requested_day_set
+        ]
+        merged_posts = _merge_nga_post_lists(raw_posts, extra_posts)
+        self._emit_progress(
+            "nga.load.done",
+            current_step="load_done",
+            total_posts=len(merged_posts),
+            loaded_dates=stats.loaded_dates,
+            crawled_dates=stats.crawled_dates,
+            empty_dates=stats.empty_dates,
+            extra_date_files=stats.extra_date_files,
+        )
+        return merged_posts, stats
 
     def _crawl_nga_day(self, day: date, *, max_pages: int) -> list[Any]:
+        return self._crawl_nga_range(day, day, max_pages=max_pages)
+
+    def _crawl_nga_range(self, start: date, end: date, *, max_pages: int) -> list[Any]:
         cookie = _config_value("NGA_COOKIE", "nga_cookie")
         if not cookie:
             raise RuntimeError(
                 "NGA_COOKIE is required to crawl missing NGAdata files; "
                 "set it in the environment or pre-populate the shared sentiment data directory"
             )
-        start_dt = datetime.combine(day, time.min)
-        end_dt = datetime.combine(day, time.max.replace(microsecond=0))
+        start_dt = datetime.combine(start, time.min)
+        end_dt = datetime.combine(end, time.max.replace(microsecond=0))
         board_fid = int(getattr(settings, "nga_board_fid", 706) or 706)
         collected: list[dict[str, Any]] = []
         seen_tids: set[str] = set()
-        for page in range(1, max_pages + 1):
+        page_limit = max_pages * max(1, (end - start).days + 1) + 1
+        self._emit_progress(
+            "nga.crawl.start",
+            current_step="crawl",
+            crawl_start=start.isoformat(),
+            crawl_end=end.isoformat(),
+            max_pages=max_pages,
+            page_limit=page_limit,
+            board_fid=board_fid,
+        )
+        for page in range(1, page_limit + 1):
+            self._emit_progress(
+                "nga.board.page_fetch",
+                current_step="board_page",
+                board_page=page,
+                current_page=page,
+                page_limit=page_limit,
+                threads_collected=len(collected),
+            )
             board_html = _fetch_nga_html("https://nga.178.com/thread.php", params={"fid": board_fid, "page": page})
             topics = _parse_nga_board_topics(board_html)
             if not topics:
+                self._emit_progress(
+                    "nga.board.no_topics",
+                    current_step="board_page",
+                    board_page=page,
+                    current_page=page,
+                    page_limit=page_limit,
+                    threads_collected=len(collected),
+                )
                 break
-            for topic in topics:
+            self._emit_progress(
+                "nga.board.page_parsed",
+                current_step="board_page",
+                board_page=page,
+                current_page=page,
+                page_limit=page_limit,
+                topics_on_page=len(topics),
+                threads_collected=len(collected),
+            )
+            parsed_topic_times = [
+                value
+                for topic in topics
+                if (value := _parse_datetime(topic.get("publish_time"))) is not None
+            ]
+            for topic_index, topic in enumerate(topics, start=1):
                 tid = str(topic.get("tid") or "")
                 if not tid or tid in seen_tids:
                     continue
                 seen_tids.add(tid)
+                topic_title = str(topic.get("title") or "")
+                self._emit_progress(
+                    "nga.thread.fetch",
+                    current_step="thread_detail",
+                    board_page=page,
+                    current_page=page,
+                    page_limit=page_limit,
+                    topic_index=topic_index,
+                    topics_on_page=len(topics),
+                    current_tid=tid,
+                    current_title=topic_title[:120],
+                    detail_page="e",
+                    threads_collected=len(collected),
+                )
                 detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
                 thread_posts = _parse_nga_thread_posts(detail_html)
                 if not thread_posts:
+                    self._emit_progress(
+                        "nga.thread.empty",
+                        current_step="thread_detail",
+                        board_page=page,
+                        current_page=page,
+                        page_limit=page_limit,
+                        current_tid=tid,
+                        current_title=topic_title[:120],
+                        detail_page="e",
+                        threads_collected=len(collected),
+                    )
                     continue
                 publish_time = _parse_datetime(thread_posts[0].get("publish_time")) or topic.get("publish_time")
                 last_reply_time = _parse_datetime(thread_posts[-1].get("publish_time")) or publish_time
@@ -1082,8 +1904,41 @@ class SentimentIngestService:
                         "sentiment_label": sentiment_label,
                     }
                 )
-            if all((_parse_datetime(item.get("publish_time")) or start_dt) < start_dt for item in topics):
+                self._emit_progress(
+                    "nga.thread.collected",
+                    current_step="thread_detail",
+                    board_page=page,
+                    current_page=page,
+                    page_limit=page_limit,
+                    topic_index=topic_index,
+                    topics_on_page=len(topics),
+                    current_tid=tid,
+                    current_title=title[:120],
+                    detail_page="e",
+                    publish_time=publish_time.isoformat() if isinstance(publish_time, datetime) else str(publish_time),
+                    last_reply_time=last_reply_time.isoformat() if isinstance(last_reply_time, datetime) else str(last_reply_time),
+                    reply_count=topic.get("reply_count", len(comments)),
+                    comments_count=len(comments),
+                    threads_collected=len(collected),
+                )
+            if parsed_topic_times and all(item < start_dt for item in parsed_topic_times):
+                self._emit_progress(
+                    "nga.crawl.stop_before_start",
+                    current_step="crawl_stop",
+                    board_page=page,
+                    current_page=page,
+                    page_limit=page_limit,
+                    threads_collected=len(collected),
+                    oldest_page_time=min(parsed_topic_times).isoformat(),
+                )
                 break
+        self._emit_progress(
+            "nga.crawl.done",
+            current_step="crawl_done",
+            crawl_start=start.isoformat(),
+            crawl_end=end.isoformat(),
+            threads_collected=len(collected),
+        )
         return collected
 
     def _analyze_nga_posts(self, raw_posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1167,6 +2022,19 @@ def _extract_nga_post_symbols(
                 continue
             if alias_text.upper() in text_upper and symbol not in normalized:
                 normalized.append(symbol)
+    return normalized
+
+
+def _extract_forum_post_symbols(
+    raw: dict[str, Any],
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    normalized = _extract_nga_post_symbols(raw, stock_aliases=stock_aliases)
+    text = _post_text(raw)
+    for code in re.findall(r"(?<!\d)(?:60|68|00|30)\d{4}(?!\d)", text):
+        symbol = normalize_security_symbol(code, _infer_market_from_code(code))
+        if symbol and "." in symbol and symbol not in normalized:
+            normalized.append(symbol)
     return normalized
 
 
@@ -1305,6 +2173,28 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "chrome_path": chrome_path,
         }
 
+    if source == "eastmoney_guba":
+        return {
+            "label": "东方财富股吧",
+            "project_dir": "https://guba.eastmoney.com/",
+            "project_ready": True,
+            "cookie_configured": False,
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
+    if source == "jisilu":
+        return {
+            "label": "集思录股票",
+            "project_dir": "https://www.jisilu.cn/category/8",
+            "project_ready": True,
+            "cookie_configured": False,
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
     if source == "flocktrader":
         project_dir = _flocktrader_project_dir()
         cache_dir = _nga_data_dir()
@@ -1364,6 +2254,97 @@ def normalize_xueqiu_spyder_post(
         comment_count=reply_count,
         raw=raw,
     )
+
+
+def normalize_eastmoney_guba_post(raw: dict[str, Any], *, symbol: str) -> SentimentPostInput | None:
+    source_post_id = str(raw.get("post_id") or "").strip()
+    if not source_post_id:
+        return None
+    normalized_symbol = normalize_sentiment_symbol(symbol)
+    code = normalized_symbol.split(".", 1)[0]
+    bar_code = str(raw.get("stockbar_code") or code).strip() or code
+    if bar_code != code:
+        return None
+    title = _strip_html_fallback(raw.get("post_title") or "")
+    published_at = _parse_datetime(raw.get("post_publish_time") or raw.get("post_display_time"))
+    reply_count = _to_int(raw.get("post_comment_count"))
+    text = title
+    score, label = _nga_sentiment(text)
+    keywords = _nga_keywords(text, [code])
+    return SentimentPostInput(
+        source="eastmoney_guba",
+        source_post_id=source_post_id,
+        symbol=normalized_symbol,
+        title=title or None,
+        content=None,
+        author=str(raw.get("user_nickname") or "") or None,
+        published_at=published_at,
+        url=f"https://guba.eastmoney.com/news,{bar_code},{source_post_id}.html",
+        reply_count=reply_count,
+        like_count=0,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(label, score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_jisilu_data_post(
+    raw: dict[str, Any],
+    *,
+    symbol: str,
+    aliases: list[str] | None = None,
+) -> SentimentPostInput | None:
+    question_id = str(raw.get("question_id") or "").strip()
+    if not question_id:
+        return None
+    symbol = normalize_sentiment_symbol(symbol)
+    comments = raw.get("comments") or []
+    reply_count = _to_int(raw.get("reply_count"), len(comments) if isinstance(comments, list) else 0)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    if aliases:
+        for alias in aliases:
+            if alias and alias not in keywords and len(str(alias)) >= 2:
+                keywords.append(str(alias))
+    return SentimentPostInput(
+        source="jisilu",
+        source_post_id=f"{question_id}:{symbol}",
+        symbol=symbol,
+        title=str(raw.get("title") or raw.get("detail_title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_time") or raw.get("active_time")),
+        url=str(raw.get("url") or f"https://www.jisilu.cn/question/{question_id}"),
+        reply_count=reply_count,
+        like_count=0,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_jisilu_data_posts(
+    raw: dict[str, Any],
+    *,
+    symbol: str | None = None,
+    aliases: list[str] | None = None,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[SentimentPostInput]:
+    target_symbols = [normalize_sentiment_symbol(symbol)] if symbol else _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    normalized: list[SentimentPostInput] = []
+    for target_symbol in target_symbols:
+        post = normalize_jisilu_data_post(raw, symbol=target_symbol, aliases=aliases if symbol else None)
+        if post is not None:
+            normalized.append(post)
+    return normalized
 
 
 def normalize_flocktrader_post(post: Any, *, symbol: str) -> SentimentPostInput | None:
@@ -1430,6 +2411,45 @@ def normalize_nga_data_post(
         comment_count=reply_count,
         sentiment_score=score,
         sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_nga_thread(
+    raw: dict[str, Any],
+    *,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> SentimentThreadInput | None:
+    tid = str(raw.get("tid") or "").strip()
+    if not tid:
+        return None
+    comments = raw.get("comments") or []
+    reply_count = _to_int(raw.get("reply_count"), len(comments) if isinstance(comments, list) else 0)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    symbols = _extract_nga_post_symbols(raw, stock_aliases=stock_aliases)
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    for symbol in symbols:
+        if symbol not in keywords:
+            keywords.append(symbol)
+    return SentimentThreadInput(
+        source="flocktrader",
+        source_thread_id=tid,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("publish_time")),
+        last_reply_at=_parse_datetime(raw.get("last_reply_time")),
+        url=f"https://bbs.nga.cn/read.php?tid={tid}",
+        reply_count=reply_count,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        symbols=symbols,
         keywords=keywords,
         raw=raw,
     )

@@ -10,6 +10,7 @@ interface LooseContextRow {
 
 interface LooseContextBlock {
   title: string
+  action?: string
   rows: LooseContextRow[]
 }
 
@@ -43,6 +44,7 @@ function normalizeBlocks(blocks: ContextBlocksLike | null | undefined): ContextB
   return (blocks || [])
     .map(block => ({
       ...block,
+      action: typeof block.action === 'string' ? block.action : undefined,
       rows: block.rows
         .filter(row => String(row.value || '').trim())
         .map(row => ({

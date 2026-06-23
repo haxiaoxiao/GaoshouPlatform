@@ -96,3 +96,41 @@ def test_pipeline_loads_filters_and_scores(monkeypatch):
     assert list(result.frame.index) == ["C", "A"]
     assert result.frame.loc["C", "score"] > result.frame.loc["A", "score"]
 
+
+def test_pipeline_supports_effective_dates_per_factor_and_filter(monkeypatch):
+    store = MagicMock()
+    seen: list[tuple[str, date]] = []
+
+    def _load_cross_section(name, trade_date, symbols=None, as_of_time=None, params=None):
+        seen.append((name, trade_date))
+        values = {
+            "daily_value": {"A": 1.0, "B": 2.0},
+            "timer_filter": {"A": 0.0, "B": 1.0},
+        }
+        body = values.get(name, {})
+        if symbols:
+            return {symbol: body[symbol] for symbol in symbols if symbol in body}
+        return body
+
+    store.load_cross_section.side_effect = _load_cross_section
+    pipeline = FactorPipeline(store=store)
+    monkeypatch.setattr(
+        pipeline,
+        "load_metadata",
+        lambda symbols: pd.DataFrame({"industry": ["Tech"] * len(symbols)}, index=symbols),
+    )
+
+    result = pipeline.build_cross_section(
+        factor_specs=[{"name": "daily_value", "weight": 1.0}],
+        trade_date=date(2026, 6, 22),
+        symbols=["A", "B"],
+        filters=[{"name": "timer_filter", "operator": ">=", "value": 0.5}],
+        min_factor_coverage=1.0,
+        factor_date_map={"daily_value": date(2026, 6, 18)},
+        filter_date_map={"timer_filter": date(2026, 6, 22)},
+    )
+
+    assert ("daily_value", date(2026, 6, 18)) in seen
+    assert ("timer_filter", date(2026, 6, 22)) in seen
+    assert "B" in result.excluded_symbols
+    assert list(result.frame.index) == ["A"]

@@ -17,6 +17,7 @@ from app.services.sentiment import (
     ordered_sentiment_sources,
     parse_sources,
     serialize_post,
+    serialize_thread,
 )
 from app.services.task_queue import QueuedTask, get_task_queue
 
@@ -43,12 +44,31 @@ def _resolve_ingest_sources(request: IngestRunRequest) -> list[str]:
 
 
 def _validate_ingest_request(request: IngestRunRequest, sources: list[str]) -> str | None:
-    if "xueqiu_spyder" in sources and not request.symbol:
+    symbol_sources = [source for source in sources if source in {"xueqiu_spyder"}]
+    if symbol_sources and not request.symbol:
         return (
-            "xueqiu_spyder ingest requires a symbol. "
-            "NGA/flocktrader can run without a symbol by selecting sources=['flocktrader']."
+            f"{', '.join(symbol_sources)} ingest requires a symbol. "
+            "Jisilu and NGA/flocktrader can run without a symbol by selecting sources=['jisilu'] or ['flocktrader']."
         )
     return None
+
+
+def _nga_event_progress(event: dict[str, Any]) -> float:
+    stage = str(event.get("stage") or "")
+    page = event.get("current_page") or event.get("board_page")
+    page_limit = event.get("page_limit")
+    try:
+        if page and page_limit:
+            return max(0.05, min(0.9, float(page) / max(float(page_limit), 1.0) * 0.85))
+    except (TypeError, ValueError):
+        pass
+    if stage.endswith(".done"):
+        return 0.95
+    if "cache.write" in stage:
+        return 0.9
+    if "crawl" in stage:
+        return 0.2
+    return 0.1
 
 
 async def _schedule_sentiment_ingest_task(task_id: str, request: IngestRunRequest, sources: list[str]) -> None:
@@ -75,7 +95,28 @@ async def _run_sentiment_ingest_task(
     )
     try:
         async with async_session_factory() as session:
-            ingest_service = SentimentIngestService(session)
+            def on_progress(event: dict[str, Any]) -> None:
+                progress_meta: dict[str, Any] = {
+                    "sources": sources,
+                    "symbol": request.symbol,
+                    "crawler_progress": event,
+                    "stage": event.get("stage"),
+                    "current_step": event.get("current_step"),
+                    "current_date": event.get("current_date"),
+                    "current_page": event.get("current_page"),
+                    "current_tid": event.get("current_tid"),
+                    "current_title": event.get("current_title"),
+                }
+                if event.get("source") == "nga":
+                    progress_meta["nga_progress"] = event
+                update_task(
+                    task_id,
+                    status="running",
+                    progress=_nga_event_progress(event),
+                    meta=progress_meta,
+                )
+
+            ingest_service = SentimentIngestService(session, progress_callback=on_progress)
             if request.source and not request.sources and len(sources) == 1:
                 result = await ingest_service.run(
                     sources[0],
@@ -96,6 +137,7 @@ async def _run_sentiment_ingest_task(
                     end_date=request.end_date,
                     force_refresh=request.force_refresh,
                 )
+            await session.commit()
         update_task(
             task_id,
             status="completed",
@@ -115,7 +157,7 @@ async def _run_sentiment_ingest_task(
 
 @router.get("/overview", summary="Get unified sentiment module overview")
 async def get_sentiment_overview(
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,jisilu,flocktrader"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
@@ -131,7 +173,7 @@ async def get_sentiment_summary(
     symbol: str,
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,jisilu,flocktrader"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
@@ -147,7 +189,7 @@ async def get_sentiment_posts(
     symbol: str,
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,jisilu,flocktrader"),
     limit: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
@@ -157,6 +199,25 @@ async def get_sentiment_posts(
             symbol, start_date, end_date, parsed_sources, limit
         )
         return {"code": 0, "data": [serialize_post(post) for post in posts]}
+    except ValueError as exc:
+        return {"code": 1, "message": str(exc)}
+
+
+@router.get("/threads", summary="List cached sentiment threads before symbol expansion")
+async def get_sentiment_threads(
+    start_date: date | None = Query(None),
+    end_date: date | None = Query(None),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,jisilu,flocktrader"),
+    symbol: str | None = Query(None, description="Optional symbol filter for matched NGA threads"),
+    limit: int = Query(50, ge=1, le=200),
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    try:
+        parsed_sources = parse_sources(sources)
+        threads = await SentimentService(session).list_threads(
+            start_date, end_date, parsed_sources, symbol, limit
+        )
+        return {"code": 0, "data": [serialize_thread(thread) for thread in threads]}
     except ValueError as exc:
         return {"code": 1, "message": str(exc)}
 

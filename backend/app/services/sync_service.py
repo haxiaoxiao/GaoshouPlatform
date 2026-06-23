@@ -2762,7 +2762,35 @@ class SyncService:
         _current_sync = progress
 
         try:
-            ingest = SentimentIngestService(self.session)
+            def on_progress(event: dict[str, Any]) -> None:
+                progress.details["stage"] = event.get("stage")
+                progress.details["phase"] = "nga_sentiment"
+                progress.details["current_step"] = event.get("current_step")
+                progress.details["crawler_progress"] = event
+                if event.get("source") == "nga":
+                    progress.details["nga_progress"] = event
+                else:
+                    progress.details.pop("nga_progress", None)
+                for key in (
+                    "current_date",
+                    "current_date_file",
+                    "crawl_start",
+                    "crawl_end",
+                    "current_page",
+                    "board_page",
+                    "page_limit",
+                    "topic_index",
+                    "topics_on_page",
+                    "current_tid",
+                    "current_title",
+                    "detail_page",
+                    "threads_collected",
+                    "cache_posts",
+                ):
+                    if key in event:
+                        progress.details[key] = event[key]
+
+            ingest = SentimentIngestService(self.session, progress_callback=on_progress)
             result = await ingest.run(
                 "flocktrader",
                 None,

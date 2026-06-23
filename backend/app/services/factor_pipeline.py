@@ -39,10 +39,13 @@ class FactorSpec:
     def from_raw(cls, raw: FactorSpec | dict[str, Any]) -> FactorSpec:
         if isinstance(raw, cls):
             return raw
+        name = raw.get("name") or raw.get("factor_name")
+        if not name:
+            raise ValueError("FactorSpec requires name or factor_name")
         # Factor definitions are intentionally data-driven so presets can ship
         # plain dicts from JSON / YAML without extra adapter code.
         return cls(
-            name=str(raw["name"]),
+            name=str(name),
             weight=float(raw.get("weight", 1.0)),
             direction=str(raw.get("direction", "higher_better")),
             transform=str(raw.get("transform", "rank_pct")),
@@ -77,13 +80,18 @@ class FilterSpec:
     params: dict[str, Any] | None = None
 
     @classmethod
-    def from_raw(cls, raw: FilterSpec | dict[str, Any]) -> FilterSpec:
+    def from_raw(cls, raw: FilterSpec | dict[str, Any] | str) -> FilterSpec:
         if isinstance(raw, cls):
             return raw
+        if isinstance(raw, str):
+            return cls(name=raw)
+        name = raw.get("name") or raw.get("factor_name")
+        if not name:
+            raise ValueError("FilterSpec requires name or factor_name")
         # Filters share the same raw dict shape as factors for simple preset
         # serialization and API payloads.
         return cls(
-            name=str(raw["name"]),
+            name=str(name),
             value=float(raw.get("value", raw.get("threshold", 0.5))),
             operator=str(raw.get("operator", ">=")),
             as_of_time=raw.get("as_of_time"),
@@ -270,10 +278,17 @@ class FactorPipeline:
         filters: Sequence[FilterSpec | dict[str, Any]] | None = None,
         min_factor_coverage: float = 0.6,
         scorer: ModelScorer | None = None,
+        factor_date_map: dict[str, date] | None = None,
+        filter_date_map: dict[str, date] | None = None,
     ) -> FactorPipelineResult:
         specs = [FactorSpec.from_raw(item) for item in factor_specs]
         symbol_list = [str(item) for item in symbols or [] if str(item).strip()]
-        raw = self._load_raw_matrix(specs, trade_date=trade_date, symbols=symbol_list or None)
+        raw = self._load_raw_matrix(
+            specs,
+            trade_date=trade_date,
+            symbols=symbol_list or None,
+            factor_date_map=factor_date_map,
+        )
         if raw.empty:
             return FactorPipelineResult(
                 frame=pd.DataFrame(),
@@ -289,6 +304,7 @@ class FactorPipeline:
             filters or [],
             trade_date=trade_date,
             symbols=list(raw.index),
+            filter_date_map=filter_date_map,
         )
         if excluded:
             # Apply exclusion rules before preprocessing so the coverage ratio
@@ -363,13 +379,15 @@ class FactorPipeline:
         *,
         trade_date: date,
         symbols: Sequence[str] | None,
+        factor_date_map: dict[str, date] | None = None,
     ) -> pd.DataFrame:
         values_by_factor: dict[str, dict[str, float]] = {}
         all_symbols: set[str] = set()
         for spec in specs:
             # Cross-section loading is cached per factor/date/symbol set so
             # repeated preset runs do not hammer the value store.
-            values = self._load_cross_section_cached(spec, trade_date=trade_date, symbols=symbols)
+            effective_date = (factor_date_map or {}).get(spec.name) or trade_date
+            values = self._load_cross_section_cached(spec, trade_date=effective_date, symbols=symbols)
             values = {str(symbol): float(value) for symbol, value in values.items()}
             values_by_factor[spec.name] = values
             all_symbols.update(values)
@@ -390,11 +408,13 @@ class FactorPipeline:
         *,
         trade_date: date,
         symbols: Sequence[str],
+        filter_date_map: dict[str, date] | None = None,
     ) -> set[str]:
         excluded: set[str] = set()
         for raw_filter in filters:
             spec = FilterSpec.from_raw(raw_filter)
-            values = self._load_cross_section_cached(spec, trade_date=trade_date, symbols=symbols)
+            effective_date = (filter_date_map or {}).get(spec.name) or trade_date
+            values = self._load_cross_section_cached(spec, trade_date=effective_date, symbols=symbols)
             for symbol, value in values.items():
                 # Filter semantics are centralized here so strategy code only
                 # needs to declare thresholds, not implement comparison logic.

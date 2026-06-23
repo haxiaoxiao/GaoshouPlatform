@@ -32,3 +32,31 @@ class SentimentPost(Base, TimestampMixin):
     sentiment_label: Mapped[str | None] = mapped_column(String(20))
     keywords_json: Mapped[str | None] = mapped_column(Text)
     raw_json: Mapped[str | None] = mapped_column(Text)
+
+
+class SentimentThread(Base, TimestampMixin):
+    """Source-level discussion thread before symbol expansion."""
+
+    __tablename__ = "sentiment_threads"
+    __table_args__ = (
+        UniqueConstraint("source", "source_thread_id", name="uq_sentiment_source_thread"),
+        Index("ix_sentiment_thread_source_published", "source", "published_at"),
+        Index("ix_sentiment_thread_source_last_reply", "source", "last_reply_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    title: Mapped[str | None] = mapped_column(String(500))
+    content: Mapped[str | None] = mapped_column(Text)
+    author: Mapped[str | None] = mapped_column(String(128))
+    published_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_reply_at: Mapped[datetime | None] = mapped_column(DateTime)
+    url: Mapped[str | None] = mapped_column(String(1000))
+    reply_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    comment_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    sentiment_score: Mapped[float | None] = mapped_column(Float)
+    sentiment_label: Mapped[str | None] = mapped_column(String(20))
+    symbols_json: Mapped[str | None] = mapped_column(Text)
+    keywords_json: Mapped[str | None] = mapped_column(Text)
+    raw_json: Mapped[str | None] = mapped_column(Text)

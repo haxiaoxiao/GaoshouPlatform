@@ -68,7 +68,6 @@
       v-if="!canTriggerSync"
       class="sync-service-warning"
       type="warning"
-      :closable="false"
       show-icon
     >
       <template #title>{{ syncUnavailableReason }}</template>
@@ -367,7 +366,6 @@
       v-if="catalog && !catalog.relay.configured"
       class="relay-warning"
       type="warning"
-      :closable="false"
       show-icon
     >
       <template #title>未检测到 INDEVS_TUSHARE_API_KEY，Relay 任务会被后端拒绝。</template>

@@ -1,6 +1,6 @@
 import request from './request'
 
-export type SentimentSource = 'xueqiu_spyder' | 'flocktrader'
+export type SentimentSource = 'xueqiu_spyder' | 'eastmoney_guba' | 'jisilu' | 'flocktrader'
 
 export interface SentimentOverviewSource {
   source: SentimentSource
@@ -51,6 +51,29 @@ export interface SentimentPost {
   keywords: string[]
 }
 
+export interface SentimentThread {
+  id: number
+  source: SentimentSource
+  source_thread_id: string
+  title: string | null
+  content: string | null
+  author: string | null
+  published_at: string | null
+  last_reply_at: string | null
+  url: string | null
+  reply_count: number
+  comment_count: number
+  sentiment_score: number | null
+  sentiment_label: string | null
+  symbols: string[]
+  keywords: string[]
+  comments: Array<{
+    content: string
+    publish_time: string | null
+  }>
+  full_text: string
+}
+
 export interface SentimentSummary {
   symbol: string
   start_date: string | null
@@ -68,6 +91,7 @@ export interface SentimentIngestSourceResult {
   matched?: number
   analyzed?: number
   upserted?: number
+  threads_upserted?: number
   loaded_dates?: string[]
   crawled_dates?: string[]
   date_files?: string[]
@@ -96,6 +120,10 @@ export interface SentimentQueryParams {
 
 export interface SentimentPostsQueryParams extends SentimentQueryParams {
   limit?: number
+}
+
+export interface SentimentThreadsQueryParams extends SentimentPostsQueryParams {
+  symbol?: string
 }
 
 export interface SentimentIngestParams {
@@ -133,6 +161,17 @@ export const sentimentApi = {
         start_date: params?.start_date,
         end_date: params?.end_date,
         sources: toSourceQuery(params?.sources),
+        limit: params?.limit,
+      },
+    }),
+
+  threads: (params?: SentimentThreadsQueryParams) =>
+    request.get<SentimentThread[]>('/sentiment/threads', {
+      params: {
+        start_date: params?.start_date,
+        end_date: params?.end_date,
+        sources: toSourceQuery(params?.sources),
+        symbol: params?.symbol,
         limit: params?.limit,
       },
     }),

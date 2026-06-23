@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import date, datetime
+import json
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -7,16 +8,22 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from app.db.models.base import Base
 from app.db.models.sentiment import SentimentPost
 from app.services.sentiment import (
+    NgaIngestStats,
     SentimentIngestService,
     SentimentPostInput,
     SentimentService,
     _inject_xueqiu_cookie,
+    _parse_jisilu_detail,
+    _parse_jisilu_list_posts,
     _post_mentions_symbol,
     _resolve_chrome_path,
     _verify_xueqiu_login,
+    normalize_eastmoney_guba_post,
     normalize_flocktrader_post,
+    normalize_jisilu_data_post,
     normalize_nga_data_post,
     normalize_nga_data_posts,
+    normalize_nga_thread,
     normalize_sentiment_source,
     normalize_xueqiu_spyder_post,
     parse_sources,
@@ -59,8 +66,10 @@ async def sentiment_session():
 
 def test_parse_sources_validates_supported_values():
     assert parse_sources("xueqiu,nga") == ["xueqiu_spyder", "flocktrader"]
-    assert parse_sources("xueqiu_spyder,flocktrader,xueqiu") == ["xueqiu_spyder", "flocktrader"]
+    assert parse_sources("xueqiu_spyder,eastmoney,jisilu,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"]
     assert normalize_sentiment_source("xueqiu-spyder") == "xueqiu_spyder"
+    assert normalize_sentiment_source("股吧") == "eastmoney_guba"
+    assert normalize_sentiment_source("集思录") == "jisilu"
     with pytest.raises(ValueError):
         parse_sources("reddit")
 
@@ -173,6 +182,39 @@ async def test_sentiment_service_migrates_legacy_source_alias(sentiment_session)
 
 
 @pytest.mark.asyncio
+async def test_sentiment_service_upserts_and_lists_threads(sentiment_session):
+    raw = {
+        "tid": "46800010",
+        "title": "SH600519 讨论串",
+        "content": "看多 SH600519，关注业绩。",
+        "author": "nga-user",
+        "publish_time": "2026-05-20T10:00:00",
+        "last_reply_time": "2026-05-20T11:30:00",
+        "reply_count": 8,
+        "comments": [{"content": "继续看多"}],
+        "keywords": ["业绩"],
+        "sentiment_score": 0.8,
+    }
+    thread = normalize_nga_thread(raw)
+    assert thread is not None
+
+    service = SentimentService(sentiment_session)
+    await service.upsert_threads([thread])
+    threads = await service.list_threads(
+        date(2026, 5, 20),
+        date(2026, 5, 20),
+        sources=["nga"],
+        symbol="600519.SH",
+    )
+
+    assert len(threads) == 1
+    assert threads[0].source == "flocktrader"
+    assert threads[0].source_thread_id == "46800010"
+    assert threads[0].sentiment_label == "bullish"
+    assert "600519.SH" in threads[0].symbols_json
+
+
+@pytest.mark.asyncio
 async def test_sentiment_service_overview_counts_sources_and_runtime_status(sentiment_session, monkeypatch, tmp_path):
     xueqiu_dir = tmp_path / "xueqiu-spyder"
     flock_dir = tmp_path / "flocktrader"
@@ -247,14 +289,16 @@ async def test_sentiment_ingest_service_run_many_combines_sources(sentiment_sess
     service.run = fake_run  # type: ignore[method-assign]
     result = await service.run_many("600519.SH")
 
-    assert result["requested_sources"] == ["xueqiu_spyder", "flocktrader"]
-    assert result["succeeded_sources"] == ["xueqiu_spyder"]
+    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"]
+    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu"]
     assert result["failed_sources"] == ["flocktrader"]
     assert result["all_succeeded"] is False
-    assert result["total_upserted"] == 2
+    assert result["total_upserted"] == 6
     assert result["results"][0]["ok"] is True
-    assert result["results"][1]["ok"] is False
-    assert "NGA cookie missing" in result["results"][1]["error"]
+    assert result["results"][1]["ok"] is True
+    assert result["results"][2]["ok"] is True
+    assert result["results"][3]["ok"] is False
+    assert "NGA cookie missing" in result["results"][3]["error"]
 
 
 @pytest.mark.asyncio
@@ -290,6 +334,118 @@ async def test_sentiment_ingest_service_run_many_allows_flocktrader_without_symb
     assert result["total_upserted"] == 5
 
 
+@pytest.mark.asyncio
+async def test_sentiment_ingest_run_persists_nga_threads_and_symbol_posts(sentiment_session):
+    service = SentimentIngestService(sentiment_session)
+    raw = {
+        "tid": "46800100",
+        "title": "SH600519 与 SZ000001 一起异动",
+        "content": "今天重点看 SH600519，同时 SZ000001 也有放量。",
+        "author": "nga-user",
+        "publish_time": "2026-05-20T10:00:00",
+        "last_reply_time": "2026-05-20T10:30:00",
+        "reply_count": 2,
+        "comments": [{"content": "看多 SH600519"}],
+        "stock_codes": ["600519", "000001"],
+        "keywords": ["白酒", "银行"],
+        "sentiment_score": 0.7,
+    }
+
+    def fake_load_or_crawl(start, end, *, max_pages, force_refresh):
+        return [raw], NgaIngestStats(loaded_dates=["2026-05-20"], date_files=["posts_2026-05-20.json"])
+
+    async def fake_load_stock_aliases():
+        return []
+
+    service._load_or_crawl_nga_date_posts = fake_load_or_crawl  # type: ignore[method-assign]
+    service._load_stock_aliases = fake_load_stock_aliases  # type: ignore[method-assign]
+
+    result = await service.run(
+        "flocktrader",
+        None,
+        start_date=date(2026, 5, 20),
+        end_date=date(2026, 5, 20),
+    )
+    sentiment_service = SentimentService(sentiment_session)
+    threads = await sentiment_service.list_threads(sources=["flocktrader"])
+    posts = await sentiment_service.list_posts("600519.SH", sources=["flocktrader"])
+
+    assert result["threads_upserted"] == 1
+    assert result["upserted"] == 2
+    assert threads[0].source_thread_id == "46800100"
+    assert posts[0].source_post_id == "46800100:600519.SH"
+
+
+@pytest.mark.asyncio
+async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monkeypatch, tmp_path):
+    progress_events: list[dict] = []
+    service = SentimentIngestService(sentiment_session, progress_callback=progress_events.append)
+    monkeypatch.setenv("NGA_COOKIE", "nga_uid=1")
+    monkeypatch.setenv("NGA_DATA_DIR", str(tmp_path))
+
+    topics_by_page = {
+        1: [{"tid": "1", "title": "today", "author": "a", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 10)}],
+        2: [{"tid": "2", "title": "yesterday", "author": "b", "reply_count": 1, "publish_time": datetime(2026, 6, 21, 10)}],
+        3: [{"tid": "3", "title": "older", "author": "c", "reply_count": 1, "publish_time": datetime(2026, 6, 14, 10)}],
+    }
+    posts_by_tid = {
+        "1": [{"title": "today", "content": "SH600519 今日", "publish_time": "2026-06-22 10:00"}],
+        "2": [
+            {"title": "yesterday", "content": "SZ000001 昨日", "publish_time": "2026-06-21 10:00"},
+            {"title": "", "content": "6月22日仍有回复", "publish_time": "2026-06-22 09:00"},
+        ],
+        "3": [{"title": "older", "content": "older", "publish_time": "2026-06-14 10:00"}],
+    }
+    fetched_pages: list[int] = []
+
+    def fake_fetch(url, *, params=None):
+        if "thread.php" in url:
+            fetched_pages.append(int(params["page"]))
+            return ""
+        return ""
+
+    monkeypatch.setattr("app.services.sentiment._fetch_nga_html", fake_fetch)
+    monkeypatch.setattr("app.services.sentiment._parse_nga_board_topics", lambda html: topics_by_page.get(fetched_pages[-1], []))
+    monkeypatch.setattr("app.services.sentiment._parse_nga_thread_posts", lambda html: posts_by_tid[html] if html in posts_by_tid else [])
+
+    def fake_fetch_with_tid(url, *, params=None):
+        if "thread.php" in url:
+            fetched_pages.append(int(params["page"]))
+            return "board"
+        return str(params["tid"])
+
+    monkeypatch.setattr("app.services.sentiment._fetch_nga_html", fake_fetch_with_tid)
+
+    posts, stats = service._load_or_crawl_nga_date_posts(
+        date(2026, 6, 21),
+        date(2026, 6, 22),
+        max_pages=1,
+        force_refresh=True,
+    )
+
+    assert fetched_pages == [1, 2, 3]
+    assert [post["tid"] for post in posts] == ["2", "1"]
+    assert stats.crawled_dates == ["2026-06-21", "2026-06-22"]
+    assert stats.scan_time_basis == "last_reply_time"
+    assert stats.cache_partition == "publish_time"
+    assert [post["tid"] for post in json.loads((tmp_path / "posts_2026-06-21.json").read_text(encoding="utf-8"))] == ["2"]
+    assert [post["tid"] for post in json.loads((tmp_path / "posts_2026-06-22.json").read_text(encoding="utf-8"))] == ["1"]
+    assert any(event["stage"] == "nga.board.page_fetch" and event["board_page"] == 1 for event in progress_events)
+    assert any(
+        event["stage"] == "nga.thread.fetch"
+        and event["current_tid"] == "2"
+        and event["current_title"] == "yesterday"
+        and event["detail_page"] == "e"
+        for event in progress_events
+    )
+    assert any(
+        event["stage"] == "nga.cache.write"
+        and event["current_date"] == "2026-06-21"
+        and event["cache_posts"] == 1
+        for event in progress_events
+    )
+
+
 def test_normalize_xueqiu_spyder_post_maps_raw_payload():
     post = normalize_xueqiu_spyder_post(
         {
@@ -314,6 +470,280 @@ def test_normalize_xueqiu_spyder_post_maps_raw_payload():
     assert post.url == "https://xueqiu.com/123/456"
     assert post.reply_count == 12
     assert post.like_count == 7
+
+
+def test_normalize_eastmoney_guba_post_maps_list_payload():
+    post = normalize_eastmoney_guba_post(
+        {
+            "post_id": 1730994689,
+            "post_title": "明天就靠你护盘了",
+            "stockbar_code": "600519",
+            "user_nickname": "散户甲",
+            "post_comment_count": 3,
+            "post_publish_time": "2026-06-23 20:56:01",
+        },
+        symbol="600519.SH",
+    )
+
+    assert post is not None
+    assert post.source == "eastmoney_guba"
+    assert post.source_post_id == "1730994689"
+    assert post.symbol == "600519.SH"
+    assert post.title == "明天就靠你护盘了"
+    assert post.author == "散户甲"
+    assert post.published_at == datetime(2026, 6, 23, 20, 56, 1)
+    assert post.comment_count == 3
+    assert post.url == "https://guba.eastmoney.com/news,600519,1730994689.html"
+    assert normalize_eastmoney_guba_post(
+        {"post_id": 1730999999, "post_title": "跨吧噪声", "stockbar_code": "000661"},
+        symbol="600519.SH",
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_guba_filters_pages_dates_and_min_reply(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    payloads = {
+        1: {
+            "re": [
+                {
+                    "post_id": 1,
+                    "post_title": "今天加仓",
+                    "stockbar_code": "600519",
+                    "user_nickname": "a",
+                    "post_comment_count": 2,
+                    "post_publish_time": "2026-06-23 10:00:00",
+                },
+                {
+                    "post_id": 2,
+                    "post_title": "评论太少",
+                    "stockbar_code": "600519",
+                    "user_nickname": "b",
+                    "post_comment_count": 0,
+                    "post_publish_time": "2026-06-23 11:00:00",
+                },
+            ]
+        },
+        2: {
+            "re": [
+                {
+                    "post_id": 3,
+                    "post_title": "旧帖",
+                    "stockbar_code": "600519",
+                    "user_nickname": "c",
+                    "post_comment_count": 3,
+                    "post_publish_time": "2026-06-20 10:00:00",
+                }
+            ]
+        },
+    }
+    seen_pages: list[int] = []
+
+    def fake_fetch(code: str, page: int, page_size: int = 20):
+        assert code == "600519"
+        seen_pages.append(page)
+        return payloads.get(page, {"re": []})
+
+    monkeypatch.setattr("app.services.sentiment._fetch_eastmoney_guba_page", fake_fetch)
+
+    posts, stats = service._collect_eastmoney_guba(
+        "600519.SH",
+        max_pages=2,
+        min_reply=1,
+        start_date=date(2026, 6, 23),
+        end_date=date(2026, 6, 23),
+    )
+
+    assert seen_pages == [1, 2]
+    assert stats["collected"] == 3
+    assert [post.source_post_id for post in posts] == ["1"]
+    assert stats["pages"] == [
+        {"page": 1, "raw_count": 2, "matched": 1},
+        {"page": 2, "raw_count": 1, "matched": 0},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_collect_eastmoney_hot_bars_without_symbol(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    monkeypatch.setattr(
+        "app.services.sentiment._fetch_eastmoney_hot_bars",
+        lambda limit: [
+            {"code": "600519", "name": "贵州茅台吧"},
+            {"code": "300750", "name": "宁德时代吧"},
+        ][:limit],
+    )
+    payloads = {
+        "600519": {
+            "re": [
+                {
+                    "post_id": 1,
+                    "post_title": "茅台看多",
+                    "stockbar_code": "600519",
+                    "user_nickname": "a",
+                    "post_comment_count": 2,
+                    "post_publish_time": "2026-06-23 10:00:00",
+                },
+                {
+                    "post_id": 2,
+                    "post_title": "评论太少",
+                    "stockbar_code": "600519",
+                    "user_nickname": "b",
+                    "post_comment_count": 0,
+                    "post_publish_time": "2026-06-23 11:00:00",
+                },
+            ]
+        },
+        "300750": {
+            "re": [
+                {
+                    "post_id": 3,
+                    "post_title": "宁德反弹",
+                    "stockbar_code": "300750",
+                    "user_nickname": "c",
+                    "post_comment_count": 3,
+                    "post_publish_time": "2026-06-23 12:00:00",
+                }
+            ]
+        },
+    }
+    seen_codes: list[str] = []
+
+    def fake_fetch(code: str, page: int, page_size: int = 20):
+        assert page == 1
+        seen_codes.append(code)
+        return payloads[code]
+
+    monkeypatch.setattr("app.services.sentiment._fetch_eastmoney_guba_page", fake_fetch)
+
+    posts, stats = service._collect_eastmoney_guba_hot_bars(
+        max_pages=1,
+        min_reply=1,
+        start_date=date(2026, 6, 23),
+        end_date=date(2026, 6, 23),
+    )
+
+    assert seen_codes == ["600519", "300750"]
+    assert stats["bar_limit"] == 10
+    assert stats["collected"] == 3
+    assert [(post.symbol, post.source_post_id) for post in posts] == [
+        ("600519.SH", "1"),
+        ("300750.SZ", "3"),
+    ]
+    assert stats["bars"] == [
+        {"symbol": "600519.SH", "code": "600519", "name": "贵州茅台吧", "raw_count": 2, "matched": 1},
+        {"symbol": "300750.SZ", "code": "300750", "name": "宁德时代吧", "raw_count": 1, "matched": 1},
+    ]
+
+
+def test_parse_and_normalize_jisilu_payload():
+    list_html = """
+    <div class="aw-item">
+      <span class="aw-question-replay-count aw-border-radius-5 active"><em>40</em> 回复</span>
+      <div class="aw-questoin-content">
+        <h4>
+          <a target="_blank" href="https://www.jisilu.cn/question/522460">600519 还能加仓吗？</a>
+          <a href="https://www.jisilu.cn/topic/%E8%82%A1%E7%A5%A8" class="aw-topic-name"><span>股票</span></a>
+        </h4>
+        <span class="aw-text-color-999">
+          <span class="aw-question-tags"><a href="https://www.jisilu.cn/category/8">股票</a></span> •
+          <a href="https://www.jisilu.cn/people/alice" class="aw-user-name" data-id="1">alice</a>
+          回复 • 2026-06-22 23:33 • 4628 次浏览
+        </span>
+      </div>
+    </div>
+    """
+    detail_html = """
+      <h1>600519 还能加仓吗？</h1>
+      <div class="aw-question-detail-txt markitup-box">茅台估值回调，想加仓 600519。</div>
+      <div class="aw-question-detail-meta"><span class="aw-text-color-999">发表时间 2026-06-17 20:57</span></div>
+      <div class="markitup-box" >看多，继续等反弹</div>
+      <span class="pull-left aw-text-color-999">2026-06-22 23:33 来自广东</span>
+    """
+
+    rows = _parse_jisilu_list_posts(list_html)
+    detail = _parse_jisilu_detail(detail_html)
+    raw = {**rows[0], **detail, "published_time": detail["question_published_time"]}
+    raw["stock_codes"] = ["600519.SH"]
+    raw["keywords"] = ["600519.SH"]
+    raw["sentiment_score"] = 1.0
+    raw["sentiment_label"] = "bullish"
+    post = normalize_jisilu_data_post(raw, symbol="600519.SH")
+
+    assert rows == [
+        {
+            "question_id": "522460",
+            "title": "600519 还能加仓吗？",
+            "url": "https://www.jisilu.cn/question/522460",
+            "reply_count": 40,
+            "author": "alice",
+            "active_time": "2026-06-22 23:33",
+            "view_count": 4628,
+            "meta_text": "alice 回复 • 2026-06-22 23:33 • 4628 次浏览",
+        }
+    ]
+    assert detail["content"] == "茅台估值回调，想加仓 600519。"
+    assert detail["comments"] == [{"content": "看多，继续等反弹", "publish_time": "2026-06-22 23:33"}]
+    assert post is not None
+    assert post.source == "jisilu"
+    assert post.source_post_id == "522460:600519.SH"
+    assert post.symbol == "600519.SH"
+    assert post.author == "alice"
+    assert post.published_at == datetime(2026, 6, 17, 20, 57)
+    assert post.comment_count == 40
+
+
+@pytest.mark.asyncio
+async def test_collect_jisilu_filters_pages_dates_and_matches_symbols(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    list_html = """
+    <div class="aw-item">
+      <span class="aw-question-replay-count aw-border-radius-5 active"><em>2</em> 回复</span>
+      <div class="aw-questoin-content">
+        <h4><a target="_blank" href="https://www.jisilu.cn/question/1">600519 讨论</a></h4>
+        <span class="aw-text-color-999"><span>股票</span> • <a class="aw-user-name">alice</a> 回复 • 2026-06-23 10:00 • 20 次浏览</span>
+      </div>
+    </div>
+    <div class="aw-item">
+      <span class="aw-question-replay-count aw-border-radius-5 active"><em>0</em> 回复</span>
+      <div class="aw-questoin-content">
+        <h4><a target="_blank" href="https://www.jisilu.cn/question/2">评论太少</a></h4>
+        <span class="aw-text-color-999"><span>股票</span> • <a class="aw-user-name">bob</a> 回复 • 2026-06-23 11:00 • 3 次浏览</span>
+      </div>
+    </div>
+    """
+    detail_html = """
+      <h1>600519 讨论</h1>
+      <div class="aw-question-detail-txt markitup-box">贵州茅台 600519 看多反弹。</div>
+      <div class="aw-question-detail-meta"><span class="aw-text-color-999">发表时间 2026-06-23 09:30</span></div>
+    """
+    seen_urls: list[str] = []
+
+    def fake_fetch(url: str):
+        seen_urls.append(url)
+        if "question/1" in url:
+            return detail_html
+        if "page-2" in url:
+            return ""
+        return list_html
+
+    monkeypatch.setattr("app.services.sentiment._fetch_jisilu_html", fake_fetch)
+
+    posts, stats = service._collect_jisilu(
+        "600519.SH",
+        aliases=["600519", "贵州茅台"],
+        stock_aliases=None,
+        max_pages=2,
+        min_reply=1,
+        start_date=date(2026, 6, 23),
+        end_date=date(2026, 6, 23),
+    )
+
+    assert any(url == "https://www.jisilu.cn/category/8" for url in seen_urls)
+    assert any(url == "https://www.jisilu.cn/question/1" for url in seen_urls)
+    assert stats["collected"] == 2
+    assert [post.source_post_id for post in posts] == ["1:600519.SH"]
+    assert posts[0].content == "贵州茅台 600519 看多反弹。"
 
 
 def test_normalize_flocktrader_post_maps_analyzed_post():

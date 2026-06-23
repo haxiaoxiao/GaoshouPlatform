@@ -56,8 +56,73 @@
           title="危险：dev 将直接读写生产真实数据目录"
           type="warning"
           show-icon
-          :closable="false"
         />
+      </div>
+    </section>
+
+    <section
+      v-if="liveGuardrails"
+      class="panel-card live-guardrail-card"
+      :class="{ 'live-guardrail-card--armed': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }"
+    >
+      <div class="live-guardrail-card__copy">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">LIVE TRADING GUARDRAILS</span>
+            <h3>实盘交易护栏</h3>
+          </div>
+          <el-tag :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'success'" effect="dark">
+            {{ guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'ARMED' : 'SAFE' }}
+          </el-tag>
+        </div>
+        <p>
+          当前配置：
+          <strong>{{ liveGuardrails.enable_order_submit ? '真实下单开启' : '真实下单关闭' }}</strong>
+          <span> · </span>
+          <strong>{{ liveGuardrails.auto_execute_enabled ? '自动实盘开启' : '自动实盘关闭' }}</strong>
+        </p>
+        <small>保存后会写入 .env.local，并即时更新当前后端进程；开启任一实盘能力需要输入确认词。</small>
+        <small class="live-guardrail-card__env">{{ liveGuardrails.env_file }}</small>
+      </div>
+
+      <div class="live-guardrail-card__controls">
+        <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.enable_order_submit }">
+          <span>
+            <strong>真实下单总开关</strong>
+            <small>LIVE_TRADING_ENABLE_ORDER_SUBMIT</small>
+          </span>
+          <el-switch
+            v-model="guardrailDraft.enable_order_submit"
+            :disabled="savingGuardrails"
+            active-text="ON"
+            inactive-text="OFF"
+            inline-prompt
+          />
+        </label>
+        <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.auto_execute_enabled }">
+          <span>
+            <strong>自动实盘执行</strong>
+            <small>LIVE_TRADING_AUTO_EXECUTE_ENABLED</small>
+          </span>
+          <el-switch
+            v-model="guardrailDraft.auto_execute_enabled"
+            :disabled="savingGuardrails || !guardrailDraft.enable_order_submit"
+            active-text="ON"
+            inactive-text="OFF"
+            inline-prompt
+          />
+        </label>
+        <div class="live-guardrail-card__actions">
+          <el-button :disabled="savingGuardrails || !guardrailsDirty" @click="resetLiveGuardrailDraft">恢复当前</el-button>
+          <el-button
+            :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'primary'"
+            :loading="savingGuardrails"
+            :disabled="!guardrailsDirty"
+            @click="saveLiveGuardrails"
+          >
+            保存护栏
+          </el-button>
+        </div>
       </div>
     </section>
 
@@ -184,12 +249,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
-import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type SystemStatus } from '@/api/system'
+import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type LiveTradingGuardrails, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
 import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
@@ -239,7 +304,13 @@ const syncLogs = ref<SyncLog[]>([])
 const dataSummary = ref<DataSummary | null>(null)
 const liveStatus = ref<LiveTradingStatus | null>(null)
 const devDataMode = ref<DevDataMode | null>(null)
+const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
+const guardrailDraft = ref({
+  enable_order_submit: false,
+  auto_execute_enabled: false,
+})
 const switchingDataMode = ref(false)
+const savingGuardrails = ref(false)
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
@@ -248,6 +319,13 @@ const queuePendingCount = computed(() => Number(syncStatus.value?.details?.queue
 const syncServiceReady = computed(() => syncStatus.value?.sync_service_available !== false && syncStatus.value?.details?.sync_service_unavailable !== true)
 const staleDatasetCount = computed(() => datasetRows.value.filter(row => row.tone === 'warn' || row.tone === 'bad').length)
 const latestRuntimeTask = computed(() => runtimeTasks.value[0] || null)
+const guardrailsDirty = computed(() => Boolean(
+  liveGuardrails.value
+  && (
+    guardrailDraft.value.enable_order_submit !== liveGuardrails.value.enable_order_submit
+    || guardrailDraft.value.auto_execute_enabled !== liveGuardrails.value.auto_execute_enabled
+  ),
+))
 
 const serviceNodes = computed<ServiceNode[]>(() => [
   {
@@ -281,13 +359,13 @@ const serviceNodes = computed<ServiceNode[]>(() => [
   {
     key: 'orders',
     label: 'Order Guard',
-    value: liveStatus.value?.order_submit_enabled ? '真实下单开启' : '仅信号',
+    value: liveGuardrails.value?.enable_order_submit ? '真实下单开启' : '仅信号',
     detail: liveStatus.value?.account_id || '未配置账户',
-    tone: liveStatus.value?.order_submit_enabled ? 'bad' : 'good',
+    tone: liveGuardrails.value?.enable_order_submit ? 'bad' : 'good',
   },
 ])
 
-const isApiHealthy = computed(() => systemStatus.value?.status === 'healthy' || systemStatus.value?.status === 'ok')
+const isApiHealthy = computed(() => ['healthy', 'ok', 'running'].includes(String(systemStatus.value?.status || '')))
 
 const incidentRows = computed<IncidentRow[]>(() => {
   const rows: IncidentRow[] = []
@@ -357,12 +435,12 @@ const incidentRows = computed<IncidentRow[]>(() => {
       tone: 'warn',
     })
   }
-  if (liveStatus.value?.order_submit_enabled) {
+  if (liveGuardrails.value?.enable_order_submit) {
     rows.push({
       key: 'order-open',
       scope: 'TRADE',
       title: '真实下单护栏已开启',
-      detail: liveStatus.value.account_id || '账户未返回',
+      detail: liveStatus.value?.account_id || '账户未返回',
       action: '复核',
       path: '/trade',
       tone: 'bad',
@@ -418,6 +496,18 @@ const controlRows = computed<ControlRow[]>(() => [
     hint: dataSummary.value?.generated_at ? `生成于 ${formatDateTime(dataSummary.value.generated_at)}` : '等待 data-summary',
     tone: staleDatasetCount.value ? 'warn' : 'good',
   },
+  {
+    label: '真实下单',
+    value: liveGuardrails.value?.enable_order_submit ? '开启' : '关闭',
+    hint: 'LIVE_TRADING_ENABLE_ORDER_SUBMIT',
+    tone: liveGuardrails.value?.enable_order_submit ? 'bad' : 'good',
+  },
+  {
+    label: '自动实盘',
+    value: liveGuardrails.value?.auto_execute_enabled ? '开启' : '关闭',
+    hint: 'LIVE_TRADING_AUTO_EXECUTE_ENABLED',
+    tone: liveGuardrails.value?.auto_execute_enabled ? 'bad' : 'good',
+  },
 ])
 
 const datasetRows = computed<DatasetRow[]>(() => [
@@ -435,7 +525,7 @@ const datasetRows = computed<DatasetRow[]>(() => [
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
@@ -443,6 +533,7 @@ async function loadOps() {
       systemApi.dataSummary(),
       liveTradingApi.status(),
       systemApi.getDevDataMode(),
+      systemApi.getLiveTradingGuardrails(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -451,6 +542,10 @@ async function loadOps() {
     if (summaryResult.status === 'fulfilled') dataSummary.value = summaryResult.value
     if (liveTradingResult.status === 'fulfilled') liveStatus.value = liveTradingResult.value
     if (devModeResult.status === 'fulfilled') devDataMode.value = devModeResult.value
+    if (guardrailsResult.status === 'fulfilled') {
+      liveGuardrails.value = guardrailsResult.value
+      resetLiveGuardrailDraft()
+    }
   } finally {
     loading.value = false
   }
@@ -504,6 +599,76 @@ async function toggleDevDataMode() {
   const confirmed = await confirmDevDataModeSwitch().catch(() => false)
   if (!confirmed) return
   await handleDevDataModeChange(nextUseProdData)
+}
+
+function resetLiveGuardrailDraft() {
+  if (!liveGuardrails.value) return
+  guardrailDraft.value = {
+    enable_order_submit: liveGuardrails.value.enable_order_submit,
+    auto_execute_enabled: liveGuardrails.value.auto_execute_enabled,
+  }
+}
+
+async function confirmLiveGuardrailSave(): Promise<{ acknowledge_risk: boolean; confirm_text?: string | null }> {
+  if (!liveGuardrails.value) return { acknowledge_risk: false, confirm_text: null }
+  const enablingLiveTrading = (
+    (guardrailDraft.value.enable_order_submit && !liveGuardrails.value.enable_order_submit)
+    || (guardrailDraft.value.auto_execute_enabled && !liveGuardrails.value.auto_execute_enabled)
+  )
+
+  if (!enablingLiveTrading) {
+    await ElMessageBox.confirm(
+      '确认关闭实盘交易护栏？保存后当前后端进程会立即停止真实下单/自动实盘执行能力。',
+      '关闭实盘交易能力',
+      { confirmButtonText: '确认关闭', cancelButtonText: '取消', type: 'info' },
+    )
+    return { acknowledge_risk: false, confirm_text: null }
+  }
+
+  const requiredText = liveGuardrails.value.confirm_text || 'ENABLE LIVE TRADING'
+  const result = await ElMessageBox.prompt(
+    `即将允许系统进入真实下单能力范围。请输入 ${requiredText} 确认。`,
+    '危险操作：开启实盘交易护栏',
+    {
+      confirmButtonText: '确认保存',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: requiredText,
+      inputValidator: value => String(value || '').trim() === requiredText || `请输入 ${requiredText}`,
+      distinguishCancelAndClose: true,
+    },
+  )
+  return { acknowledge_risk: true, confirm_text: String(result.value || '').trim() }
+}
+
+async function saveLiveGuardrails() {
+  if (!liveGuardrails.value || !guardrailsDirty.value || savingGuardrails.value) return
+  if (guardrailDraft.value.auto_execute_enabled && !guardrailDraft.value.enable_order_submit) {
+    ElMessage.warning('自动实盘执行需要先打开真实下单总开关')
+    return
+  }
+
+  const confirmation = await confirmLiveGuardrailSave().catch(() => null)
+  if (!confirmation) return
+
+  savingGuardrails.value = true
+  try {
+    liveGuardrails.value = await systemApi.setLiveTradingGuardrails({
+      enable_order_submit: guardrailDraft.value.enable_order_submit,
+      auto_execute_enabled: guardrailDraft.value.auto_execute_enabled,
+      acknowledge_risk: confirmation.acknowledge_risk,
+      confirm_text: confirmation.confirm_text,
+    })
+    resetLiveGuardrailDraft()
+    liveStatus.value = await liveTradingApi.status()
+    ElMessage.success('实盘交易护栏已更新')
+    await loadOps()
+  } catch (error) {
+    ElMessage.error('实盘交易护栏保存失败，已刷新当前状态')
+    await loadOps()
+  } finally {
+    savingGuardrails.value = false
+  }
 }
 
 function datasetRow(label: string, name: string): DatasetRow {
@@ -590,7 +755,8 @@ const pageContextBlocks = computed(() => [
       { label: 'API', value: isApiHealthy.value ? '在线' : '异常', tone: isApiHealthy.value ? 'good' : 'bad' },
       { label: '同步服务', value: syncServiceReady.value ? syncStatusLabel(syncStatus.value?.status || 'idle') : '不可用', tone: syncServiceReady.value ? 'good' : 'bad' },
       { label: '后端排队', value: `${queuePendingCount.value} 项`, tone: queuePendingCount.value ? 'warn' : 'good' },
-      { label: '真实下单', value: liveStatus.value?.order_submit_enabled ? '开启' : '关闭', tone: liveStatus.value?.order_submit_enabled ? 'bad' : 'good' },
+      { label: '真实下单', value: liveGuardrails.value?.enable_order_submit ? '开启' : '关闭', tone: liveGuardrails.value?.enable_order_submit ? 'bad' : 'good' },
+      { label: '自动实盘', value: liveGuardrails.value?.auto_execute_enabled ? '开启' : '关闭', tone: liveGuardrails.value?.auto_execute_enabled ? 'bad' : 'good' },
     ],
   },
   {
@@ -605,12 +771,23 @@ const pageContextBlocks = computed(() => [
 
 usePageContext(pageContextBlocks)
 
+watch(
+  () => guardrailDraft.value.enable_order_submit,
+  enabled => {
+    if (!enabled) guardrailDraft.value.auto_execute_enabled = false
+  },
+)
+
 onMounted(loadOps)
 </script>
 
 <style scoped>
 .ops-page {
   overflow: auto;
+}
+
+.ops-page > * {
+  flex-shrink: 0;
 }
 
 .ops-hero {
@@ -778,6 +955,106 @@ onMounted(loadOps)
   color: var(--text-muted);
 }
 
+.live-guardrail-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(440px, 0.72fr);
+  gap: var(--space-4);
+  align-items: stretch;
+  min-height: 224px;
+  padding: var(--space-4);
+  border-color: rgba(34, 197, 94, 0.26);
+  background: linear-gradient(90deg, rgba(22, 163, 74, 0.1), rgba(15, 23, 42, 0.74));
+}
+
+.live-guardrail-card--armed {
+  border-color: rgba(239, 68, 68, 0.52);
+  background: linear-gradient(90deg, rgba(185, 28, 28, 0.18), rgba(15, 23, 42, 0.76));
+}
+
+.live-guardrail-card__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--space-2);
+}
+
+.live-guardrail-card__copy .panel-card__head {
+  padding: 0;
+}
+
+.live-guardrail-card__copy h3 {
+  margin: var(--space-1) 0 0;
+}
+
+.live-guardrail-card__copy p,
+.live-guardrail-card__copy small {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.live-guardrail-card__copy strong {
+  color: var(--text-bright);
+}
+
+.live-guardrail-card__env {
+  display: block;
+  max-width: 100%;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.live-guardrail-card__controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--space-2);
+  align-content: center;
+}
+
+.guardrail-switch-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: center;
+  min-height: 66px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: var(--radius-md);
+  background: rgba(10, 14, 20, 0.62);
+}
+
+.guardrail-switch-row--on {
+  border-color: rgba(239, 68, 68, 0.48);
+  background: rgba(127, 29, 29, 0.2);
+}
+
+.guardrail-switch-row span {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.guardrail-switch-row strong {
+  color: var(--text-bright);
+  font-size: var(--text-sm);
+}
+
+.guardrail-switch-row small {
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  word-break: break-all;
+}
+
+.live-guardrail-card__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
 .ops-command-grid,
 .ops-grid {
   display: grid;
@@ -933,6 +1210,7 @@ onMounted(loadOps)
 @media (max-width: 1020px) {
   .ops-hero,
   .dev-data-mode-card,
+  .live-guardrail-card,
   .ops-command-grid,
   .ops-grid {
     grid-template-columns: 1fr;
@@ -945,6 +1223,10 @@ onMounted(loadOps)
   .dev-data-mode-card__actions {
     min-width: 0;
     align-items: flex-start;
+  }
+
+  .live-guardrail-card__actions {
+    justify-content: flex-start;
   }
 }
 

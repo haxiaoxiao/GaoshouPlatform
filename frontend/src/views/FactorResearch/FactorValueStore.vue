@@ -14,13 +14,23 @@
         </div>
       </div>
       <el-form :inline="true" :model="form" label-width="76px" class="control-form">
-        <el-form-item label="分组">
+        <el-form-item label="分组" class="group-form-item">
           <el-select-v2
             v-model="form.groupName"
             :options="groupOptions"
             filterable
-            class="factor-select"
-          />
+            :item-height="48"
+            :height="420"
+            popper-class="factor-select-dropdown factor-select-dropdown--group"
+            class="factor-select factor-select--group"
+          >
+            <template #default="{ item }">
+              <div class="factor-option">
+                <span class="factor-option__label">{{ item.displayName || item.label }}</span>
+                <span class="factor-option__meta">{{ item.value }}</span>
+              </div>
+            </template>
+          </el-select-v2>
         </el-form-item>
         <el-form-item label="因子" class="factor-form-item factor-form-item--wide">
           <el-select-v2
@@ -129,7 +139,6 @@
     <el-alert
       v-if="definitionsError"
       type="warning"
-      :closable="false"
       class="result-alert"
       :title="`因子定义加载失败：${definitionsError}`"
     />
@@ -137,7 +146,6 @@
     <el-alert
       v-if="coverageError"
       type="warning"
-      :closable="false"
       class="result-alert"
       :title="`覆盖率查询失败：${coverageError}`"
     />
@@ -284,7 +292,6 @@
     <el-alert
       v-if="previewError"
       type="warning"
-      :closable="false"
       class="result-alert"
       :title="`预览失败：${previewError}`"
     />
@@ -292,7 +299,6 @@
     <el-alert
       v-if="preview && preview.total === 0"
       type="warning"
-      :closable="false"
       class="result-alert"
       :title="`${preview.trade_date} 没有可预览数据，请检查实际缓存范围或先预计算。`"
     />
@@ -501,6 +507,7 @@ const filteredDefinitions = computed(() => {
 })
 const groupOptions = computed(() => groups.value.map(group => ({
   label: group.display_name,
+  displayName: group.display_name,
   value: group.name,
 })))
 const factorOptions = computed(() => filteredDefinitions.value.map(item => ({
@@ -694,6 +701,9 @@ const isTaskCompleted = (task: RuntimeTask) => COMPLETED_TASK_STATUSES.has(Strin
 const isTaskTerminal = (task: RuntimeTask) => TERMINAL_TASK_STATUSES.has(String(task.status))
 const isPollCancelledError = (error: unknown) => {
   return error instanceof Error && error.message === PRECOMPUTE_POLL_CANCELLED
+}
+const isUserDismissedDialog = (error: unknown) => {
+  return error === 'cancel' || error === 'close'
 }
 
 const formatCoverageRange = (row: { coverage: { min_date: string | null; max_date: string | null } | null }) => {
@@ -1205,6 +1215,8 @@ const runPrecompute = async () => {
   precomputeLoading.value = true
   try {
     await prepareAndRunPrecompute('single')
+  } catch (error) {
+    if (!isUserDismissedDialog(error)) throw error
   } finally {
     precomputeLoading.value = false
   }
@@ -1214,6 +1226,8 @@ const runGroupPrecompute = async () => {
   groupPrecomputeLoading.value = true
   try {
     await prepareAndRunPrecompute('group')
+  } catch (error) {
+    if (!isUserDismissedDialog(error)) throw error
   } finally {
     groupPrecomputeLoading.value = false
   }
@@ -1437,6 +1451,14 @@ onBeforeUnmount(() => {
 
 .factor-select {
   width: 100%;
+}
+
+.group-form-item {
+  grid-column: span 2;
+}
+
+.factor-select--group {
+  min-width: min(100%, 520px);
 }
 
 .factor-form-item--wide {
@@ -2071,6 +2093,62 @@ onBeforeUnmount(() => {
 :global(.factor-select-dropdown--wide .el-select-dropdown__item:hover .factor-option__meta),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.hover .factor-option__meta),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected .factor-option__meta) {
+  color: #bfdbfe;
+}
+
+:global(.factor-select-dropdown--group) {
+  min-width: min(640px, calc(100vw - 32px)) !important;
+  border: 1px solid rgba(96, 165, 250, 0.22) !important;
+  border-radius: 8px !important;
+  background:
+    linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(12, 15, 22, 0.98)),
+    #0c0f16 !important;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(148, 163, 184, 0.08) inset !important;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown),
+:global(.factor-select-dropdown--group .el-select-dropdown__wrap),
+:global(.factor-select-dropdown--group .el-select-dropdown__list),
+:global(.factor-select-dropdown--group .el-virtual-list),
+:global(.factor-select-dropdown--group .el-virtual-list__container),
+:global(.factor-select-dropdown--group .el-vl__wrapper),
+:global(.factor-select-dropdown--group .el-vl__window),
+:global(.factor-select-dropdown--group .el-vl__list),
+:global(.factor-select-dropdown--group ul[role="listbox"]) {
+  width: 100% !important;
+  background: transparent !important;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown__item) {
+  height: 48px;
+  width: 100% !important;
+  line-height: normal;
+  padding: 6px 12px;
+  color: #dbe7f5 !important;
+  background: transparent !important;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown__item:hover),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.hover) {
+  color: #f8fbff !important;
+  background: linear-gradient(90deg, rgba(56, 189, 248, 0.16), rgba(99, 102, 241, 0.08)) !important;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.selected) {
+  color: #ffffff !important;
+  background: linear-gradient(90deg, rgba(14, 165, 233, 0.28), rgba(37, 99, 235, 0.16)) !important;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown__item:hover .factor-option__label),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.hover .factor-option__label),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected .factor-option__label) {
+  color: #ffffff;
+}
+
+:global(.factor-select-dropdown--group .el-select-dropdown__item:hover .factor-option__meta),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.hover .factor-option__meta),
+:global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected .factor-option__meta) {
   color: #bfdbfe;
 }
 

@@ -61,7 +61,7 @@
               />
             </el-select>
             <small class="field-hint">
-              {{ requiresSymbolForIngest ? '雪球抓取需要股票；NGA 仍按日期集中抓取。' : '仅抓取 NGA 时这里可以留空。' }}
+              {{ requiresSymbolForIngest ? '雪球抓取需要股票；东财热门吧、集思录、NGA 可按全市场讨论抓取。' : '抓取东财热门吧、集思录或 NGA 时这里可以留空。' }}
             </small>
           </label>
 
@@ -338,6 +338,8 @@ interface StockOption {
 
 const sourceOptions: Array<{ value: SentimentSource; label: string }> = [
   { value: 'xueqiu_spyder', label: '雪球' },
+  { value: 'eastmoney_guba', label: '东方财富股吧' },
+  { value: 'jisilu', label: '集思录股票' },
   { value: 'flocktrader', label: 'NGA' },
 ]
 
@@ -359,7 +361,9 @@ const posts = ref<SentimentPost[]>([])
 const lastIngest = ref<SentimentIngestBatchResult | null>(null)
 
 const isRefreshing = computed(() => loadingOverview.value || loadingSummary.value || loadingPosts.value)
-const requiresSymbolForIngest = computed(() => selectedSources.value.includes('xueqiu_spyder'))
+const requiresSymbolForIngest = computed(() =>
+  selectedSources.value.some(source => source === 'xueqiu_spyder'),
+)
 
 const summarySourceMap = computed(() => {
   const map = new Map<SentimentSource, SentimentSummarySource>()

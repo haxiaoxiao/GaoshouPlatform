@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, AsyncIterator, Sequence
 
 import pandas as pd
 from loguru import logger
@@ -27,6 +27,7 @@ from sqlalchemy import delete, select, update
 
 from app.core.config import settings
 from app.db.models.live_trading import (
+    LiveEquitySnapshot,
     LiveOrderAudit,
     LivePaperAccount,
     LivePositionState,
@@ -68,8 +69,9 @@ LIVE_HIGH_VOLUME_FACTORS = {
     "avoid_high_volume_ratio",
     "high_volume_signal",
 }
-LIVE_PENDING_STATUSES = {"live_pending", "submitted", "accepted", "partially_filled"}
-LIVE_FILLED_STATUSES = {"live_filled", "filled"}
+LIVE_PENDING_STATUSES = {"live_pending", "submitted", "accepted", "partially_filled", "cancel_requested"}
+LIVE_FILLED_STATUSES = {"live_filled", "filled", "partially_cancelled"}
+LIVE_CANCELLED_STATUSES = {"cancelled", "partially_cancelled"}
 PAPER_FILLED_STATUSES = {"paper_filled"}
 
 
@@ -161,11 +163,15 @@ class LiveTradingService:
         await self.ensure_default_profiles()
         qmt = await qmt_trading_service.status()
         profiles = await self.list_profiles(include_disabled=False)
+        default_profile = next(
+            (str(profile.get("profile_key")) for profile in profiles if profile.get("is_default") and profile.get("profile_key")),
+            settings.live_trading_default_profile,
+        )
         return {
             **qmt,
             "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "auto_execute_enabled": bool(settings.live_trading_auto_execute_enabled),
-            "default_profile": settings.live_trading_default_profile,
+            "default_profile": default_profile,
             "profile_count": len(profiles),
             "runner": dict(self._runner_status),
         }
@@ -177,6 +183,7 @@ class LiveTradingService:
         profile_key: str | None = None,
         params: dict[str, Any] | None = None,
         include_broker: bool = True,
+        record_equity: bool = True,
     ) -> dict[str, Any]:
         if mode not in {"paper", "live"}:
             raise ValueError("mode must be paper or live")
@@ -186,11 +193,61 @@ class LiveTradingService:
             manual=None,
             params=dict(params or {}),
             profile_key=bundle.profile.profile_key if bundle else None,
+            prefer_local=mode == "live" and bundle is not None,
         )
         data = await self._account_dict(snapshot, mode=mode)
-        if include_broker and mode == "live":
+        if (
+            bundle is not None
+            and record_equity
+            and not data.get("error")
+            and not self._json_dict(data.get("meta")).get("stale_display_only")
+        ):
+            await self._record_equity_snapshot(
+                profile_key=bundle.profile.profile_key,
+                strategy_id=bundle.profile.strategy_id,
+                mode=mode,
+                account=data,
+                source="account_snapshot",
+            )
+        if include_broker and mode == "live" and not self._json_dict(data.get("meta")).get("stale_display_only"):
             data["broker_account"] = await self._broker_account_dict()
         return data
+
+    async def account_stream(
+        self,
+        *,
+        mode: str = "live",
+        profile_key: str | None = None,
+        interval_seconds: int = 5,
+    ) -> AsyncIterator[dict[str, Any]]:
+        interval = max(2, min(60, int(interval_seconds or 5)))
+        while True:
+            started_at = datetime.now()
+            try:
+                payload = await self.account_snapshot(
+                    mode=mode,
+                    profile_key=profile_key,
+                    include_broker=False,
+                    record_equity=False,
+                )
+                yield {
+                    "event": "account",
+                    "data": payload,
+                    "interval_seconds": interval,
+                }
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                yield {
+                    "event": "stream-error",
+                    "data": {
+                        "timestamp": datetime.now().isoformat(timespec="seconds"),
+                        "message": f"{type(exc).__name__}: {exc}",
+                    },
+                    "interval_seconds": interval,
+                }
+            elapsed = (datetime.now() - started_at).total_seconds()
+            await asyncio.sleep(max(0.5, interval - elapsed))
 
     async def initialize_strategy_account(
         self,
@@ -206,34 +263,129 @@ class LiveTradingService:
         capital_value = float(capital or 0.0)
         if capital_value <= 0:
             raise ValueError("capital must be positive")
-        if mode == "live":
+        async with async_session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(LivePositionState).where(
+                        LivePositionState.profile_key == bundle.profile.profile_key,
+                        LivePositionState.mode == mode,
+                    )
+                )
+            ).scalars().all()
+        existing = next((row for row in rows if row.symbol == STRATEGY_ACCOUNT_SYMBOL), None)
+        existing_state = self._json_dict(existing.state if existing else None)
+        is_adjustment = existing is not None and bool(existing_state.get("initialized")) and not reset_existing
+        position_states = {
+            row.symbol: self._json_dict(row.state)
+            for row in rows
+            if row.symbol != STRATEGY_ACCOUNT_SYMBOL and float(self._json_dict(row.state).get("quantity", 0.0) or 0.0) > 0
+        }
+        if is_adjustment:
+            if mode == "live":
+                current_snapshot = await self._strategy_account_snapshot(
+                    profile_key=bundle.profile.profile_key,
+                    mode=mode,
+                    params={},
+                    prefer_local=True,
+                )
+                if current_snapshot.error:
+                    raise ValueError(f"调整实盘本金前需要实时读取 QMT 策略持仓和行情: {current_snapshot.error}")
+                position_states = {symbol: dict(state) for symbol, state in current_snapshot.positions.items()}
+                current_market_value = round(float(current_snapshot.market_value or 0.0), 2)
+                current_cash = float(current_snapshot.cash or 0.0)
+            else:
+                await self._refresh_strategy_position_marks(position_states, mode=mode)
+                current_market_value = round(sum(float(item.get("market_value", 0.0) or 0.0) for item in position_states.values()), 2)
+                current_cash = float(existing_state.get("cash", 0.0) or 0.0)
+            current_total_asset = round(current_cash + current_market_value, 2)
+            cash_delta = round(capital_value - current_total_asset, 2)
+            live_required_cash = max(0.0, cash_delta)
+        else:
+            current_market_value = 0.0
+            current_cash = 0.0
+            current_total_asset = 0.0
+            cash_delta = 0.0
+            live_required_cash = capital_value
+        if mode == "live" and live_required_cash > 0 and not is_adjustment:
             try:
                 broker = await qmt_trading_service.account_snapshot()
-                cash_limit = float(broker.cash or 0.0) + max(100.0, capital_value * 0.005)
-                if capital_value > cash_limit:
-                    raise ValueError(f"QMT 可用现金不足：当前约 {broker.cash:.2f}，不能圈定 {capital_value:.2f}。")
+                broker_cash = float(broker.cash or 0.0)
+                cash_limit = broker_cash + max(100.0, live_required_cash * 0.005)
+                if live_required_cash > cash_limit:
+                    raise ValueError(
+                        f"QMT 可用现金不足：当前约 {broker_cash:.2f}，不能圈定所需现金 {live_required_cash:.2f}。"
+                    )
             except ValueError:
                 raise
             except Exception as exc:
-                raise ValueError(f"初始化实盘资金池前需要读取 QMT 可用现金: {type(exc).__name__}: {exc}") from exc
-        async with async_session_factory() as session:
-            existing = await session.scalar(
-                select(LivePositionState).where(
-                    LivePositionState.profile_key == bundle.profile.profile_key,
-                    LivePositionState.mode == mode,
-                    LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
-                )
-            )
-            if existing is not None and self._json_dict(existing.state).get("initialized") and not reset_existing:
-                position_exists = await session.scalar(
-                    select(LivePositionState.id).where(
+                raise ValueError(f"初始化/调整实盘资金池前需要读取 QMT 可用现金: {type(exc).__name__}: {exc}") from exc
+        if is_adjustment:
+            now = datetime.now().isoformat(timespec="seconds")
+            cash_adjustment_total = float(existing_state.get("cash_adjustment_total", 0.0) or 0.0) + cash_delta
+            updated_state = {
+                **existing_state,
+                "initialized": True,
+                "account_scope": "strategy_pool",
+                "profile_key": bundle.profile.profile_key,
+                "mode": mode,
+                "target_capital": round(capital_value, 2),
+                "cash": round(current_cash + cash_delta, 2),
+                "market_value": current_market_value,
+                "total_asset": round(capital_value, 2),
+                "cash_adjustment_total": round(cash_adjustment_total, 2),
+                "last_capital_adjustment": round(cash_delta, 2),
+                "last_capital_adjustment_at": now,
+                "positions_source": "qmt_account_strategy_symbols" if mode == "live" else existing_state.get("positions_source", "strategy_owned_only"),
+                "price_source": "qmt_realtime_quotes" if mode == "live" else existing_state.get("price_source"),
+                "updated_at": now,
+            }
+            async with async_session_factory() as session:
+                account_row = await session.scalar(
+                    select(LivePositionState).where(
                         LivePositionState.profile_key == bundle.profile.profile_key,
                         LivePositionState.mode == mode,
-                        LivePositionState.symbol != STRATEGY_ACCOUNT_SYMBOL,
-                    ).limit(1)
+                        LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
+                    )
                 )
-                if position_exists is not None:
-                    raise ValueError("策略资金池已产生持仓；如需重置，请勾选重新初始化。")
+                if account_row is None:
+                    raise ValueError("策略资金池状态丢失，请重新打开页面后再试。")
+                account_row.state = updated_state
+                session.add(account_row)
+                for symbol, state in position_states.items():
+                    position_row = await session.scalar(
+                        select(LivePositionState).where(
+                            LivePositionState.profile_key == bundle.profile.profile_key,
+                            LivePositionState.mode == mode,
+                            LivePositionState.symbol == symbol,
+                        )
+                    )
+                    if position_row is not None:
+                        position_row.state = state
+                        session.add(position_row)
+                await session.commit()
+            await self._write_control_audit(
+                profile_key=bundle.profile.profile_key,
+                strategy_id=bundle.profile.strategy_id,
+                trade_date=date.today(),
+                signal_hash=None,
+                trigger_source="manual",
+                mode=mode,
+                run_id=None,
+                status="strategy_account_adjusted",
+                reason=f"strategy account target capital adjusted to {capital_value:.2f}",
+                payload={
+                    "stage": "strategy_account",
+                    "action": "adjust_target_capital",
+                    "previous_total_asset": current_total_asset,
+                    "target_capital": capital_value,
+                    "cash_delta": cash_delta,
+                    "market_value": current_market_value,
+                    "cash": round(current_cash + cash_delta, 2),
+                },
+            )
+            return await self.account_snapshot(mode=mode, profile_key=bundle.profile.profile_key)
+
+        async with async_session_factory() as session:
             if reset_existing:
                 await session.execute(
                     delete(LivePositionState).where(
@@ -242,6 +394,14 @@ class LiveTradingService:
                     )
                 )
                 existing = None
+            elif existing is not None:
+                existing = await session.scalar(
+                    select(LivePositionState).where(
+                        LivePositionState.profile_key == bundle.profile.profile_key,
+                        LivePositionState.mode == mode,
+                        LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
+                    )
+                )
             now = datetime.now().isoformat(timespec="seconds")
             state = {
                 "initialized": True,
@@ -249,9 +409,11 @@ class LiveTradingService:
                 "profile_key": bundle.profile.profile_key,
                 "mode": mode,
                 "initial_capital": round(capital_value, 2),
+                "target_capital": round(capital_value, 2),
                 "cash": round(capital_value, 2),
                 "market_value": 0.0,
                 "total_asset": round(capital_value, 2),
+                "cash_adjustment_total": 0.0,
                 "realized_pnl": 0.0,
                 "fee_overdraft_limit": round(max(100.0, capital_value * 0.005), 2),
                 "positions_source": "strategy_owned_only",
@@ -449,16 +611,44 @@ class LiveTradingService:
                     payload={"stage": "signals", "adapter_type": bundle.profile.adapter_type},
                 )
             raise ValueError(f"Unsupported adapter_type: {bundle.profile.adapter_type}")
+        pending_sync: dict[str, Any] | None = None
+        if mode == "live":
+            try:
+                pending_sync = await self.sync_order_status(
+                    profile_key=bundle.profile.profile_key,
+                    mode="live",
+                    limit=500,
+                )
+            except Exception as exc:
+                pending_sync = {"synced": False, "error": f"{type(exc).__name__}: {exc}"}
         account = await self._account_snapshot(
             mode=mode,
             manual=manual_account,
             params=normalized,
             profile_key=bundle.profile.profile_key,
         )
+        if mode == "live" and account.error:
+            return await self._empty_signal_response(
+                bundle=bundle,
+                params=normalized,
+                trade_date=trade_date,
+                account=account,
+                reason=f"实盘账户实时快照不可用：{account.error}",
+                mode=mode,
+                trigger_source=trigger_source,
+                run_id=run_id,
+                write_audit=write_audit,
+                universe_size=0,
+                preflight=None,
+                factor_dates={},
+            )
         positions = {
             symbol: float(position.get("quantity", 0.0) or 0.0)
             for symbol, position in account.positions.items()
         }
+        pending_effect: dict[str, Any] = {"count": 0, "positions": {}, "cash_effect": 0.0}
+        if mode == "live":
+            pending_effect = await self._pending_order_effect(profile_key=bundle.profile.profile_key, mode="live")
         symbols = await self._resolve_symbols(bundle.profile, normalized, trade_date)
         factor_configs = self._factor_configs(bundle, normalized)
         filters = self._filter_configs(bundle, normalized)
@@ -573,26 +763,51 @@ class LiveTradingService:
             )
 
         target_symbols = self._rank_targets(frame, positions, normalized)
-        quote_symbols = sorted(set(target_symbols) | set(positions))
+        quote_symbols = sorted(set(target_symbols) | set(positions) | set(pending_effect.get("positions", {})))
         price_map, quote_error = await self._quote_prices(quote_symbols)
-        price_map.update(self._position_price_fallbacks(account))
+        if mode == "live":
+            missing_quote_symbols = self._missing_realtime_price_symbols(quote_symbols, price_map)
+            if quote_error or missing_quote_symbols:
+                reason = quote_error or f"实盘实时行情缺失：{', '.join(missing_quote_symbols[:10])}"
+                return await self._empty_signal_response(
+                    bundle=bundle,
+                    params=normalized,
+                    trade_date=trade_date,
+                    account=account,
+                    reason=reason,
+                    mode=mode,
+                    trigger_source=trigger_source,
+                    run_id=run_id,
+                    write_audit=write_audit,
+                    universe_size=len(symbols),
+                    preflight=preflight,
+                    factor_dates=effective_dates,
+                )
+        else:
+            price_map.update(self._position_price_fallbacks(account))
+        account_for_orders, positions_for_orders, pending_adjustment = self._apply_pending_order_effect(
+            account,
+            positions,
+            pending_effect,
+            price_map,
+        )
 
         target_weight = self._target_weight(target_symbols, normalized)
         target_weights = {symbol: target_weight for symbol in target_symbols if target_weight > 0}
-        portfolio_value = account.total_asset or account.cash or float(normalized.get("initial_capital", 1_000_000) or 1_000_000)
+        portfolio_value = account_for_orders.total_asset or account_for_orders.cash or float(normalized.get("initial_capital", 1_000_000) or 1_000_000)
         entry_state = self._entry_filter_state(trade_date, normalized)
         filtered_weights, entry_state = apply_entry_filter_to_target_weights(
             target_weights,
-            current_positions=positions,
+            current_positions=positions_for_orders,
             price_map=price_map,
             portfolio_value=portfolio_value,
             entry_filter_state=entry_state,
         )
         orders, skipped_orders = self._build_cash_aware_orders(
             target_weights=filtered_weights,
-            positions=positions,
+            positions=positions_for_orders,
             price_map=price_map,
-            account=account,
+            account=account_for_orders,
             params=normalized,
             portfolio_value=portfolio_value,
             bundle=bundle,
@@ -631,6 +846,8 @@ class LiveTradingService:
             "target_symbols": target_symbols,
             "target_weights": filtered_weights,
             "entry_filter": entry_state,
+            "pending_order_sync": pending_sync,
+            "pending_order_adjustment": pending_adjustment,
             "quote_error": quote_error,
             "heat_filter_note": heat_note,
             "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
@@ -804,14 +1021,342 @@ class LiveTradingService:
             "results": results,
         }
 
-    async def list_audits(self, *, limit: int = 100, profile_key: str | None = None) -> list[dict[str, Any]]:
+    async def sync_order_status(
+        self,
+        *,
+        profile_key: str | None = None,
+        mode: str = "live",
+        limit: int = 200,
+        record_ids: Sequence[str] | None = None,
+        order_ids: Sequence[str | int] | None = None,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            return {"synced": False, "mode": mode, "updated_count": 0, "pending_count": 0, "orders": [], "trades": []}
+        pending_rows = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            record_ids=record_ids,
+            order_ids=order_ids,
+            only_pending=True,
+        )
+        if not pending_rows:
+            return {"synced": True, "mode": mode, "updated_count": 0, "pending_count": 0, "orders": [], "trades": []}
+
+        wanted_order_ids = [row.order_id for row in pending_rows if row.order_id]
+        try:
+            qmt_updates = await qmt_trading_service.query_order_updates(wanted_order_ids)
+        except Exception as exc:
+            return {
+                "synced": False,
+                "mode": mode,
+                "updated_count": 0,
+                "pending_count": len(pending_rows),
+                "error": f"{type(exc).__name__}: {exc}",
+                "orders": [],
+                "trades": [],
+            }
+
+        qmt_by_order = qmt_updates.get("by_order_id") or {}
+        updated_count = 0
+        fill_events: list[dict[str, Any]] = []
+        profiles_to_reconcile: set[str] = set()
+        async with async_session_factory() as session:
+            for row in pending_rows:
+                if not row.order_id:
+                    continue
+                update_data = dict(qmt_by_order.get(str(row.order_id)) or {})
+                if not update_data:
+                    continue
+                order_payload = self._json_dict(row.order_payload)
+                result_payload = self._json_dict(row.result_payload)
+                previous_filled = float(result_payload.get("filled_quantity") or 0.0)
+                qmt_filled = float(update_data.get("filled_quantity") or 0.0)
+                delta_filled = max(0.0, qmt_filled - previous_filled)
+                update_status = str(update_data.get("status") or "live_pending")
+                order_quantity = float(order_payload.get("quantity") or row.quantity or 0.0)
+                if qmt_filled >= order_quantity > 0:
+                    next_status = "live_filled"
+                elif update_status in LIVE_CANCELLED_STATUSES:
+                    next_status = "partially_cancelled" if qmt_filled > 0 else "cancelled"
+                elif qmt_filled > 0:
+                    next_status = "partially_filled"
+                else:
+                    next_status = update_status
+
+                filled_price = float(update_data.get("filled_price") or order_payload.get("reference_price") or row.reference_price or 0.0)
+                filled_value = float(update_data.get("filled_value") or (qmt_filled * filled_price))
+                if delta_filled > 0 and filled_price > 0:
+                    fill_result = {
+                        "submitted": True,
+                        "paper": False,
+                        "status": next_status,
+                        "filled_quantity": delta_filled,
+                        "filled_price": filled_price,
+                        "filled_value": round(delta_filled * filled_price, 2),
+                        "realized_pnl": 0.0,
+                        "message": "QMT 成交回报同步",
+                        "updated_from": "qmt_trade_sync",
+                        "account_snapshot": None,
+                    }
+                    fill_order = dict(order_payload)
+                    fill_order["quantity"] = delta_filled
+                    fill_order["reference_price"] = filled_price
+                    fill_order["price"] = filled_price
+                    await self._apply_strategy_account_fill(
+                        profile_key=row.profile_key,
+                        mode=row.mode,
+                        order=fill_order,
+                        result=fill_result,
+                    )
+                    fill_events.append(
+                        {
+                            "record_id": row.record_id,
+                            "order_id": row.order_id,
+                            "filled_quantity": delta_filled,
+                            "filled_price": filled_price,
+                            "filled_value": round(delta_filled * filled_price, 2),
+                        }
+                    )
+
+                db_row = await session.scalar(select(LiveTradeRecord).where(LiveTradeRecord.record_id == row.record_id))
+                if db_row is None:
+                    continue
+                db_row.status = next_status
+                db_row.message = (
+                    str(update_data.get("status_msg") or "")
+                    or ("QMT 已成交" if next_status == "live_filled" else "QMT 部分成交" if next_status == "partially_filled" else "QMT 已撤单" if next_status == "cancelled" else db_row.message)
+                )
+                if filled_price > 0:
+                    db_row.reference_price = Decimal(str(round(filled_price, 4)))
+                if next_status in LIVE_FILLED_STATUSES:
+                    db_row.quantity = Decimal(str(qmt_filled or order_quantity or row.quantity or 0))
+                    db_row.order_value = Decimal(str(round(filled_value, 2)))
+                result_payload.update(
+                    {
+                        "submitted": True,
+                        "pending": next_status in LIVE_PENDING_STATUSES,
+                        "status": next_status,
+                        "order_id": update_data.get("order_id") or db_row.order_id,
+                        "filled_quantity": qmt_filled,
+                        "filled_price": filled_price,
+                        "filled_value": round(filled_value, 2),
+                        "remaining_quantity": max(0.0, order_quantity - qmt_filled),
+                        "order_status": update_data.get("order_status"),
+                        "status_msg": update_data.get("status_msg"),
+                        "last_trade_time": update_data.get("last_trade_time"),
+                    }
+                )
+                db_row.result_payload = result_payload
+                session.add(db_row)
+                profiles_to_reconcile.add(db_row.profile_key)
+                session.add(
+                    LiveOrderAudit(
+                        audit_id=f"audit-{uuid.uuid4().hex}",
+                        run_id=db_row.run_id,
+                        profile_key=db_row.profile_key,
+                        strategy_id=db_row.strategy_id,
+                        trade_date=db_row.trade_date,
+                        signal_hash=db_row.signal_hash,
+                        trigger_source="qmt_sync",
+                        mode=db_row.mode,
+                        status=str(db_row.status),
+                        order_payload=self._json_dict(db_row.order_payload),
+                        result_payload=self._json_dict(db_row.result_payload),
+                        skip_reason=db_row.message,
+                    )
+                )
+                updated_count += 1
+            await session.commit()
+
+        for profile in sorted(profiles_to_reconcile):
+            await self._reconcile_strategy_account_from_trade_records(profile_key=profile, mode=mode)
+
+        remaining = await self._load_live_trade_rows(profile_key=profile_key, mode=mode, limit=limit, only_pending=True)
+        return {
+            "synced": True,
+            "mode": mode,
+            "updated_count": updated_count,
+            "pending_count": len(remaining),
+            "filled_count": len(fill_events),
+            "orders": qmt_updates.get("orders") or [],
+            "trades": qmt_updates.get("trades") or [],
+            "fill_events": fill_events,
+        }
+
+    async def cancel_pending_orders(
+        self,
+        *,
+        profile_key: str | None = None,
+        mode: str = "live",
+        limit: int = 200,
+        min_age_seconds: int = 0,
+        record_ids: Sequence[str] | None = None,
+        order_ids: Sequence[str | int] | None = None,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            raise ValueError("cancel is only supported in live mode")
+        pending_rows = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            record_ids=record_ids,
+            order_ids=order_ids,
+            only_pending=True,
+            min_age_seconds=min_age_seconds,
+        )
+        cancel_targets = [row for row in pending_rows if row.order_id]
+        if not cancel_targets:
+            return {"cancelled": False, "cancel_count": 0, "orders": [], "message": "没有可撤销的待成交真实委托"}
+        if not confirm:
+            return {
+                "cancelled": False,
+                "cancel_count": len(cancel_targets),
+                "orders": [self._pending_order_dict(row) for row in cancel_targets],
+                "message": "批量撤单需要 confirm=true。",
+            }
+
+        results: list[dict[str, Any]] = []
+        cancel_requested_records: list[str] = []
+        for row in cancel_targets:
+            result = await qmt_trading_service.cancel_order(row.order_id)
+            if result.get("cancelled"):
+                result["status"] = "cancel_requested"
+                cancel_requested_records.append(row.record_id)
+            results.append(result)
+            await self._write_control_audit(
+                profile_key=row.profile_key,
+                strategy_id=row.strategy_id,
+                trade_date=row.trade_date,
+                signal_hash=row.signal_hash,
+                trigger_source="manual_cancel",
+                mode=mode,
+                run_id=row.run_id,
+                status="cancel_requested" if result.get("cancelled") else "cancel_failed",
+                reason=str(result.get("message") or ""),
+                payload={"order_id": row.order_id, "record_id": row.record_id, "result": result},
+            )
+        if cancel_requested_records:
+            async with async_session_factory() as session:
+                rows = (
+                    await session.execute(
+                        select(LiveTradeRecord).where(LiveTradeRecord.record_id.in_(cancel_requested_records))
+                    )
+                ).scalars().all()
+                for row in rows:
+                    payload = self._json_dict(row.result_payload)
+                    payload.update({"status": "cancel_requested", "pending": True, "message": "已向 QMT 发送撤单请求，等待确认。"})
+                    row.status = "cancel_requested"
+                    row.message = "已向 QMT 发送撤单请求，等待确认。"
+                    row.result_payload = payload
+                    session.add(row)
+                await session.commit()
+        sync_result = await self.sync_order_status(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            record_ids=[row.record_id for row in cancel_targets],
+            order_ids=[row.order_id for row in cancel_targets if row.order_id],
+        )
+        remaining = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            only_pending=True,
+            min_age_seconds=min_age_seconds,
+        )
+        return {
+            "cancelled": all(bool(item.get("cancelled")) for item in results),
+            "cancel_count": len(results),
+            "results": results,
+            "sync_result": sync_result,
+            "orders": [self._pending_order_dict(row) for row in remaining],
+        }
+
+    async def cancel_and_resubmit_pending_orders(
+        self,
+        *,
+        profile_key: str | None = None,
+        mode: str = "live",
+        params: dict[str, Any] | None = None,
+        limit: int = 200,
+        min_age_seconds: int = 0,
+        record_ids: Sequence[str] | None = None,
+        order_ids: Sequence[str | int] | None = None,
+        confirm_cancel: bool = False,
+        confirm_submit: bool = False,
+    ) -> dict[str, Any]:
+        cancel_result = await self.cancel_pending_orders(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            min_age_seconds=min_age_seconds,
+            record_ids=record_ids,
+            order_ids=order_ids,
+            confirm=confirm_cancel,
+        )
+        if not confirm_cancel:
+            return {"cancel_result": cancel_result, "submitted": False, "message": cancel_result.get("message")}
+        post_cancel_pending = cancel_result.get("orders") or []
+        if post_cancel_pending:
+            return {
+                "cancel_result": cancel_result,
+                "submitted": False,
+                "message": "QMT 撤单尚未完全确认，先等待状态同步后再重提。",
+            }
+        signal_result = await self.signals(
+            profile_key=profile_key,
+            mode=mode,
+            params=params or {},
+            trigger_source="manual",
+            include_preflight=True,
+        )
+        orders = list(signal_result.get("orders") or [])
+        if not orders:
+            return {
+                "cancel_result": cancel_result,
+                "signal_result": signal_result,
+                "submitted": False,
+                "message": "撤单完成，但当前没有新的差额订单需要提交。",
+            }
+        submit_result = {"submitted": False, "results": [], "message": "未确认提交"}
+        if confirm_submit:
+            submit_result = await self.submit_orders(
+                orders,
+                mode=mode,
+                confirm=True,
+                trigger_source="manual",
+            )
+        return {
+            "cancel_result": cancel_result,
+            "signal_result": signal_result,
+            "submit_result": submit_result,
+            "submitted": bool(submit_result.get("submitted")),
+            "message": submit_result.get("message") or "撤单并重提完成",
+        }
+
+    async def list_audits(self, *, limit: int = 100, profile_key: str | None = None, mode: str | None = None) -> list[dict[str, Any]]:
         async with async_session_factory() as session:
             stmt = select(LiveOrderAudit)
             if profile_key:
                 stmt = stmt.where(LiveOrderAudit.profile_key == profile_key)
+            if mode:
+                stmt = stmt.where(LiveOrderAudit.mode == mode)
             stmt = stmt.order_by(LiveOrderAudit.created_at.desc()).limit(max(1, min(500, int(limit or 100))))
             rows = (await session.execute(stmt)).scalars().all()
-        return [self._audit_dict(row) for row in rows]
+        items = [self._audit_dict(row) for row in rows]
+        missing_name_symbols = [
+            str(item.get("symbol") or "")
+            for item in items
+            if item.get("symbol") and not item.get("stock_name")
+        ]
+        name_map = await self._stock_names(missing_name_symbols)
+        for item in items:
+            symbol = str(item.get("symbol") or "")
+            if symbol and not item.get("stock_name"):
+                item["stock_name"] = name_map.get(symbol)
+        return items
 
     async def list_trade_records(
         self,
@@ -844,15 +1389,11 @@ class LiveTradingService:
         limit: int = 100,
         profile_key: str | None = None,
         mode: str = "live",
+        sync: bool = True,
     ) -> list[dict[str, Any]]:
-        async with async_session_factory() as session:
-            stmt = select(LiveTradeRecord).where(LiveTradeRecord.status.in_(sorted(LIVE_PENDING_STATUSES)))
-            if profile_key:
-                stmt = stmt.where(LiveTradeRecord.profile_key == profile_key)
-            if mode:
-                stmt = stmt.where(LiveTradeRecord.mode == mode)
-            stmt = stmt.order_by(LiveTradeRecord.created_at.desc()).limit(max(1, min(500, int(limit or 100))))
-            rows = (await session.execute(stmt)).scalars().all()
+        if sync and mode == "live":
+            await self.sync_order_status(profile_key=profile_key, mode=mode, limit=limit)
+        rows = await self._load_live_trade_rows(profile_key=profile_key, mode=mode, limit=limit, only_pending=True)
         return [self._pending_order_dict(row) for row in rows]
 
     async def weekly_analysis(
@@ -898,14 +1439,16 @@ class LiveTradingService:
             day_key = str(record.get("trade_date") or "-")
             day_row = by_day.setdefault(
                 day_key,
-                {"trade_date": day_key, "records": 0, "buy_notional": 0.0, "sell_notional": 0.0, "failed": 0, "paper_realized_pnl": 0.0},
+                {"trade_date": day_key, "records": 0, "buy_notional": 0.0, "sell_notional": 0.0, "cancelled": 0, "failed": 0, "paper_realized_pnl": 0.0},
             )
             day_row["records"] += 1
             if status in completed_statuses and side == "BUY":
                 day_row["buy_notional"] += value
             if status in completed_statuses and side == "SELL":
                 day_row["sell_notional"] += value
-            if status not in completed_statuses and status not in LIVE_PENDING_STATUSES:
+            if status in LIVE_CANCELLED_STATUSES:
+                day_row["cancelled"] += 1
+            if status not in completed_statuses and status not in LIVE_PENDING_STATUSES and status not in LIVE_CANCELLED_STATUSES:
                 day_row["failed"] += 1
             day_row["paper_realized_pnl"] += float(result.get("realized_pnl", 0.0) or 0.0)
 
@@ -943,14 +1486,65 @@ class LiveTradingService:
             for record in records
             if str(record.get("status") or "") not in completed_statuses
             and str(record.get("status") or "") not in LIVE_PENDING_STATUSES
+            and str(record.get("status") or "") not in LIVE_CANCELLED_STATUSES
         )
+        cancelled_count = sum(1 for record in records if str(record.get("status") or "") in LIVE_CANCELLED_STATUSES)
         notes = []
         if live_submitted_count:
             notes.append("live_pending 表示 QMT 委托提交成功，但尚未在平台内确认成交；请结合 QMT 当日委托/成交核对。")
+        if cancelled_count:
+            notes.append(f"本周有 {cancelled_count} 条 QMT 撤单/部成撤单记录，未成交部分不会进入策略资金池。")
         if failed_count:
             notes.append(f"本周有 {failed_count} 条提交失败记录，需要查看 message 或订单审计。")
         if not records:
             notes.append("本周暂无独立交易记录。")
+
+        current_account: dict[str, Any] | None = None
+        if profile_key:
+            try:
+                current_account = await self.account_snapshot(
+                    mode=mode or "live",
+                    profile_key=profile_key,
+                    include_broker=False,
+                    record_equity=False,
+                )
+            except Exception as exc:
+                notes.append(f"权益快照读取失败：{type(exc).__name__}: {exc}")
+
+        weekly_snapshots_raw = await self._load_equity_snapshots(
+            profile_key=profile_key,
+            mode=mode,
+            start_date=start,
+            end_date=end,
+        )
+        all_time_snapshots_raw = await self._load_equity_snapshots(
+            profile_key=profile_key,
+            mode=mode,
+            end_date=end,
+        )
+        weekly_snapshots = self._usable_equity_snapshots(weekly_snapshots_raw)
+        all_time_snapshots = self._usable_equity_snapshots(all_time_snapshots_raw)
+        weekly_equity = self._equity_metrics(weekly_snapshots)
+        all_time_equity = self._equity_metrics(all_time_snapshots)
+        current_total_pnl = self._float_or_none((current_account or {}).get("total_pnl"))
+        current_total_pnl_pct = self._float_or_none((current_account or {}).get("total_pnl_pct"))
+        current_meta = self._json_dict((current_account or {}).get("meta"))
+        initialized_date = self._parse_date(str(current_meta.get("initialized_at") or "")[:10]) if current_meta.get("initialized_at") else None
+        weekly_pnl = weekly_equity.get("pnl")
+        weekly_return_pct = weekly_equity.get("return_pct")
+        if initialized_date and start <= initialized_date <= end and current_total_pnl is not None:
+            weekly_pnl = round(current_total_pnl, 2)
+            weekly_return_pct = round(current_total_pnl_pct, 4) if current_total_pnl_pct is not None else None
+        filtered_weekly = len(weekly_snapshots_raw) - len(weekly_snapshots)
+        filtered_all_time = len(all_time_snapshots_raw) - len(all_time_snapshots)
+        if filtered_weekly:
+            notes.append(f"已过滤 {filtered_weekly} 个 QMT 半截/异常权益快照，避免把账户读取失败当作真实回撤。")
+        if initialized_date and start <= initialized_date <= end:
+            notes.append("资金池在本周内建立，本周 PnL 与至今 PnL 使用同一净投入本金口径。")
+        if len(weekly_snapshots) < 2:
+            notes.append("权益快照不足，周内 PnL 和回撤基于当前可用快照。")
+        if len(all_time_snapshots) < 2:
+            notes.append("至今回撤快照不足，后续每天/每次刷新账户后会逐步补齐。")
 
         return {
             "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -962,17 +1556,40 @@ class LiveTradingService:
                 "total_records": len(records),
                 "completed_records": completed_count,
                 "failed_records": failed_count,
+                "cancelled_records": cancelled_count,
                 "buy_notional": round(buy_notional, 2),
                 "sell_notional": round(sell_notional, 2),
                 "net_notional": round(buy_notional - sell_notional, 2),
                 "paper_realized_pnl": round(paper_realized_pnl, 2),
                 "live_submitted_records": live_submitted_count,
+                "weekly_pnl": weekly_pnl,
+                "weekly_return_pct": weekly_return_pct,
+                "weekly_max_drawdown_pct": weekly_equity.get("max_drawdown_pct"),
+                "all_time_pnl": round(current_total_pnl, 2) if current_total_pnl is not None else all_time_equity.get("pnl"),
+                "all_time_return_pct": (
+                    round(current_total_pnl_pct, 4)
+                    if current_total_pnl_pct is not None
+                    else all_time_equity.get("return_pct")
+                ),
+                "all_time_max_drawdown_pct": all_time_equity.get("max_drawdown_pct"),
+                "weekly_equity_snapshot_points": weekly_equity.get("snapshot_points", 0),
+                "all_time_equity_snapshot_points": all_time_equity.get("snapshot_points", 0),
+                "weekly_equity_snapshot_raw_points": len(weekly_snapshots_raw),
+                "all_time_equity_snapshot_raw_points": len(all_time_snapshots_raw),
+                "weekly_equity_snapshot_filtered_points": filtered_weekly,
+                "all_time_equity_snapshot_filtered_points": filtered_all_time,
+                "equity_snapshot_points": {
+                    "weekly": weekly_equity.get("snapshot_points", 0),
+                    "all_time": all_time_equity.get("snapshot_points", 0),
+                },
             },
             "by_day": sorted(by_day.values(), key=lambda item: item["trade_date"]),
             "by_profile": sorted(by_profile.values(), key=lambda item: item["notional"], reverse=True),
             "by_status": [{"status": key, "records": value} for key, value in sorted(by_status.items())],
             "by_side": list(by_side.values()),
             "top_symbols": sorted(by_symbol.values(), key=lambda item: item["notional"], reverse=True)[:10],
+            "equity_curve": self._equity_curve(all_time_snapshots),
+            "weekly_equity_curve": self._equity_curve(weekly_snapshots),
             "notes": notes,
         }
 
@@ -2187,22 +2804,34 @@ class LiveTradingService:
         return await load_index_symbols(str(index_symbol), trade_date, trade_date)
 
     async def _account_dict(self, account: LiveAccountSnapshot, *, mode: str) -> dict[str, Any]:
-        positions = await self._position_rows(account.positions)
+        raw_total_asset = account.total_asset or (account.cash + account.market_value)
+        meta = self._json_dict(account.meta)
+        positions = await self._position_rows(
+            account.positions,
+            total_asset=raw_total_asset,
+            refresh_quotes=not bool(meta.get("stale_display_only")),
+        )
         unrealized_pnl = sum(float(row.get("unrealized_pnl") or 0.0) for row in positions)
-        total_asset = account.total_asset or (account.cash + account.market_value)
+        market_value = round(sum(float(row.get("market_value") or 0.0) for row in positions), 2) if positions else account.market_value
+        total_asset = round(account.cash + market_value, 2) if positions else raw_total_asset
+        capital_base = self._capital_base(meta)
+        total_pnl = total_asset - capital_base if capital_base > 0 else unrealized_pnl
+        total_pnl_pct = (total_pnl / capital_base) if capital_base > 0 else None
         return {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "mode": mode,
             "cash": account.cash,
             "total_asset": total_asset,
-            "market_value": account.market_value,
+            "market_value": market_value,
             "unrealized_pnl": round(unrealized_pnl, 2),
+            "total_pnl": round(total_pnl, 2),
+            "total_pnl_pct": round(total_pnl_pct, 4) if total_pnl_pct is not None else None,
             "position_count": len(positions),
             "positions": positions,
             "positions_by_symbol": account.positions,
             "source": account.source,
             "error": account.error,
-            "meta": self._json_dict(account.meta),
+            "meta": meta,
         }
 
     def _snapshot_payload(self, account: LiveAccountSnapshot) -> dict[str, Any]:
@@ -2216,20 +2845,225 @@ class LiveTradingService:
             "meta": self._json_dict(account.meta),
         }
 
-    async def _position_rows(self, positions: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    async def _record_equity_snapshot(
+        self,
+        *,
+        profile_key: str,
+        strategy_id: int | None,
+        mode: str,
+        account: dict[str, Any],
+        source: str,
+    ) -> None:
+        meta = self._json_dict(account.get("meta"))
+        if not meta.get("initialized"):
+            return
+        if meta.get("stale_display_only"):
+            return
+        total_asset = float(account.get("total_asset") or 0.0)
+        if total_asset <= 0:
+            return
+        target_capital = float(meta.get("target_capital") or meta.get("initial_capital") or 0.0)
+        position_count = int(float(account.get("position_count") or 0))
+        expected_count = len([symbol for symbol in meta.get("strategy_recognized_symbols") or [] if symbol])
+        if expected_count and position_count < expected_count and target_capital > 0 and total_asset < target_capital * 0.95:
+            logger.warning(
+                "Skip incomplete live equity snapshot profile={} positions={}/{} total_asset={} target={}",
+                profile_key,
+                position_count,
+                expected_count,
+                total_asset,
+                target_capital,
+            )
+            return
+        snapshot_meta = {
+            "capital_base": self._capital_base(meta),
+            "target_capital": target_capital or meta.get("target_capital") or meta.get("initial_capital"),
+            "position_count": position_count,
+            "expected_position_count": expected_count,
+            "account_source": account.get("source"),
+            "recorded_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            async with async_session_factory() as session:
+                session.add(
+                    LiveEquitySnapshot(
+                        snapshot_id=f"equity-{uuid.uuid4().hex}",
+                        profile_key=profile_key,
+                        strategy_id=strategy_id,
+                        mode=mode,
+                        trade_date=date.today(),
+                        cash=Decimal(str(round(float(account.get("cash") or 0.0), 2))),
+                        market_value=Decimal(str(round(float(account.get("market_value") or 0.0), 2))),
+                        total_asset=Decimal(str(round(total_asset, 2))),
+                        realized_pnl=Decimal(str(round(float(meta.get("realized_pnl") or 0.0), 2))),
+                        unrealized_pnl=Decimal(str(round(float(account.get("unrealized_pnl") or 0.0), 2))),
+                        source=source,
+                        meta=snapshot_meta,
+                    )
+                )
+                await session.commit()
+        except Exception:
+            logger.opt(exception=True).warning("Failed to record live equity snapshot for {}", profile_key)
+
+    def _usable_equity_snapshots(self, rows: Sequence[LiveEquitySnapshot]) -> list[LiveEquitySnapshot]:
+        if not rows:
+            return []
+        counts: list[int] = []
+        totals: list[float] = []
+        for row in rows:
+            meta = self._json_dict(row.meta)
+            count = int(float(meta.get("position_count") or 0))
+            total_asset = float(row.total_asset or 0.0)
+            if count > 0:
+                counts.append(count)
+            if total_asset > 0:
+                totals.append(total_asset)
+        expected_count = max(counts) if counts else 0
+        anchor_total = max(totals) if totals else 0.0
+        usable: list[LiveEquitySnapshot] = []
+        for row in rows:
+            meta = self._json_dict(row.meta)
+            if meta.get("stale_display_only"):
+                continue
+            total_asset = float(row.total_asset or 0.0)
+            if total_asset <= 0:
+                continue
+            position_count = int(float(meta.get("position_count") or 0))
+            target_capital = float(meta.get("target_capital") or meta.get("capital_base") or 0.0)
+            reference_total = target_capital if target_capital > 0 else anchor_total
+            if expected_count and position_count < expected_count and reference_total > 0 and total_asset < reference_total * 0.95:
+                continue
+            usable.append(row)
+        return usable
+
+    async def _load_equity_snapshots(
+        self,
+        *,
+        profile_key: str | None,
+        mode: str | None,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        limit: int = 5000,
+    ) -> list[LiveEquitySnapshot]:
+        async with async_session_factory() as session:
+            stmt = select(LiveEquitySnapshot)
+            if profile_key:
+                stmt = stmt.where(LiveEquitySnapshot.profile_key == profile_key)
+            if mode:
+                stmt = stmt.where(LiveEquitySnapshot.mode == mode)
+            if start_date:
+                stmt = stmt.where(LiveEquitySnapshot.trade_date >= start_date)
+            if end_date:
+                stmt = stmt.where(LiveEquitySnapshot.trade_date <= end_date)
+            stmt = stmt.order_by(LiveEquitySnapshot.created_at.asc(), LiveEquitySnapshot.id.asc()).limit(max(1, min(10000, int(limit or 5000))))
+            return (await session.execute(stmt)).scalars().all()
+
+    def _equity_metrics(self, rows: Sequence[LiveEquitySnapshot]) -> dict[str, Any]:
+        if not rows:
+            return {
+                "snapshot_points": 0,
+                "start_total_asset": None,
+                "end_total_asset": None,
+                "pnl": None,
+                "return_pct": None,
+                "max_drawdown_pct": None,
+            }
+        values = [float(row.total_asset or 0.0) for row in rows if float(row.total_asset or 0.0) > 0]
+        if not values:
+            return {
+                "snapshot_points": len(rows),
+                "start_total_asset": None,
+                "end_total_asset": None,
+                "pnl": None,
+                "return_pct": None,
+                "max_drawdown_pct": None,
+            }
+        peak = values[0]
+        max_drawdown = 0.0
+        for value in values:
+            peak = max(peak, value)
+            if peak > 0:
+                max_drawdown = min(max_drawdown, (value - peak) / peak)
+        start_value = values[0]
+        end_value = values[-1]
+        pnl = end_value - start_value
+        return {
+            "snapshot_points": len(values),
+            "start_total_asset": round(start_value, 2),
+            "end_total_asset": round(end_value, 2),
+            "pnl": round(pnl, 2),
+            "return_pct": round(pnl / start_value, 4) if start_value > 0 else None,
+            "max_drawdown_pct": round(max_drawdown, 4),
+        }
+
+    def _equity_curve(self, rows: Sequence[LiveEquitySnapshot]) -> list[dict[str, Any]]:
+        values = [float(row.total_asset or 0.0) for row in rows]
+        positive_values = [value for value in values if value > 0]
+        if not positive_values:
+            return []
+        base = positive_values[0]
+        peak = positive_values[0]
+        curve: list[dict[str, Any]] = []
+        for row in rows:
+            total_asset = float(row.total_asset or 0.0)
+            if total_asset <= 0:
+                continue
+            peak = max(peak, total_asset)
+            pnl = total_asset - base
+            curve.append(
+                {
+                    "snapshot_id": row.snapshot_id,
+                    "trade_date": row.trade_date.isoformat() if row.trade_date else None,
+                    "created_at": row.created_at.isoformat(timespec="seconds") if row.created_at else None,
+                    "cash": round(float(row.cash or 0.0), 2),
+                    "market_value": round(float(row.market_value or 0.0), 2),
+                    "total_asset": round(total_asset, 2),
+                    "realized_pnl": round(float(row.realized_pnl or 0.0), 2),
+                    "unrealized_pnl": round(float(row.unrealized_pnl or 0.0), 2),
+                    "pnl": round(pnl, 2),
+                    "return_pct": round(pnl / base, 4) if base > 0 else None,
+                    "drawdown_pct": round((total_asset - peak) / peak, 4) if peak > 0 else None,
+                    "source": row.source,
+                }
+            )
+        return curve
+
+    def _capital_base(self, meta: dict[str, Any]) -> float:
+        initial = float(meta.get("initial_capital") or meta.get("capital") or 0.0)
+        adjustment = float(meta.get("cash_adjustment_total") or 0.0)
+        target = float(meta.get("target_capital") or 0.0)
+        base = initial + adjustment
+        if base <= 0:
+            base = target
+        return base
+
+    async def _position_rows(
+        self,
+        positions: dict[str, dict[str, Any]],
+        *,
+        total_asset: float | None = None,
+        refresh_quotes: bool = True,
+    ) -> list[dict[str, Any]]:
         symbol_list = [str(symbol) for symbol in positions.keys() if str(symbol).strip()]
         name_map = await self._stock_names(symbol_list)
+        quote_map = await self._quote_detail_map(symbol_list) if refresh_quotes else {}
+        denominator = float(total_asset or 0.0)
         rows: list[dict[str, Any]] = []
         for symbol in sorted(symbol_list):
             raw = dict(positions.get(symbol) or {})
+            quote = quote_map.get(symbol) or {}
             quantity = float(raw.get("quantity", raw.get("volume", 0.0)) or 0.0)
             available = float(raw.get("available", raw.get("available_volume", quantity)) or 0.0)
             avg_cost = float(raw.get("avg_cost", raw.get("cost_price", 0.0)) or 0.0)
+            last_price = float(quote.get("price") or raw.get("last_price") or raw.get("reference_price") or 0.0)
             market_value = float(raw.get("market_value", 0.0) or 0.0)
+            if quantity > 0 and last_price > 0:
+                market_value = round(quantity * last_price, 2)
             cost_value = quantity * avg_cost if quantity > 0 and avg_cost > 0 else 0.0
             unrealized_pnl = market_value - cost_value if market_value or cost_value else float(raw.get("unrealized_pnl", 0.0) or 0.0)
             unrealized_pnl_pct = (unrealized_pnl / cost_value) if cost_value > 0 else None
             stock_name = raw.get("stock_name") or raw.get("name") or raw.get("stockName") or name_map.get(symbol)
+            position_pct = (market_value / denominator) if denominator > 0 else None
             rows.append(
                 {
                     **raw,
@@ -2238,10 +3072,18 @@ class LiveTradingService:
                     "quantity": quantity,
                     "available": available,
                     "avg_cost": avg_cost,
+                    "last_price": last_price or raw.get("last_price"),
                     "market_value": market_value,
                     "cost_value": round(cost_value, 2),
                     "unrealized_pnl": round(unrealized_pnl, 2),
                     "unrealized_pnl_pct": round(unrealized_pnl_pct, 4) if unrealized_pnl_pct is not None else None,
+                    "position_pct": round(position_pct, 4) if position_pct is not None else None,
+                    "volume_ratio": self._float_or_none(quote.get("volume_ratio")),
+                    "today_change_pct": self._float_or_none(quote.get("change_pct")),
+                    "turnover_rate": self._float_or_none(quote.get("turnover_rate")),
+                    "amount": self._float_or_none(quote.get("amount")),
+                    "total_value": self._float_or_none(quote.get("total_value")),
+                    "float_value": self._float_or_none(quote.get("float_value")),
                 }
             )
         return rows
@@ -2272,6 +3114,7 @@ class LiveTradingService:
         manual: dict[str, Any] | None,
         params: dict[str, Any],
         profile_key: str | None = None,
+        prefer_local: bool = False,
     ) -> LiveAccountSnapshot:
         if manual:
             positions = self._json_dict(manual.get("positions"))
@@ -2283,7 +3126,12 @@ class LiveTradingService:
                 source="manual",
             )
         if profile_key:
-            return await self._strategy_account_snapshot(profile_key=profile_key, mode=mode, params=params)
+            return await self._strategy_account_snapshot(
+                profile_key=profile_key,
+                mode=mode,
+                params=params,
+                prefer_local=prefer_local,
+            )
         if mode == "paper":
             return await self._paper_account_snapshot(params)
         try:
@@ -2297,6 +3145,7 @@ class LiveTradingService:
         profile_key: str,
         mode: str,
         params: dict[str, Any],
+        prefer_local: bool = False,
     ) -> LiveAccountSnapshot:
         async with async_session_factory() as session:
             rows = (
@@ -2328,31 +3177,237 @@ class LiveTradingService:
                 },
             )
 
-        positions = {
+        local_positions = {
             row.symbol: self._json_dict(row.state)
             for row in rows
-            if row.symbol != STRATEGY_ACCOUNT_SYMBOL and self._json_dict(row.state).get("quantity", 0)
+            if row.symbol != STRATEGY_ACCOUNT_SYMBOL
         }
-        await self._refresh_strategy_position_marks(positions, mode=mode)
-        market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
         cash = float(account_state.get("cash", 0.0) or 0.0)
-        total_asset = round(cash + market_value, 2)
-        meta = {
+        if mode != "live":
+            positions = {
+                symbol: state
+                for symbol, state in local_positions.items()
+                if float(state.get("quantity", 0.0) or 0.0) > 0
+            }
+            await self._refresh_strategy_position_marks(positions, mode=mode)
+            market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
+            total_asset = round(cash + market_value, 2)
+            meta = {
+                **account_state,
+                "initialized": True,
+                "account_scope": "strategy_pool",
+                "profile_key": profile_key,
+                "mode": mode,
+                "positions_source": account_state.get("positions_source", "strategy_owned_only"),
+                "market_value": market_value,
+                "total_asset": total_asset,
+            }
+            return LiveAccountSnapshot(
+                cash=round(cash, 2),
+                total_asset=total_asset,
+                market_value=market_value,
+                positions={symbol: dict(position) for symbol, position in positions.items()},
+                source=f"{mode}_strategy_pool",
+                error=None,
+                meta=meta,
+            )
+
+        recognized_symbols = sorted(
+            symbol
+            for symbol, state in local_positions.items()
+            if str(symbol).strip() and float(state.get("quantity", 0.0) or 0.0) > 0
+        )
+        checked_at = datetime.now().isoformat(timespec="seconds")
+        base_meta = {
             **account_state,
             "initialized": True,
             "account_scope": "strategy_pool",
             "profile_key": profile_key,
             "mode": mode,
-            "positions_source": "strategy_owned_only",
+            "positions_source": "qmt_account_strategy_symbols",
+            "price_source": "qmt_realtime_quotes",
+            "strategy_recognized_symbols": recognized_symbols,
+            "broker_position_checked_at": checked_at,
+            "cash_source": "strategy_pool_subledger",
+            "same_symbol_source_limit": "QMT 持仓按证券代码汇总；若手工和策略同时持有同一代码，系统无法区分来源。",
+        }
+        stale_snapshot = self._stale_strategy_account_snapshot(
+            profile_key=profile_key,
+            mode=mode,
+            cash=cash,
+            positions=local_positions,
+            base_meta=base_meta,
+        )
+        if prefer_local:
+            return stale_snapshot
+        try:
+            broker = LiveAccountSnapshot.from_qmt(await qmt_trading_service.account_snapshot())
+        except Exception as exc:
+            error = f"读取 QMT 账户失败：{type(exc).__name__}: {exc}"
+            stale_snapshot.error = error
+            stale_snapshot.meta = {**self._json_dict(stale_snapshot.meta), "last_snapshot_error": error}
+            return stale_snapshot
+        if broker.error:
+            error = f"读取 QMT 账户失败：{broker.error}"
+            stale_snapshot.error = error
+            stale_snapshot.meta = {**self._json_dict(stale_snapshot.meta), "last_snapshot_error": error}
+            return stale_snapshot
+
+        held_symbols: list[str] = []
+        missing_broker_symbols: list[str] = []
+        for symbol in recognized_symbols:
+            broker_position = dict(broker.positions.get(symbol) or {})
+            broker_quantity = float(broker_position.get("quantity", 0.0) or 0.0)
+            if broker_quantity > 0:
+                held_symbols.append(symbol)
+            else:
+                missing_broker_symbols.append(symbol)
+
+        price_map, quote_error = await self._quote_prices(held_symbols)
+        missing_quote_symbols = self._missing_realtime_price_symbols(held_symbols, price_map)
+        if quote_error or missing_quote_symbols:
+            reason = quote_error or f"实盘实时行情缺失：{', '.join(missing_quote_symbols[:10])}"
+            qmt_positions = {}
+            for symbol in held_symbols:
+                broker_position = dict(broker.positions.get(symbol) or {})
+                local = dict(local_positions.get(symbol) or {})
+                qmt_positions[symbol] = {
+                    **local,
+                    "symbol": symbol,
+                    "quantity": float(broker_position.get("quantity", 0.0) or 0.0),
+                    "available": float(broker_position.get("available", 0.0) or 0.0),
+                    "avg_cost": float(broker_position.get("avg_cost", local.get("avg_cost", 0.0)) or 0.0),
+                    "stock_name": broker_position.get("name") or local.get("stock_name") or local.get("name"),
+                    "market_value": 0.0,
+                    "price_source": "qmt_realtime_quotes_missing",
+                    "quote_error": reason,
+                }
+            return LiveAccountSnapshot(
+                cash=round(cash, 2),
+                total_asset=round(cash, 2),
+                market_value=0.0,
+                positions=qmt_positions,
+                source="live_strategy_pool_qmt",
+                error=reason,
+                meta={**base_meta, "missing_quote_symbols": missing_quote_symbols, "last_snapshot_error": reason},
+            )
+
+        name_map = await self._stock_names(held_symbols)
+        positions: dict[str, dict[str, Any]] = {}
+        for symbol in held_symbols:
+            broker_position = dict(broker.positions.get(symbol) or {})
+            local = dict(local_positions.get(symbol) or {})
+            quantity = float(broker_position.get("quantity", 0.0) or 0.0)
+            available = max(0.0, min(quantity, float(broker_position.get("available", quantity) or 0.0)))
+            avg_cost = float(broker_position.get("avg_cost", local.get("avg_cost", 0.0)) or 0.0)
+            price = float(price_map.get(symbol, 0.0) or 0.0)
+            positions[symbol] = {
+                **local,
+                "symbol": symbol,
+                "stock_name": broker_position.get("name") or local.get("stock_name") or local.get("name") or name_map.get(symbol),
+                "quantity": quantity,
+                "available": available,
+                "avg_cost": avg_cost,
+                "reference_price": price,
+                "last_price": price,
+                "market_value": round(quantity * price, 2),
+                "broker_quantity": quantity,
+                "broker_available": available,
+                "broker_market_value": float(broker_position.get("market_value", 0.0) or 0.0),
+                "strategy_owned": True,
+                "position_source": "qmt_account",
+                "price_source": "qmt_realtime_quotes",
+                "updated_from": "qmt_account_snapshot",
+                "updated_at": checked_at,
+            }
+        market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
+        total_asset = round(cash + market_value, 2)
+        meta = {
+            **base_meta,
             "market_value": market_value,
             "total_asset": total_asset,
+            "broker_cash": round(float(broker.cash or 0.0), 2),
+            "broker_total_asset": round(float(broker.total_asset or 0.0), 2),
+            "broker_market_value": round(float(broker.market_value or 0.0), 2),
+            "missing_broker_symbols": missing_broker_symbols,
+            "ignored_broker_symbols": sorted(set(broker.positions) - set(recognized_symbols)),
         }
+        async with async_session_factory() as session:
+            account = await session.scalar(
+                select(LivePositionState).where(
+                    LivePositionState.profile_key == profile_key,
+                    LivePositionState.mode == mode,
+                    LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
+                )
+            )
+            if account is not None:
+                account.state = meta
+                session.add(account)
+            for symbol, position in positions.items():
+                row = await session.scalar(
+                    select(LivePositionState).where(
+                        LivePositionState.profile_key == profile_key,
+                        LivePositionState.mode == mode,
+                        LivePositionState.symbol == symbol,
+                    )
+                )
+                if row is None:
+                    row = LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position)
+                row.state = position
+                session.add(row)
+            await session.commit()
         return LiveAccountSnapshot(
             cash=round(cash, 2),
             total_asset=total_asset,
             market_value=market_value,
             positions={symbol: dict(position) for symbol, position in positions.items()},
-            source=f"{mode}_strategy_pool",
+            source="live_strategy_pool_qmt",
+            error=None,
+            meta=meta,
+        )
+
+    def _stale_strategy_account_snapshot(
+        self,
+        *,
+        profile_key: str,
+        mode: str,
+        cash: float,
+        positions: dict[str, dict[str, Any]],
+        base_meta: dict[str, Any],
+    ) -> LiveAccountSnapshot:
+        active_positions = {
+            symbol: {
+                **dict(state),
+                "symbol": symbol,
+                "position_source": state.get("position_source") or "last_successful_snapshot",
+                "price_source": state.get("price_source") or "last_successful_snapshot",
+                "stale_display_only": True,
+            }
+            for symbol, state in positions.items()
+            if str(symbol).strip() and float(state.get("quantity", 0.0) or 0.0) > 0
+        }
+        market_value = round(
+            sum(float(position.get("market_value", 0.0) or 0.0) for position in active_positions.values()),
+            2,
+        )
+        total_asset = round(float(cash or 0.0) + market_value, 2)
+        meta = {
+            **base_meta,
+            "profile_key": profile_key,
+            "mode": mode,
+            "market_value": market_value,
+            "total_asset": total_asset,
+            "positions_source": "last_successful_strategy_snapshot",
+            "price_source": "last_successful_strategy_snapshot",
+            "stale_display_only": True,
+            "stale_display_reason": "QMT 实时账户读取失败，界面暂时展示最近一次成功同步的策略持仓；生成信号和提交订单仍会被阻断。",
+        }
+        return LiveAccountSnapshot(
+            cash=round(float(cash or 0.0), 2),
+            total_asset=total_asset,
+            market_value=market_value,
+            positions=active_positions,
+            source="live_strategy_pool_stale",
             error=None,
             meta=meta,
         )
@@ -2379,29 +3434,20 @@ class LiveTradingService:
     async def _refresh_strategy_position_marks(self, positions: dict[str, dict[str, Any]], *, mode: str) -> None:
         if not positions:
             return
-        broker_positions: dict[str, dict[str, Any]] = {}
-        if mode == "live":
-            try:
-                broker = LiveAccountSnapshot.from_qmt(await qmt_trading_service.account_snapshot())
-                broker_positions = broker.positions
-            except Exception as exc:
-                for position in positions.values():
-                    position["broker_error"] = f"{type(exc).__name__}: {exc}"
-        price_map, _ = await self._quote_prices(list(positions.keys()))
+        price_map, quote_error = await self._quote_prices(list(positions.keys()))
+        missing_symbols = self._missing_realtime_price_symbols(positions.keys(), price_map) if mode == "live" else []
         for symbol, position in positions.items():
             quantity = float(position.get("quantity", 0.0) or 0.0)
             avg_cost = float(position.get("avg_cost", 0.0) or 0.0)
-            broker_position = dict(broker_positions.get(symbol) or {})
-            broker_available = float(broker_position.get("available", quantity) or 0.0) if broker_position else quantity
-            broker_quantity = float(broker_position.get("quantity", quantity) or 0.0) if broker_position else quantity
             price = float(price_map.get(symbol, 0.0) or 0.0)
-            if price <= 0 and broker_quantity > 0 and broker_position:
-                price = float(broker_position.get("market_value", 0.0) or 0.0) / broker_quantity
-            if price <= 0 and quantity > 0:
+            if mode == "live" and (quote_error or symbol in missing_symbols):
+                position["quote_error"] = quote_error or "realtime_quote_missing"
+                position["last_price"] = 0.0
+                position["market_value"] = 0.0
+                continue
+            if mode != "live" and price <= 0 and quantity > 0:
                 price = float(position.get("reference_price", 0.0) or position.get("last_price", 0.0) or avg_cost)
-            position["available"] = max(0.0, min(quantity, broker_available))
-            position["broker_quantity"] = broker_quantity if mode == "live" else None
-            position["broker_available"] = broker_available if mode == "live" else None
+            position["available"] = max(0.0, min(quantity, float(position.get("available", quantity) or quantity)))
             position["last_price"] = price
             position["market_value"] = round(quantity * price, 2) if quantity > 0 and price > 0 else float(position.get("market_value", 0.0) or 0.0)
 
@@ -2434,7 +3480,7 @@ class LiveTradingService:
         if not symbol_list:
             return {}, None
         try:
-            quotes = await qmt_gateway.get_realtime_quotes(symbol_list)
+            quotes = await asyncio.wait_for(qmt_gateway.get_realtime_quotes(symbol_list), timeout=5.0)
         except Exception as exc:
             return {}, f"{type(exc).__name__}: {exc}"
         prices: dict[str, float] = {}
@@ -2444,6 +3490,85 @@ class LiveTradingService:
             if symbol and price > 0:
                 prices[symbol] = price
         return prices, None
+
+    async def _quote_detail_map(self, symbols: Sequence[str]) -> dict[str, dict[str, float | None]]:
+        symbol_list = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not symbol_list:
+            return {}
+        try:
+            quotes = await asyncio.wait_for(qmt_gateway.get_realtime_quotes(symbol_list), timeout=5.0)
+        except Exception as exc:
+            logger.warning("Failed to read realtime quote details: {}", exc)
+            return {}
+
+        result: dict[str, dict[str, float | None]] = {}
+        for quote in quotes or []:
+            symbol = str(quote.get("symbol") or quote.get("code") or quote.get("stock_code") or "").strip()
+            if not symbol:
+                continue
+            price = self._quote_price(quote)
+            pre_close = self._first_float(
+                quote,
+                (
+                    "preClose",
+                    "pre_close",
+                    "pre_close_price",
+                    "lastClose",
+                    "last_close",
+                    "前收盘",
+                ),
+            )
+            change_pct = self._normalized_ratio(
+                self._first_float(
+                    quote,
+                    (
+                        "change_pct",
+                        "pct_chg",
+                        "changeRatio",
+                        "change_rate",
+                        "涨跌幅",
+                    ),
+                )
+            )
+            if change_pct is None and price > 0 and pre_close and pre_close > 0:
+                change_pct = (price - pre_close) / pre_close
+            raw_quote = self._json_dict(quote.get("raw"))
+            if change_pct is None and raw_quote:
+                raw_change = self._normalized_ratio(
+                    self._first_float(
+                        raw_quote,
+                        ("change_pct", "pct_chg", "changeRatio", "change_rate", "涨跌幅"),
+                    )
+                )
+                if raw_change is not None:
+                    change_pct = raw_change
+            result[symbol] = {
+                "price": price if price > 0 else None,
+                "amount": self._first_float(quote, ("amount", "turnover_amount", "成交额"))
+                or self._first_float(raw_quote, ("amount", "turnover_amount", "成交额")),
+                "volume_ratio": self._normalized_ratio(
+                    self._first_float(
+                        quote,
+                        (
+                            "volumeRatio",
+                            "volume_ratio",
+                            "volRatio",
+                            "vol_ratio",
+                            "量比",
+                        ),
+                    ) or self._first_float(raw_quote, ("volumeRatio", "volume_ratio", "volRatio", "vol_ratio", "量比")),
+                    percent_like=False,
+                ),
+                "change_pct": change_pct,
+                "turnover_rate": self._normalized_ratio(
+                    self._first_float(quote, ("turnover_rate", "turnover", "turnoverRate", "换手率"))
+                    or self._first_float(raw_quote, ("turnover_rate", "turnover", "turnoverRate", "换手率"))
+                ),
+                "total_value": self._first_float(quote, ("total_value", "total_mv", "总市值")),
+                "float_value": self._first_float(quote, ("float_value", "circ_mv", "流通市值")),
+                "quote_time": quote.get("quote_time") or raw_quote.get("time") or raw_quote.get("timetag"),
+            }
+        return result
 
     def _build_cash_aware_orders(
         self,
@@ -2531,6 +3656,8 @@ class LiveTradingService:
     ) -> dict[str, Any]:
         snapshot = await self._strategy_account_snapshot(profile_key=profile_key, mode=mode, params={})
         meta = self._json_dict(snapshot.meta)
+        if snapshot.error:
+            return {"ok": False, "message": f"策略资金池实时快照不可用：{snapshot.error}"}
         if not meta.get("initialized"):
             return {"ok": False, "message": "策略资金池未初始化，禁止提交订单。"}
         cash = float(snapshot.cash or 0.0)
@@ -2543,11 +3670,28 @@ class LiveTradingService:
             symbol: float(position.get("available", position.get("quantity", 0.0)) or 0.0)
             for symbol, position in snapshot.positions.items()
         }
+        submit_price_map: dict[str, float] = {}
+        if mode == "live":
+            order_symbols = sorted({str(order.get("symbol") or "").strip() for order in orders if str(order.get("symbol") or "").strip()})
+            submit_price_map, quote_error = await self._quote_prices(order_symbols)
+            missing_symbols = self._missing_realtime_price_symbols(order_symbols, submit_price_map)
+            if quote_error or missing_symbols:
+                reason = quote_error or f"提交前实盘实时行情缺失：{', '.join(missing_symbols[:10])}"
+                return {"ok": False, "message": reason}
+            repriced_at = datetime.now().isoformat(timespec="seconds")
+            for order in orders:
+                symbol = str(order.get("symbol") or "").strip()
+                price = float(submit_price_map.get(symbol, 0.0) or 0.0)
+                if price > 0:
+                    order["reference_price"] = round(price, 4)
+                    order["price"] = round(price, 4)
+                    order["price_source"] = "qmt_realtime_quotes_at_submit"
+                    order["repriced_at"] = repriced_at
         for order in orders:
             symbol = str(order.get("symbol") or "")
             side = str(order.get("side") or "").upper()
             qty = float(order.get("quantity") or 0.0)
-            price = float(order.get("reference_price") or order.get("price") or 0.0)
+            price = float(submit_price_map.get(symbol, 0.0) or order.get("reference_price") or order.get("price") or 0.0)
             if not symbol or qty <= 0 or price <= 0 or side not in {"BUY", "SELL"}:
                 continue
             if side == "SELL":
@@ -2564,7 +3708,7 @@ class LiveTradingService:
             if side != "BUY":
                 continue
             qty = float(order.get("quantity") or 0.0)
-            price = float(order.get("reference_price") or order.get("price") or 0.0)
+            price = float(submit_price_map.get(str(order.get("symbol") or ""), 0.0) or order.get("reference_price") or order.get("price") or 0.0)
             if qty <= 0 or price <= 0:
                 continue
             cash -= qty * price
@@ -2660,7 +3804,7 @@ class LiveTradingService:
                     "last_price": price,
                     "market_value": round(next_qty * price, 2),
                     "strategy_owned": True,
-                    "updated_from": "live_submit" if mode == "live" else "paper_fill",
+                    "updated_from": str(result.get("updated_from") or ("live_fill" if mode == "live" else "paper_fill")),
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }
                 if position_row is None:
@@ -2688,7 +3832,7 @@ class LiveTradingService:
                         "market_value": round(next_qty * price, 2),
                         "stock_name": order.get("stock_name") or position.get("stock_name"),
                         "strategy_owned": True,
-                        "updated_from": "live_submit" if mode == "live" else "paper_fill",
+                        "updated_from": str(result.get("updated_from") or ("live_fill" if mode == "live" else "paper_fill")),
                         "updated_at": datetime.now().isoformat(timespec="seconds"),
                     }
                     session.add(position_row)
@@ -2722,8 +3866,118 @@ class LiveTradingService:
             "filled_value": round(qty * price, 2),
             "realized_pnl": round(fill_realized_pnl, 2),
         }
-        payload["strategy_account_note"] = "live 模式当前按委托提交成功回写策略账本，后续可接 QMT 成交回报校准。"
+        payload["strategy_account_note"] = "live 模式按 QMT 成交回报回写策略账本；未成交委托只作为在途订单参与差额计算。"
         return payload
+
+    async def _reconcile_strategy_account_from_trade_records(self, *, profile_key: str, mode: str) -> None:
+        if mode != "live":
+            return
+        async with async_session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(LivePositionState).where(
+                        LivePositionState.profile_key == profile_key,
+                        LivePositionState.mode == mode,
+                    )
+                )
+            ).scalars().all()
+            account = next((row for row in rows if row.symbol == STRATEGY_ACCOUNT_SYMBOL), None)
+            account_state = self._json_dict(account.state if account else None)
+            if account is None or not account_state.get("initialized"):
+                return
+            records = (
+                await session.execute(
+                    select(LiveTradeRecord)
+                    .where(
+                        LiveTradeRecord.profile_key == profile_key,
+                        LiveTradeRecord.mode == mode,
+                        LiveTradeRecord.status.in_(sorted(LIVE_FILLED_STATUSES)),
+                    )
+                    .order_by(LiveTradeRecord.created_at.asc(), LiveTradeRecord.id.asc())
+                )
+            ).scalars().all()
+
+            initial_capital = float(account_state.get("initial_capital") or account_state.get("capital") or 0.0)
+            if initial_capital <= 0:
+                initial_capital = float(account_state.get("target_capital") or account_state.get("cash") or 0.0)
+            cash_adjustment_total = float(account_state.get("cash_adjustment_total", 0.0) or 0.0)
+            cash = initial_capital + cash_adjustment_total
+            realized_pnl = 0.0
+            positions: dict[str, dict[str, Any]] = {}
+            for record in records:
+                symbol = str(record.symbol or "")
+                side = str(record.side or "").upper()
+                qty = float(record.quantity or 0.0)
+                price = float(record.reference_price or 0.0)
+                if not symbol or side not in {"BUY", "SELL"} or qty <= 0 or price <= 0:
+                    continue
+                value = round(qty * price, 2)
+                position = dict(positions.get(symbol) or {})
+                current_qty = float(position.get("quantity", 0.0) or 0.0)
+                avg_cost = float(position.get("avg_cost", price) or price)
+                if side == "BUY":
+                    cash -= value
+                    next_qty = current_qty + qty
+                    avg_cost = ((avg_cost * current_qty) + value) / max(next_qty, 1.0)
+                    positions[symbol] = {
+                        **position,
+                        "symbol": symbol,
+                        "stock_name": record.stock_name or position.get("stock_name"),
+                        "quantity": next_qty,
+                        "available": next_qty,
+                        "avg_cost": avg_cost,
+                        "reference_price": price,
+                        "last_price": price,
+                        "market_value": round(next_qty * price, 2),
+                        "strategy_owned": True,
+                        "updated_from": "qmt_trade_reconcile",
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                else:
+                    sell_qty = min(current_qty, qty)
+                    cash += round(sell_qty * price, 2)
+                    realized_pnl += (price - avg_cost) * sell_qty
+                    next_qty = current_qty - sell_qty
+                    if next_qty <= 1e-6:
+                        positions.pop(symbol, None)
+                    else:
+                        positions[symbol] = {
+                            **position,
+                            "quantity": next_qty,
+                            "available": next_qty,
+                            "reference_price": price,
+                            "last_price": price,
+                            "market_value": round(next_qty * price, 2),
+                            "stock_name": record.stock_name or position.get("stock_name"),
+                            "strategy_owned": True,
+                            "updated_from": "qmt_trade_reconcile",
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+
+            await session.execute(
+                delete(LivePositionState).where(
+                    LivePositionState.profile_key == profile_key,
+                    LivePositionState.mode == mode,
+                    LivePositionState.symbol != STRATEGY_ACCOUNT_SYMBOL,
+                )
+            )
+            market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
+            for symbol, position in positions.items():
+                session.add(LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position))
+            account_state.update(
+                {
+                    "cash": round(cash, 2),
+                    "market_value": market_value,
+                    "total_asset": round(cash + market_value, 2),
+                    "realized_pnl": round(realized_pnl, 2),
+                    "positions_source": "qmt_trade_records",
+                    "reconciled_at": datetime.now().isoformat(timespec="seconds"),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            )
+            account.state = account_state
+            session.add(account)
+            await session.commit()
 
     async def _submit_paper_orders(
         self,
@@ -2855,6 +4109,141 @@ class LiveTradingService:
             account.positions = positions
             await session.commit()
         return {"submitted": all(item.get("submitted") for item in results) if results else False, "paper": True, "results": results}
+
+    async def _load_live_trade_rows(
+        self,
+        *,
+        profile_key: str | None = None,
+        mode: str | None = None,
+        limit: int = 200,
+        only_pending: bool = False,
+        min_age_seconds: int = 0,
+        record_ids: Sequence[str] | None = None,
+        order_ids: Sequence[str | int] | None = None,
+    ) -> list[LiveTradeRecord]:
+        async with async_session_factory() as session:
+            stmt = select(LiveTradeRecord)
+            if only_pending:
+                stmt = stmt.where(LiveTradeRecord.status.in_(sorted(LIVE_PENDING_STATUSES)))
+            if profile_key:
+                stmt = stmt.where(LiveTradeRecord.profile_key == profile_key)
+            if mode:
+                stmt = stmt.where(LiveTradeRecord.mode == mode)
+            if record_ids:
+                stmt = stmt.where(LiveTradeRecord.record_id.in_([str(item) for item in record_ids if str(item).strip()]))
+            if order_ids:
+                normalized_order_ids = [self._normalize_order_id(item) for item in order_ids if self._normalize_order_id(item)]
+                if normalized_order_ids:
+                    stmt = stmt.where(LiveTradeRecord.order_id.in_(normalized_order_ids))
+            if min_age_seconds > 0:
+                stmt = stmt.where(LiveTradeRecord.created_at <= datetime.now() - timedelta(seconds=int(min_age_seconds)))
+            stmt = stmt.order_by(LiveTradeRecord.created_at.desc()).limit(max(1, min(1000, int(limit or 200))))
+            return (await session.execute(stmt)).scalars().all()
+
+    async def _pending_order_effect(self, *, profile_key: str, mode: str) -> dict[str, Any]:
+        rows = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=500,
+            only_pending=True,
+        )
+        positions: dict[str, float] = {}
+        cash_reserved = 0.0
+        details: list[dict[str, Any]] = []
+        for row in rows:
+            order_payload = self._json_dict(row.order_payload)
+            result_payload = self._json_dict(row.result_payload)
+            symbol = str(row.symbol or order_payload.get("symbol") or "")
+            side = str(row.side or order_payload.get("side") or "").upper()
+            if not symbol or side not in {"BUY", "SELL"}:
+                continue
+            order_quantity = float(order_payload.get("quantity") or row.quantity or 0.0)
+            filled_quantity = float(result_payload.get("filled_quantity") or 0.0)
+            remaining = result_payload.get("remaining_quantity")
+            remaining_quantity = float(remaining if remaining is not None else max(0.0, order_quantity - filled_quantity))
+            if remaining_quantity <= 0:
+                continue
+            price = float(row.reference_price or order_payload.get("reference_price") or order_payload.get("price") or 0.0)
+            delta = remaining_quantity if side == "BUY" else -remaining_quantity
+            positions[symbol] = positions.get(symbol, 0.0) + delta
+            if side == "BUY":
+                cash_reserved += remaining_quantity * price
+            details.append(
+                {
+                    "record_id": row.record_id,
+                    "order_id": row.order_id,
+                    "symbol": symbol,
+                    "side": side,
+                    "remaining_quantity": remaining_quantity,
+                    "reference_price": price,
+                    "cash_reserved": remaining_quantity * price if side == "BUY" else 0.0,
+                    "status": row.status,
+                }
+            )
+        return {
+            "count": len(details),
+            "positions": positions,
+            "cash_effect": -round(cash_reserved, 2),
+            "cash_reserved": round(cash_reserved, 2),
+            "details": details,
+        }
+
+    def _apply_pending_order_effect(
+        self,
+        account: LiveAccountSnapshot,
+        positions: dict[str, float],
+        pending_effect: dict[str, Any],
+        price_map: dict[str, float],
+    ) -> tuple[LiveAccountSnapshot, dict[str, float], dict[str, Any]]:
+        effective_positions = {symbol: float(qty or 0.0) for symbol, qty in positions.items()}
+        account_positions = {symbol: dict(position or {}) for symbol, position in account.positions.items()}
+        deltas = {str(symbol): float(delta or 0.0) for symbol, delta in self._json_dict(pending_effect.get("positions")).items()}
+        for symbol, delta in deltas.items():
+            current_qty = float(effective_positions.get(symbol, 0.0) or 0.0)
+            next_qty = max(0.0, current_qty + delta)
+            if next_qty <= 1e-6:
+                effective_positions.pop(symbol, None)
+                account_positions.pop(symbol, None)
+                continue
+            effective_positions[symbol] = next_qty
+            position = dict(account_positions.get(symbol) or {"symbol": symbol})
+            strict_realtime = self._json_dict(account.meta).get("price_source") == "qmt_realtime_quotes"
+            price = float(price_map.get(symbol, 0.0) or 0.0)
+            if price <= 0 and not strict_realtime:
+                price = float(position.get("last_price", 0.0) or position.get("reference_price", 0.0) or position.get("avg_cost", 0.0) or 0.0)
+            position["quote_error"] = "realtime_quote_missing" if strict_realtime and price <= 0 else position.get("quote_error")
+            available = float(position.get("available", position.get("quantity", current_qty)) or 0.0)
+            position.update(
+                {
+                    "symbol": symbol,
+                    "quantity": next_qty,
+                    "available": max(0.0, min(next_qty, available + min(delta, 0.0))),
+                    "reference_price": price,
+                    "last_price": price,
+                    "market_value": round(next_qty * price, 2) if price > 0 else float(position.get("market_value", 0.0) or 0.0),
+                    "includes_pending_order": True,
+                }
+            )
+            account_positions[symbol] = position
+        market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in account_positions.values()), 2)
+        cash = round(float(account.cash or 0.0) + float(pending_effect.get("cash_effect") or 0.0), 2)
+        adjusted = LiveAccountSnapshot(
+            cash=cash,
+            total_asset=round(cash + market_value, 2),
+            market_value=market_value,
+            positions=account_positions,
+            source=f"{account.source}+pending_orders" if pending_effect.get("count") else account.source,
+            error=account.error,
+            meta={**self._json_dict(account.meta), "pending_order_adjusted": bool(pending_effect.get("count"))},
+        )
+        adjustment = {
+            "count": int(pending_effect.get("count") or 0),
+            "cash_reserved": float(pending_effect.get("cash_reserved") or 0.0),
+            "cash_effect": float(pending_effect.get("cash_effect") or 0.0),
+            "position_deltas": deltas,
+            "details": pending_effect.get("details") or [],
+        }
+        return adjusted, effective_positions, adjustment
 
     async def _write_order_audits(
         self,
@@ -3417,6 +4806,30 @@ class LiveTradingService:
         }
 
     def _audit_dict(self, row: LiveOrderAudit) -> dict[str, Any]:
+        order_payload = self._json_dict(row.order_payload)
+        result_payload = self._json_dict(row.result_payload)
+        nested_order = self._json_dict(result_payload.get("order"))
+        symbol = str(order_payload.get("symbol") or nested_order.get("symbol") or result_payload.get("symbol") or "")
+        side = str(order_payload.get("side") or nested_order.get("side") or result_payload.get("side") or "")
+        quantity = self._float_or_none(order_payload.get("quantity") or nested_order.get("quantity") or result_payload.get("quantity"))
+        filled_quantity = self._float_or_none(result_payload.get("filled_quantity"))
+        reference_price = self._float_or_none(
+            result_payload.get("filled_price")
+            or order_payload.get("reference_price")
+            or order_payload.get("price")
+            or nested_order.get("reference_price")
+            or nested_order.get("price")
+        )
+        filled_price = self._float_or_none(result_payload.get("filled_price"))
+        order_value = self._float_or_none(result_payload.get("filled_value") or order_payload.get("order_value"))
+        if order_value is None and quantity is not None and reference_price is not None:
+            order_value = round(quantity * reference_price, 2)
+        message = (
+            row.skip_reason
+            or str(result_payload.get("message") or "")
+            or str(order_payload.get("reason") or order_payload.get("remark") or "")
+            or None
+        )
         return {
             "audit_id": row.audit_id,
             "run_id": row.run_id,
@@ -3427,11 +4840,67 @@ class LiveTradingService:
             "trigger_source": row.trigger_source,
             "mode": row.mode,
             "status": row.status,
-            "order_payload": self._json_dict(row.order_payload),
-            "result_payload": self._json_dict(row.result_payload),
+            "symbol": symbol or None,
+            "stock_name": (
+                str(order_payload.get("stock_name") or nested_order.get("stock_name") or result_payload.get("stock_name") or "")
+                or None
+            ),
+            "side": side.upper() if side else None,
+            "quantity": quantity,
+            "filled_quantity": filled_quantity,
+            "remaining_quantity": self._float_or_none(result_payload.get("remaining_quantity")),
+            "reference_price": reference_price,
+            "filled_price": filled_price,
+            "order_value": order_value,
+            "order_id": str(result_payload.get("order_id") or order_payload.get("order_id") or "") or None,
+            "message": message,
+            "event_type": self._audit_event_type(row.status, row.trigger_source),
+            "order_payload": order_payload,
+            "result_payload": result_payload,
             "skip_reason": row.skip_reason,
             "created_at": row.created_at.isoformat(timespec="seconds") if row.created_at else None,
         }
+
+    def _audit_event_type(self, status: str | None, trigger_source: str | None) -> str:
+        status_value = str(status or "")
+        source_value = str(trigger_source or "")
+        if status_value == "generated":
+            return "signal_generated"
+        if status_value == "skipped":
+            return "order_skipped"
+        if status_value in {"strategy_account_initialized", "strategy_account_adjusted"}:
+            return "capital_pool"
+        if source_value in {"manual_cancel", "cancel_resubmit"} or status_value.startswith("cancel"):
+            return "cancel"
+        if source_value == "qmt_sync" or status_value in LIVE_FILLED_STATUSES or status_value in LIVE_PENDING_STATUSES:
+            return "execution_update"
+        if status_value in {"blocked", "duplicate", "failed"}:
+            return "guardrail"
+        return "control"
+
+    def _float_or_none(self, value: Any) -> float | None:
+        if value is None or value == "":
+            return None
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        return number if pd.notna(number) else None
+
+    def _first_float(self, source: dict[str, Any], keys: Sequence[str]) -> float | None:
+        for key in keys:
+            value = self._float_or_none(source.get(key))
+            if value is not None:
+                return value
+        return None
+
+    def _normalized_ratio(self, value: Any, *, percent_like: bool = True) -> float | None:
+        number = self._float_or_none(value)
+        if number is None:
+            return None
+        if percent_like and abs(number) > 1:
+            return number / 100.0
+        return number
 
     def _signal_hash(self, profile_key: str, strategy_id: int, trade_date: date, orders: Sequence[dict[str, Any]]) -> str:
         payload = {
@@ -3480,6 +4949,17 @@ class LiveTradingService:
             elif avg_cost > 0:
                 result[symbol] = avg_cost
         return result
+
+    def _missing_realtime_price_symbols(self, symbols: Sequence[str], price_map: dict[str, float]) -> list[str]:
+        missing: list[str] = []
+        for symbol in sorted({str(item).strip() for item in symbols if str(item).strip()}):
+            try:
+                price = float(price_map.get(symbol, 0.0) or 0.0)
+            except (TypeError, ValueError):
+                price = 0.0
+            if price <= 0:
+                missing.append(symbol)
+        return missing
 
     def _quote_price(self, quote: dict[str, Any]) -> float:
         for key in ("lastPrice", "last_price", "price", "close"):
@@ -3533,6 +5013,18 @@ class LiveTradingService:
         if isinstance(value, dict):
             return dict(value)
         return dict(value)
+
+    def _normalize_order_id(self, value: Any) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            numeric = float(raw)
+            if numeric.is_integer():
+                return str(int(numeric))
+        except Exception:
+            pass
+        return raw
 
     def _normalize_text(self, value: Any) -> str:
         return str(value or "").strip().lower()

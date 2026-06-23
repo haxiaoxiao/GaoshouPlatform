@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
+from starlette.responses import StreamingResponse
 
 from app.services.live_trading import live_trading_service
 
@@ -69,6 +71,34 @@ class LiveSubmitOrdersRequest(BaseModel):
     confirm: bool = False
 
 
+class LiveOrderSyncRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="live", pattern="^(paper|live)$")
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class LiveOrderCancelRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="live", pattern="^(paper|live)$")
+    limit: int = Field(default=200, ge=1, le=1000)
+    min_age_seconds: int = Field(default=0, ge=0, le=86400)
+    record_ids: list[str] = Field(default_factory=list)
+    order_ids: list[str] = Field(default_factory=list)
+    confirm: bool = False
+
+
+class LiveOrderCancelResubmitRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="live", pattern="^(paper|live)$")
+    params: dict[str, Any] = Field(default_factory=dict)
+    limit: int = Field(default=200, ge=1, le=1000)
+    min_age_seconds: int = Field(default=0, ge=0, le=86400)
+    record_ids: list[str] = Field(default_factory=list)
+    order_ids: list[str] = Field(default_factory=list)
+    confirm_cancel: bool = False
+    confirm_submit: bool = False
+
+
 class LiveStrategyAccountInitRequest(BaseModel):
     profile_key: str | None = None
     mode: str = Field(default="paper", pattern="^(paper|live)$")
@@ -96,11 +126,44 @@ async def live_status() -> dict[str, Any]:
 async def live_account(
     mode: str = Query(default="live", pattern="^(paper|live)$"),
     profile_key: str | None = Query(default=None),
+    include_broker: bool = Query(default=True),
 ) -> dict[str, Any]:
     try:
-        return _ok(await live_trading_service.account_snapshot(mode=mode, profile_key=profile_key))
+        return _ok(
+            await live_trading_service.account_snapshot(
+                mode=mode,
+                profile_key=profile_key,
+                include_broker=include_broker,
+            )
+        )
     except Exception as exc:
         raise _error(exc) from exc
+
+
+@router.get("/account/stream")
+async def live_account_stream(
+    mode: str = Query(default="live", pattern="^(paper|live)$"),
+    profile_key: str | None = Query(default=None),
+    interval_seconds: int = Query(default=5, ge=2, le=60),
+) -> StreamingResponse:
+    async def event_source():
+        async for event in live_trading_service.account_stream(
+            mode=mode,
+            profile_key=profile_key,
+            interval_seconds=interval_seconds,
+        ):
+            event_name = str(event.get("event") or "account")
+            data = json.dumps(event.get("data") or {}, ensure_ascii=False)
+            yield f"event: {event_name}\ndata: {data}\n\n"
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/account/initialize")
@@ -223,10 +286,11 @@ async def submit_orders(req: LiveSubmitOrdersRequest) -> dict[str, Any]:
 @router.get("/orders/audit")
 async def order_audit(
     profile_key: str | None = Query(default=None),
+    mode: str | None = Query(default=None, pattern="^(paper|live)$"),
     limit: int = Query(default=100, ge=1, le=500),
 ) -> dict[str, Any]:
     try:
-        return _ok(await live_trading_service.list_audits(limit=limit, profile_key=profile_key))
+        return _ok(await live_trading_service.list_audits(limit=limit, profile_key=profile_key, mode=mode))
     except Exception as exc:
         raise _error(exc) from exc
 
@@ -243,6 +307,58 @@ async def pending_orders(
                 limit=limit,
                 profile_key=profile_key,
                 mode=mode,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/orders/sync")
+async def sync_orders(req: LiveOrderSyncRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.sync_order_status(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                limit=req.limit,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/orders/cancel")
+async def cancel_orders(req: LiveOrderCancelRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.cancel_pending_orders(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                limit=req.limit,
+                min_age_seconds=req.min_age_seconds,
+                record_ids=req.record_ids,
+                order_ids=req.order_ids,
+                confirm=req.confirm,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/orders/cancel-resubmit")
+async def cancel_and_resubmit_orders(req: LiveOrderCancelResubmitRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.cancel_and_resubmit_pending_orders(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                params=req.params,
+                limit=req.limit,
+                min_age_seconds=req.min_age_seconds,
+                record_ids=req.record_ids,
+                order_ids=req.order_ids,
+                confirm_cancel=req.confirm_cancel,
+                confirm_submit=req.confirm_submit,
             )
         )
     except Exception as exc:

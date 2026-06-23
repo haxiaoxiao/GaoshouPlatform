@@ -151,6 +151,7 @@ class QMTGateway:
         self._connected = False
         self._xt = None
         self._industry_map: dict[str, str] | None = None
+        self._instrument_detail_cache: dict[str, dict[str, Any]] = {}
 
     def _get_xt(self):
         """延迟导入 xtquant"""
@@ -1221,10 +1222,14 @@ class QMTGateway:
             details = {}
             for symbol in symbols:
                 try:
-                    detail = await _run_blocking_with_timeout(
-                        lambda s=symbol: xt.get_instrument_detail(s),
-                        timeout=QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS,
-                    )
+                    detail = self._instrument_detail_cache.get(symbol)
+                    if detail is None:
+                        detail = await _run_blocking_with_timeout(
+                            lambda s=symbol: xt.get_instrument_detail(s),
+                            timeout=QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS,
+                        )
+                        if detail:
+                            self._instrument_detail_cache[symbol] = dict(detail)
                     if detail:
                         details[symbol] = detail
                 except Exception:
@@ -1233,37 +1238,95 @@ class QMTGateway:
             results = []
             for symbol, tick in ticks.items():
                 if tick:
+                    tick_data = dict(tick)
                     # 计算市值
                     total_value = None
                     float_value = None
                     detail = details.get(symbol, {})
+                    price = self._first_number(
+                        tick_data,
+                        ("lastPrice", "last_price", "price", "close", "last", "open"),
+                    )
+                    pre_close = self._first_number(
+                        tick_data,
+                        ("preClose", "pre_close", "lastClose", "last_close", "preclose"),
+                    )
+                    change_pct = self._first_number(
+                        tick_data,
+                        ("change_pct", "pct_chg", "changeRatio", "change_rate", "涨跌幅"),
+                    )
+                    if change_pct is None and price and pre_close and pre_close > 0:
+                        change_pct = (price - pre_close) / pre_close
+                    elif change_pct is not None and abs(change_pct) > 1:
+                        change_pct = change_pct / 100.0
+                    volume_ratio = self._first_number(
+                        tick_data,
+                        ("volumeRatio", "volume_ratio", "volRatio", "vol_ratio", "量比"),
+                    )
+                    turnover_rate = self._first_number(
+                        tick_data,
+                        ("turnoverRate", "turnover_rate", "turnover", "换手率"),
+                    )
                     if detail:
+                        if pre_close is None:
+                            pre_close = self._first_number(detail, ("PreClose", "preClose", "pre_close"))
+                        if change_pct is None and price and pre_close and pre_close > 0:
+                            change_pct = (price - pre_close) / pre_close
                         total_vol = detail.get("TotalVolume", 0) or 0
                         float_vol = detail.get("FloatVolume", 0) or 0
-                        price = tick.get("lastPrice") or tick.get("open") or detail.get("PreClose")
-                        if total_vol and price:
-                            total_value = total_vol * price / 10000  # 万元
-                        if float_vol and price:
-                            float_value = float_vol * price / 10000  # 万元
+                        quote_price = price or detail.get("PreClose")
+                        if total_vol and quote_price:
+                            total_value = total_vol * quote_price / 10000  # 万元
+                        if float_vol and quote_price:
+                            float_value = float_vol * quote_price / 10000  # 万元
+                        if turnover_rate is None and float_vol:
+                            volume = self._first_number(tick_data, ("volume", "pvolume", "成交量"))
+                            if volume is not None:
+                                turnover_rate = volume / float_vol
+                    if turnover_rate is not None and abs(turnover_rate) > 1:
+                        turnover_rate = turnover_rate / 100.0
 
                     results.append({
                         "symbol": symbol,
-                        "price": tick.get("lastPrice"),
-                        "open": tick.get("open"),
-                        "high": tick.get("high"),
-                        "low": tick.get("low"),
-                        "volume": tick.get("volume"),
-                        "amount": tick.get("amount"),
-                        "bid_price": tick.get("bidPrice", []),
-                        "ask_price": tick.get("askPrice", []),
-                        "bid_volume": tick.get("bidVol", []),
-                        "ask_volume": tick.get("askVol", []),
+                        "price": price,
+                        "lastPrice": tick_data.get("lastPrice"),
+                        "pre_close": pre_close,
+                        "change_pct": change_pct,
+                        "volume_ratio": volume_ratio,
+                        "turnover_rate": turnover_rate,
+                        "open": tick_data.get("open"),
+                        "high": tick_data.get("high"),
+                        "low": tick_data.get("low"),
+                        "volume": tick_data.get("volume"),
+                        "amount": tick_data.get("amount"),
+                        "bid_price": tick_data.get("bidPrice", []),
+                        "ask_price": tick_data.get("askPrice", []),
+                        "bid_volume": tick_data.get("bidVol", []),
+                        "ask_volume": tick_data.get("askVol", []),
                         "total_value": total_value,
                         "float_value": float_value,
+                        "quote_time": tick_data.get("time") or tick_data.get("timetag") or tick_data.get("datetime"),
+                        "raw": tick_data,
                     })
             return results
         except Exception:
             return []
+
+    @staticmethod
+    def _first_number(source: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+        for key in keys:
+            if key not in source:
+                continue
+            value = source.get(key)
+            if value is None or value == "":
+                continue
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                continue
+            if pd.notna(number):
+                return number
+        return None
 
     async def get_dividends(self, symbol: str, start_date: str = '', end_date: str = '') -> list[dict]:
         """获取分红送股数据 (除权除息信息)

@@ -28,15 +28,38 @@
       </div>
       <div>
         <label>真实下单</label>
-        <span :class="['state-text', status?.order_submit_enabled ? 'state-text--bad' : 'state-text--neutral']">
-          {{ status?.order_submit_enabled ? '开启' : '关闭' }}
-        </span>
+        <div class="guardrail-toggle">
+          <span :class="['state-text', status?.order_submit_enabled ? 'state-text--bad' : 'state-text--neutral']">
+            {{ status?.order_submit_enabled ? '开启' : '关闭' }}
+          </span>
+          <el-switch
+            v-model="guardrailDraft.enable_order_submit"
+            size="small"
+            :loading="savingGuardrails"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+            @change="onOrderSubmitGuardrailChange"
+          />
+        </div>
       </div>
       <div>
         <label>自动实盘</label>
-        <span :class="['state-text', status?.auto_execute_enabled ? 'state-text--bad' : 'state-text--neutral']">
-          {{ status?.auto_execute_enabled ? '允许' : '禁止' }}
-        </span>
+        <div class="guardrail-toggle">
+          <span :class="['state-text', status?.auto_execute_enabled ? 'state-text--bad' : 'state-text--neutral']">
+            {{ status?.auto_execute_enabled ? '允许' : '禁止' }}
+          </span>
+          <el-switch
+            v-model="guardrailDraft.auto_execute_enabled"
+            size="small"
+            :disabled="!guardrailDraft.enable_order_submit"
+            :loading="savingGuardrails"
+            inline-prompt
+            active-text="开"
+            inactive-text="关"
+            @change="onAutoExecuteGuardrailChange"
+          />
+        </div>
       </div>
       <div>
         <label>Runner</label>
@@ -45,71 +68,89 @@
     </section>
 
     <section class="desk-grid">
-      <article class="panel-card control-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">STRATEGY PROFILE</span>
-            <h3>策略配置</h3>
-          </div>
-          <el-button size="small" @click="profileDialogOpen = true">新增 Profile</el-button>
-        </div>
-        <div class="control-body">
-          <el-select v-model="selectedProfileKey" filterable placeholder="选择策略 Profile" @change="onProfileChange">
-            <el-option
-              v-for="profile in profiles"
-              :key="profile.profile_key"
-              :label="profile.display_name"
-              :value="profile.profile_key"
-            >
-              <span>{{ profile.display_name }}</span>
-              <small> · ID {{ profile.strategy_id }}</small>
-            </el-option>
-          </el-select>
-          <div class="param-row">
-            <label>交易日</label>
-            <el-date-picker v-model="tradeDate" value-format="YYYY-MM-DD" />
-          </div>
-          <div class="param-row">
-            <label>指数池</label>
-            <el-input v-model="indexSymbol" />
-          </div>
-          <div class="inline-signal">
-            <div class="inline-signal__head">
-              <span>候选 / 订单</span>
-              <el-button text size="small" @click="scrollToOrders">订单篮子</el-button>
+      <div class="strategy-config-stack">
+        <article v-if="brokerAccountSnapshot" class="panel-card broker-account-panel">
+          <div class="broker-account__head">
+            <div>
+              <span class="section-kicker">TOTAL BROKER ACCOUNT</span>
+              <h4>QMT 总账户</h4>
             </div>
-            <div class="inline-signal__stats">
-              <div><label>股票池</label><strong>{{ signalData?.universe_size || 0 }}</strong></div>
-              <div><label>候选</label><strong>{{ signalData?.candidate_count || 0 }}</strong></div>
-              <div><label>订单</label><strong>{{ orderRows.length }}</strong></div>
-            </div>
-            <div class="inline-signal__preview">
-              <span>
-                <strong>候选</strong>
-                {{ candidatePreview.map(candidateSymbol).join(' / ') || '暂无' }}
-              </span>
-              <span>
-                <strong>订单</strong>
-                {{ orderPreview.map(order => `${order.side} ${order.symbol}`).join(' / ') || '暂无' }}
-              </span>
+            <el-tag type="info">只读参考</el-tag>
+          </div>
+          <div class="account-summary broker-summary">
+            <div v-for="item in brokerSummaryItems" :key="item.label">
+              <label>{{ item.label }}</label>
+              <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
             </div>
           </div>
-          <div class="profile-meta" v-if="selectedProfile">
-            <strong>{{ selectedProfile.display_name }}</strong>
-            <span>ID {{ selectedProfile.strategy_id }} · {{ selectedProfile.adapter_type }}</span>
-            <p>{{ selectedProfile.description || selectedProfile.strategy_name || '-' }}</p>
-            <div class="profile-actions">
-              <el-switch
-                :model-value="selectedProfile.enabled"
-                active-text="启用"
-                inactive-text="停用"
-                @change="toggleProfileEnabled"
-              />
-              <el-button text size="small" @click="makeDefaultProfile">设为默认</el-button>
+        </article>
+
+        <article class="panel-card control-panel">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">STRATEGY PROFILE</span>
+              <h3>策略配置</h3>
+            </div>
+            <el-button size="small" @click="profileDialogOpen = true">新增 Profile</el-button>
+          </div>
+          <div class="control-body">
+            <el-select v-model="selectedProfileKey" filterable placeholder="选择策略 Profile" @change="onProfileChange">
+              <el-option
+                v-for="profile in profiles"
+                :key="profile.profile_key"
+                :label="profile.display_name"
+                :value="profile.profile_key"
+              >
+                <span>{{ profile.display_name }}</span>
+                <small> · ID {{ profile.strategy_id }}</small>
+              </el-option>
+            </el-select>
+            <div class="param-row">
+              <label>交易日</label>
+              <el-date-picker v-model="tradeDate" value-format="YYYY-MM-DD" />
+            </div>
+            <div class="param-row">
+              <label>指数池</label>
+              <el-input v-model="indexSymbol" />
+            </div>
+            <div class="inline-signal">
+              <div class="inline-signal__head">
+                <span>候选 / 订单</span>
+                <el-button text size="small" @click="scrollToOrders">订单篮子</el-button>
+              </div>
+              <div class="inline-signal__stats">
+                <div><label>股票池</label><strong>{{ signalData?.universe_size || 0 }}</strong></div>
+                <div><label>候选</label><strong>{{ signalData?.candidate_count || 0 }}</strong></div>
+                <div><label>订单</label><strong>{{ orderRows.length }}</strong></div>
+              </div>
+              <div class="inline-signal__preview">
+                <span>
+                  <strong>候选</strong>
+                  {{ candidatePreview.map(candidateSymbol).join(' / ') || '暂无' }}
+                </span>
+                <span>
+                  <strong>订单</strong>
+                  {{ orderPreview.map(order => `${order.side} ${order.symbol}`).join(' / ') || '暂无' }}
+                </span>
+              </div>
+            </div>
+            <div class="profile-meta" v-if="selectedProfile">
+              <strong>{{ selectedProfile.display_name }}</strong>
+              <span>ID {{ selectedProfile.strategy_id }} · {{ selectedProfile.adapter_type }}</span>
+              <p>{{ selectedProfile.description || selectedProfile.strategy_name || '-' }}</p>
+              <div class="profile-actions">
+                <el-switch
+                  :model-value="selectedProfile.enabled"
+                  active-text="启用"
+                  inactive-text="停用"
+                  @change="toggleProfileEnabled"
+                />
+                <el-button text size="small" @click="makeDefaultProfile">设为默认</el-button>
+              </div>
             </div>
           </div>
-        </div>
-      </article>
+        </article>
+      </div>
 
       <aside class="operations-stack">
         <section class="panel-card preflight-panel">
@@ -163,12 +204,17 @@
     <section class="panel-card account-panel">
       <div class="panel-card__head">
         <div>
-          <span class="section-kicker">STRATEGY CAPITAL POOL</span>
-          <h3>量化资金池</h3>
+          <span class="section-kicker">STRATEGY PORTFOLIO</span>
+          <h3>{{ strategyPortfolioTitle }}</h3>
+          <p class="portfolio-subtitle">{{ strategyPortfolioSubtitle }}</p>
         </div>
         <div class="table-actions">
           <span :class="['state-text', strategyAccountReady ? 'state-text--good' : 'state-text--warn']">{{ strategyAccountStatusText }}</span>
+          <span :class="['live-stream-pill', liveStreamStateClass]">{{ liveStreamStatusText }}</span>
           <el-button size="small" :loading="accountLoading" @click="loadAccount">刷新账户</el-button>
+          <el-button size="small" @click="openStrategyReviewDialog">策略表现</el-button>
+          <el-button size="small" @click="openPositionsDialog">持仓明细</el-button>
+          <span class="drag-hint">拖拽表头排序</span>
           <el-button size="small" @click="capitalDialogOpen = true">
             {{ strategyAccountReady ? '调整本金' : '圈定本金' }}
           </el-button>
@@ -178,7 +224,7 @@
         v-if="!strategyAccountReady"
         type="warning"
         show-icon
-        title="请先圈定本次量化交易本金；策略只会使用这块资金池，不会清空你原有的 QMT 持仓。"
+        title="请先圈定本次策略组合本金；策略只会使用这块独立 portfolio，不会清空你原有的 QMT 持仓。"
       />
       <div class="account-summary">
         <div v-for="item in accountSummaryItems" :key="item.label">
@@ -192,50 +238,33 @@
         show-icon
         :title="accountSnapshot.error"
       />
-      <el-table :data="accountPositions" size="small" stripe border height="260" empty-text="暂无持仓">
-        <el-table-column prop="symbol" label="代码" width="110" resizable />
-        <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
-          <template #default="{ row }">{{ row.stock_name || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="持仓" width="110" resizable align="right">
-          <template #default="{ row }">{{ formatQuantity(row.quantity) }}</template>
-        </el-table-column>
-        <el-table-column label="可用" width="110" resizable align="right">
-          <template #default="{ row }">{{ formatQuantity(row.available) }}</template>
-        </el-table-column>
-        <el-table-column label="成本价" width="110" resizable align="right">
-          <template #default="{ row }">{{ formatPrice(row.avg_cost) }}</template>
-        </el-table-column>
-        <el-table-column label="市值" width="130" resizable align="right">
-          <template #default="{ row }">{{ formatMoney(row.market_value) }}</template>
-        </el-table-column>
-        <el-table-column label="浮盈亏" width="120" resizable align="right">
-          <template #default="{ row }">
-            <span :class="pnlTone(row.unrealized_pnl)">{{ formatMoney(row.unrealized_pnl) }}</span>
+      <el-table :data="accountPositions" size="small" stripe border height="340" empty-text="暂无持仓">
+        <el-table-column
+          v-for="column in visiblePositionColumns"
+          :key="column.key"
+          :prop="column.prop"
+          :label="column.label"
+          :min-width="column.minWidth || column.width"
+          :align="column.align"
+          resizable
+          show-overflow-tooltip
+        >
+          <template #header>
+            <span
+              :class="positionColumnHeaderClass(column.key)"
+              :data-position-column-key="column.key"
+              @pointerdown="onPositionColumnPointerDown($event, column.key)"
+            >
+              <span class="position-column-header__grip" aria-hidden="true"></span>
+              <span>{{ column.label }}</span>
+            </span>
           </template>
-        </el-table-column>
-        <el-table-column label="盈亏率" width="100" resizable align="right">
           <template #default="{ row }">
-            <span :class="pnlTone(row.unrealized_pnl)">{{ formatPercent(row.unrealized_pnl_pct) }}</span>
+            <span :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
           </template>
         </el-table-column>
       </el-table>
 
-      <div v-if="brokerAccountSnapshot" class="broker-account">
-        <div class="broker-account__head">
-          <div>
-            <span class="section-kicker">BROKER CONTEXT</span>
-            <h4>QMT 实际账户参考</h4>
-          </div>
-          <el-tag type="info">只读参考</el-tag>
-        </div>
-        <div class="account-summary broker-summary">
-          <div v-for="item in brokerSummaryItems" :key="item.label">
-            <label>{{ item.label }}</label>
-            <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
-          </div>
-        </div>
-      </div>
     </section>
 
     <el-alert
@@ -256,6 +285,18 @@
       :closable="false"
       show-icon
       :title="heatFilterInfoNote"
+    />
+    <el-alert
+      v-if="signalAdjustmentNote"
+      type="info"
+      show-icon
+      :title="signalAdjustmentNote"
+    />
+    <el-alert
+      v-if="pendingSyncState && pendingSyncState.synced === false"
+      type="warning"
+      show-icon
+      :title="String(pendingSyncState.error || '待成交委托状态同步失败，请检查 miniQMT 交易模块。')"
     />
 
     <section ref="orderPanelRef" class="panel-card order-panel">
@@ -295,47 +336,57 @@
       </el-table>
     </section>
 
-    <section class="lower-grid">
-      <article class="panel-card">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">SKIPS</span>
-            <h3>跳过订单</h3>
-          </div>
+    <section class="panel-card audit-panel">
+      <div class="panel-card__head">
+        <div>
+          <span class="section-kicker">ORDER AUDIT</span>
+          <h3>订单审计 / 跳过</h3>
         </div>
-        <el-table :data="signalData?.skipped_orders || []" size="small" border height="260">
-          <el-table-column prop="symbol" label="代码" width="110" resizable />
-          <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
-            <template #default="{ row }">{{ row.stock_name || '-' }}</template>
-          </el-table-column>
-          <el-table-column prop="side" label="方向" width="80" resizable />
-          <el-table-column prop="quantity" label="数量" width="100" resizable />
-          <el-table-column prop="reason" label="原因" resizable show-overflow-tooltip />
-        </el-table>
-      </article>
-
-      <article class="panel-card">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">AUDIT</span>
-            <h3>订单审计</h3>
-          </div>
+        <div class="table-actions">
+          <span>{{ audits.length }} 条事件</span>
+          <span v-if="signalData?.skipped_orders?.length">{{ signalData.skipped_orders.length }} 笔跳过已入审计</span>
           <el-button text size="small" @click="loadAudits">刷新</el-button>
         </div>
-        <el-table :data="audits" size="small" border height="260">
-          <el-table-column label="时间" width="168" resizable>
-            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
-          </el-table-column>
-          <el-table-column prop="profile_key" label="Profile" width="150" resizable show-overflow-tooltip />
-          <el-table-column prop="mode" label="模式" width="72" resizable />
-          <el-table-column label="状态" width="100" resizable>
-            <template #default="{ row }">
-              <el-tag :type="statusTagType(row.status)" effect="plain">{{ statusLabel(row.status) }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="skip_reason" label="说明" resizable show-overflow-tooltip />
-        </el-table>
-      </article>
+      </div>
+      <el-table :data="audits" size="small" border height="300" empty-text="暂无审计事件">
+        <el-table-column label="时间" width="168" resizable>
+          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+        </el-table-column>
+        <el-table-column label="事件" width="118" resizable>
+          <template #default="{ row }">{{ auditEventLabel(row.event_type, row.status) }}</template>
+        </el-table-column>
+        <el-table-column label="状态" width="116" resizable>
+          <template #default="{ row }">
+            <el-tag :type="statusTagType(row.status)" effect="plain">{{ statusLabel(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="mode" label="模式" width="72" resizable />
+        <el-table-column prop="symbol" label="代码" width="110" resizable />
+        <el-table-column label="名称" width="130" resizable show-overflow-tooltip>
+          <template #default="{ row }">{{ row.stock_name || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="方向" width="80" resizable>
+          <template #default="{ row }">{{ sideLabel(row.side) }}</template>
+        </el-table-column>
+        <el-table-column label="委托量" width="100" resizable align="right">
+          <template #default="{ row }">{{ formatQuantity(row.quantity) }}</template>
+        </el-table-column>
+        <el-table-column label="成交量" width="100" resizable align="right">
+          <template #default="{ row }">{{ formatQuantity(row.filled_quantity) }}</template>
+        </el-table-column>
+        <el-table-column label="价格" width="105" resizable align="right">
+          <template #default="{ row }">{{ formatPrice(row.filled_price || row.reference_price) }}</template>
+        </el-table-column>
+        <el-table-column label="金额" width="125" resizable align="right">
+          <template #default="{ row }">{{ formatMoney(row.order_value) }}</template>
+        </el-table-column>
+        <el-table-column label="委托号" width="130" resizable show-overflow-tooltip>
+          <template #default="{ row }">{{ row.order_id || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="说明" min-width="260" resizable show-overflow-tooltip>
+          <template #default="{ row }">{{ row.message || row.skip_reason || '-' }}</template>
+        </el-table-column>
+      </el-table>
     </section>
 
     <section ref="pendingPanelRef" class="panel-card pending-order-panel">
@@ -346,10 +397,24 @@
         </div>
         <div class="table-actions">
           <span>{{ pendingOrders.length }} 笔实盘委托待确认</span>
-          <el-button text size="small" :loading="pendingLoading" @click="loadPendingOrders">刷新</el-button>
+          <span class="stale-control">超过
+            <el-input-number v-model="staleOrderMinutes" :min="0" :max="240" :step="1" size="small" controls-position="right" />
+            分钟
+          </span>
+          <el-button text size="small" :loading="pendingLoading" @click="syncPendingOrderStatus">同步成交</el-button>
+          <el-button text size="small" type="warning" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelPendingOrders">批量撤单</el-button>
+          <el-button text size="small" type="danger" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelAndResubmitPendingOrders">撤单再提交</el-button>
         </div>
       </div>
-      <el-table :data="pendingOrders" size="small" border height="280" empty-text="暂无待成交真实委托">
+      <el-table
+        :data="pendingOrders"
+        size="small"
+        border
+        height="280"
+        empty-text="暂无待成交真实委托"
+        @selection-change="onPendingSelectionChange"
+      >
+        <el-table-column type="selection" width="44" />
         <el-table-column label="提交时间" width="168" resizable>
           <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
         </el-table-column>
@@ -368,6 +433,12 @@
         <el-table-column label="数量" width="100" resizable align="right">
           <template #default="{ row }">{{ formatQuantity(row.quantity) }}</template>
         </el-table-column>
+        <el-table-column label="已成" width="100" resizable align="right">
+          <template #default="{ row }">{{ formatQuantity(payloadNumber(row, 'filled_quantity')) }}</template>
+        </el-table-column>
+        <el-table-column label="剩余" width="100" resizable align="right">
+          <template #default="{ row }">{{ formatQuantity(pendingRemainingQuantity(row)) }}</template>
+        </el-table-column>
         <el-table-column label="委托价" width="110" resizable align="right">
           <template #default="{ row }">{{ formatPrice(row.reference_price) }}</template>
         </el-table-column>
@@ -376,6 +447,9 @@
         </el-table-column>
         <el-table-column label="QMT委托号" width="130" resizable show-overflow-tooltip>
           <template #default="{ row }">{{ row.order_id || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="QMT状态" width="140" resizable show-overflow-tooltip>
+          <template #default="{ row }">{{ row.result_payload?.status_msg || row.result_payload?.order_status || '-' }}</template>
         </el-table-column>
         <el-table-column label="说明" min-width="220" resizable show-overflow-tooltip>
           <template #default="{ row }">{{ row.message || row.result_payload?.message || '-' }}</template>
@@ -449,16 +523,17 @@
         <div v-if="(weeklyAnalysis?.notes || []).length > 1" class="weekly-note-list">
           <span v-for="note in weeklyAnalysis?.notes.slice(1) || []" :key="note">{{ note }}</span>
         </div>
-        <el-table :data="weeklyAnalysis?.top_symbols || []" size="small" border height="220">
-          <el-table-column prop="symbol" label="代码" width="110" resizable />
-          <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
+        <div class="weekly-table-title">本周交易额 Top 10</div>
+        <el-table :data="weeklyAnalysis?.top_symbols || []" size="small" border height="180">
+          <el-table-column prop="symbol" label="代码" min-width="84" resizable />
+          <el-table-column label="名称" min-width="96" resizable show-overflow-tooltip>
             <template #default="{ row }">{{ row.stock_name || '-' }}</template>
           </el-table-column>
-          <el-table-column prop="records" label="次数" width="80" resizable align="right" />
-          <el-table-column prop="notional" label="金额" width="120" resizable align="right">
+          <el-table-column prop="records" label="次数" min-width="58" resizable align="right" />
+          <el-table-column prop="notional" label="金额" min-width="76" resizable align="right">
             <template #default="{ row }">{{ formatMoney(row.notional) }}</template>
           </el-table-column>
-          <el-table-column prop="net_notional" label="净额" width="120" resizable align="right">
+          <el-table-column prop="net_notional" label="净额" min-width="76" resizable align="right">
             <template #default="{ row }">{{ formatMoney(row.net_notional) }}</template>
           </el-table-column>
         </el-table>
@@ -550,12 +625,12 @@
       </template>
     </el-dialog>
 
-    <el-dialog v-model="capitalDialogOpen" title="圈定量化交易本金" width="520px">
+    <el-dialog v-model="capitalDialogOpen" title="圈定 / 调整量化交易本金" width="560px">
       <el-alert
         type="info"
         :closable="false"
         show-icon
-        title="初始化后，策略只用这块资金和它自己买出的持仓调仓；QMT 里原有的手工持仓不会进入卖出列表。"
+        title="再次调整时，输入的是策略资金池目标总资产：现金 + 策略持仓市值会被调到这个数，不清空已有策略持仓。"
       />
       <el-form class="capital-form" label-width="120px">
         <el-form-item label="当前 Profile">
@@ -564,7 +639,7 @@
         <el-form-item label="模式">
           <el-tag>{{ mode === 'paper' ? '模拟' : '实盘' }}</el-tag>
         </el-form-item>
-        <el-form-item label="本金">
+        <el-form-item label="目标总资产">
           <el-input-number
             v-model="capitalForm.capital"
             :min="10000"
@@ -576,23 +651,176 @@
         </el-form-item>
         <el-form-item label="重新初始化">
           <el-switch v-model="capitalForm.reset_existing" />
+          <span class="form-hint">关闭时为调整目标总资产；开启时清空策略资金池重来。</span>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="capitalDialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="capitalSaving" @click="initializeCapitalPool">确认初始化</el-button>
+        <el-button type="primary" :loading="capitalSaving" @click="initializeCapitalPool">
+          {{ strategyAccountReady && !capitalForm.reset_existing ? '确认调整' : '确认初始化' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="positionsDialogOpen"
+      :title="`${strategyPortfolioTitle} 持仓明细`"
+      width="min(1180px, 94vw)"
+      class="positions-dialog"
+    >
+      <div class="positions-dialog__toolbar">
+        <div class="positions-dialog__summary">
+          <span>现金 {{ formatMoney(accountSnapshot?.cash) }}</span>
+          <span>总资产 {{ formatMoney(accountSnapshot?.total_asset) }}</span>
+          <span>持仓 {{ accountSnapshot?.position_count || 0 }} 只</span>
+        </div>
+        <span class="drag-hint">拖拽表头排序</span>
+      </div>
+      <el-table :data="accountPositions" size="small" stripe border height="560" empty-text="暂无持仓">
+        <el-table-column
+          v-for="column in visiblePositionColumns"
+          :key="column.key"
+          :prop="column.prop"
+          :label="column.label"
+          :min-width="column.minWidth || column.width"
+          :align="column.align"
+          resizable
+          show-overflow-tooltip
+        >
+          <template #header>
+            <span
+              :class="positionColumnHeaderClass(column.key)"
+              :data-position-column-key="column.key"
+              @pointerdown="onPositionColumnPointerDown($event, column.key)"
+            >
+              <span class="position-column-header__grip" aria-hidden="true"></span>
+              <span>{{ column.label }}</span>
+            </span>
+          </template>
+          <template #default="{ row }">
+            <span :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
+          </template>
+        </el-table-column>
+      </el-table>
+      <template #footer>
+        <el-button @click="positionsDialogOpen = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog
+      v-model="strategyReviewDialogOpen"
+      :title="`${currentStrategyName} 低频复盘`"
+      width="min(1180px, 94vw)"
+      class="strategy-review-dialog"
+      @opened="renderStrategyReviewCharts"
+      @closed="disposeStrategyReviewCharts"
+    >
+      <div class="strategy-review">
+        <div class="strategy-review__intro">
+          <div>
+            <span class="section-kicker">PORTFOLIO REVIEW</span>
+            <h3>{{ strategyPortfolioTitle }}</h3>
+            <p>{{ selectedProfile?.description || selectedProfile?.strategy_name || '当前策略组合的建池以来表现、资金使用和成交质量。' }}</p>
+          </div>
+          <div class="strategy-review__facts">
+            <span v-for="row in strategyReviewRows" :key="row.label">
+              <label>{{ row.label }}</label>
+              <strong>{{ row.value }}</strong>
+            </span>
+          </div>
+        </div>
+
+        <div class="strategy-review__metrics">
+          <div v-for="item in strategyReviewMetrics" :key="item.label">
+            <label>{{ item.label }}</label>
+            <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
+          </div>
+        </div>
+
+        <div class="strategy-review__charts">
+          <section>
+            <div class="strategy-chart-head">
+              <span>权益与回撤</span>
+              <small>{{ equityCurve.length }} 个快照</small>
+            </div>
+            <div v-if="equityCurve.length" ref="equityChartRef" class="strategy-chart"></div>
+            <div v-else class="strategy-chart strategy-chart--empty">暂无权益快照；刷新账户或成交同步后会自动补点。</div>
+          </section>
+          <section>
+            <div class="strategy-chart-head">
+              <span>每日净买入</span>
+              <small>{{ weeklyWindowLabel }}</small>
+            </div>
+            <div v-if="flowChartRows.length" ref="flowChartRef" class="strategy-chart"></div>
+            <div v-else class="strategy-chart strategy-chart--empty">本周暂无交易流。</div>
+          </section>
+          <section>
+            <div class="strategy-chart-head">
+              <span>成交状态</span>
+              <small>订单质量</small>
+            </div>
+            <div v-if="statusChartRows.length" ref="statusChartRef" class="strategy-chart"></div>
+            <div v-else class="strategy-chart strategy-chart--empty">暂无订单状态。</div>
+          </section>
+        </div>
+
+        <div class="strategy-review__tables">
+          <section>
+            <div class="weekly-table-title">交易额 Top 10</div>
+            <el-table :data="weeklyAnalysis?.top_symbols || []" size="small" border height="220">
+              <el-table-column prop="symbol" label="代码" min-width="84" resizable />
+              <el-table-column label="名称" min-width="96" resizable show-overflow-tooltip>
+                <template #default="{ row }">{{ row.stock_name || '-' }}</template>
+              </el-table-column>
+              <el-table-column prop="records" label="次数" min-width="58" resizable align="right" />
+              <el-table-column prop="notional" label="金额" min-width="76" resizable align="right">
+                <template #default="{ row }">{{ formatMoney(row.notional) }}</template>
+              </el-table-column>
+              <el-table-column prop="net_notional" label="净额" min-width="76" resizable align="right">
+                <template #default="{ row }">{{ formatMoney(row.net_notional) }}</template>
+              </el-table-column>
+            </el-table>
+          </section>
+          <section>
+            <div class="weekly-table-title">当前持仓 Top 10</div>
+            <el-table :data="accountPositions.slice(0, 10)" size="small" border height="220">
+              <el-table-column prop="symbol" label="代码" width="110" resizable />
+              <el-table-column label="股票名称" width="130" resizable show-overflow-tooltip>
+                <template #default="{ row }">{{ row.stock_name || '-' }}</template>
+              </el-table-column>
+              <el-table-column label="市值" width="120" resizable align="right">
+                <template #default="{ row }">{{ formatMoney(row.market_value) }}</template>
+              </el-table-column>
+              <el-table-column label="仓位" width="100" resizable align="right">
+                <template #default="{ row }">{{ formatPercent(row.position_pct) }}</template>
+              </el-table-column>
+              <el-table-column label="总盈亏比例" width="120" resizable align="right">
+                <template #default="{ row }">
+                  <span :class="pnlTone(row.unrealized_pnl_pct)">{{ formatPercent(row.unrealized_pnl_pct) }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+          </section>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="strategyReviewDialogOpen = false">关闭</el-button>
+        <el-button type="primary" @click="openPositionsDialog">查看持仓明细</el-button>
       </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
+import * as echarts from '@/lib/echarts'
+import { systemApi, type LiveTradingGuardrails } from '@/api/system'
 import {
   liveTradingApi,
   type LiveAccountSnapshot,
+  type LiveAccountPosition,
   type LiveOrder,
   type LiveOrderAudit,
   type LivePreflightResponse,
@@ -610,11 +838,16 @@ const modeOptions = [
   { label: '实盘', value: 'live' },
 ]
 
-const mode = ref<LiveTradingMode>('paper')
+const mode = ref<LiveTradingMode>('live')
 const tradeDate = ref(new Date().toISOString().slice(0, 10))
 const indexSymbol = ref('399101.SZ')
 const selectedProfileKey = ref('')
 const status = ref<LiveTradingStatus | null>(null)
+const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
+const guardrailDraft = reactive({
+  enable_order_submit: false,
+  auto_execute_enabled: false,
+})
 const profiles = ref<LiveStrategyProfile[]>([])
 const preflightData = ref<LivePreflightResponse | null>(null)
 const signalData = ref<LiveSignalsResponse | null>(null)
@@ -623,6 +856,7 @@ const orderRows = ref<LiveOrder[]>([])
 const audits = ref<LiveOrderAudit[]>([])
 const tradeRecords = ref<LiveTradeRecord[]>([])
 const pendingOrders = ref<LiveTradeRecord[]>([])
+const selectedPendingOrders = ref<LiveTradeRecord[]>([])
 const weeklyAnalysis = ref<LiveWeeklyAnalysis | null>(null)
 const orderPanelRef = ref<HTMLElement | null>(null)
 const pendingPanelRef = ref<HTMLElement | null>(null)
@@ -631,14 +865,32 @@ const accountLoading = ref(false)
 const preflightLoading = ref(false)
 const signalsLoading = ref(false)
 const runnerLoading = ref(false)
+const pendingActionLoading = ref(false)
 const journalLoading = ref(false)
 const pendingLoading = ref(false)
+const savingGuardrails = ref(false)
 const profileDialogOpen = ref(false)
 const profileSaving = ref(false)
 const capitalDialogOpen = ref(false)
 const capitalSaving = ref(false)
+const positionsDialogOpen = ref(false)
+const strategyReviewDialogOpen = ref(false)
 const submitResultDialogOpen = ref(false)
 const submitResult = ref<LiveSubmitOrdersResponse | null>(null)
+const staleOrderMinutes = ref(10)
+const draggedPositionColumn = ref<PositionColumnKey | null>(null)
+const dragOverPositionColumn = ref<PositionColumnKey | null>(null)
+const equityChartRef = ref<HTMLElement | null>(null)
+const flowChartRef = ref<HTMLElement | null>(null)
+const statusChartRef = ref<HTMLElement | null>(null)
+let equityChart: echarts.ECharts | null = null
+let flowChart: echarts.ECharts | null = null
+let statusChart: echarts.ECharts | null = null
+let accountEventSource: EventSource | null = null
+let accountPollTimer: number | null = null
+const liveStreamState = ref<'off' | 'connecting' | 'live' | 'polling' | 'error'>('off')
+const liveStreamUpdatedAt = ref<string | null>(null)
+const liveStreamError = ref('')
 const newProfile = reactive({
   strategy_id: 62,
   profile_key: '',
@@ -651,7 +903,53 @@ const capitalForm = reactive({
   reset_existing: false,
 })
 
+type PositionColumnKey =
+  | 'symbol'
+  | 'stock_name'
+  | 'quantity'
+  | 'available'
+  | 'last_price'
+  | 'volume_ratio'
+  | 'today_change_pct'
+  | 'turnover_rate'
+  | 'market_value'
+  | 'position_pct'
+  | 'unrealized_pnl_pct'
+  | 'amount'
+
+interface PositionColumnDef {
+  key: PositionColumnKey
+  prop?: string
+  label: string
+  width?: number
+  minWidth?: number
+  align?: 'left' | 'center' | 'right'
+}
+
+const positionColumnDefs: PositionColumnDef[] = [
+  { key: 'symbol', prop: 'symbol', label: '代码', width: 92 },
+  { key: 'stock_name', prop: 'stock_name', label: '股票名称', width: 120 },
+  { key: 'quantity', prop: 'quantity', label: '持仓', width: 88, align: 'right' },
+  { key: 'available', prop: 'available', label: '可用', width: 88, align: 'right' },
+  { key: 'last_price', prop: 'last_price', label: '最新价', width: 92, align: 'right' },
+  { key: 'volume_ratio', prop: 'volume_ratio', label: '量比', width: 72, align: 'right' },
+  { key: 'today_change_pct', prop: 'today_change_pct', label: '今日涨跌幅', width: 100, align: 'right' },
+  { key: 'turnover_rate', prop: 'turnover_rate', label: '换手率', width: 82, align: 'right' },
+  { key: 'market_value', prop: 'market_value', label: '市值', width: 108, align: 'right' },
+  { key: 'position_pct', prop: 'position_pct', label: '仓位', width: 78, align: 'right' },
+  { key: 'unrealized_pnl_pct', prop: 'unrealized_pnl_pct', label: '总盈亏比例', width: 104, align: 'right' },
+  { key: 'amount', prop: 'amount', label: '成交额', width: 116, align: 'right' },
+]
+const positionColumnOrder = ref<PositionColumnKey[]>(positionColumnDefs.map(column => column.key))
+
 const selectedProfile = computed(() => profiles.value.find(item => item.profile_key === selectedProfileKey.value) || null)
+const currentStrategyName = computed(() => selectedProfile.value?.display_name || selectedProfile.value?.strategy_name || selectedProfileKey.value || '策略组合')
+const strategyPortfolioTitle = computed(() => `${currentStrategyName.value} Portfolio`)
+const strategyPortfolioSubtitle = computed(() => {
+  const profile = selectedProfile.value
+  if (!profile) return '当前策略独立资金池和策略持仓'
+  return `ID ${profile.strategy_id} · ${profile.adapter_type}`
+})
 const runnerText = computed(() => {
   const runner = status.value?.runner
   if (!runner) return '-'
@@ -673,7 +971,53 @@ const signalWarningNote = computed(() => (
 ))
 const candidatePreview = computed(() => (signalData.value?.top_candidates || []).slice(0, 3))
 const orderPreview = computed(() => orderRows.value.slice(0, 3))
+const pendingAdjustment = computed(() => signalData.value?.pending_order_adjustment || null)
+const pendingSyncState = computed(() => signalData.value?.pending_order_sync || null)
+const signalAdjustmentNote = computed(() => {
+  const adjustment = pendingAdjustment.value
+  if (!adjustment || !adjustment.count) return ''
+  return `已纳入 ${adjustment.count} 笔在途委托，冻结现金 ${formatMoney(adjustment.cash_reserved)}，避免重复下单。`
+})
 const accountPositions = computed(() => accountSnapshot.value?.positions || [])
+const liveStreamStatusText = computed(() => {
+  if (mode.value !== 'live') return '实时流关闭'
+  if (liveStreamState.value === 'live') return `实时流 ${formatClock(liveStreamUpdatedAt.value)}`
+  if (liveStreamState.value === 'connecting') return '实时流连接中'
+  if (liveStreamState.value === 'polling') return `轮询 ${formatClock(liveStreamUpdatedAt.value)}`
+  if (liveStreamState.value === 'error') return liveStreamError.value || '实时流异常'
+  return '实时流关闭'
+})
+const liveStreamStateClass = computed(() => {
+  if (liveStreamState.value === 'live') return 'live-stream-pill--live'
+  if (liveStreamState.value === 'polling' || liveStreamState.value === 'connecting') return 'live-stream-pill--polling'
+  if (liveStreamState.value === 'error') return 'live-stream-pill--error'
+  return 'live-stream-pill--off'
+})
+const guardrailsDirty = computed(() => Boolean(
+  liveGuardrails.value
+  && (
+    guardrailDraft.enable_order_submit !== liveGuardrails.value.enable_order_submit
+    || guardrailDraft.auto_execute_enabled !== liveGuardrails.value.auto_execute_enabled
+  ),
+))
+const orderedPositionColumnDefs = computed(() => {
+  const byKey = new Map(positionColumnDefs.map(column => [column.key, column]))
+  return positionColumnOrder.value.map(key => byKey.get(key)).filter(Boolean) as PositionColumnDef[]
+})
+function stretchTrailingPositionColumn(columns: PositionColumnDef[]): PositionColumnDef[] {
+  if (!columns.length) return columns
+  const trailingIndex = columns.length - 1
+  return columns.map((column, index) => (
+    index === trailingIndex
+      ? {
+          ...column,
+          width: undefined,
+          minWidth: Math.max(column.minWidth || 0, column.width || 0, 132),
+        }
+      : column
+  ))
+}
+const visiblePositionColumns = computed(() => stretchTrailingPositionColumn(orderedPositionColumnDefs.value))
 const brokerAccountSnapshot = computed(() => accountSnapshot.value?.broker_account || null)
 const strategyAccountReady = computed(() => Boolean(accountSnapshot.value?.meta?.initialized))
 const strategyAccountStatusText = computed(() => {
@@ -683,18 +1027,25 @@ const strategyAccountStatusText = computed(() => {
 })
 const accountSourceText = computed(() => {
   const source = accountSnapshot.value?.source || (mode.value === 'paper' ? 'paper' : 'qmt')
+  if (accountSnapshot.value?.meta?.stale_display_only) {
+    return mode.value === 'paper' ? `模拟 · ${source}` : '实盘 · 最近同步持仓'
+  }
   return mode.value === 'paper' ? `模拟 · ${source}` : `实盘 · ${source}`
 })
 const accountSummaryItems = computed(() => {
   const account = accountSnapshot.value
   const pnl = Number(account?.unrealized_pnl || 0)
+  const totalPnl = Number(account?.total_pnl || 0)
   const meta = account?.meta || {}
+  const targetCapital = Number(meta.target_capital || meta.initial_capital || 0)
   return [
-    { label: '初始本金', value: formatMoney(Number(meta.initial_capital || 0) || null) },
+    { label: '目标总资产', value: formatMoney(targetCapital || null) },
     { label: '可用现金', value: formatMoney(account?.cash) },
     { label: '总资产', value: formatMoney(account?.total_asset) },
     { label: '持仓市值', value: formatMoney(account?.market_value) },
     { label: '浮盈亏', value: formatMoney(pnl), tone: pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral' },
+    { label: '总盈亏', value: formatMoney(totalPnl), tone: totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : 'neutral' },
+    { label: '总盈亏率', value: formatPercent(account?.total_pnl_pct), tone: totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : 'neutral' },
     { label: '持仓数', value: `${account?.position_count || 0}` },
   ]
 })
@@ -716,16 +1067,53 @@ const weeklyWindowLabel = computed(() => {
 })
 const weeklySummaryItems = computed(() => {
   const summary = weeklyAnalysis.value?.summary
-  const pnl = Number(summary?.paper_realized_pnl || 0)
+  const weeklyPnl = Number(summary?.weekly_pnl || 0)
+  const allTimePnl = Number(summary?.all_time_pnl || 0)
   return [
-    { label: '记录数', value: `${summary?.total_records || 0}` },
-    { label: '已成/待成/失败', value: `${summary?.completed_records || 0}/${summary?.live_submitted_records || 0}/${summary?.failed_records || 0}` },
-    { label: '买入金额', value: formatMoney(summary?.buy_notional) },
-    { label: '卖出金额', value: formatMoney(summary?.sell_notional) },
+    { label: '本周PnL', value: formatMoney(summary?.weekly_pnl), tone: weeklyPnl > 0 ? 'good' : weeklyPnl < 0 ? 'bad' : 'neutral' },
+    { label: '本周回撤', value: formatPercent(summary?.weekly_max_drawdown_pct), tone: Number(summary?.weekly_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
+    { label: '至今PnL', value: formatMoney(summary?.all_time_pnl), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
+    { label: '至今回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: Number(summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
     { label: '净买入', value: formatMoney(summary?.net_notional) },
-    { label: '模拟已实现', value: formatMoney(pnl), tone: pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral' },
+    { label: '已成/待成/撤单/失败', value: `${summary?.completed_records || 0}/${summary?.live_submitted_records || 0}/${summary?.cancelled_records || 0}/${summary?.failed_records || 0}` },
   ]
 })
+const strategyReviewMetrics = computed(() => {
+  const summary = weeklyAnalysis.value?.summary
+  const account = accountSnapshot.value
+  const targetCapital = Number(account?.meta?.target_capital || account?.meta?.initial_capital || 0)
+  const cash = Number(account?.cash || 0)
+  const totalAsset = Number(account?.total_asset || 0)
+  const marketValue = Number(account?.market_value || 0)
+  const allTimePnl = Number(summary?.all_time_pnl ?? account?.total_pnl ?? 0)
+  const exposure = totalAsset > 0 ? marketValue / totalAsset : null
+  const cashRatio = totalAsset > 0 ? cash / totalAsset : null
+  const deployment = targetCapital > 0 ? totalAsset / targetCapital : null
+  const turnover = targetCapital > 0 ? Math.abs(Number(summary?.buy_notional || 0) + Number(summary?.sell_notional || 0)) / targetCapital : null
+  return [
+    { label: '建池以来PnL', value: formatMoney(summary?.all_time_pnl ?? account?.total_pnl), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
+    { label: '建池收益率', value: formatPercent(summary?.all_time_return_pct ?? account?.total_pnl_pct), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
+    { label: '最大回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: Number(summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
+    { label: '权益快照', value: `${summary?.all_time_equity_snapshot_points || 0} 点` },
+    { label: '仓位暴露', value: formatPercent(exposure) },
+    { label: '现金比例', value: formatPercent(cashRatio), tone: cashRatio != null && cashRatio < 0.05 ? 'warn' : 'neutral' },
+    { label: '目标资产达成', value: formatPercent(deployment) },
+    { label: '本周换手代理', value: formatPercent(turnover) },
+    { label: '成交/撤单', value: `${summary?.completed_records || 0}/${summary?.cancelled_records || 0}` },
+    { label: '当前持仓', value: `${account?.position_count || 0} 只` },
+  ]
+})
+const strategyReviewRows = computed(() => [
+  { label: '策略', value: currentStrategyName.value },
+  { label: 'Profile Key', value: selectedProfileKey.value || '-' },
+  { label: '模式', value: mode.value === 'paper' ? '模拟' : '实盘' },
+  { label: '账户来源', value: accountSourceText.value },
+  { label: '目标总资产', value: accountSummaryItems.value.find(item => item.label === '目标总资产')?.value || '-' },
+  { label: '本周窗口', value: weeklyWindowLabel.value },
+])
+const equityCurve = computed(() => weeklyAnalysis.value?.equity_curve || [])
+const flowChartRows = computed(() => weeklyAnalysis.value?.by_day || [])
+const statusChartRows = computed(() => weeklyAnalysis.value?.by_status || [])
 const submitResultRows = computed(() => {
   const results = submitResult.value?.results || []
   return results.map(result => {
@@ -889,41 +1277,276 @@ const preflightChecks = computed(() => {
   ]
 })
 
+function resetLiveGuardrailDraft() {
+  if (!liveGuardrails.value) {
+    guardrailDraft.enable_order_submit = Boolean(status.value?.order_submit_enabled)
+    guardrailDraft.auto_execute_enabled = Boolean(status.value?.auto_execute_enabled)
+    return
+  }
+  guardrailDraft.enable_order_submit = liveGuardrails.value.enable_order_submit
+  guardrailDraft.auto_execute_enabled = liveGuardrails.value.auto_execute_enabled
+}
+
+async function loadGuardrails() {
+  liveGuardrails.value = await systemApi.getLiveTradingGuardrails()
+  resetLiveGuardrailDraft()
+}
+
+async function confirmLiveGuardrailSave(): Promise<{ acknowledge_risk: boolean; confirm_text?: string | null }> {
+  if (!liveGuardrails.value) return { acknowledge_risk: false, confirm_text: null }
+  const enablingLiveTrading = (
+    (guardrailDraft.enable_order_submit && !liveGuardrails.value.enable_order_submit)
+    || (guardrailDraft.auto_execute_enabled && !liveGuardrails.value.auto_execute_enabled)
+  )
+  if (!enablingLiveTrading) {
+    await ElMessageBox.confirm(
+      '确认关闭实盘交易能力？保存后当前后端进程会立即停止真实下单/自动实盘执行能力。',
+      '关闭实盘交易能力',
+      { confirmButtonText: '确认关闭', cancelButtonText: '取消', type: 'info' },
+    )
+    return { acknowledge_risk: false, confirm_text: null }
+  }
+  const requiredText = liveGuardrails.value.confirm_text || 'ENABLE LIVE TRADING'
+  const result = await ElMessageBox.prompt(
+    `即将允许系统进入真实下单能力范围。请输入 ${requiredText} 确认。`,
+    '危险操作：开启实盘交易护栏',
+    {
+      confirmButtonText: '确认保存',
+      cancelButtonText: '取消',
+      type: 'warning',
+      inputPlaceholder: requiredText,
+      inputValidator: value => String(value || '').trim() === requiredText || `请输入 ${requiredText}`,
+      distinguishCancelAndClose: true,
+    },
+  )
+  return { acknowledge_risk: true, confirm_text: String(result.value || '').trim() }
+}
+
+async function saveLiveGuardrails() {
+  if (!liveGuardrails.value || !guardrailsDirty.value || savingGuardrails.value) return
+  if (guardrailDraft.auto_execute_enabled && !guardrailDraft.enable_order_submit) {
+    guardrailDraft.auto_execute_enabled = false
+    ElMessage.warning('自动实盘执行需要先打开真实下单总开关')
+    return
+  }
+
+  const confirmation = await confirmLiveGuardrailSave().catch(() => null)
+  if (!confirmation) {
+    resetLiveGuardrailDraft()
+    return
+  }
+
+  savingGuardrails.value = true
+  try {
+    liveGuardrails.value = await systemApi.setLiveTradingGuardrails({
+      enable_order_submit: guardrailDraft.enable_order_submit,
+      auto_execute_enabled: guardrailDraft.auto_execute_enabled,
+      acknowledge_risk: confirmation.acknowledge_risk,
+      confirm_text: confirmation.confirm_text,
+    })
+    resetLiveGuardrailDraft()
+    status.value = await liveTradingApi.status()
+    await loadPreflight()
+    ElMessage.success('实盘交易护栏已更新')
+  } catch (error) {
+    ElMessage.error('实盘交易护栏保存失败，已恢复当前状态')
+    await loadGuardrails().catch(() => resetLiveGuardrailDraft())
+    status.value = await liveTradingApi.status()
+  } finally {
+    savingGuardrails.value = false
+  }
+}
+
+async function onOrderSubmitGuardrailChange(value: string | number | boolean) {
+  if (!Boolean(value)) {
+    guardrailDraft.auto_execute_enabled = false
+  }
+  await saveLiveGuardrails()
+}
+
+async function onAutoExecuteGuardrailChange(value: string | number | boolean) {
+  if (Boolean(value) && !guardrailDraft.enable_order_submit) {
+    guardrailDraft.auto_execute_enabled = false
+    ElMessage.warning('自动实盘执行需要先打开真实下单总开关')
+    return
+  }
+  await saveLiveGuardrails()
+}
+
 async function loadAll() {
   loading.value = true
   try {
-    const [nextStatus, nextProfiles] = await Promise.all([
+    const [nextStatus, nextProfiles, nextGuardrails] = await Promise.all([
       liveTradingApi.status(),
       liveTradingApi.profiles(true),
+      systemApi.getLiveTradingGuardrails(),
     ])
     status.value = nextStatus
     profiles.value = nextProfiles
+    liveGuardrails.value = nextGuardrails
+    resetLiveGuardrailDraft()
+    const resolvedInitialProfile = !selectedProfileKey.value
     if (!selectedProfileKey.value) {
-      selectedProfileKey.value = nextProfiles.find(item => item.is_default)?.profile_key || nextStatus.default_profile || nextProfiles[0]?.profile_key || ''
+      selectedProfileKey.value = await resolveInitialProfile(nextProfiles, nextStatus)
     }
     await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
+    if (!resolvedInitialProfile && shouldSwitchFromEmptyProfile()) {
+      const fallbackProfile = await resolveInitialProfile(nextProfiles, nextStatus)
+      if (fallbackProfile && fallbackProfile !== selectedProfileKey.value) {
+        selectedProfileKey.value = fallbackProfile
+        await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
+      }
+    }
   } finally {
     loading.value = false
   }
+}
+
+function shouldSwitchFromEmptyProfile() {
+  if (mode.value !== 'live') return false
+  const snapshot = accountSnapshot.value
+  if (!snapshot) return false
+  return !snapshot.meta?.initialized && Number(snapshot.position_count || 0) === 0
+}
+
+async function resolveInitialProfile(nextProfiles: LiveStrategyProfile[], nextStatus: LiveTradingStatus) {
+  const seen = new Set<string>()
+  const preferred = [
+    nextProfiles.find(item => item.is_default)?.profile_key,
+    nextStatus.default_profile,
+    ...nextProfiles.map(item => item.profile_key),
+  ].filter((key): key is string => {
+    if (!key || seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  if (mode.value === 'live') {
+    for (const profileKey of preferred) {
+      try {
+        const snapshot = await liveTradingApi.account('live', profileKey, false)
+        if (snapshot?.meta?.initialized && Number(snapshot.position_count || 0) > 0) {
+          return profileKey
+        }
+      } catch {
+        // Profile selection should still fall back to configured defaults if QMT is temporarily busy.
+      }
+    }
+  }
+  return preferred[0] || ''
 }
 
 watch(mode, async () => {
   if (!selectedProfileKey.value) return
   signalData.value = null
   orderRows.value = []
+  startAccountRealtime()
   await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
+})
+
+watch(selectedProfileKey, () => {
+  signalData.value = null
+  orderRows.value = []
+  startAccountRealtime()
+})
+
+watch([weeklyAnalysis, accountSnapshot, strategyReviewDialogOpen], async () => {
+  if (!strategyReviewDialogOpen.value) return
+  await nextTick()
+  renderStrategyReviewCharts()
 })
 
 async function loadAccount() {
   accountLoading.value = true
   try {
-    accountSnapshot.value = await liveTradingApi.account(mode.value, selectedProfileKey.value || undefined)
-    const initialCapital = Number(accountSnapshot.value?.meta?.initial_capital || 0)
-    if (initialCapital > 0) {
-      capitalForm.capital = initialCapital
-    }
+    applyAccountSnapshot(await liveTradingApi.account(mode.value, selectedProfileKey.value || undefined))
   } finally {
     accountLoading.value = false
+  }
+}
+
+function applyAccountSnapshot(snapshot: LiveAccountSnapshot) {
+  accountSnapshot.value = {
+    ...snapshot,
+    broker_account: snapshot.broker_account || accountSnapshot.value?.broker_account,
+  }
+  liveStreamUpdatedAt.value = snapshot.timestamp || new Date().toISOString()
+  const targetCapital = Number(
+    snapshot.meta?.target_capital
+      || snapshot.meta?.initial_capital
+      || 0,
+  )
+  if (targetCapital > 0) {
+    capitalForm.capital = targetCapital
+  }
+}
+
+function stopAccountRealtime() {
+  if (accountEventSource) {
+    accountEventSource.close()
+    accountEventSource = null
+  }
+  if (accountPollTimer != null) {
+    window.clearInterval(accountPollTimer)
+    accountPollTimer = null
+  }
+  liveStreamState.value = 'off'
+}
+
+function startAccountPolling() {
+  if (accountPollTimer != null) return
+  liveStreamState.value = 'polling'
+  accountPollTimer = window.setInterval(() => {
+    if (document.hidden || mode.value !== 'live' || !selectedProfileKey.value) return
+    liveTradingApi.account(mode.value, selectedProfileKey.value, false)
+      .then(snapshot => {
+        applyAccountSnapshot(snapshot)
+        liveStreamState.value = 'polling'
+      })
+      .catch(error => {
+        liveStreamState.value = 'error'
+        liveStreamError.value = error?.message || '账户轮询失败'
+      })
+  }, 8000)
+}
+
+function startAccountRealtime() {
+  stopAccountRealtime()
+  if (mode.value !== 'live' || !selectedProfileKey.value) return
+  liveStreamState.value = 'connecting'
+  liveStreamError.value = ''
+  try {
+    const source = new EventSource(liveTradingApi.accountStreamUrl(mode.value, selectedProfileKey.value, 5))
+    accountEventSource = source
+    source.addEventListener('account', event => {
+      try {
+        applyAccountSnapshot(JSON.parse((event as MessageEvent).data) as LiveAccountSnapshot)
+        liveStreamState.value = 'live'
+        liveStreamError.value = ''
+      } catch (error) {
+        liveStreamState.value = 'error'
+        liveStreamError.value = error instanceof Error ? error.message : '实时数据解析失败'
+      }
+    })
+    source.addEventListener('stream-error', event => {
+      try {
+        const detail = JSON.parse((event as MessageEvent).data || '{}')
+        liveStreamError.value = detail.message || '实时流异常'
+      } catch {
+        liveStreamError.value = '实时流异常'
+      }
+      liveStreamState.value = 'error'
+    })
+    source.onerror = () => {
+      if (accountEventSource !== source) return
+      source.close()
+      accountEventSource = null
+      liveStreamError.value = '实时流断开，已切换轮询'
+      startAccountPolling()
+    }
+  } catch (error) {
+    liveStreamState.value = 'error'
+    liveStreamError.value = error instanceof Error ? error.message : '实时流启动失败'
+    startAccountPolling()
   }
 }
 
@@ -968,6 +1591,7 @@ async function loadSignals() {
     })
     preflightData.value = signalData.value.preflight || preflightData.value
     orderRows.value = (signalData.value.orders || []).map(order => ({ ...order }))
+    await loadAudits()
   } finally {
     signalsLoading.value = false
   }
@@ -976,6 +1600,7 @@ async function loadSignals() {
 async function loadAudits() {
   audits.value = await liveTradingApi.audits({
     profile_key: selectedProfileKey.value || undefined,
+    mode: mode.value,
     limit: 80,
   })
 }
@@ -1006,8 +1631,125 @@ async function loadPendingOrders() {
       mode: 'live',
       limit: 120,
     })
+    selectedPendingOrders.value = []
   } finally {
     pendingLoading.value = false
+  }
+}
+
+async function syncPendingOrderStatus() {
+  pendingLoading.value = true
+  try {
+    const result = await liveTradingApi.syncOrders({
+      profile_key: selectedProfileKey.value || undefined,
+      mode: 'live',
+      limit: 200,
+    })
+    if (result.synced) {
+      ElMessage.success(`已同步 QMT 成交状态，更新 ${result.updated_count || 0} 笔。`)
+    } else {
+      ElMessage.warning(result.error || 'QMT 成交状态同步失败')
+    }
+    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+  } finally {
+    pendingLoading.value = false
+  }
+}
+
+function selectedOrStalePendingRows() {
+  if (selectedPendingOrders.value.length) return selectedPendingOrders.value
+  const thresholdMs = Math.max(0, staleOrderMinutes.value || 0) * 60 * 1000
+  if (!thresholdMs) return pendingOrders.value
+  const now = Date.now()
+  return pendingOrders.value.filter(row => {
+    const created = row.created_at ? new Date(row.created_at).getTime() : 0
+    return created > 0 && now - created >= thresholdMs
+  })
+}
+
+async function cancelPendingOrders() {
+  const rows = selectedOrStalePendingRows()
+  const useSelectedRows = selectedPendingOrders.value.length > 0
+  if (!rows.length) {
+    ElMessage.info(`没有超过 ${staleOrderMinutes.value} 分钟的待成交委托；也可以勾选具体订单后再撤。`)
+    return
+  }
+  await ElMessageBox.confirm(
+    `确认向 QMT 真实撤销 ${rows.length} 笔委托？这不是平台内纸面取消。`,
+    '批量真实撤单',
+    {
+      type: 'warning',
+      confirmButtonText: '真实撤单',
+      cancelButtonText: '取消',
+    },
+  )
+  pendingActionLoading.value = true
+  try {
+    const result = await liveTradingApi.cancelOrders({
+      profile_key: selectedProfileKey.value || undefined,
+      mode: 'live',
+      limit: 200,
+      min_age_seconds: useSelectedRows ? 0 : Math.max(0, staleOrderMinutes.value || 0) * 60,
+      record_ids: rows.map(row => row.record_id),
+      order_ids: rows.map(row => String(row.order_id || '')).filter(Boolean),
+      confirm: true,
+    })
+    ElMessage.success(`已向 QMT 发送 ${result.cancel_count || 0} 笔撤单请求。`)
+    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+  } finally {
+    pendingActionLoading.value = false
+  }
+}
+
+async function cancelAndResubmitPendingOrders() {
+  const rows = selectedOrStalePendingRows()
+  const useSelectedRows = selectedPendingOrders.value.length > 0
+  if (!rows.length) {
+    ElMessage.info(`没有超过 ${staleOrderMinutes.value} 分钟的待成交委托；也可以勾选具体订单后再重提。`)
+    return
+  }
+  await ElMessageBox.confirm(
+    `确认先向 QMT 真实撤销 ${rows.length} 笔委托；撤单确认后按最新行情重新生成差额订单并提交？如 QMT 尚未确认撤单，系统不会重复提交。`,
+    '撤单后重新提交',
+    {
+      type: 'warning',
+      confirmButtonText: '撤单再提交',
+      cancelButtonText: '取消',
+    },
+  )
+  pendingActionLoading.value = true
+  try {
+    const result = await liveTradingApi.cancelAndResubmit({
+      profile_key: selectedProfileKey.value || undefined,
+      mode: 'live',
+      params: {
+        trade_date: tradeDate.value,
+        index_symbol: indexSymbol.value,
+      },
+      limit: 200,
+      min_age_seconds: useSelectedRows ? 0 : Math.max(0, staleOrderMinutes.value || 0) * 60,
+      record_ids: rows.map(row => row.record_id),
+      order_ids: rows.map(row => String(row.order_id || '')).filter(Boolean),
+      confirm_cancel: true,
+      confirm_submit: true,
+    })
+    if (result.signal_result) {
+      signalData.value = result.signal_result
+      preflightData.value = result.signal_result.preflight || preflightData.value
+      orderRows.value = (result.signal_result.orders || []).map(order => ({ ...order }))
+    }
+    if (result.submit_result) {
+      submitResult.value = result.submit_result
+      submitResultDialogOpen.value = true
+    }
+    if (result.submitted) {
+      ElMessage.success('撤单确认后已重新提交差额订单。')
+    } else {
+      ElMessage.warning(result.message || '撤单后尚未提交新订单。')
+    }
+    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+  } finally {
+    pendingActionLoading.value = false
   }
 }
 
@@ -1117,6 +1859,7 @@ async function submitOrders() {
 
 async function initializeCapitalPool() {
   if (!selectedProfileKey.value) return
+  const adjustingCapital = strategyAccountReady.value && !capitalForm.reset_existing
   if (strategyAccountReady.value && capitalForm.reset_existing) {
     await ElMessageBox.confirm('重新初始化会清空该 Profile 当前策略资金池和策略持仓账本。确认继续？', '重新初始化确认', {
       type: 'warning',
@@ -1134,7 +1877,7 @@ async function initializeCapitalPool() {
     })
     capitalDialogOpen.value = false
     capitalForm.reset_existing = false
-    ElMessage.success('量化资金池已初始化')
+    ElMessage.success(adjustingCapital ? '量化资金池目标总资产已调整' : '量化资金池已初始化')
     await Promise.all([loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
   } finally {
     capitalSaving.value = false
@@ -1220,6 +1963,11 @@ function formatDateTime(value?: string | null) {
   return value.replace('T', ' ').replace(/\.\d+$/, '').slice(0, 19)
 }
 
+function formatClock(value?: string | null) {
+  if (!value) return '--:--:--'
+  return formatDateTime(value).slice(11, 19) || '--:--:--'
+}
+
 function pnlTone(value?: number | null) {
   const numberValue = Number(value || 0)
   if (numberValue > 0) return 'metric-good'
@@ -1234,6 +1982,7 @@ function candidateSymbol(candidate: Record<string, unknown>) {
 async function onProfileChange() {
   signalData.value = null
   orderRows.value = []
+  startAccountRealtime()
   await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
 }
 
@@ -1297,11 +2046,11 @@ function toNumber(value: unknown) {
 }
 
 function isPendingStatus(status?: string | null) {
-  return ['live_pending', 'submitted', 'accepted', 'partially_filled'].includes(String(status || ''))
+  return ['live_pending', 'submitted', 'accepted', 'partially_filled', 'cancel_requested'].includes(String(status || ''))
 }
 
 function isFilledStatus(status?: string | null) {
-  return ['paper_filled', 'live_filled', 'filled'].includes(String(status || ''))
+  return ['paper_filled', 'live_filled', 'filled', 'partially_cancelled'].includes(String(status || ''))
 }
 
 function statusLabel(status?: string | null) {
@@ -1310,21 +2059,58 @@ function statusLabel(status?: string | null) {
     submitted: '待成交',
     accepted: '已接收',
     partially_filled: '部分成交',
+    cancel_requested: '撤单中',
     paper_filled: '模拟成交',
     live_filled: '实盘成交',
+    partially_cancelled: '部成已撤',
+    cancelled: '已撤单',
     filled: '已成交',
     failed: '失败',
     skipped: '跳过',
     generated: '已生成',
+    strategy_account_initialized: '资金池初始化',
+    strategy_account_adjusted: '资金池调整',
+    blocked: '被护栏拦截',
+    duplicate: '重复跳过',
   }
   return labels[String(status || '')] || String(status || '-')
+}
+
+function auditEventLabel(eventType?: string | null, status?: string | null) {
+  const labels: Record<string, string> = {
+    signal_generated: '信号生成',
+    order_skipped: '跳过订单',
+    capital_pool: '资金池',
+    cancel: '撤单',
+    execution_update: '执行更新',
+    guardrail: '护栏',
+    control: '控制',
+  }
+  return labels[String(eventType || '')] || statusLabel(status)
 }
 
 function statusTagType(status?: string | null) {
   if (isPendingStatus(status)) return 'warning'
   if (isFilledStatus(status)) return 'success'
-  if (String(status || '') === 'failed') return 'danger'
+  if (['failed', 'cancelled'].includes(String(status || ''))) return 'danger'
   return 'info'
+}
+
+function payloadNumber(row: LiveTradeRecord, key: string) {
+  return toNumber(row.result_payload?.[key])
+}
+
+function pendingRemainingQuantity(row: LiveTradeRecord) {
+  const total = toNumber(row.quantity)
+  const filled = payloadNumber(row, 'filled_quantity')
+  const remaining = payloadNumber(row, 'remaining_quantity')
+  if (remaining > 0) return remaining
+  if (filled > 0) return Math.max(0, total - filled)
+  return total
+}
+
+function onPendingSelectionChange(rows: LiveTradeRecord[]) {
+  selectedPendingOrders.value = rows
 }
 
 function sideLabel(side?: string | null) {
@@ -1332,6 +2118,256 @@ function sideLabel(side?: string | null) {
   if (value === 'BUY') return '买入'
   if (value === 'SELL') return '卖出'
   return value || '-'
+}
+
+async function openPositionsDialog() {
+  positionsDialogOpen.value = true
+  if (!accountSnapshot.value && !accountLoading.value) {
+    await loadAccount().catch(error => ElMessage.error(error?.message || '持仓读取失败'))
+  }
+}
+
+async function openStrategyReviewDialog() {
+  strategyReviewDialogOpen.value = true
+  if (!weeklyAnalysis.value && !journalLoading.value) {
+    await loadTradeJournal().catch(error => ElMessage.error(error?.message || '策略复盘读取失败'))
+  }
+  if (!accountSnapshot.value && !accountLoading.value) {
+    await loadAccount().catch(error => ElMessage.error(error?.message || '账户读取失败'))
+  }
+  await nextTick()
+  renderStrategyReviewCharts()
+}
+
+function disposeStrategyReviewCharts() {
+  equityChart?.dispose()
+  flowChart?.dispose()
+  statusChart?.dispose()
+  equityChart = null
+  flowChart = null
+  statusChart = null
+}
+
+function renderStrategyReviewCharts() {
+  if (!strategyReviewDialogOpen.value) return
+  disposeStrategyReviewCharts()
+  renderEquityChart()
+  renderFlowChart()
+  renderStatusChart()
+}
+
+function renderEquityChart() {
+  if (!equityChartRef.value) return
+  equityChart = echarts.init(equityChartRef.value)
+  const rows = equityCurve.value
+  const x = rows.map(row => formatDateTime(row.created_at || row.trade_date || '').slice(5, 16))
+  const assets = rows.map(row => Number(row.total_asset || 0))
+  const drawdown = rows.map(row => row.drawdown_pct == null ? null : Number(row.drawdown_pct) * 100)
+  equityChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      formatter: (points: any[]) => {
+        const asset = points.find(point => point.seriesName === '总资产')
+        const dd = points.find(point => point.seriesName === '回撤')
+        return `${points[0]?.axisValue || '-'}<br/>总资产 ${formatMoney(asset?.data)}<br/>回撤 ${dd?.data == null ? '-' : `${Number(dd.data).toFixed(2)}%`}`
+      },
+    },
+    legend: { data: ['总资产', '回撤'], textStyle: { color: '#a9b7c9', fontSize: 11 }, top: 0 },
+    grid: { left: 58, right: 54, top: 34, bottom: 36 },
+    xAxis: {
+      type: 'category',
+      data: x,
+      axisLabel: { color: '#a9b7c9', fontSize: 10, rotate: 35 },
+      axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.3)' } },
+    },
+    yAxis: [
+      {
+        type: 'value',
+        axisLabel: { color: '#a9b7c9', fontSize: 10 },
+        splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.12)' } },
+      },
+      {
+        type: 'value',
+        axisLabel: { color: '#a9b7c9', fontSize: 10, formatter: '{value}%' },
+        splitLine: { show: false },
+      },
+    ],
+    series: [
+      {
+        name: '总资产',
+        type: 'line',
+        data: assets,
+        showSymbol: false,
+        smooth: true,
+        lineStyle: { color: '#38bdf8', width: 2 },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(56, 189, 248, 0.24)' },
+            { offset: 1, color: 'rgba(56, 189, 248, 0.02)' },
+          ]),
+        },
+      },
+      {
+        name: '回撤',
+        type: 'line',
+        yAxisIndex: 1,
+        data: drawdown,
+        showSymbol: false,
+        lineStyle: { color: '#f87171', width: 1.4 },
+        areaStyle: { color: 'rgba(248, 113, 113, 0.08)' },
+      },
+    ],
+  })
+}
+
+function renderFlowChart() {
+  if (!flowChartRef.value) return
+  flowChart = echarts.init(flowChartRef.value)
+  const rows = flowChartRows.value
+  flowChart.setOption({
+    tooltip: {
+      trigger: 'axis',
+      formatter: (points: any[]) => {
+        const buy = points.find(point => point.seriesName === '买入')
+        const sell = points.find(point => point.seriesName === '卖出')
+        return `${points[0]?.axisValue || '-'}<br/>买入 ${formatMoney(buy?.data)}<br/>卖出 ${formatMoney(Math.abs(Number(sell?.data || 0)))}`
+      },
+    },
+    legend: { data: ['买入', '卖出'], textStyle: { color: '#a9b7c9', fontSize: 11 }, top: 0 },
+    grid: { left: 58, right: 18, top: 34, bottom: 36 },
+    xAxis: {
+      type: 'category',
+      data: rows.map(row => row.trade_date),
+      axisLabel: { color: '#a9b7c9', fontSize: 10, rotate: 35 },
+      axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.3)' } },
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: { color: '#a9b7c9', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.12)' } },
+    },
+    series: [
+      { name: '买入', type: 'bar', data: rows.map(row => Number(row.buy_notional || 0)), itemStyle: { color: '#22c55e' } },
+      { name: '卖出', type: 'bar', data: rows.map(row => -Number(row.sell_notional || 0)), itemStyle: { color: '#f87171' } },
+    ],
+  })
+}
+
+function renderStatusChart() {
+  if (!statusChartRef.value) return
+  statusChart = echarts.init(statusChartRef.value)
+  const rows = statusChartRows.value
+  statusChart.setOption({
+    tooltip: { trigger: 'axis' },
+    grid: { left: 44, right: 16, top: 24, bottom: 42 },
+    xAxis: {
+      type: 'category',
+      data: rows.map(row => statusLabel(row.status)),
+      axisLabel: { color: '#a9b7c9', fontSize: 10, rotate: 30 },
+      axisLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.3)' } },
+    },
+    yAxis: {
+      type: 'value',
+      minInterval: 1,
+      axisLabel: { color: '#a9b7c9', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(148, 163, 184, 0.12)' } },
+    },
+    series: [{
+      name: '订单数',
+      type: 'bar',
+      data: rows.map(row => Number(row.records || 0)),
+      itemStyle: { color: '#7dd3fc' },
+    }],
+  })
+}
+
+function movePositionColumnTo(source: PositionColumnKey, target: PositionColumnKey) {
+  if (source === target) return
+  const next = [...positionColumnOrder.value]
+  const sourceIndex = next.indexOf(source)
+  const targetIndex = next.indexOf(target)
+  if (sourceIndex < 0 || targetIndex < 0) return
+  const [item] = next.splice(sourceIndex, 1)
+  next.splice(targetIndex, 0, item)
+  positionColumnOrder.value = next
+}
+
+function columnKeyFromPointer(event: PointerEvent) {
+  const target = document.elementFromPoint(event.clientX, event.clientY)
+  const header = target?.closest<HTMLElement>('[data-position-column-key]')
+  return header?.dataset.positionColumnKey as PositionColumnKey | undefined
+}
+
+function onPositionColumnPointerDown(event: PointerEvent, key: PositionColumnKey) {
+  if (event.button !== 0) return
+  const target = event.currentTarget as HTMLElement
+  draggedPositionColumn.value = key
+  dragOverPositionColumn.value = key
+  target.setPointerCapture?.(event.pointerId)
+
+  const onPointerMove = (moveEvent: PointerEvent) => {
+    const targetKey = columnKeyFromPointer(moveEvent)
+    if (targetKey && targetKey !== draggedPositionColumn.value) {
+      dragOverPositionColumn.value = targetKey
+    }
+  }
+
+  const onPointerUp = (upEvent: PointerEvent) => {
+    const targetKey = columnKeyFromPointer(upEvent) || dragOverPositionColumn.value
+    if (draggedPositionColumn.value && targetKey) {
+      movePositionColumnTo(draggedPositionColumn.value, targetKey)
+    }
+    target.releasePointerCapture?.(event.pointerId)
+    window.removeEventListener('pointermove', onPointerMove)
+    window.removeEventListener('pointerup', onPointerUp)
+    onPositionColumnDragEnd()
+  }
+
+  window.addEventListener('pointermove', onPointerMove)
+  window.addEventListener('pointerup', onPointerUp, { once: true })
+}
+
+function onPositionColumnDragEnd() {
+  draggedPositionColumn.value = null
+  dragOverPositionColumn.value = null
+}
+
+function positionColumnHeaderClass(key: PositionColumnKey) {
+  return [
+    'position-column-header',
+    draggedPositionColumn.value === key ? 'position-column-header--dragging' : '',
+    dragOverPositionColumn.value === key && draggedPositionColumn.value !== key ? 'position-column-header--over' : '',
+  ]
+}
+
+function positionCellValue(row: LiveAccountPosition, key: PositionColumnKey) {
+  if (key === 'symbol') return row.symbol || '-'
+  if (key === 'stock_name') return row.stock_name || '-'
+  if (key === 'quantity' || key === 'available') return formatQuantity(row[key])
+  if (key === 'last_price') return formatPrice(row.last_price)
+  if (key === 'volume_ratio') return row.volume_ratio == null ? '-' : Number(row.volume_ratio).toFixed(2)
+  if (key === 'today_change_pct' || key === 'turnover_rate' || key === 'position_pct' || key === 'unrealized_pnl_pct') {
+    return formatPercent(row[key])
+  }
+  if (key === 'market_value' || key === 'amount') return formatMoney(row[key])
+  return '-'
+}
+
+function positionCellClass(row: LiveAccountPosition, key: PositionColumnKey) {
+  if (key === 'today_change_pct') return pnlTone(row.today_change_pct)
+  if (key === 'unrealized_pnl_pct') return pnlTone(row.unrealized_pnl_pct)
+  return ''
+}
+
+function handlePageContextAction(event: Event) {
+  const action = String((event as CustomEvent<{ action?: string }>).detail?.action || '')
+  if (action === 'open-strategy-review') {
+    openStrategyReviewDialog()
+    return
+  }
+  if (action === 'open-capital-positions') {
+    openPositionsDialog()
+  }
 }
 
 const pageContextBlocks = computed(() => [
@@ -1356,18 +2392,23 @@ const pageContextBlocks = computed(() => [
     ],
   },
   {
-    title: 'Capital Pool',
+    title: currentStrategyName.value,
+    action: 'open-strategy-review',
     rows: [
       { label: '状态', value: strategyAccountStatusText.value, tone: strategyAccountReady.value ? 'good' : 'warn' },
       { label: '来源', value: accountSourceText.value, tone: accountSnapshot.value?.error ? 'warn' : 'good' },
-      { label: '现金', value: formatMoney(accountSnapshot.value?.cash) },
+      { label: '目标资产', value: accountSummaryItems.value.find(item => item.label === '目标总资产')?.value || '-' },
+      { label: '可用现金', value: formatMoney(accountSnapshot.value?.cash) },
       { label: '总资产', value: formatMoney(accountSnapshot.value?.total_asset) },
       { label: '持仓市值', value: formatMoney(accountSnapshot.value?.market_value) },
       {
-        label: '浮盈亏',
-        value: formatMoney(accountSnapshot.value?.unrealized_pnl),
-        tone: Number(accountSnapshot.value?.unrealized_pnl || 0) > 0 ? 'good' : Number(accountSnapshot.value?.unrealized_pnl || 0) < 0 ? 'bad' : 'neutral',
+        label: '至今PnL',
+        value: formatMoney(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl),
+        tone: Number(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl ?? 0) > 0
+          ? 'good'
+          : Number(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl ?? 0) < 0 ? 'bad' : 'neutral',
       },
+      { label: '至今回撤', value: formatPercent(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct), tone: Number(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
       { label: '持仓', value: `${accountSnapshot.value?.position_count || 0} 只` },
     ],
   },
@@ -1376,7 +2417,16 @@ const pageContextBlocks = computed(() => [
 usePageContext(pageContextBlocks)
 
 onMounted(() => {
-  loadAll().catch(error => ElMessage.error(error?.message || '实盘交易模块加载失败'))
+  window.addEventListener('page-context-action', handlePageContextAction)
+  loadAll()
+    .then(() => startAccountRealtime())
+    .catch(error => ElMessage.error(error?.message || '实盘交易模块加载失败'))
+})
+
+onUnmounted(() => {
+  window.removeEventListener('page-context-action', handlePageContextAction)
+  stopAccountRealtime()
+  disposeStrategyReviewCharts()
 })
 </script>
 
@@ -1410,7 +2460,8 @@ onMounted(() => {
 }
 
 .page-head p,
-.profile-meta p {
+.profile-meta p,
+.portfolio-subtitle {
   margin: 0;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -1426,6 +2477,19 @@ onMounted(() => {
   gap: var(--space-2);
   align-items: center;
   justify-content: flex-end;
+}
+
+.stale-control {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.stale-control :deep(.el-input-number) {
+  width: 86px;
 }
 
 .action-button {
@@ -1554,6 +2618,76 @@ onMounted(() => {
 
 .state-text--neutral {
   color: var(--text-secondary);
+}
+
+.live-stream-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: var(--radius-full);
+  background: rgba(15, 23, 42, 0.62);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.live-stream-pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: var(--radius-full);
+  background: currentColor;
+  box-shadow: 0 0 9px currentColor;
+}
+
+.live-stream-pill--live {
+  border-color: rgba(134, 239, 172, 0.42);
+  background: rgba(22, 101, 52, 0.18);
+  color: #86efac;
+}
+
+.live-stream-pill--polling {
+  border-color: rgba(125, 211, 252, 0.42);
+  background: rgba(14, 116, 144, 0.18);
+  color: #7dd3fc;
+}
+
+.live-stream-pill--error {
+  border-color: rgba(252, 165, 165, 0.42);
+  background: rgba(127, 29, 29, 0.18);
+  color: #fca5a5;
+}
+
+.live-stream-pill--off {
+  color: var(--text-muted);
+}
+
+.guardrail-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: var(--space-2);
+}
+
+.guardrail-toggle .state-text {
+  flex: 0 0 auto;
+  min-width: 54px;
+}
+
+.guardrail-toggle :deep(.el-switch) {
+  flex: 0 0 auto;
+  order: -1;
+}
+
+.strategy-config-stack {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-4);
 }
 
 .desk-grid {
@@ -1779,9 +2913,17 @@ onMounted(() => {
   line-height: 1.45;
 }
 
+.weekly-table-title {
+  margin: 0 var(--space-4) var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
 .trade-record-panel :deep(.el-table),
 .weekly-panel :deep(.el-table) {
   margin: 0 var(--space-4) var(--space-4);
+  width: calc(100% - var(--space-4) * 2);
 }
 
 .control-body {
@@ -1938,9 +3080,13 @@ onMounted(() => {
   margin: 0 var(--space-4);
 }
 
+.account-panel :deep(.el-table) {
+  width: calc(100% - var(--space-4) * 2);
+}
+
 .account-summary {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: var(--space-3);
   padding: 0 var(--space-4);
 }
@@ -1966,12 +3112,20 @@ onMounted(() => {
   font-family: var(--font-data);
 }
 
-.broker-account {
+.broker-account,
+.broker-account-panel {
   display: grid;
   gap: var(--space-3);
+}
+
+.broker-account {
   margin: var(--space-2) var(--space-4) 0;
   padding-top: var(--space-3);
   border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.broker-account-panel {
+  padding: var(--space-4);
 }
 
 .broker-account__head {
@@ -1999,12 +3153,267 @@ onMounted(() => {
   width: 240px;
 }
 
+.positions-dialog :deep(.el-dialog__body) {
+  display: grid;
+  gap: var(--space-3);
+  max-height: min(76vh, 780px);
+  overflow: hidden;
+}
+
+.positions-dialog__toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+}
+
+.positions-dialog__summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.positions-dialog__summary span {
+  padding: 5px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.48);
+}
+
+.positions-dialog :deep(.el-table) {
+  width: 100%;
+}
+
+.position-column-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  cursor: grab;
+  user-select: none;
+  vertical-align: middle;
+}
+
+.position-column-header:active {
+  cursor: grabbing;
+}
+
+.position-column-header--dragging {
+  color: #7dd3fc;
+  opacity: 0.66;
+}
+
+.position-column-header--over {
+  color: #a7f3d0;
+}
+
+.position-column-header--over::after {
+  content: '';
+  width: 2px;
+  align-self: stretch;
+  border-radius: var(--radius-full);
+  background: #22d3ee;
+  box-shadow: 0 0 10px rgba(34, 211, 238, 0.72);
+}
+
+.position-column-header__grip {
+  width: 8px;
+  height: 14px;
+  flex: 0 0 auto;
+  opacity: 0.72;
+  background:
+    radial-gradient(circle, currentColor 1px, transparent 1.4px) 0 0 / 4px 4px,
+    radial-gradient(circle, currentColor 1px, transparent 1.4px) 4px 2px / 4px 4px;
+}
+
+.drag-hint {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
 .metric-good {
   color: #86efac !important;
 }
 
 .metric-bad {
   color: #fca5a5 !important;
+}
+
+.metric-warn {
+  color: #fde68a !important;
+}
+
+:global(.strategy-review-dialog.el-dialog),
+:global(.strategy-review-dialog .el-dialog) {
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  background: #0b111c;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.56);
+}
+
+:global(.strategy-review-dialog .el-dialog__header) {
+  border-bottom: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+:global(.strategy-review-dialog .el-dialog__title) {
+  color: #f8fafc;
+  font-weight: 800;
+}
+
+:global(.strategy-review-dialog .el-dialog__headerbtn .el-dialog__close) {
+  color: #cbd5e1;
+}
+
+:global(.strategy-review-dialog .el-dialog__body) {
+  max-height: min(76vh, 820px);
+  overflow: auto;
+  color: var(--text-primary);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.92), rgba(2, 6, 23, 0.96)),
+    var(--bg-surface);
+}
+
+:global(.strategy-review-dialog .el-dialog__footer) {
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+  background: #0b111c;
+}
+
+.strategy-review {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.strategy-review__intro {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.72fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.strategy-review__intro h3 {
+  margin: var(--space-1) 0 var(--space-2);
+  color: var(--text-bright);
+}
+
+.strategy-review__intro p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
+.strategy-review__facts,
+.strategy-review__metrics {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.strategy-review__facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.strategy-review__metrics {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
+.strategy-review__facts span,
+.strategy-review__metrics div {
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.52);
+}
+
+.strategy-review__facts label,
+.strategy-review__metrics label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.strategy-review__facts strong,
+.strategy-review__metrics strong {
+  display: block;
+  overflow: hidden;
+  color: var(--text-primary);
+  font-family: var(--font-data);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-review__charts {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  gap: var(--space-3);
+}
+
+.strategy-review__charts section,
+.strategy-review__tables section {
+  min-width: 0;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: var(--radius-md);
+  background: rgba(15, 23, 42, 0.36);
+}
+
+.strategy-review__charts section:first-child {
+  grid-row: span 2;
+}
+
+.strategy-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) 0;
+}
+
+.strategy-chart-head span {
+  color: var(--text-bright);
+  font-size: var(--text-sm);
+  font-weight: 800;
+}
+
+.strategy-chart-head small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.strategy-chart {
+  min-height: 230px;
+}
+
+.strategy-review__charts section:first-child .strategy-chart {
+  min-height: 490px;
+}
+
+.strategy-chart--empty {
+  display: grid;
+  place-items: center;
+  padding: var(--space-4);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+.strategy-review__tables {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.strategy-review__tables .weekly-table-title {
+  margin-top: var(--space-3);
+}
+
+.strategy-review__tables :deep(.el-table) {
+  margin: 0 var(--space-3) var(--space-3);
 }
 
 .signal-overview {
@@ -2139,7 +3548,11 @@ onMounted(() => {
   .preflight-grid,
   .account-summary,
   .weekly-summary,
-  .signal-overview {
+  .signal-overview,
+  .strategy-review__intro,
+  .strategy-review__metrics,
+  .strategy-review__charts,
+  .strategy-review__tables {
     grid-template-columns: 1fr;
   }
 

@@ -607,6 +607,141 @@ def precompute_small_cap_core_features(
         "rows": {**writer.counts, **((high_volume_result or {}).get("rows") or {})},
         "rows_written": total_written,
         "high_volume": high_volume_result,
+}
+
+
+def precompute_live_timer_status_features(
+    *,
+    start_date: str | date,
+    end_date: str | date,
+    symbols: Sequence[str] | None = None,
+    index_symbol: str | None = None,
+    timer_time: str = "10:30",
+    factor_names: Sequence[str] | None = None,
+    store: FactorValueStore | None = None,
+    progress_callback: Callable[[float, str, dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Precompute same-day timer status filters without writing daily factors."""
+
+    def report(progress: float, stage: str, **meta: Any) -> None:
+        if progress_callback is not None:
+            progress_callback(max(0.0, min(1.0, progress)), stage, meta)
+
+    report(0.02, "解析参数")
+    start = _parse_date(start_date)
+    end = _parse_date(end_date)
+    if end < start:
+        raise ValueError("end_date must be greater than or equal to start_date")
+    timer_time = normalize_factor_time(timer_time)
+    symbol_list = _resolve_symbols(
+        symbols=symbols,
+        index_symbol=index_symbol,
+        start_date=start,
+        end_date=end,
+    )
+    if not symbol_list:
+        return {"symbols": 0, "rows": {}, "message": "no symbols"}
+    requested = {
+        str(name)
+        for name in (factor_names or ["is_paused", "is_limit_up", "is_limit_down"])
+        if str(name) in {"is_paused", "is_limit_up", "is_limit_down"}
+    }
+    if not requested:
+        return {"symbols": len(symbol_list), "rows": {}, "message": "no live timer status factors requested"}
+
+    factor_store = store or get_factor_value_store()
+    writer = factor_store.batch_writer()
+    created_at = datetime.now()
+
+    report(0.20, "加载分钟行情", factor_name="is_paused", as_of_time=timer_time)
+    market_store = get_market_data_store()
+    timer_start = datetime.combine(start, datetime.min.time())
+    timer_end = datetime.combine(end, datetime.min.time()) + timedelta(days=1)
+    minute = market_store.load_minute(
+        symbol_list,
+        timer_start,
+        timer_end,
+        columns=["symbol", "datetime", "close"],
+        timer_times=[timer_time],
+    )
+    if not minute.empty:
+        minute = minute.reset_index() if "datetime" not in minute.columns else minute.copy()
+        minute["trade_date"] = pd.to_datetime(minute["datetime"]).dt.date
+        minute["close"] = pd.to_numeric(minute["close"], errors="coerce")
+    elif requested:
+        raise RuntimeError(f"No {timer_time} minute data found for live timer status precompute")
+
+    limit_prices = pd.DataFrame()
+    if requested & {"is_limit_up", "is_limit_down"}:
+        report(0.45, "加载涨跌停价格", factor_name="is_limit_up")
+        limit_prices = _load_limit_prices(symbol_list, start, end)
+        if not limit_prices.empty:
+            limit_prices["trade_date"] = pd.to_datetime(limit_prices["trade_date"]).dt.date
+            limit_prices["up_limit"] = pd.to_numeric(limit_prices["up_limit"], errors="coerce")
+            limit_prices["down_limit"] = pd.to_numeric(limit_prices["down_limit"], errors="coerce")
+        else:
+            raise RuntimeError("No stock_limit_prices data found for live limit filter precompute")
+
+    minute_keys = set()
+    minute_close: dict[tuple[str, date], float] = {}
+    if not minute.empty:
+        minute_keys = {(str(row.symbol), row.trade_date) for row in minute.itertuples(index=False)}
+        minute_close = {
+            (str(row.symbol), row.trade_date): float(row.close or 0.0)
+            for row in minute.itertuples(index=False)
+        }
+    limit_map: dict[tuple[str, date], tuple[float, float]] = {}
+    if not limit_prices.empty:
+        limit_map = {
+            (str(row.symbol), row.trade_date): (float(row.up_limit or 0.0), float(row.down_limit or 0.0))
+            for row in limit_prices.itertuples(index=False)
+        }
+
+    report(0.68, "写入盘中状态因子")
+    days = [day for day in _date_range(start, end) if day.weekday() < 5]
+    params_hash = factor_params_hash({"time": timer_time})
+    for day in days:
+        for symbol in symbol_list:
+            common = {
+                "symbol": symbol,
+                "trade_date": day,
+                "as_of_time": timer_time,
+                "source": "precompute.live_timer_status",
+                "created_at": created_at,
+                "params_hash": params_hash,
+            }
+            paused = (symbol, day) not in minute_keys
+            price = minute_close.get((symbol, day), 0.0)
+            up_limit, down_limit = limit_map.get((symbol, day), (0.0, 0.0))
+            if "is_paused" in requested:
+                writer.add({
+                    **common,
+                    "factor_name": "is_paused",
+                    "value": 1.0 if paused else 0.0,
+                })
+            if "is_limit_up" in requested:
+                writer.add({
+                    **common,
+                    "factor_name": "is_limit_up",
+                    "value": 1.0 if price > 0 and up_limit > 0 and price >= up_limit - 1e-4 else 0.0,
+                })
+            if "is_limit_down" in requested:
+                writer.add({
+                    **common,
+                    "factor_name": "is_limit_down",
+                    "value": 1.0 if price > 0 and down_limit > 0 and price <= down_limit + 1e-4 else 0.0,
+                })
+
+    writer.flush()
+    report(1.0, "完成", rows_written=writer.written)
+    return {
+        "symbols": len(symbol_list),
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "as_of_time": timer_time,
+        "factor_names": sorted(requested),
+        "rows": writer.counts,
+        "rows_written": writer.written,
     }
 
 

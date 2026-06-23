@@ -32,7 +32,6 @@
       <el-alert
         v-if="loadError"
         type="warning"
-        :closable="false"
         class="result-alert"
         :title="`投研清单加载失败：${loadError}`"
       />

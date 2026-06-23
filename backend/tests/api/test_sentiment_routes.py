@@ -11,6 +11,7 @@ async def test_sentiment_routes_are_registered_and_validate_sources():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.get("/api/sentiment/summary/600519.SH?sources=reddit")
         overview_resp = await client.get("/api/sentiment/overview?sources=reddit")
+        threads_resp = await client.get("/api/sentiment/threads?sources=reddit")
 
     assert resp.status_code == 200
     assert resp.json()["code"] == 1
@@ -18,6 +19,9 @@ async def test_sentiment_routes_are_registered_and_validate_sources():
     assert overview_resp.status_code == 200
     assert overview_resp.json()["code"] == 1
     assert "unsupported sentiment source" in overview_resp.json()["message"]
+    assert threads_resp.status_code == 200
+    assert threads_resp.json()["code"] == 1
+    assert "unsupported sentiment source" in threads_resp.json()["message"]
 
 
 @pytest.mark.asyncio
@@ -34,7 +38,7 @@ async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
             "/api/sentiment/ingest/run",
             json={
                 "symbol": "600519.SH",
-                "sources": ["xueqiu", "nga"],
+                "sources": ["xueqiu", "eastmoney", "jisilu", "nga"],
                 "max_pages": 2,
                 "min_reply": 10,
             },
@@ -44,8 +48,8 @@ async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
     assert resp.json()["code"] == 0
     data = resp.json()["data"]
     assert data["status"] == "queued"
-    assert data["sources"] == ["xueqiu_spyder", "flocktrader"]
-    assert scheduled == [(data["task_id"], ["xueqiu_spyder", "flocktrader"])]
+    assert data["sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"]
+    assert scheduled == [(data["task_id"], ["xueqiu_spyder", "eastmoney_guba", "jisilu", "flocktrader"])]
     assert get_task(data["task_id"])["status"] == "queued"
 
 
@@ -77,6 +81,29 @@ async def test_sentiment_ingest_route_allows_flocktrader_without_symbol(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_sentiment_ingest_route_allows_jisilu_without_symbol(monkeypatch):
+    scheduled: list[tuple[str, list[str]]] = []
+
+    async def fake_schedule(task_id, request, sources):
+        assert request.symbol is None
+        scheduled.append((task_id, sources))
+
+    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/sentiment/ingest/run",
+            json={"sources": ["jisilu"], "max_pages": 1, "min_reply": 0},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+    data = resp.json()["data"]
+    assert data["sources"] == ["jisilu"]
+    assert scheduled == [(data["task_id"], ["jisilu"])]
+
+
+@pytest.mark.asyncio
 async def test_sentiment_ingest_route_requires_symbol_for_xueqiu():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         resp = await client.post(
@@ -87,6 +114,29 @@ async def test_sentiment_ingest_route_requires_symbol_for_xueqiu():
     assert resp.status_code == 200
     assert resp.json()["code"] == 1
     assert "requires a symbol" in resp.json()["message"]
+
+
+@pytest.mark.asyncio
+async def test_sentiment_ingest_route_allows_eastmoney_without_symbol(monkeypatch):
+    scheduled: list[tuple[str, list[str]]] = []
+
+    async def fake_schedule(task_id, request, sources):
+        assert request.symbol is None
+        scheduled.append((task_id, sources))
+
+    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/sentiment/ingest/run",
+            json={"sources": ["eastmoney_guba"], "max_pages": 1, "min_reply": 0},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+    data = resp.json()["data"]
+    assert data["sources"] == ["eastmoney_guba"]
+    assert scheduled == [(data["task_id"], ["eastmoney_guba"])]
 
 
 @pytest.mark.asyncio

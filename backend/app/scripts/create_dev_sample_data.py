@@ -578,6 +578,16 @@ def _copy_sqlite_sample(
             suffix=f"ORDER BY published_at DESC LIMIT {max_meta_rows}",
         )
 
+    if _table_exists(src, "sentiment_threads"):
+        counts["sentiment_threads"] = _copy_rows(
+            src,
+            dst,
+            "sentiment_threads",
+            where="last_reply_at IS NULL OR date(last_reply_at) >= ?",
+            params=[(start_date - timedelta(days=30)).isoformat()],
+            suffix=f"ORDER BY COALESCE(last_reply_at, published_at) DESC LIMIT {max_meta_rows}",
+        )
+
     dst.execute(
         """
         CREATE TABLE IF NOT EXISTS dev_sample_manifest (

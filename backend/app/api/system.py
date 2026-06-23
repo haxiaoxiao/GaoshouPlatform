@@ -1,6 +1,8 @@
 # backend/app/api/system.py
 import asyncio
+import os
 from datetime import date, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -33,6 +35,20 @@ class DevDataModeUpdate(BaseModel):
     acknowledge_warning: bool = False
 
 
+class LiveTradingGuardrailsUpdate(BaseModel):
+    enable_order_submit: bool
+    auto_execute_enabled: bool
+    acknowledge_risk: bool = False
+    confirm_text: str | None = None
+
+
+LIVE_TRADING_CONFIRM_TEXT = "ENABLE LIVE TRADING"
+LIVE_TRADING_GUARDRAIL_KEYS = {
+    "enable_order_submit": ("LIVE_TRADING_ENABLE_ORDER_SUBMIT", "live_trading_enable_order_submit"),
+    "auto_execute_enabled": ("LIVE_TRADING_AUTO_EXECUTE_ENABLED", "live_trading_auto_execute_enabled"),
+}
+
+
 def _iso_or_none(value: Any) -> str | None:
     if value is None:
         return None
@@ -61,6 +77,73 @@ def _freshness_status(latest_date: str | None, *, max_good_days: int) -> str:
     if age_days <= max_good_days:
         return "good"
     return "stale"
+
+
+def _env_bool_text(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _live_trading_guardrail_env_path() -> Path:
+    return settings.base_dir / ".env.local"
+
+
+def _read_env_value(path: Path, key: str) -> str | None:
+    if not path.exists():
+        return None
+    value: str | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        text = line.strip()
+        if not text or text.startswith("#") or "=" not in text:
+            continue
+        current_key, raw_value = text.split("=", 1)
+        if current_key.strip() == key:
+            value = raw_value.strip()
+    return value
+
+
+def _write_env_values(path: Path, updates: dict[str, bool]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing_lines = path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    remaining = set(updates)
+    output: list[str] = []
+
+    for line in existing_lines:
+        text = line.strip()
+        if text and not text.startswith("#") and "=" in text:
+            key = text.split("=", 1)[0].strip()
+            if key in updates:
+                output.append(f"{key}={_env_bool_text(updates[key])}")
+                remaining.discard(key)
+                continue
+        output.append(line)
+
+    if remaining:
+        if output and output[-1].strip():
+            output.append("")
+        output.append("# Live trading guardrails. Keep false unless production trading is intentionally armed.")
+        for key in LIVE_TRADING_GUARDRAIL_KEYS.values():
+            env_key = key[0]
+            if env_key in remaining:
+                output.append(f"{env_key}={_env_bool_text(updates[env_key])}")
+
+    path.write_text("\n".join(output).rstrip() + "\n", encoding="utf-8")
+
+
+def _live_trading_guardrails_payload() -> dict[str, Any]:
+    env_path = _live_trading_guardrail_env_path()
+    env_values = {
+        env_key: _read_env_value(env_path, env_key)
+        for env_key, _settings_attr in LIVE_TRADING_GUARDRAIL_KEYS.values()
+    }
+    return {
+        "enable_order_submit": bool(settings.live_trading_enable_order_submit),
+        "auto_execute_enabled": bool(settings.live_trading_auto_execute_enabled),
+        "env_file": str(env_path),
+        "env_values": env_values,
+        "requires_restart": False,
+        "confirm_text": LIVE_TRADING_CONFIRM_TEXT,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
 
 
 def _summary_item(
@@ -474,6 +557,45 @@ async def update_dev_data_mode(payload: DevDataModeUpdate):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return dev_data_mode_payload()
+
+
+@router.get("/live-trading-guardrails")
+async def get_live_trading_guardrails():
+    """Return live trading kill switches used by the production runner."""
+    return _live_trading_guardrails_payload()
+
+
+@router.put("/live-trading-guardrails")
+async def update_live_trading_guardrails(payload: LiveTradingGuardrailsUpdate):
+    """Persist live trading guardrails and update this process immediately."""
+    current = _live_trading_guardrails_payload()
+    turning_on = (
+        (payload.enable_order_submit and not current["enable_order_submit"])
+        or (payload.auto_execute_enabled and not current["auto_execute_enabled"])
+    )
+    if payload.auto_execute_enabled and not payload.enable_order_submit:
+        raise HTTPException(
+            status_code=400,
+            detail="LIVE_TRADING_AUTO_EXECUTE_ENABLED=true requires LIVE_TRADING_ENABLE_ORDER_SUBMIT=true",
+        )
+    if turning_on and (
+        not payload.acknowledge_risk
+        or (payload.confirm_text or "").strip() != LIVE_TRADING_CONFIRM_TEXT
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Enabling live trading guardrails requires confirm_text={LIVE_TRADING_CONFIRM_TEXT!r}",
+        )
+
+    desired = {
+        "LIVE_TRADING_ENABLE_ORDER_SUBMIT": payload.enable_order_submit,
+        "LIVE_TRADING_AUTO_EXECUTE_ENABLED": payload.auto_execute_enabled,
+    }
+    _write_env_values(_live_trading_guardrail_env_path(), desired)
+    os.environ.update({key: _env_bool_text(value) for key, value in desired.items()})
+    settings.live_trading_enable_order_submit = payload.enable_order_submit
+    settings.live_trading_auto_execute_enabled = payload.auto_execute_enabled
+    return _live_trading_guardrails_payload()
 
 
 @router.get("/cache")

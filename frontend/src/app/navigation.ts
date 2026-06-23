@@ -9,6 +9,7 @@ export interface ContextRow {
 
 export interface ContextBlock {
   title: string
+  action?: string
   rows: ContextRow[]
 }
 

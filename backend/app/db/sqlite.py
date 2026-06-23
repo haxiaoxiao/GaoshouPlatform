@@ -65,6 +65,10 @@ async def init_db():
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_financial_data_ann_date ON financial_data (ann_date)"
         )
+        await conn.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_live_equity_snapshots_profile_mode_date "
+            "ON live_equity_snapshots (profile_key, mode, trade_date)"
+        )
 
 
 async def get_async_session() -> AsyncGenerator[AsyncSession, None]:

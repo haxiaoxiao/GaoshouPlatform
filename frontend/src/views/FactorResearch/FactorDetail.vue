@@ -135,7 +135,6 @@
       v-if="prepareMessage"
       :title="prepareMessage"
       type="warning"
-      :closable="false"
       show-icon
     />
 
