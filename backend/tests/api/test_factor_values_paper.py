@@ -147,6 +147,45 @@ async def test_group_precompute_expands_independent_ashare_30_group(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_group_precompute_expands_main_factor_selection_group(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_execute_factor_bundle(*, task_id, factor_names, start_date, end_date, symbols, index_symbol, params):
+        captured["factor_names"] = list(factor_names)
+        captured["symbols"] = list(symbols or [])
+        return {
+            "rows": {name: 1 for name in factor_names},
+            "rows_written": len(factor_names),
+        }
+
+    monkeypatch.setattr(factor_values_api, "_execute_factor_bundle", fake_execute_factor_bundle)
+    monkeypatch.setattr(factor_values_api, "_safe_attach_result_coverage", lambda *args, **kwargs: None)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/factor-values/groups/precompute",
+            json={
+                "group_name": "main_factor_selection_20260623",
+                "start_date": "2024-01-02",
+                "end_date": "2024-01-03",
+                "symbols": ["000001.SZ"],
+                "params": {},
+            },
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert captured["factor_names"] == [
+        "semibeta_downside_avoid_252",
+        "balance_sheet_quality_value_pit",
+        "growth_duration_proxy_pit",
+        "paper_growth_quality_score",
+        "elasticity_amount_resilience_20d",
+    ]
+    assert data["rows_written"] == 5
+
+
+@pytest.mark.asyncio
 async def test_param_hashes_endpoint_returns_cached_hashes(monkeypatch) -> None:
     captured: dict[str, object] = {}
 

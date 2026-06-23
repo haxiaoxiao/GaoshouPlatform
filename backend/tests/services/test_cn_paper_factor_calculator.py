@@ -199,6 +199,8 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
             "asset_backed_value_proxy_pit",
             "growth_duration_proxy_pit",
             "garp_duration_proxy_pit",
+            "earnings_revenue_accel_pit",
+            "earnings_surprise_combo_pit",
             "elasticity_amount_resilience_20d",
             "jump_intraday_tail_20d",
             "limit_ecology_quality_combo",
@@ -229,6 +231,8 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
     assert result["rows"]["paper_asset_allocation_proxy"] > 0
     assert result["rows"]["semibeta_downside_avoid_252"] > 0
     assert result["rows"]["balance_sheet_quality_value_pit"] > 0
+    assert result["rows"]["earnings_revenue_accel_pit"] > 0
+    assert result["rows"]["earnings_surprise_combo_pit"] > 0
     assert result["rows"]["elasticity_amount_resilience_20d"] > 0
     assert result["rows"]["limit_ecology_quality_combo"] > 0
     assert result["rows"]["low_idio_vol_60"] > 0
@@ -241,6 +245,8 @@ def test_precompute_cn_paper_daily_factors(monkeypatch) -> None:
         "paper_industry_momentum_20d",
         "semibeta_upside_capture_252",
         "growth_duration_proxy_pit",
+        "earnings_revenue_accel_pit",
+        "earnings_surprise_combo_pit",
         "limit_ecology_quality_combo",
         "momentum_120_skip20",
     })

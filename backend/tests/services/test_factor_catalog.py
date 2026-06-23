@@ -66,6 +66,8 @@ def test_catalog_groups_are_exposed() -> None:
     assert "tsmf_research_factor_library" in groups
     assert "tsmf_preferred_rotation_pool" in groups
     assert "independent_ashare_30_20260618" in groups
+    assert "main_factor_selection_20260623" in groups
+    assert "main_factor_auxiliary_20260623" in groups
     assert get_factor_definition("ta_rsi_14")["source"] == "catalog.ta_lib"
     assert get_factor_definition("alpha101_001")["source"] == "catalog.alpha101"
     assert get_factor_definition("research_low_beta")["source"] == "catalog.research"
@@ -75,6 +77,8 @@ def test_catalog_groups_are_exposed() -> None:
     assert get_factor_definition("paper_size_rotation_score")["source"] == "catalog.cn_paper"
     assert get_factor_definition("tsmf_recent_effective_score")["source"] == "catalog.cn_paper"
     assert get_factor_definition("semibeta_downside_avoid_252")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("earnings_revenue_accel_pit")["source"] == "catalog.cn_paper"
+    assert get_factor_definition("earnings_surprise_combo_pit")["source"] == "catalog.cn_paper"
     assert get_factor_definition("limit_ecology_quality_combo")["source"] == "catalog.cn_paper"
     assert get_factor_definition("trend_support")["data_policy"]["alias_of"] == "paper_trend_fund_support"
     assert get_factor_definition("avoid_high_volume_ratio")["source"] == "parquet"
@@ -104,6 +108,19 @@ def test_independent_ashare_30_factor_group_is_exposed() -> None:
     assert "high_volume_signal" in group["factor_names"]
     assert group["direction_hints"]["semibeta_upside_capture_252"] == "high"
     assert group["direction_hints"]["balance_sheet_quality_value_pit"] == "low"
+
+
+def test_main_factor_selection_20260623_group_is_exposed() -> None:
+    groups = {item["name"]: item for item in list_factor_groups()}
+    main = groups["main_factor_selection_20260623"]
+    auxiliary = groups["main_factor_auxiliary_20260623"]
+
+    assert len(main["factor_names"]) == 5
+    assert main["weights"]["semibeta_downside_avoid_252"] == 0.25
+    assert main["direction_hints"]["growth_duration_proxy_pit"] == "high"
+    assert "earnings_surprise_combo_pit" in auxiliary["factor_names"]
+    assert auxiliary["direction_hints"]["earnings_revenue_accel_pit"] == "low"
+    assert auxiliary["direction_hints"]["earnings_surprise_combo_pit"] == "high"
 
 
 def test_cn_paper_manifest_covers_all_report_rows() -> None:

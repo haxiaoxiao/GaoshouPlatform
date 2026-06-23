@@ -285,6 +285,9 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
             "total_equity",
             "quarter_revenue_yoy",
             "quarter_profit_yoy",
+            "revenue_accel",
+            "profit_accel",
+            "roe_yoy_change",
             "equity_to_assets",
             "debt_ratio",
             "net_margin",
@@ -330,11 +333,12 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
         financial_frame["net_profit"],
         financial_frame["net_profit"] - financial_frame["prev_profit_cum"],
     )
-    lag = financial_frame[["symbol", "period_id", "quarter_revenue", "quarter_profit"]].copy()
+    lag = financial_frame[["symbol", "period_id", "quarter_revenue", "quarter_profit", "roe"]].copy()
     lag["period_id"] = lag["period_id"] + 4
     lag = lag.rename(columns={
         "quarter_revenue": "quarter_revenue_lag4",
         "quarter_profit": "quarter_profit_lag4",
+        "roe": "roe_lag4",
     })
     financial_frame = financial_frame.merge(lag, on=["symbol", "period_id"], how="left")
     financial_frame["quarter_revenue_yoy"] = (
@@ -343,6 +347,9 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
     financial_frame["quarter_profit_yoy"] = (
         financial_frame["quarter_profit"] - financial_frame["quarter_profit_lag4"]
     ) / financial_frame["quarter_profit_lag4"].abs().replace(0, np.nan)
+    financial_frame["revenue_accel"] = financial_frame.groupby("symbol", sort=False)["quarter_revenue_yoy"].diff()
+    financial_frame["profit_accel"] = financial_frame.groupby("symbol", sort=False)["quarter_profit_yoy"].diff()
+    financial_frame["roe_yoy_change"] = financial_frame["roe"] - financial_frame["roe_lag4"]
     financial_frame["equity_to_assets"] = _safe_ratio(financial_frame["total_equity"], financial_frame["total_assets"])
     financial_frame["debt_ratio"] = _safe_ratio(financial_frame["total_liability"], financial_frame["total_assets"])
     financial_frame["net_margin"] = _safe_ratio(financial_frame["net_profit"], financial_frame["revenue"])
@@ -350,6 +357,9 @@ def _align_financial_asof(daily: pd.DataFrame, financial: pd.DataFrame) -> pd.Da
     for column in (
         "quarter_revenue_yoy",
         "quarter_profit_yoy",
+        "revenue_accel",
+        "profit_accel",
+        "roe_yoy_change",
         "equity_to_assets",
         "debt_ratio",
         "net_margin",
@@ -587,6 +597,8 @@ def _compute_daily_factor(frame: pd.DataFrame, factor_name: str) -> pd.Series:
         "balance_sheet_quality_value_pit",
         "growth_duration_proxy_pit",
         "garp_duration_proxy_pit",
+        "earnings_revenue_accel_pit",
+        "earnings_surprise_combo_pit",
     }:
         pb = _numeric_column(frame, "pb")
         roe = _numeric_column(frame, "roe")
@@ -600,6 +612,9 @@ def _compute_daily_factor(frame: pd.DataFrame, factor_name: str) -> pd.Series:
         net_margin = _numeric_column(frame, "net_margin").fillna(_safe_ratio(net_profit, revenue))
         revenue_growth = _numeric_column(frame, "quarter_revenue_yoy").fillna(_numeric_column(frame, "revenue_yoy"))
         profit_growth = _numeric_column(frame, "quarter_profit_yoy").fillna(_numeric_column(frame, "profit_yoy"))
+        revenue_accel = _numeric_column(frame, "revenue_accel")
+        profit_accel = _numeric_column(frame, "profit_accel")
+        roe_yoy_change = _numeric_column(frame, "roe_yoy_change")
 
         rank_low_pb = _cs_rank(pb, dates).rsub(1.0)
         rank_high_pb = _cs_rank(pb, dates)
@@ -617,7 +632,15 @@ def _compute_daily_factor(frame: pd.DataFrame, factor_name: str) -> pd.Series:
             return pd.concat([rank_low_pb, rank_equity_to_assets, rank_low_debt, rank_net_margin], axis=1).mean(axis=1, skipna=True)
         if factor_name == "growth_duration_proxy_pit":
             return pd.concat([rank_revenue_yoy, rank_profit_yoy, rank_high_pb], axis=1).mean(axis=1, skipna=True)
-        return (growth_rank - rank_high_pb).where(growth_rank.notna())
+        if factor_name == "garp_duration_proxy_pit":
+            return (growth_rank - rank_high_pb).where(growth_rank.notna())
+        if factor_name == "earnings_revenue_accel_pit":
+            return revenue_accel
+        return pd.concat([
+            _cs_rank(revenue_accel, dates),
+            _cs_rank(profit_accel, dates),
+            _cs_rank(roe_yoy_change, dates),
+        ], axis=1).mean(axis=1, skipna=True)
 
     if factor_name == "paper_overnight_turnover_corr":
         overnight = (open_price / prev_close.replace(0, np.nan) - 1.0).abs()

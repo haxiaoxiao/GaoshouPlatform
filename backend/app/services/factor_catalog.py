@@ -521,6 +521,36 @@ CN_PAPER_FACTOR_SPECS: dict[str, dict[str, Any]] = {
         "frequency": "monthly",
         "data_policy": {"selection_direction": "low", "evidence": "independent_factor_mining_20260618"},
     },
+    "earnings_revenue_accel_pit": {
+        "label": "Earnings Revenue Acceleration PIT",
+        "category": "independent_earnings_pit",
+        "dependencies": [
+            "financial_data.revenue",
+            "financial_data.net_profit",
+            "financial_data.roe",
+        ],
+        "description": "Point-in-time single-quarter revenue YoY acceleration from announced financial statements.",
+        "lookback": 730,
+        "formula": "diff((quarter_revenue - quarter_revenue_lag4) / abs(quarter_revenue_lag4)) by symbol",
+        "human_description": "Earnings-watch proxy that measures acceleration in single-quarter revenue growth using announcement-date PIT alignment.",
+        "frequency": "monthly",
+        "data_policy": {"selection_direction": "low", "evidence": "event_limited_candidate_factors_20260623"},
+    },
+    "earnings_surprise_combo_pit": {
+        "label": "Earnings Surprise Combo PIT",
+        "category": "independent_earnings_pit",
+        "dependencies": [
+            "financial_data.revenue",
+            "financial_data.net_profit",
+            "financial_data.roe",
+        ],
+        "description": "Point-in-time earnings surprise proxy from revenue acceleration, profit acceleration and ROE YoY change ranks.",
+        "lookback": 730,
+        "formula": "mean(rank(revenue_accel), rank(profit_accel), rank(roe - roe_lag4))",
+        "human_description": "Low-consensus earnings surprise proxy that blends revenue acceleration, profit acceleration and ROE improvement after PIT announcement alignment.",
+        "frequency": "monthly",
+        "data_policy": {"selection_direction": "high", "evidence": "event_limited_candidate_factors_20260623"},
+    },
     "semibeta_downside_avoid_252": {
         "label": "Semi-Beta Downside Avoid 252D",
         "category": "independent_daily_risk",
@@ -1113,6 +1143,58 @@ INDEPENDENT_ASHARE_30_20260618_DIRECTIONS: dict[str, str] = {
     "momentum_120_skip20": "low",
 }
 
+MAIN_FACTOR_SELECTION_20260623_FACTOR_NAMES: list[str] = [
+    "semibeta_downside_avoid_252",
+    "balance_sheet_quality_value_pit",
+    "growth_duration_proxy_pit",
+    "paper_growth_quality_score",
+    "elasticity_amount_resilience_20d",
+]
+
+MAIN_FACTOR_SELECTION_20260623_WEIGHTS: dict[str, float] = {
+    "semibeta_downside_avoid_252": 0.25,
+    "balance_sheet_quality_value_pit": 0.20,
+    "growth_duration_proxy_pit": 0.20,
+    "paper_growth_quality_score": 0.20,
+    "elasticity_amount_resilience_20d": 0.15,
+}
+
+MAIN_FACTOR_SELECTION_20260623_DIRECTIONS: dict[str, str] = {
+    "semibeta_downside_avoid_252": "low",
+    "balance_sheet_quality_value_pit": "low",
+    "growth_duration_proxy_pit": "high",
+    "paper_growth_quality_score": "high",
+    "elasticity_amount_resilience_20d": "high",
+}
+
+MAIN_FACTOR_AUXILIARY_20260623_FACTOR_NAMES: list[str] = [
+    "paper_composite_value",
+    "paper_defensive_quality_lowvol",
+    "intraday_shape_composite",
+    "jump_intraday_tail_20d",
+    "overnight_momentum_20",
+    "paper_reversal_20d",
+    "paper_value_growth_rotation_score",
+    "garp_duration_proxy_pit",
+    "earnings_revenue_accel_pit",
+    "earnings_surprise_combo_pit",
+    "trend_support",
+]
+
+MAIN_FACTOR_AUXILIARY_20260623_DIRECTIONS: dict[str, str] = {
+    "paper_composite_value": "low",
+    "paper_defensive_quality_lowvol": "low",
+    "intraday_shape_composite": "low",
+    "jump_intraday_tail_20d": "low",
+    "overnight_momentum_20": "high",
+    "paper_reversal_20d": "low",
+    "paper_value_growth_rotation_score": "low",
+    "garp_duration_proxy_pit": "low",
+    "earnings_revenue_accel_pit": "low",
+    "earnings_surprise_combo_pit": "high",
+    "trend_support": "high",
+}
+
 
 CATALOG_GROUPS: dict[str, dict[str, Any]] = {
     "ta_lib_core": {
@@ -1179,6 +1261,32 @@ CATALOG_GROUPS: dict[str, dict[str, Any]] = {
         "factor_names": INDEPENDENT_ASHARE_30_20260618_FACTOR_NAMES,
         "direction_hints": INDEPENDENT_ASHARE_30_20260618_DIRECTIONS,
         "source_report": "E:/Projects/TheLandsBetween/wiki/05 综合/2026-06-18 - 30个逻辑独立A股因子挖掘验证.md",
+    },
+    "main_factor_selection_20260623": {
+        "name": "main_factor_selection_20260623",
+        "display_name": "五主因子策略候选集 2026-06-23",
+        "description": (
+            "The five main A-share factors selected from the 2026-06-23 Q2 "
+            "factor trend study. Weights are the proxy-composite weights from "
+            "the local QuantaAlpha selection note."
+        ),
+        "factor_names": MAIN_FACTOR_SELECTION_20260623_FACTOR_NAMES,
+        "direction_hints": MAIN_FACTOR_SELECTION_20260623_DIRECTIONS,
+        "weights": MAIN_FACTOR_SELECTION_20260623_WEIGHTS,
+        "auxiliary_group": "main_factor_auxiliary_20260623",
+        "source_report": "E:/Projects/data/BaiduSyncdisk/TheLandsBetween/wiki/04 主题/策略研究/2026-06-23 - 五主因子策略候选集.md",
+    },
+    "main_factor_auxiliary_20260623": {
+        "name": "main_factor_auxiliary_20260623",
+        "display_name": "五主因子辅助观察池 2026-06-23",
+        "description": (
+            "Auxiliary factors retained for monitoring, redundancy checks and "
+            "future strategy fusion around the 2026-06-23 five-main-factor set."
+        ),
+        "factor_names": MAIN_FACTOR_AUXILIARY_20260623_FACTOR_NAMES,
+        "direction_hints": MAIN_FACTOR_AUXILIARY_20260623_DIRECTIONS,
+        "parent_group": "main_factor_selection_20260623",
+        "source_report": "E:/Projects/data/BaiduSyncdisk/TheLandsBetween/wiki/04 主题/策略研究/2026-06-23 - 五主因子策略候选集.md",
     },
     "cn_paper_fundamental": {
         "name": "cn_paper_fundamental",
