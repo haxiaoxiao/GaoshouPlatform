@@ -1,6 +1,6 @@
 import request from './request'
 
-export type SentimentSource = 'xueqiu_spyder' | 'eastmoney_guba' | 'taoguba' | 'tieba_stock' | 'jisilu' | 'wechat_sogou' | 'flocktrader'
+export type SentimentSource = 'xueqiu_spyder' | 'eastmoney_guba' | 'taoguba' | 'tieba_stock' | 'laohu8_stock' | 'jisilu' | 'wechat_sogou' | 'flocktrader'
 
 export interface SentimentOverviewSource {
   source: SentimentSource

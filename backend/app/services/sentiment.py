@@ -25,7 +25,7 @@ from app.db.models.sentiment import SentimentPost, SentimentThread
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader")
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader")
 CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
@@ -46,6 +46,11 @@ SOURCE_ALIASES = {
     "baidu_tieba": "tieba_stock",
     "百度贴吧": "tieba_stock",
     "贴吧": "tieba_stock",
+    "laohu8": "laohu8_stock",
+    "laohu8_stock": "laohu8_stock",
+    "tiger": "laohu8_stock",
+    "tiger_community": "laohu8_stock",
+    "老虎社区": "laohu8_stock",
     "jisilu": "jisilu",
     "jsl": "jisilu",
     "集思录": "jisilu",
@@ -67,6 +72,7 @@ LEGACY_SOURCE_NAMES = {
     "eastmoney_guba": {"eastmoney_guba"},
     "taoguba": {"taoguba"},
     "tieba_stock": {"tieba_stock"},
+    "laohu8_stock": {"laohu8_stock"},
     "jisilu": {"jisilu"},
     "wechat_sogou": {"wechat_sogou"},
     "flocktrader": {"nga", "flocktrader"},
@@ -112,6 +118,15 @@ DEFAULT_TIEBA_STOCK_BARS = (
     "A股",
     "炒股",
     "涨停板",
+)
+DEFAULT_LAOHU8_STOCK_SYMBOLS = (
+    "600519.SH",
+    "300750.SZ",
+    "300059.SZ",
+    "601318.SH",
+    "000001.SZ",
+    "688256.SH",
+    "002594.SZ",
 )
 
 
@@ -637,6 +652,133 @@ def _parse_tieba_stock_threads(payload: dict[str, Any], *, bar: str, page: int =
                 "forum_name": forum_name,
                 "page": page,
                 "url": f"https://tieba.baidu.com/p/{tid}",
+            }
+        )
+    return rows
+
+
+def _laohu8_stock_symbol_values(symbol: str | None = None) -> list[str]:
+    if symbol:
+        return [normalize_sentiment_symbol(symbol)]
+    raw = _config_value("LAOHU8_STOCK_SYMBOLS", "laohu8_stock_symbols", "")
+    values = re.split(r"[,;，；、\n]+", raw) if raw else list(DEFAULT_LAOHU8_STOCK_SYMBOLS)
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        try:
+            item = normalize_sentiment_symbol(text)
+        except ValueError:
+            item = normalize_security_symbol(text, _infer_market_from_code(text)) or text
+        if item and "." in item and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+def _laohu8_stock_url(symbol: str) -> str:
+    code = normalize_sentiment_symbol(symbol).split(".", 1)[0]
+    return f"https://www.laohu8.com/stock/{code}"
+
+
+def _laohu8_headers(referer: str = "https://www.laohu8.com/community") -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": referer,
+    }
+    cookie = _config_value("LAOHU8_COOKIE", "laohu8_cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _fetch_laohu8_stock_html(symbol: str) -> str:
+    url = _laohu8_stock_url(symbol)
+    response = requests.get(url, headers=_laohu8_headers(), timeout=20)
+    response.raise_for_status()
+    text = response.text
+    if "人机验证" in text or "captcha" in text.lower():
+        raise RuntimeError("Laohu8 returned a verification page; configure LAOHU8_COOKIE or retry later")
+    return text
+
+
+def _laohu8_clean_text(value: str | None) -> str:
+    text = str(value or "")
+    text = re.sub(r"<script\b.*?</script>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<style\b.*?</style>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<svg\b.*?</svg>", " ", text, flags=re.I | re.S)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _parse_laohu8_time(value: str | None, *, now: datetime | None = None) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    now = now or datetime.now()
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d", "%m-%d %H:%M"):
+        try:
+            parsed = datetime.strptime(text, fmt)
+            if fmt.startswith("%m"):
+                parsed = parsed.replace(year=now.year)
+                if parsed.date() > now.date() + timedelta(days=1):
+                    parsed = parsed.replace(year=now.year - 1)
+            return parsed
+        except ValueError:
+            continue
+    return _parse_datetime(text)
+
+
+def _parse_laohu8_stock_posts(html_text: str, *, symbol: str) -> list[dict[str, Any]]:
+    normalized_symbol = normalize_sentiment_symbol(symbol)
+    chunks = re.split(r'<div class="tweet-item-root[^"]*">', html_text)
+    rows: list[dict[str, Any]] = []
+    for chunk in chunks[1:]:
+        link_match = re.search(r'<a\b(?=[^>]*class="[^"]*\btweet-link\b[^"]*")(?P<attrs>[^>]*)>', chunk, flags=re.I | re.S)
+        if not link_match:
+            continue
+        attrs = link_match.group("attrs")
+        href_match = re.search(r'href="(?P<href>[^"]+)"', attrs)
+        href = html.unescape(href_match.group("href")) if href_match else ""
+        post_id_match = re.search(r"/post/(?P<id>\d+)", href)
+        if not post_id_match:
+            continue
+        title_attr = re.search(r'title="(?P<title>[^"]*)"', attrs)
+        title_html = title_attr.group("title") if title_attr else ""
+        if not title_html:
+            title_match = re.search(r'<h3\b[^>]*class="[^"]*\btweet-title\b[^"]*"[^>]*>(?P<title>.*?)</h3>', chunk, flags=re.I | re.S)
+            title_html = title_match.group("title") if title_match else ""
+        author_match = re.search(
+            r'<a\b[^>]*class="[^"]*\btweet-author\b[^"]*"[^>]*?(?:title="(?P<title>[^"]*)")?[^>]*>.*?<span>(?P<span>.*?)</span>',
+            chunk,
+            flags=re.I | re.S,
+        )
+        time_match = re.search(r'<div\b[^>]*class="[^"]*\bpublish-time\b[^"]*"[^>]*>(?P<time>.*?)</div>', chunk, flags=re.I | re.S)
+        view_match = re.search(r'<div\b[^>]*class="[^"]*\bview-count\b[^"]*"[^>]*>(?P<views>.*?)</div>', chunk, flags=re.I | re.S)
+        content = _laohu8_clean_text(chunk)
+        title = _laohu8_clean_text(title_html)
+        author = ""
+        if author_match:
+            author = _laohu8_clean_text(author_match.group("title") or author_match.group("span"))
+        published_at = _parse_laohu8_time(_laohu8_clean_text(time_match.group("time")) if time_match else None)
+        reply_match = re.search(r"回复\s*(?P<count>\d+)?", content)
+        reply_count = _to_int(reply_match.group("count") if reply_match else None)
+        url = urljoin("https://www.laohu8.com/", href)
+        rows.append(
+            {
+                "source_thread_id": post_id_match.group("id"),
+                "post_id": post_id_match.group("id"),
+                "title": title,
+                "content": content,
+                "author": author,
+                "published_at": published_at.isoformat() if published_at else None,
+                "url": url,
+                "reply_count": reply_count,
+                "view_count": _to_int(re.sub(r"[^\d]", "", _laohu8_clean_text(view_match.group("views")) if view_match else "")),
+                "stock_codes": [normalized_symbol],
             }
         )
     return rows
@@ -1797,6 +1939,25 @@ class SentimentIngestService:
                 "page_url": "https://tieba.baidu.com/mg/f/getFrsData",
                 **tieba_stats,
             }
+        elif source == "laohu8_stock":
+            symbols = _laohu8_stock_symbol_values(symbol)
+            posts, threads, laohu8_stats = await asyncio.to_thread(
+                self._collect_laohu8_stock,
+                symbols,
+                0,
+                start_date,
+                end_date,
+            )
+            threads_upserted = await self.service.upsert_threads(threads)
+            stats = {
+                "mode": "stock_pages",
+                "collected": laohu8_stats["collected"],
+                "matched": len(posts),
+                "threads_upserted": threads_upserted,
+                "page_url": "https://www.laohu8.com/stock/{code}",
+                "min_reply_applied": 0,
+                **laohu8_stats,
+            }
         elif source == "jisilu":
             aliases: list[str] | None = None
             stock_aliases = await self._load_stock_aliases() if not symbol else None
@@ -2274,6 +2435,100 @@ class SentimentIngestService:
         return [post for post in normalized if post.source_post_id], threads, {
             "collected": raw_count,
             "bars": bar_rows,
+        }
+
+    def _collect_laohu8_stock(
+        self,
+        symbols: list[str],
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], list[SentimentThreadInput], dict[str, Any]]:
+        normalized: list[SentimentPostInput] = []
+        threads: list[SentimentThreadInput] = []
+        raw_count = 0
+        symbol_rows: list[dict[str, Any]] = []
+        seen_posts: set[tuple[str, str]] = set()
+        self._emit_progress(
+            "laohu8_stock.symbol_plan",
+            source="laohu8_stock",
+            current_step="symbol_plan",
+            symbol_count=len(symbols),
+        )
+        for symbol_index, symbol in enumerate(symbols, start=1):
+            normalized_symbol = normalize_sentiment_symbol(symbol)
+            self._emit_progress(
+                "laohu8_stock.page_fetch",
+                source="laohu8_stock",
+                current_step="stock_page",
+                current_symbol=normalized_symbol,
+                current_page=symbol_index,
+                page_limit=len(symbols),
+                page_url=_laohu8_stock_url(normalized_symbol),
+            )
+            rows = _parse_laohu8_stock_posts(_fetch_laohu8_stock_html(normalized_symbol), symbol=normalized_symbol)
+            raw_count += len(rows)
+            matched_before = len(normalized)
+            thread_before = len(threads)
+            for raw in rows:
+                post_id = str(raw.get("source_thread_id") or "").strip()
+                if not post_id:
+                    continue
+                if _to_int(raw.get("reply_count")) < min_reply:
+                    continue
+                published_at = _parse_datetime(raw.get("published_at"))
+                if not _in_date_window(published_at, start_date, end_date):
+                    continue
+                text = _post_text(raw)
+                stock_codes = _extract_forum_post_symbols(raw)
+                if normalized_symbol not in stock_codes:
+                    stock_codes.append(normalized_symbol)
+                raw["stock_codes"] = stock_codes
+                raw["keywords"] = _nga_keywords(text, stock_codes)
+                score, label = _nga_sentiment(text)
+                raw["sentiment_score"] = score
+                raw["sentiment_label"] = label
+                thread = normalize_laohu8_stock_thread(raw)
+                if thread is not None:
+                    threads.append(thread)
+                post = normalize_laohu8_stock_data_post(raw, symbol=normalized_symbol)
+                if post is None:
+                    continue
+                dedupe_key = (post.symbol, post.source_post_id)
+                if dedupe_key in seen_posts:
+                    continue
+                seen_posts.add(dedupe_key)
+                normalized.append(post)
+            symbol_rows.append(
+                {
+                    "symbol": normalized_symbol,
+                    "raw_count": len(rows),
+                    "matched": len(normalized) - matched_before,
+                    "threads": len(threads) - thread_before,
+                }
+            )
+            self._emit_progress(
+                "laohu8_stock.page_parsed",
+                source="laohu8_stock",
+                current_step="stock_page",
+                current_symbol=normalized_symbol,
+                current_page=symbol_index,
+                page_limit=len(symbols),
+                rows_on_page=len(rows),
+                posts_collected=len(normalized),
+                threads_collected=len(threads),
+            )
+        self._emit_progress(
+            "laohu8_stock.done",
+            source="laohu8_stock",
+            current_step="done",
+            symbol_count=len(symbols),
+            posts_collected=len(normalized),
+            threads_collected=len(threads),
+        )
+        return [post for post in normalized if post.source_post_id], threads, {
+            "collected": raw_count,
+            "symbols": symbol_rows,
         }
 
     def _collect_jisilu(
@@ -3152,6 +3407,18 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "ready": True,
         }
 
+    if source == "laohu8_stock":
+        return {
+            "label": "老虎社区个股",
+            "project_dir": "https://www.laohu8.com/stock/{code}",
+            "project_ready": True,
+            "cookie_configured": bool(_config_value("LAOHU8_COOKIE", "laohu8_cookie").strip()),
+            "symbol_count_configured": len(_laohu8_stock_symbol_values()),
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
     if source == "jisilu":
         return {
             "label": "集思录股票",
@@ -3502,6 +3769,75 @@ def normalize_tieba_stock_thread(
         published_at=_parse_datetime(raw.get("published_at")),
         last_reply_at=_parse_datetime(raw.get("published_at")),
         url=str(raw.get("url") or f"https://tieba.baidu.com/p/{tid}"),
+        reply_count=reply_count,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        symbols=symbols,
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_laohu8_stock_data_post(
+    raw: dict[str, Any],
+    *,
+    symbol: str,
+) -> SentimentPostInput | None:
+    post_id = str(raw.get("source_thread_id") or raw.get("post_id") or "").strip()
+    if not post_id:
+        return None
+    symbol = normalize_sentiment_symbol(symbol)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentPostInput(
+        source="laohu8_stock",
+        source_post_id=f"{post_id}:{symbol}",
+        symbol=symbol,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or f"https://www.laohu8.com/post/{post_id}"),
+        reply_count=reply_count,
+        like_count=0,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_laohu8_stock_thread(raw: dict[str, Any]) -> SentimentThreadInput | None:
+    post_id = str(raw.get("source_thread_id") or raw.get("post_id") or "").strip()
+    if not post_id:
+        return None
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    symbols = _extract_forum_post_symbols(raw)
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    for symbol in symbols:
+        if symbol not in keywords:
+            keywords.append(symbol)
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentThreadInput(
+        source="laohu8_stock",
+        source_thread_id=post_id,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        last_reply_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or f"https://www.laohu8.com/post/{post_id}"),
         reply_count=reply_count,
         comment_count=reply_count,
         sentiment_score=score,

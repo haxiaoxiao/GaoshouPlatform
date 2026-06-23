@@ -121,6 +121,8 @@ class Settings(BaseSettings):
     taoguba_cookie: str = ""
     tieba_stock_bars: str = "股票,股市,A股,炒股,涨停板"
     tieba_cookie: str = ""
+    laohu8_stock_symbols: str = "600519.SH,300750.SZ,300059.SZ,601318.SH,000001.SZ,688256.SH,002594.SZ"
+    laohu8_cookie: str = ""
 
     # API 配置
     api_prefix: str = "/api"

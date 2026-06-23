@@ -38,7 +38,7 @@ async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
             "/api/sentiment/ingest/run",
             json={
                 "symbol": "600519.SH",
-                "sources": ["xueqiu", "eastmoney", "taoguba", "tieba", "jisilu", "wechat", "nga"],
+                "sources": ["xueqiu", "eastmoney", "taoguba", "tieba", "laohu8", "jisilu", "wechat", "nga"],
                 "max_pages": 2,
                 "min_reply": 10,
             },
@@ -48,8 +48,8 @@ async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
     assert resp.json()["code"] == 0
     data = resp.json()["data"]
     assert data["status"] == "queued"
-    assert data["sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"]
-    assert scheduled == [(data["task_id"], ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"])]
+    assert data["sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"]
+    assert scheduled == [(data["task_id"], ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"])]
     assert get_task(data["task_id"])["status"] == "queued"
 
 
@@ -183,6 +183,29 @@ async def test_sentiment_ingest_route_allows_tieba_without_symbol(monkeypatch):
     data = resp.json()["data"]
     assert data["sources"] == ["tieba_stock"]
     assert scheduled == [(data["task_id"], ["tieba_stock"])]
+
+
+@pytest.mark.asyncio
+async def test_sentiment_ingest_route_allows_laohu8_without_symbol(monkeypatch):
+    scheduled: list[tuple[str, list[str]]] = []
+
+    async def fake_schedule(task_id, request, sources):
+        assert request.symbol is None
+        scheduled.append((task_id, sources))
+
+    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/sentiment/ingest/run",
+            json={"sources": ["老虎社区"], "max_pages": 1, "min_reply": 0},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["code"] == 0
+    data = resp.json()["data"]
+    assert data["sources"] == ["laohu8_stock"]
+    assert scheduled == [(data["task_id"], ["laohu8_stock"])]
 
 
 @pytest.mark.asyncio

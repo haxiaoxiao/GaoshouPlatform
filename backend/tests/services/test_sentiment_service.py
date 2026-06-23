@@ -13,6 +13,7 @@ from app.services.sentiment import (
     SentimentPostInput,
     SentimentService,
     _inject_xueqiu_cookie,
+    _parse_laohu8_stock_posts,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
     _parse_taoguba_article_detail,
@@ -26,6 +27,8 @@ from app.services.sentiment import (
     normalize_eastmoney_guba_post,
     normalize_flocktrader_post,
     normalize_jisilu_data_post,
+    normalize_laohu8_stock_data_post,
+    normalize_laohu8_stock_thread,
     normalize_nga_data_post,
     normalize_nga_data_posts,
     normalize_nga_thread,
@@ -77,11 +80,12 @@ async def sentiment_session():
 
 def test_parse_sources_validates_supported_values():
     assert parse_sources("xueqiu,nga") == ["xueqiu_spyder", "flocktrader"]
-    assert parse_sources("xueqiu_spyder,eastmoney,taoguba,贴吧,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"]
+    assert parse_sources("xueqiu_spyder,eastmoney,taoguba,贴吧,老虎社区,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"]
     assert normalize_sentiment_source("xueqiu-spyder") == "xueqiu_spyder"
     assert normalize_sentiment_source("股吧") == "eastmoney_guba"
     assert normalize_sentiment_source("淘股吧") == "taoguba"
     assert normalize_sentiment_source("百度贴吧") == "tieba_stock"
+    assert normalize_sentiment_source("老虎社区") == "laohu8_stock"
     assert normalize_sentiment_source("集思录") == "jisilu"
     assert normalize_sentiment_source("公众号") == "wechat_sogou"
     with pytest.raises(ValueError):
@@ -287,6 +291,8 @@ async def test_sentiment_service_overview_counts_sources_and_runtime_status(sent
     assert rows["taoguba"]["ready"] is True
     assert rows["tieba_stock"]["ready"] is True
     assert rows["tieba_stock"]["bar_count"] >= 3
+    assert rows["laohu8_stock"]["ready"] is True
+    assert rows["laohu8_stock"]["symbol_count_configured"] >= 5
     assert rows["wechat_sogou"]["ready"] is True
     assert rows["wechat_sogou"]["account_count"] >= 10
     assert rows["flocktrader"]["ready"] is True
@@ -320,19 +326,20 @@ async def test_sentiment_ingest_service_run_many_combines_sources(sentiment_sess
     service.run = fake_run  # type: ignore[method-assign]
     result = await service.run_many("600519.SH")
 
-    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"]
-    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou"]
+    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"]
+    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou"]
     assert result["failed_sources"] == ["flocktrader"]
     assert result["all_succeeded"] is False
-    assert result["total_upserted"] == 12
+    assert result["total_upserted"] == 14
     assert result["results"][0]["ok"] is True
     assert result["results"][1]["ok"] is True
     assert result["results"][2]["ok"] is True
     assert result["results"][3]["ok"] is True
     assert result["results"][4]["ok"] is True
     assert result["results"][5]["ok"] is True
-    assert result["results"][6]["ok"] is False
-    assert "NGA cookie missing" in result["results"][6]["error"]
+    assert result["results"][6]["ok"] is True
+    assert result["results"][7]["ok"] is False
+    assert "NGA cookie missing" in result["results"][7]["error"]
 
 
 @pytest.mark.asyncio
@@ -875,6 +882,85 @@ async def test_collect_tieba_stock_matches_symbols_and_threads(sentiment_session
     assert len(threads) == 2
     assert [(post.source, post.symbol, post.source_post_id) for post in posts] == [
         ("tieba_stock", "600519.SH", "10813189797:600519.SH")
+    ]
+
+
+def test_parse_and_normalize_laohu8_stock_payload():
+    html = """
+    <div class="tweet-item-root">
+      <div class="tweet-content-container">
+        <header class="tweet-item-header">
+          <a class="tweet-author" href="/personal/1/" title="散户小虎"><span>散户小虎</span></a>
+          <div class="publish-time">06-23 16:47</div>
+        </header>
+        <div class="tweet-content"><div class="tweet-content-left">
+          <h3 class="tweet-title text-truncate">$贵州茅台(600519)$ 泡沫要破了</h3>
+          <div> $贵州茅台(600519)$ 泡沫要破了，还在努力喊韭菜接盘。</div>
+        </div></div>
+        <a href="/post/578335739913248" target="_blank" class="tweet-link stretched-link" title="$贵州茅台(600519)$ 泡沫要破了">详情</a>
+        <div class="action-bar"><div class="action-item">回复 2</div></div>
+      </div>
+    </div>
+    """
+
+    rows = _parse_laohu8_stock_posts(html, symbol="600519.SH")
+    raw = {
+        **rows[0],
+        "keywords": ["600519.SH"],
+        "sentiment_score": 0.0,
+        "sentiment_label": "bearish",
+    }
+    post = normalize_laohu8_stock_data_post(raw, symbol="600519.SH")
+    thread = normalize_laohu8_stock_thread(raw)
+
+    assert rows[0]["source_thread_id"] == "578335739913248"
+    assert rows[0]["author"] == "散户小虎"
+    assert rows[0]["reply_count"] == 2
+    assert post is not None
+    assert post.source == "laohu8_stock"
+    assert post.source_post_id == "578335739913248:600519.SH"
+    assert post.symbol == "600519.SH"
+    assert thread is not None
+    assert thread.source == "laohu8_stock"
+    assert thread.symbols == ["600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_collect_laohu8_stock_persists_symbol_page_posts(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    html = """
+    <div class="tweet-item-root">
+      <header class="tweet-item-header">
+        <a class="tweet-author" href="/personal/1/" title="散户小虎"><span>散户小虎</span></a>
+        <div class="publish-time">06-23 16:47</div>
+      </header>
+      <div class="tweet-content"><div class="tweet-content-left">
+        <h3 class="tweet-title">$贵州茅台(600519)$ 感觉低估</h3>
+        <div>$贵州茅台(600519)$ 感觉被低估了，看多反弹。</div>
+      </div></div>
+      <a href="/post/578335739913248" class="tweet-link stretched-link" title="$贵州茅台(600519)$ 感觉低估">详情</a>
+      <div class="action-bar"><div class="action-item">回复 1</div></div>
+    </div>
+    """
+    seen_symbols: list[str] = []
+
+    def fake_fetch(symbol: str) -> str:
+        seen_symbols.append(symbol)
+        return html
+
+    monkeypatch.setattr("app.services.sentiment._fetch_laohu8_stock_html", fake_fetch)
+    posts, threads, stats = service._collect_laohu8_stock(
+        ["600519.SH"],
+        min_reply=0,
+        start_date=date(2026, 6, 23),
+        end_date=date(2026, 6, 23),
+    )
+
+    assert seen_symbols == ["600519.SH"]
+    assert stats["collected"] == 1
+    assert len(threads) == 1
+    assert [(post.source, post.symbol, post.source_post_id) for post in posts] == [
+        ("laohu8_stock", "600519.SH", "578335739913248:600519.SH")
     ]
 
 
