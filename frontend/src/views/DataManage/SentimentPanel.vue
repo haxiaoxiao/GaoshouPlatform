@@ -4,7 +4,7 @@
       <div>
         <div class="eyebrow">DATA SENTIMENT</div>
         <h2>情绪数据模块</h2>
-        <p>把雪球、东财股吧、集思录、微信公众号搜索和 NGA 主题讨论统一进平台内的数据面板，按股票汇总、缓存和回看。</p>
+        <p>把雪球、东财股吧、淘股吧、集思录、微信公众号搜索和 NGA 主题讨论统一进平台内的数据面板，按股票汇总、缓存和回看。</p>
       </div>
       <div class="sentiment-actions">
         <el-button :icon="Refresh" :loading="isRefreshing" @click="reloadAll">刷新面板</el-button>
@@ -61,7 +61,7 @@
               />
             </el-select>
             <small class="field-hint">
-              {{ requiresSymbolForIngest ? '雪球抓取需要股票；东财热门吧、集思录、搜狗微信、NGA 可按全市场讨论抓取。' : '抓取东财热门吧、集思录、搜狗微信或 NGA 时这里可以留空。' }}
+              {{ requiresSymbolForIngest ? '雪球抓取需要股票；东财热门吧、淘股吧、集思录、搜狗微信、NGA 可按全市场讨论抓取。' : '抓取东财热门吧、淘股吧、集思录、搜狗微信或 NGA 时这里可以留空。' }}
             </small>
           </label>
 
@@ -339,6 +339,7 @@ interface StockOption {
 const sourceOptions: Array<{ value: SentimentSource; label: string }> = [
   { value: 'xueqiu_spyder', label: '雪球' },
   { value: 'eastmoney_guba', label: '东方财富股吧' },
+  { value: 'taoguba', label: '淘股吧' },
   { value: 'jisilu', label: '集思录股票' },
   { value: 'wechat_sogou', label: '搜狗微信' },
   { value: 'flocktrader', label: 'NGA' },

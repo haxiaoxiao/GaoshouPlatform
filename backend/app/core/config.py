@@ -115,7 +115,10 @@ class Settings(BaseSettings):
     nga_data_dir: str = str(_DATA_DIR / "sentiment" / "NGAdata")
     nga_board_fid: int = 706
     wechat_sogou_queries: str = "开盘啦 创始人 股票,开盘啦 A股 股票,龙虎榜 A股 游资,短线 A股 股票,涨停板 A股"
+    wechat_sogou_accounts: str = "陈小群周策略,余哥牛弹琴,佛总晚评,饭统戴老板,表舅是养基大户,奶员外,海里的小龙龙,小群知识营,投资明见,徐小明,天津股侠,王金生,小红帽爱股票,空空道人"
     wechat_sogou_cookie: str = ""
+    taoguba_blog_ids: str = "2577911:zarili,444409:湖南人,8186648:星辰趋势主升,13186975:主升龙头空空龙,7826561:玫瑰抓龙头,11255090:搞钱老兵,11520081:风一样的胖刺猬,6671396:亿百万实盘"
+    taoguba_cookie: str = ""
 
     # API 配置
     api_prefix: str = "/api"

@@ -15,7 +15,10 @@ from app.services.sentiment import (
     _inject_xueqiu_cookie,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
+    _parse_taoguba_article_detail,
+    _parse_taoguba_blog_articles,
     _parse_wechat_sogou_articles,
+    _wechat_sogou_queries,
     _post_mentions_symbol,
     _resolve_chrome_path,
     _verify_xueqiu_login,
@@ -26,6 +29,8 @@ from app.services.sentiment import (
     normalize_nga_data_posts,
     normalize_nga_thread,
     normalize_sentiment_source,
+    normalize_taoguba_data_post,
+    normalize_taoguba_thread,
     normalize_wechat_sogou_data_post,
     normalize_wechat_sogou_thread,
     normalize_xueqiu_spyder_post,
@@ -69,13 +74,26 @@ async def sentiment_session():
 
 def test_parse_sources_validates_supported_values():
     assert parse_sources("xueqiu,nga") == ["xueqiu_spyder", "flocktrader"]
-    assert parse_sources("xueqiu_spyder,eastmoney,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader"]
+    assert parse_sources("xueqiu_spyder,eastmoney,taoguba,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader"]
     assert normalize_sentiment_source("xueqiu-spyder") == "xueqiu_spyder"
     assert normalize_sentiment_source("股吧") == "eastmoney_guba"
+    assert normalize_sentiment_source("淘股吧") == "taoguba"
     assert normalize_sentiment_source("集思录") == "jisilu"
     assert normalize_sentiment_source("公众号") == "wechat_sogou"
     with pytest.raises(ValueError):
         parse_sources("reddit")
+
+
+def test_wechat_sogou_queries_include_configured_accounts(monkeypatch):
+    monkeypatch.setenv("WECHAT_SOGOU_QUERIES", "龙虎榜 A股 游资")
+    monkeypatch.setenv("WECHAT_SOGOU_ACCOUNTS", "陈小群周策略,海里的小龙龙、空空道人")
+
+    assert _wechat_sogou_queries() == [
+        "龙虎榜 A股 游资",
+        "陈小群周策略 股票",
+        "海里的小龙龙 股票",
+        "空空道人 股票",
+    ]
 
 
 @pytest.mark.asyncio
@@ -262,7 +280,9 @@ async def test_sentiment_service_overview_counts_sources_and_runtime_status(sent
     assert overview["latest_published_at"] == "2026-05-11T10:00:00"
     assert rows["xueqiu_spyder"]["ready"] is True
     assert rows["xueqiu_spyder"]["cookie_configured"] is True
+    assert rows["taoguba"]["ready"] is True
     assert rows["wechat_sogou"]["ready"] is True
+    assert rows["wechat_sogou"]["account_count"] >= 10
     assert rows["flocktrader"]["ready"] is True
     assert rows["flocktrader"]["cache_file_count"] == 1
 
@@ -294,17 +314,18 @@ async def test_sentiment_ingest_service_run_many_combines_sources(sentiment_sess
     service.run = fake_run  # type: ignore[method-assign]
     result = await service.run_many("600519.SH")
 
-    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader"]
-    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou"]
+    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader"]
+    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou"]
     assert result["failed_sources"] == ["flocktrader"]
     assert result["all_succeeded"] is False
-    assert result["total_upserted"] == 8
+    assert result["total_upserted"] == 10
     assert result["results"][0]["ok"] is True
     assert result["results"][1]["ok"] is True
     assert result["results"][2]["ok"] is True
     assert result["results"][3]["ok"] is True
-    assert result["results"][4]["ok"] is False
-    assert "NGA cookie missing" in result["results"][4]["error"]
+    assert result["results"][4]["ok"] is True
+    assert result["results"][5]["ok"] is False
+    assert "NGA cookie missing" in result["results"][5]["error"]
 
 
 @pytest.mark.asyncio
@@ -642,6 +663,119 @@ async def test_collect_eastmoney_hot_bars_without_symbol(sentiment_session, monk
     ]
 
 
+def test_parse_and_normalize_taoguba_payload():
+    blog_html = """
+    <title>zarili_博客_淘股吧</title>
+    <div class="allblog_article">
+      <div class="article_tittle">
+        <div class="tittle_data left"><span>[原]</span><a href="a/2sNTQK9UyWZ" title="主升进行时">主升进行时</a></div>
+        <div class="tittle_llhf left">54131/483</div>
+        <div class="tittle_fbshijian left">2026-06-21</div>
+        <div class="clear"></div>
+      </div>
+    </div>
+    """
+    detail_html = """
+    <div class="article-content">
+      <div class="article-tittle" id="stockTitle">主升进行时<div id="gioMsg" subject="主升进行时" userID="2577911" userName="zarili"></div></div>
+      <div class="article-data">
+        <span><a href="/blog/2577911">zarili</a></span>
+        <span>淘股吧原创&nbsp;2026-06-21 09:30&nbsp;</span>
+        <span>|</span><span>浏览 54131 </span><span>|</span><span>评论 483 </span>
+      </div>
+      <div class="article-text p_coten" id="first"><div class=" gradient">贵州茅台 600519 和科技主线都在修复。</div></div>
+    </div>
+    """
+    articles = _parse_taoguba_blog_articles(blog_html, blog_id="2577911")
+    detail = _parse_taoguba_article_detail(detail_html, article_id="2sNTQK9UyWZ", fallback=articles[0])
+    raw = {
+        **detail,
+        "stock_codes": ["600519.SH"],
+        "keywords": ["贵州茅台", "600519.SH"],
+        "sentiment_score": 0.6,
+        "sentiment_label": "bullish",
+    }
+    post = normalize_taoguba_data_post(raw, symbol="600519.SH")
+    thread = normalize_taoguba_thread(raw)
+
+    assert articles == [
+        {
+            "article_id": "2sNTQK9UyWZ",
+            "source_thread_id": "2sNTQK9UyWZ",
+            "title": "主升进行时",
+            "author": "zarili",
+            "blog_id": "2577911",
+            "url": "https://www.tgb.cn/a/2sNTQK9UyWZ",
+            "view_count": 54131,
+            "reply_count": 483,
+            "published_at": "2026-06-21",
+        }
+    ]
+    assert detail["published_at"] == "2026-06-21 09:30"
+    assert detail["content"] == "贵州茅台 600519 和科技主线都在修复。"
+    assert post is not None
+    assert post.source == "taoguba"
+    assert post.source_post_id == "2sNTQK9UyWZ:600519.SH"
+    assert post.comment_count == 483
+    assert thread is not None
+    assert thread.source == "taoguba"
+    assert thread.symbols == ["600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_collect_taoguba_matches_symbols_and_threads(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    blog_html = """
+    <title>zarili_博客_淘股吧</title>
+    <div class="article_tittle">
+      <div class="tittle_data left"><a href="a/abc123" title="主升进行时">主升进行时</a></div>
+      <div class="tittle_llhf left">100/5</div>
+      <div class="tittle_fbshijian left">2026-06-21</div>
+      <div class="clear"></div>
+    </div>
+    <div class="article_tittle">
+      <div class="tittle_data left"><a href="a/tooquiet" title="回复太少">回复太少</a></div>
+      <div class="tittle_llhf left">10/0</div>
+      <div class="tittle_fbshijian left">2026-06-21</div>
+      <div class="clear"></div>
+    </div>
+    """
+    detail_html = """
+    <div class="article-content">
+      <div class="article-tittle">主升进行时<div id="gioMsg" userName="zarili"></div></div>
+      <div class="article-data"><span>2026-06-21 09:30&nbsp;</span><span>浏览 100 </span><span>评论 5 </span></div>
+      <div class="article-text p_coten"><div class=" gradient">贵州茅台 600519 看多，科技也活跃。</div></div>
+    </div>
+    """
+    seen_urls: list[str] = []
+
+    def fake_fetch(url: str, *, referer: str = "https://www.tgb.cn/") -> str:
+        seen_urls.append(url)
+        if "/a/" in url:
+            return detail_html
+        return blog_html
+
+    monkeypatch.setattr("app.services.sentiment._fetch_taoguba_html", fake_fetch)
+    posts, threads, stats = service._collect_taoguba(
+        None,
+        None,
+        [("贵州茅台", "600519.SH")],
+        [{"blog_id": "2577911", "name": "zarili"}],
+        max_pages=2,
+        min_reply=1,
+        start_date=date(2026, 6, 21),
+        end_date=date(2026, 6, 21),
+    )
+
+    assert seen_urls == ["https://www.tgb.cn/blog/2577911", "https://www.tgb.cn/a/abc123"]
+    assert stats["collected"] == 2
+    assert stats["article_limit_per_blog"] == 2
+    assert len(threads) == 1
+    assert [(post.source, post.symbol, post.source_post_id) for post in posts] == [
+        ("taoguba", "600519.SH", "abc123:600519.SH")
+    ]
+
+
 def test_parse_and_normalize_jisilu_payload():
     list_html = """
     <div class="aw-item">
@@ -837,6 +971,22 @@ async def test_collect_wechat_sogou_matches_symbols_and_threads(sentiment_sessio
     assert len(posts) == 1
     assert posts[0].symbol == "600519.SH"
     assert posts[0].source == "wechat_sogou"
+
+
+@pytest.mark.asyncio
+async def test_collect_wechat_sogou_reports_verification_required(sentiment_session, monkeypatch):
+    progress_events = []
+    service = SentimentIngestService(sentiment_session, progress_callback=progress_events.append)
+
+    def fake_fetch(query: str, page: int = 1) -> str:
+        raise RuntimeError("Sogou WeChat returned a verification page; configure WECHAT_SOGOU_COOKIE or retry later")
+
+    monkeypatch.setattr("app.services.sentiment._fetch_wechat_sogou_page", fake_fetch)
+
+    with pytest.raises(RuntimeError, match="verification page"):
+        service._collect_wechat_sogou(None, None, [], ["陈小群周策略 股票"], 1)
+
+    assert any(event["stage"] == "wechat_sogou.verification_required" for event in progress_events)
 
 
 def test_normalize_flocktrader_post_maps_analyzed_post():

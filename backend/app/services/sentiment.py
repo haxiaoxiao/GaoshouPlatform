@@ -25,7 +25,7 @@ from app.db.models.sentiment import SentimentPost, SentimentThread
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "jisilu", "wechat_sogou", "flocktrader")
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader")
 CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
@@ -37,6 +37,10 @@ SOURCE_ALIASES = {
     "dfcfw": "eastmoney_guba",
     "guba": "eastmoney_guba",
     "股吧": "eastmoney_guba",
+    "taoguba": "taoguba",
+    "tgb": "taoguba",
+    "taoguba_blog": "taoguba",
+    "淘股吧": "taoguba",
     "jisilu": "jisilu",
     "jsl": "jisilu",
     "集思录": "jisilu",
@@ -56,6 +60,7 @@ SOURCE_ALIASES = {
 LEGACY_SOURCE_NAMES = {
     "xueqiu_spyder": {"xueqiu", "xueqiu_spyder"},
     "eastmoney_guba": {"eastmoney_guba"},
+    "taoguba": {"taoguba"},
     "jisilu": {"jisilu"},
     "wechat_sogou": {"wechat_sogou"},
     "flocktrader": {"nga", "flocktrader"},
@@ -68,6 +73,32 @@ DEFAULT_WECHAT_SOGOU_QUERIES = (
     "龙虎榜 A股 游资",
     "短线 A股 股票",
     "涨停板 A股",
+)
+DEFAULT_WECHAT_SOGOU_ACCOUNTS = (
+    "陈小群周策略",
+    "余哥牛弹琴",
+    "佛总晚评",
+    "饭统戴老板",
+    "表舅是养基大户",
+    "奶员外",
+    "海里的小龙龙",
+    "小群知识营",
+    "投资明见",
+    "徐小明",
+    "天津股侠",
+    "王金生",
+    "小红帽爱股票",
+    "空空道人",
+)
+DEFAULT_TAOGUBA_BLOGS = (
+    "2577911:zarili",
+    "444409:湖南人",
+    "8186648:星辰趋势主升",
+    "13186975:主升龙头空空龙",
+    "7826561:玫瑰抓龙头",
+    "11255090:搞钱老兵",
+    "11520081:风一样的胖刺猬",
+    "6671396:亿百万实盘",
 )
 
 
@@ -456,6 +487,143 @@ def _fetch_eastmoney_hot_bars(limit: int = 30) -> list[dict[str, str]]:
     return bars
 
 
+def _taoguba_blog_values() -> list[dict[str, str]]:
+    raw = _config_value("TAOGUBA_BLOG_IDS", "taoguba_blog_ids", "")
+    values = re.split(r"[,;，；\n]+", raw) if raw else list(DEFAULT_TAOGUBA_BLOGS)
+    blogs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        if ":" in text:
+            blog_id, name = text.split(":", 1)
+        elif "|" in text:
+            blog_id, name = text.split("|", 1)
+        else:
+            blog_id, name = text, ""
+        blog_id = re.sub(r"\D", "", blog_id)
+        if not blog_id or blog_id in seen:
+            continue
+        seen.add(blog_id)
+        blogs.append({"blog_id": blog_id, "name": name.strip()})
+    return blogs
+
+
+def _taoguba_headers(referer: str = "https://www.tgb.cn/") -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Referer": referer,
+    }
+    cookie = _config_value("TAOGUBA_COOKIE", "taoguba_cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _fetch_taoguba_html(url: str, *, referer: str = "https://www.tgb.cn/") -> str:
+    response = requests.get(url, headers=_taoguba_headers(referer), timeout=20, allow_redirects=True)
+    response.raise_for_status()
+    response.encoding = response.encoding or "utf-8"
+    text = response.text
+    has_content_marker = any(marker in text for marker in ("article_tittle", "allblog_article", "article-content"))
+    if ("阿里云验证码" in text or "AliyunCaptcha" in text) and not has_content_marker:
+        raise RuntimeError("Taoguba returned a verification page; configure TAOGUBA_COOKIE or retry later")
+    return text
+
+
+def _taoguba_blog_url(blog_id: str) -> str:
+    return f"https://www.tgb.cn/blog/{blog_id}"
+
+
+def _taoguba_article_url(article_id: str) -> str:
+    return f"https://www.tgb.cn/a/{article_id}"
+
+
+def _parse_taoguba_blog_articles(html_text: str, *, blog_id: str, author_name: str | None = None) -> list[dict[str, Any]]:
+    title_match = re.search(r"<title[^>]*>(?P<title>.*?)</title>", html_text, flags=re.I | re.S)
+    title_author = ""
+    if title_match:
+        title_author = _wechat_clean_text(title_match.group("title")).split("_", 1)[0].strip()
+    author = (author_name or title_author or "").strip()
+    articles: list[dict[str, Any]] = []
+    for match in re.finditer(
+        r'<div class="article_tittle">(?P<body>.*?)<div class="clear">\s*</div>\s*</div>',
+        html_text,
+        flags=re.I | re.S,
+    ):
+        body = match.group("body")
+        link_match = re.search(
+            r'<a\b[^>]*href=["\'](?:https?://www\.tgb\.cn/)?a/(?P<article_id>[A-Za-z0-9]+)["\'][^>]*>(?P<title>.*?)</a>',
+            body,
+            flags=re.I | re.S,
+        )
+        if not link_match:
+            continue
+        stats_match = re.search(r'<div class="tittle_llhf left">\s*(?P<views>\d+)\s*/\s*(?P<replies>\d+)\s*</div>', body, flags=re.I | re.S)
+        date_match = re.search(r'<div class="tittle_fbshijian left">\s*(?P<date>\d{4}-\d{2}-\d{2})\s*</div>', body, flags=re.I | re.S)
+        article_id = link_match.group("article_id")
+        articles.append(
+            {
+                "article_id": article_id,
+                "source_thread_id": article_id,
+                "title": _wechat_clean_text(link_match.group("title")),
+                "author": author or None,
+                "blog_id": str(blog_id),
+                "url": _taoguba_article_url(article_id),
+                "view_count": _to_int(stats_match.group("views") if stats_match else 0),
+                "reply_count": _to_int(stats_match.group("replies") if stats_match else 0),
+                "published_at": date_match.group("date") if date_match else None,
+            }
+        )
+    return articles
+
+
+def _parse_taoguba_article_detail(html_text: str, *, article_id: str, fallback: dict[str, Any] | None = None) -> dict[str, Any]:
+    fallback = fallback or {}
+    title = str(fallback.get("title") or "")
+    title_match = re.search(
+        r'<div class="article-tittle"[^>]*>(?P<title>.*?)<div id="gioMsg"',
+        html_text,
+        flags=re.I | re.S,
+    )
+    if title_match:
+        title = _wechat_clean_text(title_match.group("title"))
+    gio_match = re.search(r'<div id="gioMsg"[^>]*userName=["\'](?P<author>[^"\']+)["\']', html_text, flags=re.I)
+    author = html.unescape(gio_match.group("author")).strip() if gio_match else str(fallback.get("author") or "")
+    data_match = re.search(r'<div class="article-data">(?P<data>.*?)</div>', html_text, flags=re.I | re.S)
+    data_text = _wechat_clean_text(data_match.group("data")) if data_match else ""
+    published_match = re.search(r"(?P<dt>\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})", data_text)
+    view_match = re.search(r"浏览\s*(?P<views>\d+)", data_text)
+    reply_match = re.search(r"评论\s*(?P<replies>\d+)", data_text)
+    content_match = re.search(
+        r'<div class="article-text[^"]*p_coten[^"]*"[^>]*>.*?<div class="\s*gradient\s*"[^>]*>(?P<content>.*?)</div>',
+        html_text,
+        flags=re.I | re.S,
+    )
+    if not content_match:
+        content_match = re.search(
+            r'<div class="article-text[^"]*p_coten[^"]*"[^>]*>(?P<content>.*?)</div>',
+            html_text,
+            flags=re.I | re.S,
+        )
+    content = _wechat_clean_text(content_match.group("content")) if content_match else ""
+    content = content.replace("登录可查看全文", "").strip()
+    return {
+        **fallback,
+        "article_id": article_id,
+        "source_thread_id": article_id,
+        "title": title or str(fallback.get("title") or ""),
+        "content": content or str(fallback.get("content") or ""),
+        "author": author or str(fallback.get("author") or ""),
+        "published_at": published_match.group("dt") if published_match else fallback.get("published_at"),
+        "url": _taoguba_article_url(article_id),
+        "view_count": _to_int(view_match.group("views") if view_match else fallback.get("view_count")),
+        "reply_count": _to_int(reply_match.group("replies") if reply_match else fallback.get("reply_count")),
+    }
+
+
 def _wechat_sogou_query_values() -> list[str]:
     raw = _config_value("WECHAT_SOGOU_QUERIES", "wechat_sogou_queries", "")
     values = re.split(r"[,;，；\n]+", raw) if raw else list(DEFAULT_WECHAT_SOGOU_QUERIES)
@@ -467,10 +635,27 @@ def _wechat_sogou_query_values() -> list[str]:
     return normalized
 
 
+def _wechat_sogou_account_values() -> list[str]:
+    raw = _config_value("WECHAT_SOGOU_ACCOUNTS", "wechat_sogou_accounts", "")
+    values = re.split(r"[,;，；、\n]+", raw) if raw else list(DEFAULT_WECHAT_SOGOU_ACCOUNTS)
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
 def _wechat_sogou_queries(symbol: str | None = None, stock: Stock | None = None) -> list[str]:
     configured = _wechat_sogou_query_values()
+    accounts = _wechat_sogou_account_values()
     if not symbol:
-        return configured
+        account_queries = [f"{account} 股票" for account in accounts]
+        queries: list[str] = []
+        for query in [*configured, *account_queries]:
+            if query and query not in queries:
+                queries.append(query)
+        return queries
     normalized = normalize_sentiment_symbol(symbol)
     code = normalized.split(".", 1)[0]
     stock_terms = [code]
@@ -492,6 +677,11 @@ def _wechat_sogou_queries(symbol: str | None = None, stock: Stock | None = None)
                 queries.append(query)
     for query in configured:
         if query not in queries:
+            queries.append(query)
+    account_focus = next((term for term in stock_terms if term and term != code), code)
+    for account in accounts:
+        query = f"{account} {account_focus}".strip()
+        if query and query not in queries:
             queries.append(query)
     return queries
 
@@ -1421,6 +1611,33 @@ class SentimentIngestService:
                 "page_url": page_url,
                 **eastmoney_stats,
             }
+        elif source == "taoguba":
+            aliases = None
+            stock = await self.session.get(Stock, symbol) if symbol else None
+            stock_aliases = await self._load_stock_aliases() if not symbol else None
+            if symbol:
+                aliases = _symbol_aliases_from_parts(symbol, stock)
+            blogs = _taoguba_blog_values()
+            posts, threads, taoguba_stats = await asyncio.to_thread(
+                self._collect_taoguba,
+                symbol,
+                aliases,
+                stock_aliases,
+                blogs,
+                max_pages,
+                min_reply,
+                start_date,
+                end_date,
+            )
+            threads_upserted = await self.service.upsert_threads(threads)
+            stats = {
+                "mode": "blog_author_stream",
+                "collected": taoguba_stats["collected"],
+                "matched": len(posts),
+                "threads_upserted": threads_upserted,
+                "page_url": "https://www.tgb.cn/",
+                **taoguba_stats,
+            }
         elif source == "jisilu":
             aliases: list[str] | None = None
             stock_aliases = await self._load_stock_aliases() if not symbol else None
@@ -1665,6 +1882,113 @@ class SentimentIngestService:
             "bars": bar_rows,
         }
 
+    def _collect_taoguba(
+        self,
+        symbol: str | None,
+        aliases: list[str] | None,
+        stock_aliases: list[tuple[str, str]] | None,
+        blogs: list[dict[str, str]],
+        max_pages: int,
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], list[SentimentThreadInput], dict[str, Any]]:
+        article_limit = max(max_pages, 1)
+        normalized: list[SentimentPostInput] = []
+        threads: list[SentimentThreadInput] = []
+        raw_count = 0
+        blog_rows: list[dict[str, Any]] = []
+        seen_articles: set[str] = set()
+        for blog_index, blog in enumerate(blogs, start=1):
+            blog_id = str(blog.get("blog_id") or "").strip()
+            if not blog_id:
+                continue
+            blog_url = _taoguba_blog_url(blog_id)
+            author_name = str(blog.get("name") or "").strip()
+            self._emit_progress(
+                "taoguba.blog_fetch",
+                source="taoguba",
+                current_step="taoguba_blog",
+                current_page=blog_index,
+                page_limit=len(blogs),
+                current_title=author_name or blog_id,
+                page_url=blog_url,
+            )
+            articles = _parse_taoguba_blog_articles(
+                _fetch_taoguba_html(blog_url),
+                blog_id=blog_id,
+                author_name=author_name,
+            )
+            raw_count += len(articles)
+            matched_before = len(normalized)
+            detail_count = 0
+            for article in articles[:article_limit]:
+                article_id = str(article.get("article_id") or "").strip()
+                if not article_id or article_id in seen_articles:
+                    continue
+                seen_articles.add(article_id)
+                if _to_int(article.get("reply_count")) < min_reply:
+                    continue
+                if not _in_date_window(_parse_datetime(article.get("published_at")), start_date, end_date):
+                    continue
+                self._emit_progress(
+                    "taoguba.article_fetch",
+                    source="taoguba",
+                    current_step="taoguba_article",
+                    current_page=blog_index,
+                    page_limit=len(blogs),
+                    current_tid=article_id,
+                    current_title=str(article.get("title") or "")[:120],
+                    posts_collected=len(normalized),
+                )
+                detail = _parse_taoguba_article_detail(
+                    _fetch_taoguba_html(str(article.get("url")), referer=blog_url),
+                    article_id=article_id,
+                    fallback=article,
+                )
+                detail_count += 1
+                text = _post_text(detail)
+                article_symbols = _extract_forum_post_symbols(detail, stock_aliases=stock_aliases)
+                detail["stock_codes"] = article_symbols
+                detail["keywords"] = _nga_keywords(text, article_symbols)
+                score, label = _nga_sentiment(text)
+                detail["sentiment_score"] = score
+                detail["sentiment_label"] = label
+                thread = normalize_taoguba_thread(detail, stock_aliases=stock_aliases)
+                if thread is not None:
+                    threads.append(thread)
+                if symbol:
+                    if not _post_mentions_symbol(detail, symbol, aliases):
+                        continue
+                    normalized.extend(normalize_taoguba_data_posts(detail, symbol=symbol, aliases=aliases))
+                else:
+                    normalized.extend(normalize_taoguba_data_posts(detail, stock_aliases=stock_aliases))
+            blog_rows.append(
+                {
+                    "blog_id": blog_id,
+                    "name": author_name,
+                    "raw_count": len(articles),
+                    "details": detail_count,
+                    "matched": len(normalized) - matched_before,
+                }
+            )
+            self._emit_progress(
+                "taoguba.blog_parsed",
+                source="taoguba",
+                current_step="taoguba_blog",
+                current_page=blog_index,
+                page_limit=len(blogs),
+                current_title=author_name or blog_id,
+                rows_on_page=len(articles),
+                posts_collected=len(normalized),
+                threads_collected=len(threads),
+            )
+        return [post for post in normalized if post.source_post_id], threads, {
+            "collected": raw_count,
+            "article_limit_per_blog": article_limit,
+            "blogs": blog_rows,
+        }
+
     def _collect_jisilu(
         self,
         symbol: str | None,
@@ -1777,9 +2101,31 @@ class SentimentIngestService:
         raw_count = 0
         query_rows: list[dict[str, Any]] = []
         seen_articles: set[str] = set()
+        duplicate_count = 0
+        self._emit_progress(
+            "wechat_sogou.query_plan",
+            source="wechat_sogou",
+            current_step="query_plan",
+            query_count=len(queries),
+            page_limit=max_pages,
+            symbol=symbol,
+            account_count=len(_wechat_sogou_account_values()),
+        )
         for query_index, query in enumerate(queries, start=1):
             query_raw_count = 0
             query_matched_before = len(normalized)
+            query_threads_before = len(threads)
+            query_duplicates = 0
+            pages_fetched = 0
+            self._emit_progress(
+                "wechat_sogou.query_start",
+                source="wechat_sogou",
+                current_step="wechat_sogou_query",
+                query_index=query_index,
+                query_count=len(queries),
+                current_title=query,
+                page_limit=max_pages,
+            )
             for page in range(1, max_pages + 1):
                 self._emit_progress(
                     "wechat_sogou.page_fetch",
@@ -1792,7 +2138,25 @@ class SentimentIngestService:
                     current_title=query,
                     page_url=_wechat_sogou_url(query, page),
                 )
-                rows = _parse_wechat_sogou_articles(_fetch_wechat_sogou_page(query, page), query=query, page=page)
+                try:
+                    html_text = _fetch_wechat_sogou_page(query, page)
+                except RuntimeError as exc:
+                    if "Sogou WeChat returned a verification page" in str(exc):
+                        self._emit_progress(
+                            "wechat_sogou.verification_required",
+                            source="wechat_sogou",
+                            current_step="verification_required",
+                            current_page=page,
+                            page_limit=max_pages,
+                            query_index=query_index,
+                            query_count=len(queries),
+                            current_title=query,
+                            page_url=_wechat_sogou_url(query, page),
+                            error=str(exc),
+                        )
+                    raise
+                rows = _parse_wechat_sogou_articles(html_text, query=query, page=page)
+                pages_fetched += 1
                 if not rows:
                     break
                 raw_count += len(rows)
@@ -1800,6 +2164,8 @@ class SentimentIngestService:
                 for raw in rows:
                     article_id = str(raw.get("source_thread_id") or "").strip()
                     if not article_id or article_id in seen_articles:
+                        duplicate_count += 1
+                        query_duplicates += 1
                         continue
                     seen_articles.add(article_id)
                     if not _in_date_window(_parse_datetime(raw.get("published_at")), start_date, end_date):
@@ -1832,17 +2198,40 @@ class SentimentIngestService:
                     rows_on_page=len(rows),
                     posts_collected=len(normalized),
                     threads_collected=len(threads),
+                    duplicates=query_duplicates,
                 )
-            query_rows.append(
-                {
-                    "query": query,
-                    "raw_count": query_raw_count,
-                    "matched": len(normalized) - query_matched_before,
-                }
+            query_row = {
+                "query": query,
+                "raw_count": query_raw_count,
+                "matched": len(normalized) - query_matched_before,
+                "threads": len(threads) - query_threads_before,
+                "duplicates": query_duplicates,
+                "pages_fetched": pages_fetched,
+            }
+            query_rows.append(query_row)
+            self._emit_progress(
+                "wechat_sogou.query_done",
+                source="wechat_sogou",
+                current_step="wechat_sogou_query",
+                query_index=query_index,
+                query_count=len(queries),
+                current_title=query,
+                **query_row,
             )
+        self._emit_progress(
+            "wechat_sogou.done",
+            source="wechat_sogou",
+            current_step="done",
+            query_count=len(queries),
+            page_limit=max_pages,
+            posts_collected=len(normalized),
+            threads_collected=len(threads),
+            duplicates=duplicate_count,
+        )
         return [post for post in normalized if post.source_post_id], threads, {
             "collected": raw_count,
             "queries": query_rows,
+            "duplicates": duplicate_count,
         }
 
     def _collect_flocktrader(self, symbol: str, max_pages: int) -> list[SentimentPostInput]:
@@ -2453,6 +2842,17 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "ready": True,
         }
 
+    if source == "taoguba":
+        return {
+            "label": "淘股吧",
+            "project_dir": "https://www.tgb.cn/",
+            "project_ready": True,
+            "cookie_configured": bool(_config_value("TAOGUBA_COOKIE", "taoguba_cookie").strip()),
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
     if source == "jisilu":
         return {
             "label": "集思录股票",
@@ -2470,6 +2870,8 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "project_dir": "https://weixin.sogou.com/weixin?type=2",
             "project_ready": True,
             "cookie_configured": bool(_config_value("WECHAT_SOGOU_COOKIE", "wechat_sogou_cookie").strip()),
+            "query_count": len(_wechat_sogou_query_values()),
+            "account_count": len(_wechat_sogou_account_values()),
             "cache_dir": None,
             "cache_file_count": 0,
             "ready": True,
@@ -2709,6 +3111,100 @@ def normalize_wechat_sogou_thread(
         url=str(raw.get("url") or "") or None,
         reply_count=0,
         comment_count=0,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        symbols=symbols,
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_taoguba_data_post(
+    raw: dict[str, Any],
+    *,
+    symbol: str,
+    aliases: list[str] | None = None,
+) -> SentimentPostInput | None:
+    article_id = str(raw.get("source_thread_id") or raw.get("article_id") or "").strip()
+    if not article_id:
+        return None
+    symbol = normalize_sentiment_symbol(symbol)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    if aliases:
+        for alias in aliases:
+            if alias and alias not in keywords and len(str(alias)) >= 2:
+                keywords.append(str(alias))
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentPostInput(
+        source="taoguba",
+        source_post_id=f"{article_id}:{symbol}",
+        symbol=symbol,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or _taoguba_article_url(article_id)),
+        reply_count=reply_count,
+        like_count=0,
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_taoguba_data_posts(
+    raw: dict[str, Any],
+    *,
+    symbol: str | None = None,
+    aliases: list[str] | None = None,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[SentimentPostInput]:
+    target_symbols = [normalize_sentiment_symbol(symbol)] if symbol else _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    normalized: list[SentimentPostInput] = []
+    for target_symbol in target_symbols:
+        post = normalize_taoguba_data_post(raw, symbol=target_symbol, aliases=aliases if symbol else None)
+        if post is not None:
+            normalized.append(post)
+    return normalized
+
+
+def normalize_taoguba_thread(
+    raw: dict[str, Any],
+    *,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> SentimentThreadInput | None:
+    article_id = str(raw.get("source_thread_id") or raw.get("article_id") or "").strip()
+    if not article_id:
+        return None
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    symbols = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    for symbol in symbols:
+        if symbol not in keywords:
+            keywords.append(symbol)
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentThreadInput(
+        source="taoguba",
+        source_thread_id=article_id,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        last_reply_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or _taoguba_article_url(article_id)),
+        reply_count=reply_count,
+        comment_count=reply_count,
         sentiment_score=score,
         sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
         symbols=symbols,
