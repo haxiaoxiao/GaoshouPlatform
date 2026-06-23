@@ -2476,19 +2476,17 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
         }
 
     if source == "flocktrader":
-        project_dir = _flocktrader_project_dir()
         cache_dir = _nga_data_dir()
         cache_file_count = len(list(cache_dir.glob("posts_*.json"))) if cache_dir.exists() else 0
         cookie_configured = bool(_config_value("NGA_COOKIE", "nga_cookie").strip())
-        project_ready = project_dir.exists()
         return {
             "label": "NGA",
-            "project_dir": str(project_dir),
-            "project_ready": project_ready,
+            "project_dir": f"https://nga.178.com/thread.php?fid={int(getattr(settings, 'nga_board_fid', 706) or 706)}",
+            "project_ready": True,
             "cookie_configured": cookie_configured,
             "cache_dir": str(cache_dir),
             "cache_file_count": cache_file_count,
-            "ready": project_ready and (cookie_configured or cache_file_count > 0),
+            "ready": cookie_configured or cache_file_count > 0,
         }
 
     cache_dir = _nga_data_dir()
