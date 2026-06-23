@@ -48,7 +48,7 @@ def _validate_ingest_request(request: IngestRunRequest, sources: list[str]) -> s
     if symbol_sources and not request.symbol:
         return (
             f"{', '.join(symbol_sources)} ingest requires a symbol. "
-            "Eastmoney, Taoguba, Jisilu, WeChat/Sogou and NGA/flocktrader can run without a symbol."
+            "Eastmoney, Taoguba, Baidu Tieba, Jisilu, WeChat/Sogou and NGA/flocktrader can run without a symbol."
         )
     return None
 
@@ -157,7 +157,7 @@ async def _run_sentiment_ingest_task(
 
 @router.get("/overview", summary="Get unified sentiment module overview")
 async def get_sentiment_overview(
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,jisilu,wechat_sogou,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,tieba_stock,jisilu,wechat_sogou,flocktrader"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
@@ -173,7 +173,7 @@ async def get_sentiment_summary(
     symbol: str,
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,jisilu,wechat_sogou,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,tieba_stock,jisilu,wechat_sogou,flocktrader"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     try:
@@ -189,7 +189,7 @@ async def get_sentiment_posts(
     symbol: str,
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,jisilu,wechat_sogou,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,tieba_stock,jisilu,wechat_sogou,flocktrader"),
     limit: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
@@ -207,7 +207,7 @@ async def get_sentiment_posts(
 async def get_sentiment_threads(
     start_date: date | None = Query(None),
     end_date: date | None = Query(None),
-    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,jisilu,wechat_sogou,flocktrader"),
+    sources: str | None = Query(None, description="Comma-separated source list: xueqiu_spyder,eastmoney_guba,taoguba,tieba_stock,jisilu,wechat_sogou,flocktrader"),
     symbol: str | None = Query(None, description="Optional symbol filter for matched NGA threads"),
     limit: int = Query(50, ge=1, le=200),
     session: AsyncSession = Depends(get_async_session),

@@ -17,6 +17,7 @@ from app.services.sentiment import (
     _parse_jisilu_list_posts,
     _parse_taoguba_article_detail,
     _parse_taoguba_blog_articles,
+    _parse_tieba_stock_threads,
     _parse_wechat_sogou_articles,
     _wechat_sogou_queries,
     _post_mentions_symbol,
@@ -31,6 +32,8 @@ from app.services.sentiment import (
     normalize_sentiment_source,
     normalize_taoguba_data_post,
     normalize_taoguba_thread,
+    normalize_tieba_stock_data_post,
+    normalize_tieba_stock_thread,
     normalize_wechat_sogou_data_post,
     normalize_wechat_sogou_thread,
     normalize_xueqiu_spyder_post,
@@ -74,10 +77,11 @@ async def sentiment_session():
 
 def test_parse_sources_validates_supported_values():
     assert parse_sources("xueqiu,nga") == ["xueqiu_spyder", "flocktrader"]
-    assert parse_sources("xueqiu_spyder,eastmoney,taoguba,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader"]
+    assert parse_sources("xueqiu_spyder,eastmoney,taoguba,贴吧,jisilu,wechat,flocktrader,xueqiu") == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"]
     assert normalize_sentiment_source("xueqiu-spyder") == "xueqiu_spyder"
     assert normalize_sentiment_source("股吧") == "eastmoney_guba"
     assert normalize_sentiment_source("淘股吧") == "taoguba"
+    assert normalize_sentiment_source("百度贴吧") == "tieba_stock"
     assert normalize_sentiment_source("集思录") == "jisilu"
     assert normalize_sentiment_source("公众号") == "wechat_sogou"
     with pytest.raises(ValueError):
@@ -281,6 +285,8 @@ async def test_sentiment_service_overview_counts_sources_and_runtime_status(sent
     assert rows["xueqiu_spyder"]["ready"] is True
     assert rows["xueqiu_spyder"]["cookie_configured"] is True
     assert rows["taoguba"]["ready"] is True
+    assert rows["tieba_stock"]["ready"] is True
+    assert rows["tieba_stock"]["bar_count"] >= 3
     assert rows["wechat_sogou"]["ready"] is True
     assert rows["wechat_sogou"]["account_count"] >= 10
     assert rows["flocktrader"]["ready"] is True
@@ -314,18 +320,19 @@ async def test_sentiment_ingest_service_run_many_combines_sources(sentiment_sess
     service.run = fake_run  # type: ignore[method-assign]
     result = await service.run_many("600519.SH")
 
-    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader"]
-    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou"]
+    assert result["requested_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader"]
+    assert result["succeeded_sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou"]
     assert result["failed_sources"] == ["flocktrader"]
     assert result["all_succeeded"] is False
-    assert result["total_upserted"] == 10
+    assert result["total_upserted"] == 12
     assert result["results"][0]["ok"] is True
     assert result["results"][1]["ok"] is True
     assert result["results"][2]["ok"] is True
     assert result["results"][3]["ok"] is True
     assert result["results"][4]["ok"] is True
-    assert result["results"][5]["ok"] is False
-    assert "NGA cookie missing" in result["results"][5]["error"]
+    assert result["results"][5]["ok"] is True
+    assert result["results"][6]["ok"] is False
+    assert "NGA cookie missing" in result["results"][6]["error"]
 
 
 @pytest.mark.asyncio
@@ -773,6 +780,101 @@ async def test_collect_taoguba_matches_symbols_and_threads(sentiment_session, mo
     assert len(threads) == 1
     assert [(post.source, post.symbol, post.source_post_id) for post in posts] == [
         ("taoguba", "600519.SH", "abc123:600519.SH")
+    ]
+
+
+def test_parse_and_normalize_tieba_stock_payload():
+    payload = {
+        "errno": 0,
+        "data": {
+            "forum": {"name": "股票"},
+            "thread_list": [
+                {
+                    "tid": 10813189797,
+                    "title": "贵州茅台 600519 全线反弹",
+                    "abstract": [{"text": "白酒和科技都看多，600519 有反弹预期。"}],
+                    "author": {"name_show": "散户老李"},
+                    "last_time_int": 1782233188,
+                    "reply_num": 4,
+                    "agree": {"agree_num": 8, "disagree_num": 1},
+                }
+            ],
+        },
+    }
+
+    rows = _parse_tieba_stock_threads(payload, bar="股票", page=1)
+    raw = {
+        **rows[0],
+        "stock_codes": ["600519.SH"],
+        "keywords": ["贵州茅台", "600519.SH"],
+        "sentiment_score": 1.0,
+        "sentiment_label": "bullish",
+    }
+    post = normalize_tieba_stock_data_post(raw, symbol="600519.SH")
+    thread = normalize_tieba_stock_thread(raw)
+
+    assert rows[0]["source_thread_id"] == "10813189797"
+    assert rows[0]["forum_name"] == "股票"
+    assert rows[0]["reply_count"] == 4
+    assert post is not None
+    assert post.source == "tieba_stock"
+    assert post.source_post_id == "10813189797:600519.SH"
+    assert post.like_count == 8
+    assert thread is not None
+    assert thread.source == "tieba_stock"
+    assert thread.symbols == ["600519.SH"]
+
+
+@pytest.mark.asyncio
+async def test_collect_tieba_stock_matches_symbols_and_threads(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    payload = {
+        "errno": 0,
+        "data": {
+            "forum": {"name": "股票"},
+            "thread_list": [
+                {
+                    "tid": 10813189797,
+                    "title": "贵州茅台 600519 全线反弹",
+                    "abstract": [{"text": "白酒和科技都看多，600519 有反弹预期。"}],
+                    "author": {"name_show": "散户老李"},
+                    "last_time_int": 1782233188,
+                    "reply_num": 4,
+                },
+                {
+                    "tid": 10813180000,
+                    "title": "无关闲聊",
+                    "abstract": [{"text": "不提股票代码。"}],
+                    "author": {"name_show": "路人"},
+                    "last_time_int": 1782233188,
+                    "reply_num": 9,
+                },
+            ],
+        },
+    }
+    seen: list[tuple[str, int]] = []
+
+    def fake_fetch(bar: str, page: int = 1, page_size: int = 30) -> dict:
+        seen.append((bar, page))
+        return payload if page == 1 else {"errno": 0, "data": {"forum": {"name": bar}, "thread_list": []}}
+
+    monkeypatch.setattr("app.services.sentiment._fetch_tieba_stock_json", fake_fetch)
+    posts, threads, stats = service._collect_tieba_stock(
+        None,
+        None,
+        [("贵州茅台", "600519.SH")],
+        ["股票"],
+        max_pages=2,
+        min_reply=1,
+        start_date=date(2026, 6, 24),
+        end_date=date(2026, 6, 24),
+    )
+
+    assert seen == [("股票", 1), ("股票", 2)]
+    assert stats["collected"] == 2
+    assert len(threads) == 2
+    assert [(post.source, post.symbol, post.source_post_id) for post in posts] == [
+        ("tieba_stock", "600519.SH", "10813189797:600519.SH")
     ]
 
 

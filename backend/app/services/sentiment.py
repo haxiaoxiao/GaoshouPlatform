@@ -25,7 +25,7 @@ from app.db.models.sentiment import SentimentPost, SentimentThread
 from app.db.models.stock import Stock
 from app.services.security_symbols import normalize_security_symbol
 
-DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "jisilu", "wechat_sogou", "flocktrader")
+DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "jisilu", "wechat_sogou", "flocktrader")
 CANONICAL_SOURCES = set(DEFAULT_SOURCE_ORDER)
 SOURCE_ALIASES = {
     "xueqiu": "xueqiu_spyder",
@@ -41,6 +41,11 @@ SOURCE_ALIASES = {
     "tgb": "taoguba",
     "taoguba_blog": "taoguba",
     "淘股吧": "taoguba",
+    "tieba": "tieba_stock",
+    "tieba_stock": "tieba_stock",
+    "baidu_tieba": "tieba_stock",
+    "百度贴吧": "tieba_stock",
+    "贴吧": "tieba_stock",
     "jisilu": "jisilu",
     "jsl": "jisilu",
     "集思录": "jisilu",
@@ -61,6 +66,7 @@ LEGACY_SOURCE_NAMES = {
     "xueqiu_spyder": {"xueqiu", "xueqiu_spyder"},
     "eastmoney_guba": {"eastmoney_guba"},
     "taoguba": {"taoguba"},
+    "tieba_stock": {"tieba_stock"},
     "jisilu": {"jisilu"},
     "wechat_sogou": {"wechat_sogou"},
     "flocktrader": {"nga", "flocktrader"},
@@ -99,6 +105,13 @@ DEFAULT_TAOGUBA_BLOGS = (
     "11255090:搞钱老兵",
     "11520081:风一样的胖刺猬",
     "6671396:亿百万实盘",
+)
+DEFAULT_TIEBA_STOCK_BARS = (
+    "股票",
+    "股市",
+    "A股",
+    "炒股",
+    "涨停板",
 )
 
 
@@ -508,6 +521,125 @@ def _taoguba_blog_values() -> list[dict[str, str]]:
         seen.add(blog_id)
         blogs.append({"blog_id": blog_id, "name": name.strip()})
     return blogs
+
+
+def _tieba_stock_bar_values() -> list[str]:
+    raw = _config_value("TIEBA_STOCK_BARS", "tieba_stock_bars", "")
+    values = re.split(r"[,;，；、\n]+", raw) if raw else list(DEFAULT_TIEBA_STOCK_BARS)
+    normalized: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def _tieba_stock_bars(symbol: str | None = None, stock: Stock | None = None) -> list[str]:
+    configured = _tieba_stock_bar_values()
+    if not symbol:
+        return configured
+    normalized = normalize_sentiment_symbol(symbol)
+    code = normalized.split(".", 1)[0]
+    candidates = [code]
+    if stock is not None:
+        candidates.extend([stock.name, stock.company_name, _short_company_name(stock.company_name)])
+    candidates.extend(configured)
+    bars: list[str] = []
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text and text not in bars:
+            bars.append(text)
+    return bars
+
+
+def _tieba_stock_url(bar: str, page: int = 1, page_size: int = 30) -> str:
+    params = {"kw": bar, "pn": max(int(page), 1), "rn": page_size}
+    return "https://tieba.baidu.com/mg/f/getFrsData?" + urlencode(params)
+
+
+def _tieba_stock_headers() -> dict[str, str]:
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+        "Referer": "https://tieba.baidu.com/",
+    }
+    cookie = _config_value("TIEBA_COOKIE", "tieba_cookie")
+    if cookie:
+        headers["Cookie"] = cookie
+    return headers
+
+
+def _fetch_tieba_stock_json(bar: str, page: int = 1, page_size: int = 30) -> dict[str, Any]:
+    response = requests.get(
+        "https://tieba.baidu.com/mg/f/getFrsData",
+        params={"kw": bar, "pn": max(int(page), 1), "rn": page_size},
+        headers=_tieba_stock_headers(),
+        timeout=20,
+    )
+    response.raise_for_status()
+    text = response.text
+    if "百度安全验证" in text or "security_verify" in text.lower():
+        raise RuntimeError("Baidu Tieba returned a verification page; configure TIEBA_COOKIE or retry later")
+    payload = response.json()
+    errno = payload.get("errno")
+    if errno not in (None, 0, "0"):
+        raise RuntimeError(f"Baidu Tieba returned errno={errno}: {payload.get('errmsg') or payload.get('error') or ''}")
+    return payload
+
+
+def _tieba_text_fragments(value: Any) -> list[str]:
+    if isinstance(value, list):
+        fragments: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                fragments.append(str(item.get("text") or ""))
+            else:
+                fragments.append(str(item or ""))
+        return fragments
+    if isinstance(value, dict):
+        return [str(value.get("text") or "")]
+    return [str(value or "")]
+
+
+def _parse_tieba_stock_threads(payload: dict[str, Any], *, bar: str, page: int = 1) -> list[dict[str, Any]]:
+    data = payload.get("data") if isinstance(payload, dict) else {}
+    if not isinstance(data, dict):
+        return []
+    forum = data.get("forum") if isinstance(data.get("forum"), dict) else {}
+    forum_name = str(forum.get("name") or bar).strip() if isinstance(forum, dict) else bar
+    rows: list[dict[str, Any]] = []
+    for item in data.get("thread_list") or []:
+        if not isinstance(item, dict):
+            continue
+        tid = str(item.get("tid") or item.get("id") or "").strip()
+        if not tid:
+            continue
+        abstract = _nga_clean_text(" ".join(_tieba_text_fragments(item.get("abstract"))))
+        rich_abstract = _nga_clean_text(" ".join(_tieba_text_fragments(item.get("rich_abstract"))))
+        author = item.get("author") if isinstance(item.get("author"), dict) else {}
+        agree = item.get("agree") if isinstance(item.get("agree"), dict) else {}
+        published_at = _parse_datetime(item.get("last_time_int") or item.get("create_time"))
+        created_at = _parse_datetime(item.get("create_time"))
+        rows.append(
+            {
+                "source_thread_id": tid,
+                "tid": tid,
+                "title": _nga_clean_text(str(item.get("title") or "")),
+                "content": rich_abstract or abstract,
+                "author": str(author.get("name_show") or author.get("name") or ""),
+                "published_at": published_at.isoformat() if published_at else None,
+                "created_at": created_at.isoformat() if created_at else None,
+                "reply_count": _to_int(item.get("reply_num")),
+                "agree_count": _to_int(agree.get("agree_num")),
+                "disagree_count": _to_int(agree.get("disagree_num")),
+                "bar": bar,
+                "forum_name": forum_name,
+                "page": page,
+                "url": f"https://tieba.baidu.com/p/{tid}",
+            }
+        )
+    return rows
 
 
 def _taoguba_headers(referer: str = "https://www.tgb.cn/") -> dict[str, str]:
@@ -1638,6 +1770,33 @@ class SentimentIngestService:
                 "page_url": "https://www.tgb.cn/",
                 **taoguba_stats,
             }
+        elif source == "tieba_stock":
+            aliases: list[str] | None = None
+            stock = await self.session.get(Stock, symbol) if symbol else None
+            stock_aliases = await self._load_stock_aliases() if not symbol else None
+            if symbol:
+                aliases = _symbol_aliases_from_parts(symbol, stock)
+            bars = _tieba_stock_bars(symbol, stock)
+            posts, threads, tieba_stats = await asyncio.to_thread(
+                self._collect_tieba_stock,
+                symbol,
+                aliases,
+                stock_aliases,
+                bars,
+                max_pages,
+                min_reply,
+                start_date,
+                end_date,
+            )
+            threads_upserted = await self.service.upsert_threads(threads)
+            stats = {
+                "mode": "stock_forum_bars",
+                "collected": tieba_stats["collected"],
+                "matched": len(posts),
+                "threads_upserted": threads_upserted,
+                "page_url": "https://tieba.baidu.com/mg/f/getFrsData",
+                **tieba_stats,
+            }
         elif source == "jisilu":
             aliases: list[str] | None = None
             stock_aliases = await self._load_stock_aliases() if not symbol else None
@@ -1987,6 +2146,134 @@ class SentimentIngestService:
             "collected": raw_count,
             "article_limit_per_blog": article_limit,
             "blogs": blog_rows,
+        }
+
+    def _collect_tieba_stock(
+        self,
+        symbol: str | None,
+        aliases: list[str] | None,
+        stock_aliases: list[tuple[str, str]] | None,
+        bars: list[str],
+        max_pages: int,
+        min_reply: int,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[list[SentimentPostInput], list[SentimentThreadInput], dict[str, Any]]:
+        normalized: list[SentimentPostInput] = []
+        threads: list[SentimentThreadInput] = []
+        raw_count = 0
+        bar_rows: list[dict[str, Any]] = []
+        seen_threads: set[str] = set()
+        code = normalize_sentiment_symbol(symbol).split(".", 1)[0] if symbol else None
+        self._emit_progress(
+            "tieba_stock.bar_plan",
+            source="tieba_stock",
+            current_step="bar_plan",
+            bar_count=len(bars),
+            page_limit=max_pages,
+            symbol=symbol,
+        )
+        for bar_index, bar in enumerate(bars, start=1):
+            bar_raw_count = 0
+            bar_matched_before = len(normalized)
+            bar_threads_before = len(threads)
+            for page in range(1, max_pages + 1):
+                self._emit_progress(
+                    "tieba_stock.page_fetch",
+                    source="tieba_stock",
+                    current_step="tieba_bar",
+                    current_page=page,
+                    page_limit=max_pages,
+                    bar_index=bar_index,
+                    bar_count=len(bars),
+                    current_title=bar,
+                    page_url=_tieba_stock_url(bar, page),
+                )
+                try:
+                    payload = _fetch_tieba_stock_json(bar, page)
+                except RuntimeError as exc:
+                    if "Baidu Tieba returned a verification page" in str(exc):
+                        self._emit_progress(
+                            "tieba_stock.verification_required",
+                            source="tieba_stock",
+                            current_step="verification_required",
+                            current_page=page,
+                            page_limit=max_pages,
+                            bar_index=bar_index,
+                            bar_count=len(bars),
+                            current_title=bar,
+                            page_url=_tieba_stock_url(bar, page),
+                            error=str(exc),
+                        )
+                    raise
+                rows = _parse_tieba_stock_threads(payload, bar=bar, page=page)
+                if not rows:
+                    break
+                raw_count += len(rows)
+                bar_raw_count += len(rows)
+                for raw in rows:
+                    tid = str(raw.get("source_thread_id") or "").strip()
+                    if not tid or tid in seen_threads:
+                        continue
+                    seen_threads.add(tid)
+                    if _to_int(raw.get("reply_count")) < min_reply:
+                        continue
+                    published_at = _parse_datetime(raw.get("published_at"))
+                    if not _in_date_window(published_at, start_date, end_date):
+                        continue
+                    text = _post_text(raw)
+                    stock_codes = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+                    forum_name = str(raw.get("forum_name") or "").strip()
+                    is_symbol_bar = bool(symbol and code and (bar == code or forum_name == code))
+                    if symbol and is_symbol_bar and symbol not in stock_codes:
+                        stock_codes.append(symbol)
+                    raw["stock_codes"] = stock_codes
+                    raw["keywords"] = _nga_keywords(text, stock_codes)
+                    score, label = _nga_sentiment(text)
+                    raw["sentiment_score"] = score
+                    raw["sentiment_label"] = label
+                    thread = normalize_tieba_stock_thread(raw, stock_aliases=stock_aliases)
+                    if thread is not None:
+                        threads.append(thread)
+                    if symbol:
+                        if not is_symbol_bar and not _post_mentions_symbol(raw, symbol, aliases):
+                            continue
+                        normalized.extend(normalize_tieba_stock_data_posts(raw, symbol=symbol, aliases=aliases))
+                    else:
+                        normalized.extend(normalize_tieba_stock_data_posts(raw, stock_aliases=stock_aliases))
+                self._emit_progress(
+                    "tieba_stock.page_parsed",
+                    source="tieba_stock",
+                    current_step="tieba_bar",
+                    current_page=page,
+                    page_limit=max_pages,
+                    bar_index=bar_index,
+                    bar_count=len(bars),
+                    current_title=bar,
+                    rows_on_page=len(rows),
+                    posts_collected=len(normalized),
+                    threads_collected=len(threads),
+                )
+            bar_rows.append(
+                {
+                    "bar": bar,
+                    "raw_count": bar_raw_count,
+                    "matched": len(normalized) - bar_matched_before,
+                    "threads": len(threads) - bar_threads_before,
+                }
+            )
+        self._emit_progress(
+            "tieba_stock.done",
+            source="tieba_stock",
+            current_step="done",
+            bar_count=len(bars),
+            page_limit=max_pages,
+            posts_collected=len(normalized),
+            threads_collected=len(threads),
+        )
+        return [post for post in normalized if post.source_post_id], threads, {
+            "collected": raw_count,
+            "bars": bar_rows,
         }
 
     def _collect_jisilu(
@@ -2853,6 +3140,18 @@ def _source_runtime_status(source: str) -> dict[str, Any]:
             "ready": True,
         }
 
+    if source == "tieba_stock":
+        return {
+            "label": "百度贴吧股票",
+            "project_dir": "https://tieba.baidu.com/mg/f/getFrsData",
+            "project_ready": True,
+            "cookie_configured": bool(_config_value("TIEBA_COOKIE", "tieba_cookie").strip()),
+            "bar_count": len(_tieba_stock_bar_values()),
+            "cache_dir": None,
+            "cache_file_count": 0,
+            "ready": True,
+        }
+
     if source == "jisilu":
         return {
             "label": "集思录股票",
@@ -3111,6 +3410,100 @@ def normalize_wechat_sogou_thread(
         url=str(raw.get("url") or "") or None,
         reply_count=0,
         comment_count=0,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        symbols=symbols,
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_tieba_stock_data_post(
+    raw: dict[str, Any],
+    *,
+    symbol: str,
+    aliases: list[str] | None = None,
+) -> SentimentPostInput | None:
+    tid = str(raw.get("source_thread_id") or raw.get("tid") or "").strip()
+    if not tid:
+        return None
+    symbol = normalize_sentiment_symbol(symbol)
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    if aliases:
+        for alias in aliases:
+            if alias and alias not in keywords and len(str(alias)) >= 2:
+                keywords.append(str(alias))
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentPostInput(
+        source="tieba_stock",
+        source_post_id=f"{tid}:{symbol}",
+        symbol=symbol,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or f"https://tieba.baidu.com/p/{tid}"),
+        reply_count=reply_count,
+        like_count=_to_int(raw.get("agree_count")),
+        comment_count=reply_count,
+        sentiment_score=score,
+        sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
+        keywords=keywords,
+        raw=raw,
+    )
+
+
+def normalize_tieba_stock_data_posts(
+    raw: dict[str, Any],
+    *,
+    symbol: str | None = None,
+    aliases: list[str] | None = None,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> list[SentimentPostInput]:
+    target_symbols = [normalize_sentiment_symbol(symbol)] if symbol else _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    normalized: list[SentimentPostInput] = []
+    for target_symbol in target_symbols:
+        post = normalize_tieba_stock_data_post(raw, symbol=target_symbol, aliases=aliases if symbol else None)
+        if post is not None:
+            normalized.append(post)
+    return normalized
+
+
+def normalize_tieba_stock_thread(
+    raw: dict[str, Any],
+    *,
+    stock_aliases: list[tuple[str, str]] | None = None,
+) -> SentimentThreadInput | None:
+    tid = str(raw.get("source_thread_id") or raw.get("tid") or "").strip()
+    if not tid:
+        return None
+    score = raw.get("sentiment_score")
+    try:
+        score = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score = None
+    symbols = _extract_forum_post_symbols(raw, stock_aliases=stock_aliases)
+    keywords = [str(item) for item in (raw.get("keywords") or []) if str(item).strip()]
+    for symbol in symbols:
+        if symbol not in keywords:
+            keywords.append(symbol)
+    reply_count = _to_int(raw.get("reply_count"))
+    return SentimentThreadInput(
+        source="tieba_stock",
+        source_thread_id=tid,
+        title=str(raw.get("title") or "") or None,
+        content=str(raw.get("content") or "") or None,
+        author=str(raw.get("author") or "") or None,
+        published_at=_parse_datetime(raw.get("published_at")),
+        last_reply_at=_parse_datetime(raw.get("published_at")),
+        url=str(raw.get("url") or f"https://tieba.baidu.com/p/{tid}"),
+        reply_count=reply_count,
+        comment_count=reply_count,
         sentiment_score=score,
         sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
         symbols=symbols,

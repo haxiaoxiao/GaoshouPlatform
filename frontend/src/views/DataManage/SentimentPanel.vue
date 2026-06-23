@@ -340,6 +340,7 @@ const sourceOptions: Array<{ value: SentimentSource; label: string }> = [
   { value: 'xueqiu_spyder', label: '雪球' },
   { value: 'eastmoney_guba', label: '东方财富股吧' },
   { value: 'taoguba', label: '淘股吧' },
+  { value: 'tieba_stock', label: '百度贴吧' },
   { value: 'jisilu', label: '集思录股票' },
   { value: 'wechat_sogou', label: '搜狗微信' },
   { value: 'flocktrader', label: 'NGA' },

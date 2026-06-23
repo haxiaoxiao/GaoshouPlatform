@@ -119,6 +119,8 @@ class Settings(BaseSettings):
     wechat_sogou_cookie: str = ""
     taoguba_blog_ids: str = "2577911:zarili,444409:湖南人,8186648:星辰趋势主升,13186975:主升龙头空空龙,7826561:玫瑰抓龙头,11255090:搞钱老兵,11520081:风一样的胖刺猬,6671396:亿百万实盘"
     taoguba_cookie: str = ""
+    tieba_stock_bars: str = "股票,股市,A股,炒股,涨停板"
+    tieba_cookie: str = ""
 
     # API 配置
     api_prefix: str = "/api"
