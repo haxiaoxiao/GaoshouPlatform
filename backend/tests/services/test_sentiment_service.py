@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
 from app.db.models.sentiment import SentimentPost
+from app.db.models.stock import Stock
 from app.services.sentiment import (
     NgaIngestStats,
     SentimentIngestService,
@@ -41,6 +42,7 @@ from app.services.sentiment import (
     normalize_wechat_sogou_thread,
     normalize_xueqiu_spyder_post,
     parse_sources,
+    serialize_post,
 )
 
 
@@ -487,6 +489,171 @@ async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monk
     )
 
 
+@pytest.mark.asyncio
+async def test_nga_symbol_search_uses_recent_reply_window(sentiment_session, monkeypatch):
+    progress_events: list[dict] = []
+    service = SentimentIngestService(sentiment_session, progress_callback=progress_events.append)
+
+    stock = Stock(symbol="603629.SH", name="利通电子", company_name="江苏利通电子股份有限公司")
+    sentiment_session.add(stock)
+    await sentiment_session.flush()
+
+    def fake_search_html(query: str, *, page: int = 1):
+        if query == "利通电子" and page == 1:
+            return """
+            <tr class='row1 topicrow'>
+                <td class='c1'><a href='/read.php?tid=1001' class='replies'>3</a></td>
+                <td class='c2'><a href='/read.php?tid=1001' class='topic'>利通电子(603629)后续大家怎么看待？</a></td>
+                <td class='c3'><a title='用户ID 1'>甲</a><span class='silver postdate'>1739915247</span></td>
+                <td class='c4'><a href='/read.php?tid=1001&page=e' class='silver replydate'></a><span class='replyer'>乙</span></td>
+            </tr>
+            <script type='text/javascript'>
+            commonui.topicArg.add(
+            'a','b','c','d',
+            'e','f','g',
+            '706',1001,'','','0',1739915247,1782528000,3,
+            8192,'','',
+            null,'',null,'',''
+            )
+            </script>
+            <tr class='row2 topicrow'>
+                <td class='c1'><a href='/read.php?tid=1002' class='replies'>1</a></td>
+                <td class='c2'><a href='/read.php?tid=1002' class='topic'>利通电子旧帖</a></td>
+                <td class='c3'><a title='用户ID 2'>丙</a><span class='silver postdate'>1739000000</span></td>
+                <td class='c4'><a href='/read.php?tid=1002&page=e' class='silver replydate'></a><span class='replyer'>丁</span></td>
+            </tr>
+            <script type='text/javascript'>
+            commonui.topicArg.add(
+            'a','b','c','d',
+            'e','f','g',
+            '706',1002,'','','0',1739000000,1782000000,1,
+            8192,'','',
+            null,'',null,'',''
+            )
+            </script>
+            """
+        return "没有符合条件的结果"
+
+    def fake_fetch(url, *, params=None):
+        return str(params["tid"])
+
+    def fake_parse_thread_posts(html_text: str):
+        if html_text == "1001":
+            return [
+                {"title": "利通电子(603629)后续大家怎么看待？", "content": "感觉还能反弹 SH603629", "publish_time": "2026-06-26 10:00"},
+                {"title": "", "content": "昨天跌停太伤了", "publish_time": "2026-06-27 09:00"},
+            ]
+        if html_text == "1002":
+            return [
+                {"title": "利通电子旧帖", "content": "很老的内容 SH603629", "publish_time": "2026-06-10 10:00"},
+                {"title": "", "content": "旧回复", "publish_time": "2026-06-20 09:00"},
+            ]
+        return []
+
+    monkeypatch.setattr("app.services.sentiment._fetch_nga_search_html", fake_search_html)
+    monkeypatch.setattr("app.services.sentiment._fetch_nga_html", fake_fetch)
+    monkeypatch.setattr("app.services.sentiment._parse_nga_thread_posts", fake_parse_thread_posts)
+
+    posts, threads, stats = await service._collect_flocktrader_by_date(
+        "603629.SH",
+        max_pages=2,
+        start_date=date(2026, 6, 25),
+        end_date=date(2026, 6, 27),
+        force_refresh=False,
+    )
+
+    assert stats.mode == "search_recent_reply+daily_cache"
+    assert stats.search_queries[0] == "利通电子"
+    assert stats.search_pages[0]["matched"] == 1
+    assert len(posts) >= 1
+    assert "1001:603629.SH" in {post.source_post_id for post in posts}
+    assert "1001" in {thread.source_thread_id for thread in threads}
+    assert any(
+        event["stage"] == "nga.search.thread_collected"
+        and event["current_tid"] == "1001"
+        for event in progress_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_nga_symbol_mode_merges_search_and_daily_cache(sentiment_session, monkeypatch):
+    service = SentimentIngestService(sentiment_session)
+    stock = Stock(symbol="603629.SH", name="利通电子", company_name="江苏利通电子股份有限公司")
+    sentiment_session.add(stock)
+    await sentiment_session.flush()
+
+    search_stats = NgaIngestStats(mode="search_recent_reply")
+    search_stats.search_queries = ["利通电子", "603629"]
+    search_stats.search_pages = [{"query": "利通电子", "page": 1, "raw_count": 1, "matched": 1}]
+    date_stats = NgaIngestStats(mode="daily_cache")
+    date_stats.loaded_dates = ["2026-06-26"]
+    date_stats.date_files = ["posts_2026-06-26.json"]
+
+    monkeypatch.setattr(
+        service,
+        "_load_or_search_nga_symbol_posts",
+        lambda *args, **kwargs: (
+            [
+                {
+                    "tid": "2001",
+                    "title": "search hit",
+                    "content": "SH603629 反弹",
+                    "publish_time": "2026-06-26 10:00",
+                    "last_reply_time": "2026-06-26 11:00",
+                    "reply_count": 2,
+                    "comments": [],
+                    "stock_codes": ["603629.SH"],
+                }
+            ],
+            search_stats,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "_load_or_crawl_nga_date_posts",
+        lambda *args, **kwargs: (
+            [
+                {
+                    "tid": "2001",
+                    "title": "search hit",
+                    "content": "SH603629 反弹",
+                    "publish_time": "2026-06-26 10:00",
+                    "last_reply_time": "2026-06-26 11:00",
+                    "reply_count": 2,
+                    "comments": [],
+                    "stock_codes": ["603629.SH"],
+                },
+                {
+                    "tid": "2002",
+                    "title": "date cache hit",
+                    "content": "利通电子 跌停",
+                    "publish_time": "2026-06-27 09:00",
+                    "last_reply_time": "2026-06-27 09:30",
+                    "reply_count": 3,
+                    "comments": [],
+                    "stock_codes": ["603629.SH"],
+                },
+            ],
+            date_stats,
+        ),
+    )
+
+    posts, threads, stats = await service._collect_flocktrader_by_date(
+        "603629.SH",
+        max_pages=2,
+        start_date=date(2026, 6, 25),
+        end_date=date(2026, 6, 27),
+        force_refresh=False,
+    )
+
+    assert stats.mode == "search_recent_reply+daily_cache"
+    assert stats.search_queries == ["利通电子", "603629"]
+    assert stats.loaded_dates == ["2026-06-26"]
+    assert len(posts) == 2
+    assert {post.source_post_id for post in posts} == {"2001:603629.SH", "2002:603629.SH"}
+    assert {thread.source_thread_id for thread in threads} == {"2001", "2002"}
+
+
 def test_normalize_xueqiu_spyder_post_maps_raw_payload():
     post = normalize_xueqiu_spyder_post(
         {
@@ -511,6 +678,49 @@ def test_normalize_xueqiu_spyder_post_maps_raw_payload():
     assert post.url == "https://xueqiu.com/123/456"
     assert post.reply_count == 12
     assert post.like_count == 7
+
+
+def test_serialize_post_exposes_xueqiu_source_meta():
+    post = SentimentPost(
+        source="xueqiu_spyder",
+        source_post_id="123",
+        symbol="600519.SH",
+        title="雪球样本",
+        raw_json=json.dumps(
+            {
+                "view_count": 760,
+                "retweet_count": 2,
+                "fav_count": 3,
+                "source": "Android",
+                "timeBefore": "19分钟前",
+                "user": {
+                    "id": 42,
+                    "profile": "/u/42",
+                    "followers_count": 395,
+                    "friends_count": 18,
+                    "status_count": 1001,
+                    "verified": True,
+                    "verified_description": "财经博主",
+                    "verified_type": 7,
+                    "verified_infos": [{"type": "stock"}],
+                },
+            },
+            ensure_ascii=False,
+        ),
+    )
+
+    meta = serialize_post(post)["source_meta"]
+
+    assert meta["view_count"] == 760
+    assert meta["retweet_count"] == 2
+    assert meta["fav_count"] == 3
+    assert meta["source_device"] == "Android"
+    assert meta["time_before"] == "19分钟前"
+    assert meta["user_id"] == "42"
+    assert meta["user_followers_count"] == 395
+    assert meta["user_verified"] is True
+    assert meta["user_verified_description"] == "财经博主"
+    assert meta["user_verified_infos"] == [{"type": "stock"}]
 
 
 def test_normalize_eastmoney_guba_post_maps_list_payload():

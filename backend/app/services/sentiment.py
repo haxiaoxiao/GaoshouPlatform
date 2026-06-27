@@ -170,11 +170,14 @@ class SentimentThreadInput:
 
 @dataclass
 class NgaIngestStats:
+    mode: str = "daily_cache"
     loaded_dates: list[str] = field(default_factory=list)
     crawled_dates: list[str] = field(default_factory=list)
     date_files: list[str] = field(default_factory=list)
     extra_date_files: list[str] = field(default_factory=list)
     empty_dates: list[str] = field(default_factory=list)
+    search_queries: list[str] = field(default_factory=list)
+    search_pages: list[dict[str, Any]] = field(default_factory=list)
     scan_time_basis: str = "last_reply_time"
     cache_partition: str = "publish_time"
     total_posts: int = 0
@@ -270,6 +273,40 @@ def _to_int(value: Any, default: int = 0) -> int:
         return max(int(value or default), 0)
     except (TypeError, ValueError):
         return default
+
+
+def _compact_dict(value: dict[str, Any]) -> dict[str, Any]:
+    return {key: item for key, item in value.items() if item not in (None, "", [], {})}
+
+
+def _post_source_meta(post: SentimentPost) -> dict[str, Any]:
+    try:
+        raw = json.loads(post.raw_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict) or normalize_sentiment_source(post.source) != "xueqiu_spyder":
+        return {}
+
+    user = raw.get("user") if isinstance(raw.get("user"), dict) else {}
+    verified_infos = user.get("verified_infos") if isinstance(user, dict) else None
+    return _compact_dict(
+        {
+            "view_count": _to_int(raw.get("view_count")),
+            "retweet_count": _to_int(raw.get("retweet_count")),
+            "fav_count": _to_int(raw.get("fav_count")),
+            "source_device": raw.get("source") or raw.get("source_feed"),
+            "time_before": raw.get("timeBefore"),
+            "user_id": str(user.get("id")) if user.get("id") is not None else None,
+            "user_profile": user.get("profile"),
+            "user_followers_count": _to_int(user.get("followers_count")),
+            "user_friends_count": _to_int(user.get("friends_count")),
+            "user_status_count": _to_int(user.get("status_count")),
+            "user_verified": bool(user.get("verified")),
+            "user_verified_description": user.get("verified_description"),
+            "user_verified_type": user.get("verified_type"),
+            "user_verified_infos": verified_infos if isinstance(verified_infos, list) else None,
+        }
+    )
 
 
 def _strip_html_fallback(text: str | None) -> str:
@@ -412,6 +449,24 @@ def _short_company_name(name: str | None) -> str | None:
     for suffix in ("股份有限公司", "有限责任公司", "有限公司", "集团股份", "集团"):
         short = short.replace(suffix, "")
     return short or None
+
+
+def _nga_search_queries(symbol: str, stock: Stock | None = None) -> list[str]:
+    normalized = normalize_sentiment_symbol(symbol)
+    code = normalized.split(".", 1)[0]
+    candidates = [
+        getattr(stock, "name", None),
+        _short_company_name(getattr(stock, "company_name", None)),
+        code,
+    ]
+    queries: list[str] = []
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if len(text) < 2 or "." in text:
+            continue
+        if text not in queries:
+            queries.append(text)
+    return queries or [code]
 
 
 def _post_mentions_symbol(raw: dict[str, Any], symbol: str, aliases: list[str] | None = None) -> bool:
@@ -1702,6 +1757,7 @@ def serialize_post(post: SentimentPost) -> dict[str, Any]:
         "sentiment_score": post.sentiment_score,
         "sentiment_label": post.sentiment_label,
         "keywords": _loads_list(post.keywords_json),
+        "source_meta": _post_source_meta(post),
     }
 
 
@@ -2017,7 +2073,7 @@ class SentimentIngestService:
             )
             nga_stats.thread_upserted = await self.service.upsert_threads(threads)
             stats = {
-                "mode": "daily_cache",
+                "mode": nga_stats.mode,
                 "collected": nga_stats.total_posts,
                 "analyzed": nga_stats.analyzed_posts,
                 "matched": nga_stats.matched_posts,
@@ -2027,6 +2083,8 @@ class SentimentIngestService:
                 "date_files": nga_stats.date_files,
                 "extra_date_files": nga_stats.extra_date_files,
                 "empty_dates": nga_stats.empty_dates,
+                "search_queries": nga_stats.search_queries,
+                "search_pages": nga_stats.search_pages,
                 "scan_time_basis": nga_stats.scan_time_basis,
                 "cache_partition": nga_stats.cache_partition,
             }
@@ -2825,16 +2883,46 @@ class SentimentIngestService:
             raise ValueError("start_date cannot be after end_date")
 
         aliases: list[str] | None = None
+        stock: Stock | None = None
         if symbol:
             stock = await self.session.get(Stock, symbol)
             aliases = _symbol_aliases_from_parts(symbol, stock)
         stock_aliases = await self._load_stock_aliases() if not symbol else None
-        raw_posts, stats = self._load_or_crawl_nga_date_posts(
-            start,
-            end,
-            max_pages=max_pages,
-            force_refresh=force_refresh,
-        )
+        if symbol:
+            search_posts, search_stats = self._load_or_search_nga_symbol_posts(
+                symbol,
+                stock,
+                start,
+                end,
+                max_pages=max_pages,
+                force_refresh=force_refresh,
+            )
+            date_posts, date_stats = self._load_or_crawl_nga_date_posts(
+                start,
+                end,
+                max_pages=max_pages,
+                force_refresh=force_refresh,
+            )
+            raw_posts = _merge_nga_post_lists(search_posts, date_posts)
+            stats = NgaIngestStats(
+                mode="search_recent_reply+daily_cache",
+                loaded_dates=date_stats.loaded_dates,
+                crawled_dates=date_stats.crawled_dates,
+                date_files=date_stats.date_files,
+                extra_date_files=date_stats.extra_date_files,
+                empty_dates=date_stats.empty_dates,
+                search_queries=search_stats.search_queries,
+                search_pages=search_stats.search_pages,
+                scan_time_basis=search_stats.scan_time_basis,
+                cache_partition=date_stats.cache_partition,
+            )
+        else:
+            raw_posts, stats = self._load_or_crawl_nga_date_posts(
+                start,
+                end,
+                max_pages=max_pages,
+                force_refresh=force_refresh,
+            )
         stats.total_posts = len(raw_posts)
 
         analyzed = self._analyze_nga_posts(raw_posts)
@@ -2856,6 +2944,183 @@ class SentimentIngestService:
             normalized.extend(normalize_nga_data_posts(raw, stock_aliases=stock_aliases))
         stats.matched_posts = len(normalized)
         return normalized, threads, stats
+
+    def _load_or_search_nga_symbol_posts(
+        self,
+        symbol: str,
+        stock: Stock | None,
+        start: date,
+        end: date,
+        *,
+        max_pages: int,
+        force_refresh: bool,
+    ) -> tuple[list[dict[str, Any]], NgaIngestStats]:
+        stats = NgaIngestStats(mode="search_recent_reply")
+        stats.cache_partition = "none"
+        queries = _nga_search_queries(symbol, stock)
+        stats.search_queries = list(queries)
+        self._emit_progress(
+            "nga.search.prepare",
+            source="flocktrader",
+            current_step="search_prepare",
+            current_symbol=symbol,
+            search_queries=queries,
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+            force_refresh=force_refresh,
+            scan_time_basis=stats.scan_time_basis,
+        )
+        start_dt = datetime.combine(start, time.min)
+        end_dt = datetime.combine(end, time.max.replace(microsecond=0))
+        collected: list[dict[str, Any]] = []
+        seen_tids: set[str] = set()
+
+        for query in queries:
+            for page in range(1, max_pages + 1):
+                self._emit_progress(
+                    "nga.search.page_fetch",
+                    source="flocktrader",
+                    current_step="search_page",
+                    current_symbol=symbol,
+                    current_query=query,
+                    current_page=page,
+                    page_limit=max_pages,
+                )
+                html_text = _fetch_nga_search_html(query, page=page)
+                if "没有符合条件的结果" in html_text:
+                    stats.search_pages.append({"query": query, "page": page, "raw_count": 0, "matched": 0})
+                    self._emit_progress(
+                        "nga.search.no_results",
+                        source="flocktrader",
+                        current_step="search_page",
+                        current_symbol=symbol,
+                        current_query=query,
+                        current_page=page,
+                        page_limit=max_pages,
+                    )
+                    break
+                topics = _parse_nga_search_topics(html_text)
+                if not topics:
+                    stats.search_pages.append({"query": query, "page": page, "raw_count": 0, "matched": 0})
+                    self._emit_progress(
+                        "nga.search.page_parsed",
+                        source="flocktrader",
+                        current_step="search_page",
+                        current_symbol=symbol,
+                        current_query=query,
+                        current_page=page,
+                        page_limit=max_pages,
+                        topics_on_page=0,
+                        matched_topics=0,
+                    )
+                    break
+                matched_on_page = 0
+                for topic_index, topic in enumerate(topics, start=1):
+                    tid = str(topic.get("tid") or "")
+                    if not tid or tid in seen_tids:
+                        continue
+                    last_reply_time = _parse_datetime(topic.get("last_reply_time"))
+                    if last_reply_time is None:
+                        last_reply_time = _parse_datetime(topic.get("publish_time"))
+                    if last_reply_time is None or last_reply_time < start_dt or last_reply_time > end_dt:
+                        continue
+                    seen_tids.add(tid)
+                    title = str(topic.get("title") or "")
+                    self._emit_progress(
+                        "nga.search.thread_fetch",
+                        source="flocktrader",
+                        current_step="search_thread_detail",
+                        current_symbol=symbol,
+                        current_query=query,
+                        current_page=page,
+                        page_limit=max_pages,
+                        topic_index=topic_index,
+                        topics_on_page=len(topics),
+                        current_tid=tid,
+                        current_title=title[:120],
+                    )
+                    detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
+                    thread_posts = _parse_nga_thread_posts(detail_html)
+                    if not thread_posts:
+                        continue
+                    publish_time = _parse_datetime(thread_posts[0].get("publish_time")) or _parse_datetime(topic.get("publish_time"))
+                    computed_last_reply = _parse_datetime(thread_posts[-1].get("publish_time")) or last_reply_time or publish_time
+                    if computed_last_reply is None or computed_last_reply < start_dt or computed_last_reply > end_dt:
+                        continue
+                    body_title = thread_posts[0].get("title") or title
+                    content = thread_posts[0].get("content") or body_title
+                    comments = [
+                        {"content": post.get("content") or "", "publish_time": post.get("publish_time")}
+                        for post in thread_posts[1:]
+                        if str(post.get("content") or "").strip()
+                    ]
+                    stock_codes = _extract_nga_post_symbols({"title": body_title, "content": content, "comments": comments})
+                    sentiment_score, sentiment_label = _nga_sentiment(" ".join([body_title, content, *[str(item.get('content') or '') for item in comments]]))
+                    collected.append(
+                        {
+                            "tid": tid,
+                            "title": body_title,
+                            "author": topic.get("author"),
+                            "content": content,
+                            "publish_time": publish_time.isoformat() if isinstance(publish_time, datetime) else publish_time,
+                            "last_reply_time": computed_last_reply.isoformat() if isinstance(computed_last_reply, datetime) else computed_last_reply,
+                            "reply_count": topic.get("reply_count", len(comments)),
+                            "comments": comments,
+                            "stock_codes": stock_codes,
+                            "keywords": _nga_keywords(" ".join([body_title, content]), stock_codes),
+                            "sentiment_score": sentiment_score,
+                            "sentiment_label": sentiment_label,
+                        }
+                    )
+                    matched_on_page += 1
+                    self._emit_progress(
+                        "nga.search.thread_collected",
+                        source="flocktrader",
+                        current_step="search_thread_detail",
+                        current_symbol=symbol,
+                        current_query=query,
+                        current_page=page,
+                        page_limit=max_pages,
+                        topic_index=topic_index,
+                        topics_on_page=len(topics),
+                        current_tid=tid,
+                        current_title=body_title[:120],
+                        last_reply_time=computed_last_reply.isoformat() if isinstance(computed_last_reply, datetime) else str(computed_last_reply),
+                        reply_count=topic.get("reply_count", len(comments)),
+                        comments_count=len(comments),
+                        threads_collected=len(collected),
+                    )
+                stats.search_pages.append({"query": query, "page": page, "raw_count": len(topics), "matched": matched_on_page})
+                self._emit_progress(
+                    "nga.search.page_parsed",
+                    source="flocktrader",
+                    current_step="search_page",
+                    current_symbol=symbol,
+                    current_query=query,
+                    current_page=page,
+                    page_limit=max_pages,
+                    topics_on_page=len(topics),
+                    matched_topics=matched_on_page,
+                    threads_collected=len(collected),
+                )
+                if len(topics) < 20:
+                    break
+
+        collected.sort(
+            key=lambda item: _parse_datetime(item.get("last_reply_time")) or _parse_datetime(item.get("publish_time")) or datetime.min,
+            reverse=True,
+        )
+        self._emit_progress(
+            "nga.search.done",
+            source="flocktrader",
+            current_step="search_done",
+            current_symbol=symbol,
+            search_queries=queries,
+            total_posts=len(collected),
+            start_date=start.isoformat(),
+            end_date=end.isoformat(),
+        )
+        return collected, stats
 
     def _load_or_crawl_nga_date_posts(
         self,
@@ -3270,6 +3535,19 @@ def _fetch_nga_html(url: str, *, params: dict[str, Any] | None = None) -> str:
     return _decode_nga_response(response.content)
 
 
+def _fetch_nga_search_html(query: str, *, page: int = 1) -> str:
+    board_fid = int(getattr(settings, "nga_board_fid", 706) or 706)
+    response = requests.get(
+        "https://nga.178.com/thread.php",
+        headers=_nga_headers(),
+        params={"fid": board_fid, "key": query, "content": 4, "page": page},
+        timeout=20,
+    )
+    if response.status_code not in {200, 410}:
+        response.raise_for_status()
+    return _decode_nga_response(response.content)
+
+
 def _parse_nga_board_topics(html_text: str) -> list[dict[str, Any]]:
     pattern = re.compile(
         r"<tr class='row\d+ topicrow'>.*?"
@@ -3293,6 +3571,44 @@ def _parse_nga_board_topics(html_text: str) -> list[dict[str, Any]]:
                 "author_id": match.group("author_id"),
                 "reply_count": _to_int(match.group("replies")),
                 "publish_time": datetime.fromtimestamp(post_ts),
+            }
+        )
+    return topics
+
+
+def _parse_nga_search_topics(html_text: str) -> list[dict[str, Any]]:
+    row_pattern = re.compile(
+        r"<tr class='row\d+ topicrow'>.*?"
+        r"href='/read\.php\?tid=(?P<tid>\d+)'[^>]*class='replies'>(?P<replies>\d+)</a>.*?"
+        r"<a href='/read\.php\?tid=(?P=tid)'[^>]*class='topic'>(?P<title>.*?)</a>.*?"
+        r"title='用户ID (?P<author_id>\d+)'>(?P<author>.*?)</a><span class='silver postdate'[^>]*>(?P<postdate>\d+)</span>.*?"
+        r"<span class='replyer'[^>]*>(?P<replyer>.*?)</span>.*?"
+        r"</tr>",
+        re.S,
+    )
+    script_pattern = re.compile(
+        r"commonui\.topicArg\.add\(\s*'[^']*','[^']*','[^']*','[^']*',\s*'[^']*','[^']*','[^']*',\s*'(?P<fid>\d+)',(?P<tid>\d+),'[^']*','[^']*','[^']*',(?P<publish>\d+),(?P<last_reply>\d+),(?P<replies>\d+),",
+        re.S,
+    )
+    topics: list[dict[str, Any]] = []
+    for match in row_pattern.finditer(html_text):
+        tid = str(match.group("tid") or "").strip()
+        if not tid:
+            continue
+        window = html_text[match.end(): match.end() + 1200]
+        script_match = script_pattern.search(window)
+        publish_ts = _to_int(script_match.group("publish")) if script_match else _to_int(match.group("postdate"))
+        last_reply_ts = _to_int(script_match.group("last_reply")) if script_match else publish_ts
+        topics.append(
+            {
+                "tid": tid,
+                "title": _nga_clean_text(match.group("title")),
+                "author": _nga_clean_text(match.group("author")) or match.group("author_id"),
+                "author_id": match.group("author_id"),
+                "reply_count": _to_int(script_match.group("replies")) if script_match else _to_int(match.group("replies")),
+                "publish_time": datetime.fromtimestamp(publish_ts) if publish_ts else None,
+                "last_reply_time": datetime.fromtimestamp(last_reply_ts) if last_reply_ts else None,
+                "last_reply_author": _nga_clean_text(match.group("replyer")),
             }
         )
     return topics

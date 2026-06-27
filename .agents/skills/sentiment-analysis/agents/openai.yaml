@@ -1,0 +1,4 @@
+interface:
+  display_name: "Sentiment Analysis"
+  short_description: "Run and extend Gaoshou multi-source A-share sentiment crawlers."
+  default_prompt: "Use $sentiment-analysis to run, inspect, troubleshoot, or extend the GaoshouPlatform sentiment analysis pipeline."

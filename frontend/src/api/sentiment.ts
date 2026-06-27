@@ -49,6 +49,7 @@ export interface SentimentPost {
   sentiment_score: number | null
   sentiment_label: string | null
   keywords: string[]
+  source_meta: Record<string, unknown>
 }
 
 export interface SentimentThread {
