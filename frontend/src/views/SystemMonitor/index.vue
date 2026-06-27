@@ -385,7 +385,7 @@ const incidentRows = computed<IncidentRow[]>(() => {
       key: 'sync-service',
       scope: 'SYNC',
       title: '同步服务不可用',
-      detail: syncStatus.value?.reason || String(syncStatus.value?.details?.proxy_error || '18810 同步服务未返回可用状态'),
+      detail: syncStatus.value?.reason || String(syncStatus.value?.details?.proxy_error || '8810 同步服务未返回可用状态'),
       action: '看同步',
       path: '/data/sync',
       tone: 'bad',

@@ -17,6 +17,7 @@ from app.services.sentiment import (
     _parse_laohu8_stock_posts,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
+    _parse_nga_board_topics,
     _parse_taoguba_article_detail,
     _parse_taoguba_blog_articles,
     _parse_tieba_stock_threads,
@@ -419,6 +420,34 @@ async def test_sentiment_ingest_run_persists_nga_threads_and_symbol_posts(sentim
     assert posts[0].source_post_id == "46800100:600519.SH"
 
 
+def test_parse_nga_board_topics_reads_last_reply_time():
+    topics = _parse_nga_board_topics(
+        """
+        <tr class='row1 topicrow'>
+            <td class='c1'><a href='/read.php?tid=46872529' class='replies'>10355</a></td>
+            <td class='c2'><a href='/read.php?tid=46872529' class='topic'>存储人哀嚎酒馆。</a></td>
+            <td class='c3'><a title='用户ID 61395264'>村上吹树</a><span class='silver postdate'>1779952664</span></td>
+            <td class='c4'><a href='/read.php?tid=46872529&page=e' class='silver replydate'></a><span class='replyer'>ShirasagiYin</span></td>
+        </tr>
+        <script type='text/javascript'>
+        commonui.topicArg.add(
+        't_rc1_2','t_tt1_2','t_ta1_2','t_pt1_2',
+        't_tr1_2','t_rt1_2','t_pc1_2',
+        '706',46872529,'','','0',1779952664,1782532787,10355,
+        8224,'','',
+        null,'',null,'',''
+        )
+        </script>
+        """
+    )
+
+    assert len(topics) == 1
+    assert topics[0]["tid"] == "46872529"
+    assert topics[0]["reply_count"] == 10355
+    assert topics[0]["publish_time"] == datetime.fromtimestamp(1779952664)
+    assert topics[0]["last_reply_time"] == datetime.fromtimestamp(1782532787)
+
+
 @pytest.mark.asyncio
 async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monkeypatch, tmp_path):
     progress_events: list[dict] = []
@@ -427,9 +456,9 @@ async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monk
     monkeypatch.setenv("NGA_DATA_DIR", str(tmp_path))
 
     topics_by_page = {
-        1: [{"tid": "1", "title": "today", "author": "a", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 10)}],
-        2: [{"tid": "2", "title": "yesterday", "author": "b", "reply_count": 1, "publish_time": datetime(2026, 6, 21, 10)}],
-        3: [{"tid": "3", "title": "older", "author": "c", "reply_count": 1, "publish_time": datetime(2026, 6, 14, 10)}],
+        1: [{"tid": "1", "title": "today", "author": "a", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 10), "last_reply_time": datetime(2026, 6, 22, 10)}],
+        2: [{"tid": "2", "title": "yesterday", "author": "b", "reply_count": 1, "publish_time": datetime(2026, 6, 21, 10), "last_reply_time": datetime(2026, 6, 22, 9)}],
+        3: [{"tid": "3", "title": "older", "author": "c", "reply_count": 1, "publish_time": datetime(2026, 6, 14, 10), "last_reply_time": datetime(2026, 6, 14, 10)}],
     }
     posts_by_tid = {
         "1": [{"title": "today", "content": "SH600519 今日", "publish_time": "2026-06-22 10:00"}],
@@ -466,13 +495,13 @@ async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monk
         force_refresh=True,
     )
 
-    assert fetched_pages == [1, 2, 3]
-    assert [post["tid"] for post in posts] == ["2", "1"]
+    assert fetched_pages == [1, 2, 1, 2]
+    assert [post["tid"] for post in posts] == ["1", "2"]
     assert stats.crawled_dates == ["2026-06-21", "2026-06-22"]
     assert stats.scan_time_basis == "last_reply_time"
-    assert stats.cache_partition == "publish_time"
-    assert [post["tid"] for post in json.loads((tmp_path / "posts_2026-06-21.json").read_text(encoding="utf-8"))] == ["2"]
-    assert [post["tid"] for post in json.loads((tmp_path / "posts_2026-06-22.json").read_text(encoding="utf-8"))] == ["1"]
+    assert stats.cache_partition == "last_reply_time"
+    assert json.loads((tmp_path / "posts_2026-06-21.json").read_text(encoding="utf-8")) == []
+    assert [post["tid"] for post in json.loads((tmp_path / "posts_2026-06-22.json").read_text(encoding="utf-8"))] == ["1", "2"]
     assert any(event["stage"] == "nga.board.page_fetch" and event["board_page"] == 1 for event in progress_events)
     assert any(
         event["stage"] == "nga.thread.fetch"
@@ -483,8 +512,60 @@ async def test_nga_range_crawl_buckets_missing_days_once(sentiment_session, monk
     )
     assert any(
         event["stage"] == "nga.cache.write"
-        and event["current_date"] == "2026-06-21"
-        and event["cache_posts"] == 1
+        and event["current_date"] == "2026-06-22"
+        and event["cache_posts"] == 2
+        for event in progress_events
+    )
+
+
+@pytest.mark.asyncio
+async def test_nga_range_crawl_stops_at_first_topic_before_start(sentiment_session, monkeypatch, tmp_path):
+    progress_events: list[dict] = []
+    service = SentimentIngestService(sentiment_session, progress_callback=progress_events.append)
+    monkeypatch.setenv("NGA_COOKIE", "nga_uid=1")
+    monkeypatch.setenv("NGA_DATA_DIR", str(tmp_path))
+
+    topics_by_page = {
+        1: [
+            {"tid": "1", "title": "today", "author": "a", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 10), "last_reply_time": datetime(2026, 6, 22, 10)},
+            {"tid": "2", "title": "yesterday", "author": "b", "reply_count": 1, "publish_time": datetime(2026, 6, 21, 10), "last_reply_time": datetime(2026, 6, 21, 23, 59)},
+            {"tid": "3", "title": "should not fetch", "author": "c", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 9), "last_reply_time": datetime(2026, 6, 22, 9)},
+        ],
+        2: [{"tid": "4", "title": "should not page", "author": "d", "reply_count": 1, "publish_time": datetime(2026, 6, 22, 8), "last_reply_time": datetime(2026, 6, 22, 8)}],
+    }
+    posts_by_tid = {
+        "1": [{"title": "today", "content": "SH600519 今日", "publish_time": "2026-06-22 10:00"}],
+    }
+    fetched_pages: list[int] = []
+    fetched_tids: list[str] = []
+
+    def fake_fetch(url, *, params=None):
+        if "thread.php" in url:
+            fetched_pages.append(int(params["page"]))
+            return "board"
+        fetched_tids.append(str(params["tid"]))
+        return str(params["tid"])
+
+    monkeypatch.setattr("app.services.sentiment._fetch_nga_html", fake_fetch)
+    monkeypatch.setattr("app.services.sentiment._parse_nga_board_topics", lambda html: topics_by_page.get(fetched_pages[-1], []))
+    monkeypatch.setattr("app.services.sentiment._parse_nga_thread_posts", lambda html: posts_by_tid.get(html, []))
+
+    posts, stats = service._load_or_crawl_nga_date_posts(
+        date(2026, 6, 22),
+        date(2026, 6, 22),
+        max_pages=5,
+        force_refresh=True,
+    )
+
+    assert fetched_pages == [1]
+    assert fetched_tids == ["1"]
+    assert [post["tid"] for post in posts] == ["1"]
+    assert stats.scan_time_basis == "last_reply_time"
+    assert stats.cache_partition == "last_reply_time"
+    assert any(
+        event["stage"] == "nga.crawl.stop_before_start"
+        and event["current_tid"] == "2"
+        and event["stop_time"] == "2026-06-21T23:59:00"
         for event in progress_events
     )
 
@@ -1438,6 +1519,8 @@ def test_nga_data_post_matches_code_and_name_aliases():
     assert post.source == "flocktrader"
     assert post.source_post_id == "46800001:600118.SH"
     assert post.symbol == "600118.SH"
+    assert post.published_at == datetime(2026, 5, 20, 11, 0)
+    assert post.raw and post.raw["published_at_original"] == "2026-05-20T10:00:00"
     assert post.sentiment_label == "bullish"
     assert post.url == "https://bbs.nga.cn/read.php?tid=46800001"
     assert "商业航天" in post.keywords

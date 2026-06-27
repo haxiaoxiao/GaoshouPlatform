@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from time import perf_counter
 from typing import Any, AsyncIterator, Sequence
 
 import pandas as pd
@@ -112,6 +113,7 @@ class LiveTradingService:
     def __init__(self) -> None:
         self._runner_task: asyncio.Task[None] | None = None
         self._runner_stop: asyncio.Event | None = None
+        self._strategy_account_write_lock = asyncio.Lock()
         self._runner_status: dict[str, Any] = {
             "status": "stopped",
             "mode": None,
@@ -297,16 +299,24 @@ class LiveTradingService:
                 await self._refresh_strategy_position_marks(position_states, mode=mode)
                 current_market_value = round(sum(float(item.get("market_value", 0.0) or 0.0) for item in position_states.values()), 2)
                 current_cash = float(existing_state.get("cash", 0.0) or 0.0)
+            current_position_cost = self._positions_cost_basis(position_states)
+            desired_cash = round(capital_value - current_position_cost, 2)
             current_total_asset = round(current_cash + current_market_value, 2)
-            cash_delta = round(capital_value - current_total_asset, 2)
+            adjusted_cash = round(desired_cash, 2)
+            adjusted_total_asset = round(adjusted_cash + current_market_value, 2)
+            cash_delta = round(adjusted_cash - current_cash, 2)
             live_required_cash = max(0.0, cash_delta)
         else:
             current_market_value = 0.0
+            current_position_cost = 0.0
             current_cash = 0.0
             current_total_asset = 0.0
+            adjusted_cash = capital_value
+            adjusted_total_asset = capital_value
+            desired_cash = capital_value
             cash_delta = 0.0
             live_required_cash = capital_value
-        if mode == "live" and live_required_cash > 0 and not is_adjustment:
+        if mode == "live" and live_required_cash > 0:
             try:
                 broker = await qmt_trading_service.account_snapshot()
                 broker_cash = float(broker.cash or 0.0)
@@ -329,9 +339,12 @@ class LiveTradingService:
                 "profile_key": bundle.profile.profile_key,
                 "mode": mode,
                 "target_capital": round(capital_value, 2),
-                "cash": round(current_cash + cash_delta, 2),
+                "cash": adjusted_cash,
                 "market_value": current_market_value,
-                "total_asset": round(capital_value, 2),
+                "total_asset": adjusted_total_asset,
+                "position_cost_basis": round(current_position_cost, 2),
+                "principal_cash": adjusted_cash,
+                "principal_basis": "position_cost_basis_plus_cash",
                 "cash_adjustment_total": round(cash_adjustment_total, 2),
                 "last_capital_adjustment": round(cash_delta, 2),
                 "last_capital_adjustment_at": now,
@@ -378,9 +391,13 @@ class LiveTradingService:
                     "action": "adjust_target_capital",
                     "previous_total_asset": current_total_asset,
                     "target_capital": capital_value,
+                    "position_cost_basis": round(current_position_cost, 2),
+                    "desired_cash": desired_cash,
                     "cash_delta": cash_delta,
                     "market_value": current_market_value,
-                    "cash": round(current_cash + cash_delta, 2),
+                    "cash": adjusted_cash,
+                    "total_asset": adjusted_total_asset,
+                    "capital_basis": "position_cost_basis_plus_cash",
                 },
             )
             return await self.account_snapshot(mode=mode, profile_key=bundle.profile.profile_key)
@@ -413,6 +430,9 @@ class LiveTradingService:
                 "cash": round(capital_value, 2),
                 "market_value": 0.0,
                 "total_asset": round(capital_value, 2),
+                "position_cost_basis": 0.0,
+                "principal_cash": round(capital_value, 2),
+                "principal_basis": "position_cost_basis_plus_cash",
                 "cash_adjustment_total": 0.0,
                 "realized_pnl": 0.0,
                 "fee_overdraft_limit": round(max(100.0, capital_value * 0.005), 2),
@@ -471,6 +491,12 @@ class LiveTradingService:
             universe_error = f"{type(exc).__name__}: {exc}"
         factor_configs = self._factor_configs(bundle, normalized)
         filters = self._filter_configs(bundle, normalized)
+        normalized, filters = self._apply_live_execution_filter_time(
+            params=normalized,
+            filters=filters,
+            mode=mode,
+            trade_date=trade_date,
+        )
         return await self._build_preflight_report(
             bundle=bundle,
             params=normalized,
@@ -581,6 +607,20 @@ class LiveTradingService:
         bundle = await self._load_profile_bundle(profile_key)
         normalized = self._normalized_params(bundle, params)
         trade_date = self._parse_date(normalized.get("trade_date")) or date.today()
+        started_at = perf_counter()
+
+        def log_stage(stage: str, **details: Any) -> None:
+            logger.info(
+                "Live signals stage={} profile={} mode={} trade_date={} elapsed={:.2f}s details={}",
+                stage,
+                bundle.profile.profile_key,
+                mode,
+                trade_date.isoformat(),
+                perf_counter() - started_at,
+                details,
+            )
+
+        log_stage("start", trigger_source=trigger_source, include_preflight=include_preflight)
         if not bundle.profile.enabled:
             if write_audit:
                 await self._write_control_audit(
@@ -613,20 +653,43 @@ class LiveTradingService:
             raise ValueError(f"Unsupported adapter_type: {bundle.profile.adapter_type}")
         pending_sync: dict[str, Any] | None = None
         if mode == "live":
+            pending_sync_timeout = max(
+                1.0,
+                min(30.0, float(normalized.get("pending_order_sync_timeout_seconds", 10.0) or 10.0)),
+            )
             try:
-                pending_sync = await self.sync_order_status(
-                    profile_key=bundle.profile.profile_key,
-                    mode="live",
-                    limit=500,
+                log_stage("pending_order_sync.start", timeout_seconds=pending_sync_timeout)
+                pending_sync = await asyncio.wait_for(
+                    self.sync_order_status(
+                        profile_key=bundle.profile.profile_key,
+                        mode="live",
+                        limit=500,
+                    ),
+                    timeout=pending_sync_timeout,
                 )
+                log_stage(
+                    "pending_order_sync.done",
+                    pending_count=pending_sync.get("pending_count"),
+                    updated_count=pending_sync.get("updated_count"),
+                    synced=pending_sync.get("synced"),
+                )
+            except asyncio.TimeoutError:
+                message = f"QMT pending order sync timed out after {pending_sync_timeout:.0f}s"
+                pending_sync = {"synced": False, "timeout": True, "error": message}
+                logger.warning("Live signal generation skips pending order sync: {}", message)
+                log_stage("pending_order_sync.timeout", timeout_seconds=pending_sync_timeout)
             except Exception as exc:
                 pending_sync = {"synced": False, "error": f"{type(exc).__name__}: {exc}"}
+                logger.warning("Live signal generation skips pending order sync: {}", pending_sync["error"])
+                log_stage("pending_order_sync.failed", error=pending_sync["error"])
+        log_stage("account_snapshot.start")
         account = await self._account_snapshot(
             mode=mode,
             manual=manual_account,
             params=normalized,
             profile_key=bundle.profile.profile_key,
         )
+        log_stage("account_snapshot.done", source=account.source, error=account.error, positions=len(account.positions))
         if mode == "live" and account.error:
             return await self._empty_signal_response(
                 bundle=bundle,
@@ -648,14 +711,25 @@ class LiveTradingService:
         }
         pending_effect: dict[str, Any] = {"count": 0, "positions": {}, "cash_effect": 0.0}
         if mode == "live":
+            log_stage("pending_order_effect.start")
             pending_effect = await self._pending_order_effect(profile_key=bundle.profile.profile_key, mode="live")
+            log_stage("pending_order_effect.done", count=pending_effect.get("count"))
+        log_stage("resolve_symbols.start")
         symbols = await self._resolve_symbols(bundle.profile, normalized, trade_date)
+        log_stage("resolve_symbols.done", symbol_count=len(symbols))
         factor_configs = self._factor_configs(bundle, normalized)
         filters = self._filter_configs(bundle, normalized)
+        normalized, filters = self._apply_live_execution_filter_time(
+            params=normalized,
+            filters=filters,
+            mode=mode,
+            trade_date=trade_date,
+        )
         requirements, requirement_errors = self._factor_requirements(factor_configs, filters)
         effective_dates = self._factor_effective_dates(requirements, trade_date, symbols)
         preflight = None
         if include_preflight:
+            log_stage("preflight.start", factor_count=len(factor_configs), filter_count=len(filters))
             preflight = await self._build_preflight_report(
                 bundle=bundle,
                 params=normalized,
@@ -668,6 +742,13 @@ class LiveTradingService:
                 include_factor_coverage=True,
                 evaluate_pipeline=False,
             )
+            log_stage(
+                "preflight.done",
+                can_generate=preflight.get("can_generate"),
+                blocking_count=len(preflight.get("blocking_reasons") or []),
+                coverage_count=len(preflight.get("factor_coverage") or []),
+            )
+            log_stage("intraday_prepare.start")
             prepare_result = await self._prepare_live_intraday_factors(
                 bundle=bundle,
                 params=normalized,
@@ -680,7 +761,13 @@ class LiveTradingService:
                 run_id=run_id,
                 write_audit=write_audit,
             )
+            log_stage(
+                "intraday_prepare.done",
+                attempted=prepare_result.get("attempted"),
+                status=prepare_result.get("status"),
+            )
             if prepare_result.get("attempted"):
+                log_stage("preflight_refresh.start")
                 preflight = await self._build_preflight_report(
                     bundle=bundle,
                     params=normalized,
@@ -694,9 +781,16 @@ class LiveTradingService:
                     evaluate_pipeline=False,
                     intraday_prepare=prepare_result,
                 )
+                log_stage(
+                    "preflight_refresh.done",
+                    can_generate=preflight.get("can_generate"),
+                    blocking_count=len(preflight.get("blocking_reasons") or []),
+                    coverage_count=len(preflight.get("factor_coverage") or []),
+                )
                 effective_dates = self._factor_effective_dates(requirements, trade_date, symbols)
             signal_blocks = self._signal_blocking_reasons(preflight)
             if signal_blocks:
+                log_stage("blocked", reasons=signal_blocks[:5])
                 return await self._empty_signal_response(
                     bundle=bundle,
                     params=normalized,
@@ -733,6 +827,7 @@ class LiveTradingService:
             raise ValueError("；".join(requirement_errors))
 
         pipeline = FactorPipeline()
+        log_stage("pipeline.start", symbol_count=len(symbols), factor_count=len(factor_configs), filter_count=len(filters))
         result = await asyncio.to_thread(
             pipeline.build_cross_section,
             factor_specs=factor_configs,
@@ -744,9 +839,11 @@ class LiveTradingService:
             factor_date_map=effective_dates.get("factor_date_map"),
             filter_date_map=effective_dates.get("filter_date_map"),
         )
+        log_stage("pipeline.done", raw_count=len(result.raw), candidate_count=len(result.frame), excluded_count=len(result.excluded_symbols))
         frame = self._apply_theme_filter(result.frame, normalized)
         frame, heat_note = self._apply_limit_up_heat_filter(frame, normalized, trade_date)
         if frame.empty:
+            log_stage("empty_after_filters", raw_count=len(result.raw), excluded_count=len(result.excluded_symbols))
             return await self._empty_signal_response(
                 bundle=bundle,
                 params=normalized,
@@ -764,10 +861,13 @@ class LiveTradingService:
 
         target_symbols = self._rank_targets(frame, positions, normalized)
         quote_symbols = sorted(set(target_symbols) | set(positions) | set(pending_effect.get("positions", {})))
+        log_stage("quote.start", quote_symbol_count=len(quote_symbols), target_count=len(target_symbols))
         price_map, quote_error = await self._quote_prices(quote_symbols)
+        log_stage("quote.done", price_count=len(price_map), quote_error=quote_error)
         if mode == "live":
             missing_quote_symbols = self._missing_realtime_price_symbols(quote_symbols, price_map)
             if quote_error or missing_quote_symbols:
+                log_stage("quote.blocked", missing_count=len(missing_quote_symbols), quote_error=quote_error)
                 reason = quote_error or f"实盘实时行情缺失：{', '.join(missing_quote_symbols[:10])}"
                 return await self._empty_signal_response(
                     bundle=bundle,
@@ -820,6 +920,7 @@ class LiveTradingService:
             skipped["signal_hash"] = signal_hash
 
         if write_audit:
+            log_stage("audit.start", order_count=len(orders), skipped_count=len(skipped_orders))
             await self._write_order_audits(
                 profile_key=bundle.profile.profile_key,
                 strategy_id=bundle.profile.strategy_id,
@@ -831,7 +932,9 @@ class LiveTradingService:
                 orders=orders,
                 skipped_orders=skipped_orders,
             )
+            log_stage("audit.done", order_count=len(orders), skipped_count=len(skipped_orders))
 
+        log_stage("done", order_count=len(orders), skipped_count=len(skipped_orders), candidate_count=len(frame))
         return {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             "profile": self._profile_dict(bundle.profile, bundle.strategy),
@@ -1060,6 +1163,8 @@ class LiveTradingService:
         qmt_by_order = qmt_updates.get("by_order_id") or {}
         updated_count = 0
         fill_events: list[dict[str, Any]] = []
+        locally_closed: list[dict[str, Any]] = []
+        fills_to_apply: list[tuple[str, str, dict[str, Any], dict[str, Any]]] = []
         profiles_to_reconcile: set[str] = set()
         async with async_session_factory() as session:
             for row in pending_rows:
@@ -1067,6 +1172,19 @@ class LiveTradingService:
                     continue
                 update_data = dict(qmt_by_order.get(str(row.order_id)) or {})
                 if not update_data:
+                    if str(row.status or "") == "cancel_requested":
+                        closed = await self._close_live_trade_record_in_session(
+                            session,
+                            row,
+                            status="cancelled",
+                            trigger_source="qmt_sync_missing_after_cancel",
+                            message="QMT 未返回该撤单中委托，按客户端已撤单关闭。",
+                            reason="missing_from_qmt_after_cancel_request",
+                        )
+                        if closed:
+                            locally_closed.append(closed)
+                            profiles_to_reconcile.add(row.profile_key)
+                            updated_count += 1
                     continue
                 order_payload = self._json_dict(row.order_payload)
                 result_payload = self._json_dict(row.result_payload)
@@ -1074,6 +1192,7 @@ class LiveTradingService:
                 qmt_filled = float(update_data.get("filled_quantity") or 0.0)
                 delta_filled = max(0.0, qmt_filled - previous_filled)
                 update_status = str(update_data.get("status") or "live_pending")
+                previous_status = str(row.status or "")
                 order_quantity = float(order_payload.get("quantity") or row.quantity or 0.0)
                 if qmt_filled >= order_quantity > 0:
                     next_status = "live_filled"
@@ -1083,10 +1202,16 @@ class LiveTradingService:
                     next_status = "partially_filled"
                 else:
                     next_status = update_status
+                if previous_status == "cancel_requested" and qmt_filled <= 0 and next_status in LIVE_PENDING_STATUSES:
+                    next_status = "cancel_requested"
 
                 filled_price = float(update_data.get("filled_price") or order_payload.get("reference_price") or row.reference_price or 0.0)
                 filled_value = float(update_data.get("filled_value") or (qmt_filled * filled_price))
                 if delta_filled > 0 and filled_price > 0:
+                    fill_order = dict(order_payload)
+                    fill_order["quantity"] = delta_filled
+                    fill_order["reference_price"] = filled_price
+                    fill_order["price"] = filled_price
                     fill_result = {
                         "submitted": True,
                         "paper": False,
@@ -1099,16 +1224,7 @@ class LiveTradingService:
                         "updated_from": "qmt_trade_sync",
                         "account_snapshot": None,
                     }
-                    fill_order = dict(order_payload)
-                    fill_order["quantity"] = delta_filled
-                    fill_order["reference_price"] = filled_price
-                    fill_order["price"] = filled_price
-                    await self._apply_strategy_account_fill(
-                        profile_key=row.profile_key,
-                        mode=row.mode,
-                        order=fill_order,
-                        result=fill_result,
-                    )
+                    fills_to_apply.append((row.profile_key, row.mode, fill_order, fill_result))
                     fill_events.append(
                         {
                             "record_id": row.record_id,
@@ -1138,6 +1254,7 @@ class LiveTradingService:
                         "pending": next_status in LIVE_PENDING_STATUSES,
                         "status": next_status,
                         "order_id": update_data.get("order_id") or db_row.order_id,
+                        "message": db_row.message,
                         "filled_quantity": qmt_filled,
                         "filled_price": filled_price,
                         "filled_value": round(filled_value, 2),
@@ -1169,8 +1286,27 @@ class LiveTradingService:
                 updated_count += 1
             await session.commit()
 
+        account_reconcile_errors: list[str] = []
+        for fill_profile, fill_mode, fill_order, fill_result in fills_to_apply:
+            try:
+                await self._apply_strategy_account_fill(
+                    profile_key=fill_profile,
+                    mode=fill_mode,
+                    order=fill_order,
+                    result=fill_result,
+                )
+            except Exception as exc:
+                message = f"{fill_profile}: {type(exc).__name__}: {exc}"
+                account_reconcile_errors.append(message)
+                logger.warning("Live order sync applied trade status but failed to update strategy account: {}", message)
+
         for profile in sorted(profiles_to_reconcile):
-            await self._reconcile_strategy_account_from_trade_records(profile_key=profile, mode=mode)
+            try:
+                await self._reconcile_strategy_account_from_trade_records(profile_key=profile, mode=mode)
+            except Exception as exc:
+                message = f"{profile}: {type(exc).__name__}: {exc}"
+                account_reconcile_errors.append(message)
+                logger.warning("Live order sync status updated but account reconcile failed: {}", message)
 
         remaining = await self._load_live_trade_rows(profile_key=profile_key, mode=mode, limit=limit, only_pending=True)
         return {
@@ -1182,6 +1318,74 @@ class LiveTradingService:
             "orders": qmt_updates.get("orders") or [],
             "trades": qmt_updates.get("trades") or [],
             "fill_events": fill_events,
+            "locally_closed": locally_closed,
+            "account_reconcile_errors": account_reconcile_errors,
+        }
+
+    async def close_local_pending_orders(
+        self,
+        *,
+        profile_key: str | None = None,
+        mode: str = "live",
+        limit: int = 200,
+        record_ids: Sequence[str] | None = None,
+        order_ids: Sequence[str | int] | None = None,
+        reason: str = "client_cancelled",
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        if mode != "live":
+            raise ValueError("local close is only supported in live mode")
+        pending_rows = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=limit,
+            record_ids=record_ids,
+            order_ids=order_ids,
+            only_pending=True,
+        )
+        if not pending_rows:
+            return {"closed": False, "closed_count": 0, "orders": [], "message": "没有待关闭的实盘委托"}
+        if not confirm:
+            return {
+                "closed": False,
+                "closed_count": len(pending_rows),
+                "orders": [self._pending_order_dict(row) for row in pending_rows],
+                "message": "本地关闭需要 confirm=true；请先确认这些委托已在 QMT 客户端撤掉或不会成交。",
+            }
+
+        closed: list[dict[str, Any]] = []
+        profiles_to_reconcile: set[str] = set()
+        message = str(reason or "client_cancelled")
+        async with async_session_factory() as session:
+            for row in pending_rows:
+                item = await self._close_live_trade_record_in_session(
+                    session,
+                    row,
+                    status="cancelled",
+                    trigger_source="manual_local_close",
+                    message=f"本地关闭待确认委托：{message}",
+                    reason=message,
+                )
+                if item:
+                    closed.append(item)
+                    profiles_to_reconcile.add(row.profile_key)
+            await session.commit()
+
+        account_reconcile_errors: list[str] = []
+        for profile in sorted(profiles_to_reconcile):
+            try:
+                await self._reconcile_strategy_account_from_trade_records(profile_key=profile, mode=mode)
+            except Exception as exc:
+                error = f"{profile}: {type(exc).__name__}: {exc}"
+                account_reconcile_errors.append(error)
+                logger.warning("Local close updated trade records but account reconcile failed: {}", error)
+        remaining = await self._load_live_trade_rows(profile_key=profile_key, mode=mode, limit=limit, only_pending=True)
+        return {
+            "closed": bool(closed),
+            "closed_count": len(closed),
+            "records": closed,
+            "orders": [self._pending_order_dict(row) for row in remaining],
+            "account_reconcile_errors": account_reconcile_errors,
         }
 
     async def cancel_pending_orders(
@@ -1826,6 +2030,130 @@ class LiveTradingService:
     def _filter_configs(self, bundle: StrategyProfileBundle, params: dict[str, Any]) -> list[Any]:
         return list(params.get("filter_factors") or bundle.constants.get("FILTER_FACTORS") or [])
 
+    def _apply_live_execution_filter_time(
+        self,
+        *,
+        params: dict[str, Any],
+        filters: list[Any],
+        mode: str,
+        trade_date: date,
+    ) -> tuple[dict[str, Any], list[Any]]:
+        if mode != "live" or bool(params.get("disable_current_execution_filter_time", False)):
+            return params, filters
+
+        timer_text = self._live_execution_filter_time(params=params, filters=filters, trade_date=trade_date)
+        if not timer_text:
+            return params, filters
+
+        adjusted_filters: list[Any] = []
+        adjusted = False
+        for raw in filters:
+            name = self._raw_factor_name(raw)
+            if name not in LIVE_TIMER_STATUS_FACTORS:
+                adjusted_filters.append(raw)
+                continue
+            item = dict(raw) if isinstance(raw, dict) else {"name": name}
+            item["as_of_time"] = timer_text
+            raw_params = item.get("params")
+            item_params = dict(raw_params) if isinstance(raw_params, dict) else {}
+            item_params["time"] = timer_text
+            item["params"] = item_params
+            adjusted_filters.append(item)
+            adjusted = True
+
+        if not adjusted:
+            return params, filters
+
+        adjusted_params = dict(params)
+        adjusted_params["live_execution_filter_time"] = timer_text
+        adjusted_params["live_execution_filter_time_source"] = "current_intraday"
+        return adjusted_params, adjusted_filters
+
+    def _live_execution_filter_time(self, *, params: dict[str, Any], filters: list[Any], trade_date: date) -> str | None:
+        override = params.get("live_execution_filter_time") or params.get("execution_filter_time")
+        if override:
+            return normalize_factor_time(str(override))
+        now = datetime.now()
+        if trade_date != now.date():
+            return None
+        minute = self._latest_completed_trading_minute(now)
+        if minute is None:
+            return None
+        timer_text = self._snap_to_nearest_timer_time(minute, params, filters)
+        if timer_text is not None:
+            return timer_text
+        return f"{minute.hour:02d}:{minute.minute:02d}"
+
+    @staticmethod
+    def _snap_to_nearest_timer_time(current: time, params: dict[str, Any], filters: list[Any] | None = None) -> str | None:
+        raw_values: list[Any] = []
+        for key in ("timer_times", "timer_minute_times", "minute_timer_times"):
+            raw = params.get(key)
+            if raw:
+                raw_values.extend(raw if isinstance(raw, (list, tuple)) else [raw])
+        raw_values.extend(LiveTradingService._timer_values_from_filters(filters or []))
+        if not raw_values:
+            return None
+        timer_times: list[time] = []
+        for item in raw_values:
+            try:
+                parts = str(item).strip().split(":")
+                h, m = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+                t = time(h, m)
+                if t not in timer_times:
+                    timer_times.append(t)
+            except (ValueError, IndexError):
+                continue
+        timer_times.sort()
+        current_seconds = current.hour * 3600 + current.minute * 60
+        best: time | None = None
+        for tt in timer_times:
+            tt_seconds = tt.hour * 3600 + tt.minute * 60
+            if tt_seconds <= current_seconds:
+                best = tt
+            else:
+                break
+        if best is not None:
+            return f"{best.hour:02d}:{best.minute:02d}"
+        return None
+
+    @staticmethod
+    def _timer_values_from_filters(filters: list[Any]) -> list[str]:
+        values: list[str] = []
+        for raw in filters:
+            if not isinstance(raw, dict):
+                continue
+            name = LiveTradingService._raw_factor_name(raw)
+            if name not in LIVE_TIMER_STATUS_FACTORS:
+                continue
+            raw_params = raw.get("params")
+            params = raw_params if isinstance(raw_params, dict) else {}
+            for value in (raw.get("as_of_time"), params.get("time"), params.get("as_of_time")):
+                if value:
+                    values.append(str(value))
+        return values
+
+    @staticmethod
+    def _latest_completed_trading_minute(value: datetime) -> time | None:
+        current = value.time()
+        if current < time(9, 31):
+            return None
+        if current <= time(11, 30):
+            return time(value.hour, value.minute)
+        if current < time(13, 1):
+            return time(11, 30)
+        if current <= time(15, 0):
+            return time(value.hour, value.minute)
+        return time(15, 0)
+
+    @staticmethod
+    def _raw_factor_name(raw: Any) -> str:
+        if isinstance(raw, str):
+            return raw.strip()
+        if isinstance(raw, dict):
+            return str(raw.get("name") or raw.get("factor_name") or "").strip()
+        return ""
+
     def _factor_effective_dates(
         self,
         requirements: list[dict[str, Any]],
@@ -1882,19 +2210,21 @@ class LiveTradingService:
         if not names:
             return None
         store = get_factor_value_store()
+        try:
+            coverage_by_name = store.coverage_many(
+                names,
+                start_date=trade_date - timedelta(days=370),
+                end_date=trade_date - timedelta(days=1),
+                symbols=symbols or None,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load live factor latest dates in batch: {}", exc)
+            return None
+
         latest_dates: list[date] = []
         market_cap_date: date | None = None
         for name in names:
-            try:
-                coverage = store.coverage(
-                    name,
-                    start_date=trade_date - timedelta(days=370),
-                    end_date=trade_date - timedelta(days=1),
-                    symbols=symbols or None,
-                    include_symbols_sample=False,
-                )
-            except Exception:
-                continue
+            coverage = coverage_by_name.get(name) or {}
             value = self._parse_date(coverage.get("max_date"))
             if value is not None:
                 latest_dates.append(value)
@@ -1921,7 +2251,7 @@ class LiveTradingService:
         requirements: list[dict[str, Any]],
         effective_dates: dict[str, Any],
     ) -> list[tuple[date, list[dict[str, Any]]]]:
-        grouped: dict[date, list[dict[str, Any]]] = {}
+        grouped: dict[tuple[date, str | None], list[dict[str, Any]]] = {}
         req_dates = {
             str(item.get("name")): item.get("effective_date")
             for item in effective_dates.get("requirements") or []
@@ -1932,8 +2262,31 @@ class LiveTradingService:
                 effective_date = self._parse_date(effective_date)
             if effective_date is None:
                 continue
-            grouped.setdefault(effective_date, []).append(req)
-        return sorted(grouped.items(), key=lambda item: item[0])
+            group_time = str(req.get("as_of_time") or "") or None
+            grouped.setdefault((effective_date, group_time), []).append(req)
+        return [
+            (key[0], value)
+            for key, value in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1] or ""))
+        ]
+
+    def _prepare_params_for_requirements(
+        self,
+        params: dict[str, Any],
+        requirements: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        prepare_params = dict(params)
+        times = sorted({
+            str(req.get("as_of_time") or "")
+            for req in requirements
+            if str(req.get("as_of_time") or "").strip()
+        })
+        if times:
+            timer_text = times[0]
+            prepare_params["time"] = timer_text
+            prepare_params["as_of_time"] = timer_text
+        else:
+            prepare_params.setdefault("time", params.get("rebalance_time") or "10:30")
+        return prepare_params
 
     @staticmethod
     def _merge_dependency_prepare(parts: list[dict[str, Any]]) -> dict[str, Any]:
@@ -2005,17 +2358,17 @@ class LiveTradingService:
         factor_names = sorted({item["name"] for item in requirements if "factor" in item.get("roles", [])})
         filter_names = sorted({item["name"] for item in requirements if "filter" in item.get("roles", [])})
         required_names = sorted({item["name"] for item in requirements})
+        execution_filter_time = self._execution_filter_time_from_requirements(requirements)
         effective_dates = self._factor_effective_dates(requirements, trade_date, symbols)
 
         dependency_prepare: dict[str, Any] | None = None
         dependency_error: str | None = None
         if required_names:
-            prepare_params = dict(params)
-            prepare_params.setdefault("time", params.get("rebalance_time") or "10:30")
             prepare_groups = self._requirements_by_effective_date(requirements, effective_dates)
             try:
                 prepared_parts: list[dict[str, Any]] = []
                 for effective_date, grouped_requirements in prepare_groups:
+                    prepare_params = self._prepare_params_for_requirements(params, grouped_requirements)
                     prepared_parts.append(
                         await asyncio.to_thread(
                             build_precompute_prepare,
@@ -2201,6 +2554,8 @@ class LiveTradingService:
                 "filter_names": filter_names,
                 "min_factor_coverage": float(params.get("min_factor_coverage", 0.4) or 0.4),
                 "rebalance_time": str(params.get("rebalance_time") or "10:30"),
+                "execution_filter_time": execution_filter_time,
+                "execution_filter_time_source": params.get("live_execution_filter_time_source"),
             },
             "dependency_prepare": dependency_prepare,
             "dependency_error": dependency_error,
@@ -2311,6 +2666,16 @@ class LiveTradingService:
             add(item, "filter")
         return list(rows.values()), errors
 
+    @staticmethod
+    def _execution_filter_time_from_requirements(requirements: list[dict[str, Any]]) -> str | None:
+        times = sorted({
+            str(item.get("as_of_time") or "")
+            for item in requirements
+            if str(item.get("name") or "") in LIVE_TIMER_STATUS_FACTORS
+            and str(item.get("as_of_time") or "").strip()
+        })
+        return times[0] if times else None
+
     def _factor_coverage_snapshot(
         self,
         requirements: list[dict[str, Any]],
@@ -2325,6 +2690,7 @@ class LiveTradingService:
             str(item.get("name")): item.get("effective_date")
             for item in (effective_dates or {}).get("requirements") or []
         }
+        grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
         for req in requirements:
             name = str(req["name"])
             params = req.get("params")
@@ -2334,58 +2700,72 @@ class LiveTradingService:
                 effective_date = self._parse_date(effective_date)
             if effective_date is None:
                 effective_date = trade_date
+            params_hash = str(req.get("params_hash") or "")
+            params_key = json.dumps(params or {}, sort_keys=True, ensure_ascii=False, default=str)
+            group_key = (effective_date.isoformat(), str(as_of_time or ""), params_hash, params_key)
+            group = grouped.setdefault(
+                group_key,
+                {
+                    "effective_date": effective_date,
+                    "as_of_time": as_of_time,
+                    "params": params,
+                    "requirements": [],
+                },
+            )
+            group["requirements"].append(req)
+
+        for group in grouped.values():
+            effective_date = group["effective_date"]
+            as_of_time = group["as_of_time"]
+            params = group["params"]
+            grouped_requirements = list(group["requirements"])
+            names = sorted({str(req["name"]) for req in grouped_requirements})
             try:
-                values = store.load_cross_section(
-                    name,
-                    effective_date,
-                    symbols=symbols,
-                    as_of_time=as_of_time,
-                    params=params,
-                )
-                coverage = store.coverage(
-                    name,
+                coverage_by_name = store.coverage_many(
+                    names,
                     start_date=effective_date,
                     end_date=effective_date,
-                    symbols=symbols,
+                    symbols=symbols or None,
                     as_of_time=as_of_time,
                     params=params,
-                    include_symbols_sample=False,
-                )
-                count = len(values)
-                rows.append(
-                    {
-                        "name": name,
-                        "roles": list(req.get("roles") or []),
-                        "as_of_time": as_of_time,
-                        "trade_date": trade_date.isoformat(),
-                        "effective_date": effective_date.isoformat(),
-                        "date_policy": "same_day_intraday" if self._is_intraday_requirement(req) else "previous_available_daily",
-                        "params_hash": req.get("params_hash"),
-                        "value_count": count,
-                        "coverage_ratio": round(count / denominator, 4),
-                        "status": "ok" if count > 0 else "empty",
-                        "min_date": coverage.get("min_date"),
-                        "max_date": coverage.get("max_date"),
-                        "total_rows": coverage.get("total_rows", 0),
-                        "symbol_count": coverage.get("symbol_count", 0),
-                    }
                 )
             except Exception as exc:
-                rows.append(
+                coverage_by_name = {}
+                error = f"{type(exc).__name__}: {exc}"
+                logger.warning("Failed to load live factor coverage batch for {}: {}", names, error)
+            else:
+                error = None
+
+            for req in grouped_requirements:
+                name = str(req["name"])
+                coverage = coverage_by_name.get(name) or {}
+                count = int(coverage.get("symbol_count") or coverage.get("total_rows") or 0)
+                row = {
+                    "name": name,
+                    "roles": list(req.get("roles") or []),
+                    "as_of_time": as_of_time,
+                    "trade_date": trade_date.isoformat(),
+                    "effective_date": effective_date.isoformat(),
+                    "date_policy": "same_day_intraday" if self._is_intraday_requirement(req) else "previous_available_daily",
+                    "params_hash": req.get("params_hash"),
+                    "value_count": count,
+                    "coverage_ratio": round(count / denominator, 4),
+                    "status": "ok" if count > 0 else "empty",
+                    "min_date": coverage.get("min_date"),
+                    "max_date": coverage.get("max_date"),
+                    "total_rows": coverage.get("total_rows", 0),
+                    "symbol_count": coverage.get("symbol_count", 0),
+                }
+                if error is not None:
+                    row.update(
                     {
-                        "name": name,
-                        "roles": list(req.get("roles") or []),
-                        "as_of_time": as_of_time,
-                        "trade_date": trade_date.isoformat(),
-                        "effective_date": effective_date.isoformat(),
-                        "date_policy": "same_day_intraday" if self._is_intraday_requirement(req) else "previous_available_daily",
-                        "params_hash": req.get("params_hash"),
                         "value_count": 0,
                         "coverage_ratio": 0.0,
                         "status": "error",
-                        "error": f"{type(exc).__name__}: {exc}",
+                        "error": error,
                     }
-                )
+                    )
+                rows.append(row)
         return rows
 
     def _market_phase(self, *, trade_date: date, params: dict[str, Any]) -> dict[str, Any]:
@@ -2625,6 +3005,11 @@ class LiveTradingService:
             step_type = str((step or {}).get("type") or "")
             if step_type in {"kline_minute", "cum_timer", "tushare_daily"}:
                 next_step = dict(step)
+                if step_type == "kline_minute":
+                    timer_times = [str(item) for item in next_step.get("timer_times") or [] if str(item).strip()]
+                    if not timer_times:
+                        continue
+                    next_step["timer_times"] = timer_times
                 if step_type == "tushare_daily":
                     datasets = [str(item) for item in next_step.get("datasets") or [] if str(item) == "stock_limit_prices"]
                     if not datasets:
@@ -2636,7 +3021,11 @@ class LiveTradingService:
         gaps = [
             dict(gap)
             for gap in plan.get("coverage_gaps") or []
-            if str(gap.get("sync_step") or "") in {"kline_minute", "cum_timer", "tushare_daily"}
+            if (
+                str(gap.get("sync_step") or "") in {"cum_timer", "tushare_daily"}
+                or (str(gap.get("sync_step") or "") == "kline_minute" and bool(gap.get("timer_time")))
+            )
+            and not (str(gap.get("sync_step") or "") == "tushare_daily" and str(gap.get("dependency") or "") != "stock_limit_prices")
         ]
         return {**plan, "steps": steps, "coverage_gaps": gaps}
 
@@ -2809,7 +3198,7 @@ class LiveTradingService:
         positions = await self._position_rows(
             account.positions,
             total_asset=raw_total_asset,
-            refresh_quotes=not bool(meta.get("stale_display_only")),
+            refresh_quotes=True,
         )
         unrealized_pnl = sum(float(row.get("unrealized_pnl") or 0.0) for row in positions)
         market_value = round(sum(float(row.get("market_value") or 0.0) for row in positions), 2) if positions else account.market_value
@@ -3037,6 +3426,24 @@ class LiveTradingService:
             base = target
         return base
 
+    def _positions_cost_basis(self, positions: dict[str, dict[str, Any]]) -> float:
+        total = 0.0
+        for raw in positions.values():
+            position = dict(raw or {})
+            quantity = float(position.get("quantity", position.get("volume", 0.0)) or 0.0)
+            if quantity <= 0:
+                continue
+            avg_cost = float(position.get("avg_cost", position.get("cost_price", 0.0)) or 0.0)
+            if avg_cost > 0:
+                total += quantity * avg_cost
+                continue
+            cost_value = float(position.get("cost_value", 0.0) or 0.0)
+            if cost_value > 0:
+                total += cost_value
+                continue
+            total += float(position.get("market_value", 0.0) or 0.0)
+        return round(total, 2)
+
     async def _position_rows(
         self,
         positions: dict[str, dict[str, Any]],
@@ -3047,15 +3454,23 @@ class LiveTradingService:
         symbol_list = [str(symbol) for symbol in positions.keys() if str(symbol).strip()]
         name_map = await self._stock_names(symbol_list)
         quote_map = await self._quote_detail_map(symbol_list) if refresh_quotes else {}
+        volume_metrics = await asyncio.to_thread(self._position_volume_metrics, symbol_list)
         denominator = float(total_asset or 0.0)
         rows: list[dict[str, Any]] = []
         for symbol in sorted(symbol_list):
             raw = dict(positions.get(symbol) or {})
             quote = quote_map.get(symbol) or {}
+            metrics = volume_metrics.get(symbol, {})
             quantity = float(raw.get("quantity", raw.get("volume", 0.0)) or 0.0)
             available = float(raw.get("available", raw.get("available_volume", quantity)) or 0.0)
             avg_cost = float(raw.get("avg_cost", raw.get("cost_price", 0.0)) or 0.0)
-            last_price = float(quote.get("price") or raw.get("last_price") or raw.get("reference_price") or 0.0)
+            last_price = float(
+                quote.get("price")
+                or raw.get("last_price")
+                or raw.get("latest_price")
+                or raw.get("reference_price")
+                or 0.0
+            )
             market_value = float(raw.get("market_value", 0.0) or 0.0)
             if quantity > 0 and last_price > 0:
                 market_value = round(quantity * last_price, 2)
@@ -3064,6 +3479,14 @@ class LiveTradingService:
             unrealized_pnl_pct = (unrealized_pnl / cost_value) if cost_value > 0 else None
             stock_name = raw.get("stock_name") or raw.get("name") or raw.get("stockName") or name_map.get(symbol)
             position_pct = (market_value / denominator) if denominator > 0 else None
+            volume_ratio = self._float_or_none(quote.get("volume_ratio") or raw.get("volume_ratio"))
+            if volume_ratio is None:
+                quote_volume = self._float_or_none(quote.get("volume"))
+                avg_volume = self._float_or_none(metrics.get("avg_volume_5"))
+                if quote_volume is not None and avg_volume and avg_volume > 0:
+                    volume_ratio = quote_volume / avg_volume
+            if volume_ratio is None:
+                volume_ratio = self._float_or_none(metrics.get("volume_ratio"))
             rows.append(
                 {
                     **raw,
@@ -3073,15 +3496,20 @@ class LiveTradingService:
                     "available": available,
                     "avg_cost": avg_cost,
                     "last_price": last_price or raw.get("last_price"),
+                    "latest_price": last_price or raw.get("latest_price") or raw.get("last_price"),
                     "market_value": market_value,
                     "cost_value": round(cost_value, 2),
                     "unrealized_pnl": round(unrealized_pnl, 2),
                     "unrealized_pnl_pct": round(unrealized_pnl_pct, 4) if unrealized_pnl_pct is not None else None,
                     "position_pct": round(position_pct, 4) if position_pct is not None else None,
-                    "volume_ratio": self._float_or_none(quote.get("volume_ratio")),
-                    "today_change_pct": self._float_or_none(quote.get("change_pct")),
-                    "turnover_rate": self._float_or_none(quote.get("turnover_rate")),
-                    "amount": self._float_or_none(quote.get("amount")),
+                    "volume_ratio": round(volume_ratio, 4) if volume_ratio is not None else None,
+                    "today_change_pct": self._float_or_none(
+                        quote.get("change_pct")
+                        or raw.get("today_change_pct")
+                        or raw.get("change_pct")
+                    ),
+                    "turnover_rate": self._float_or_none(quote.get("turnover_rate") or raw.get("turnover_rate")),
+                    "amount": self._float_or_none(quote.get("amount") or raw.get("amount")),
                     "total_value": self._float_or_none(quote.get("total_value")),
                     "float_value": self._float_or_none(quote.get("float_value")),
                 }
@@ -3192,6 +3620,7 @@ class LiveTradingService:
             await self._refresh_strategy_position_marks(positions, mode=mode)
             market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
             total_asset = round(cash + market_value, 2)
+            position_cost_basis = self._positions_cost_basis(positions)
             meta = {
                 **account_state,
                 "initialized": True,
@@ -3201,6 +3630,10 @@ class LiveTradingService:
                 "positions_source": account_state.get("positions_source", "strategy_owned_only"),
                 "market_value": market_value,
                 "total_asset": total_asset,
+                "position_cost_basis": position_cost_basis,
+                "principal_cash": round(cash, 2),
+                "principal_invested": round(position_cost_basis + cash, 2),
+                "principal_basis": account_state.get("principal_basis", "position_cost_basis_plus_cash"),
             }
             return LiveAccountSnapshot(
                 cash=round(cash, 2),
@@ -3322,40 +3755,46 @@ class LiveTradingService:
             }
         market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
         total_asset = round(cash + market_value, 2)
+        position_cost_basis = self._positions_cost_basis(positions)
         meta = {
             **base_meta,
             "market_value": market_value,
             "total_asset": total_asset,
+            "position_cost_basis": position_cost_basis,
+            "principal_cash": round(cash, 2),
+            "principal_invested": round(position_cost_basis + cash, 2),
+            "principal_basis": account_state.get("principal_basis", "position_cost_basis_plus_cash"),
             "broker_cash": round(float(broker.cash or 0.0), 2),
             "broker_total_asset": round(float(broker.total_asset or 0.0), 2),
             "broker_market_value": round(float(broker.market_value or 0.0), 2),
             "missing_broker_symbols": missing_broker_symbols,
             "ignored_broker_symbols": sorted(set(broker.positions) - set(recognized_symbols)),
         }
-        async with async_session_factory() as session:
-            account = await session.scalar(
-                select(LivePositionState).where(
-                    LivePositionState.profile_key == profile_key,
-                    LivePositionState.mode == mode,
-                    LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
-                )
-            )
-            if account is not None:
-                account.state = meta
-                session.add(account)
-            for symbol, position in positions.items():
-                row = await session.scalar(
+        async with self._strategy_account_write_lock:
+            async with async_session_factory() as session:
+                account = await session.scalar(
                     select(LivePositionState).where(
                         LivePositionState.profile_key == profile_key,
                         LivePositionState.mode == mode,
-                        LivePositionState.symbol == symbol,
+                        LivePositionState.symbol == STRATEGY_ACCOUNT_SYMBOL,
                     )
                 )
-                if row is None:
-                    row = LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position)
-                row.state = position
-                session.add(row)
-            await session.commit()
+                if account is not None:
+                    account.state = meta
+                    session.add(account)
+                for symbol, position in positions.items():
+                    row = await session.scalar(
+                        select(LivePositionState).where(
+                            LivePositionState.profile_key == profile_key,
+                            LivePositionState.mode == mode,
+                            LivePositionState.symbol == symbol,
+                        )
+                    )
+                    if row is None:
+                        row = LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position)
+                    row.state = position
+                    session.add(row)
+                await session.commit()
         return LiveAccountSnapshot(
             cash=round(cash, 2),
             total_asset=total_asset,
@@ -3391,12 +3830,17 @@ class LiveTradingService:
             2,
         )
         total_asset = round(float(cash or 0.0) + market_value, 2)
+        position_cost_basis = self._positions_cost_basis(active_positions)
         meta = {
             **base_meta,
             "profile_key": profile_key,
             "mode": mode,
             "market_value": market_value,
             "total_asset": total_asset,
+            "position_cost_basis": position_cost_basis,
+            "principal_cash": round(float(cash or 0.0), 2),
+            "principal_invested": round(position_cost_basis + float(cash or 0.0), 2),
+            "principal_basis": base_meta.get("principal_basis", "position_cost_basis_plus_cash"),
             "positions_source": "last_successful_strategy_snapshot",
             "price_source": "last_successful_strategy_snapshot",
             "stale_display_only": True,
@@ -3546,6 +3990,8 @@ class LiveTradingService:
                 "price": price if price > 0 else None,
                 "amount": self._first_float(quote, ("amount", "turnover_amount", "成交额"))
                 or self._first_float(raw_quote, ("amount", "turnover_amount", "成交额")),
+                "volume": self._first_float(quote, ("volume", "pvolume", "成交量"))
+                or self._first_float(raw_quote, ("volume", "pvolume", "成交量")),
                 "volume_ratio": self._normalized_ratio(
                     self._first_float(
                         quote,
@@ -3567,6 +4013,46 @@ class LiveTradingService:
                 "total_value": self._first_float(quote, ("total_value", "total_mv", "总市值")),
                 "float_value": self._first_float(quote, ("float_value", "circ_mv", "流通市值")),
                 "quote_time": quote.get("quote_time") or raw_quote.get("time") or raw_quote.get("timetag"),
+            }
+        return result
+
+    def _position_volume_metrics(self, symbols: Sequence[str]) -> dict[str, dict[str, float]]:
+        symbol_list = sorted({str(symbol).strip() for symbol in symbols if str(symbol).strip()})
+        if not symbol_list:
+            return {}
+        end_date = date.today()
+        start_date = end_date - timedelta(days=45)
+        try:
+            daily = get_market_data_store().load_daily(
+                symbol_list,
+                start_date,
+                end_date,
+                columns=["symbol", "trade_date", "volume"],
+            )
+        except Exception as exc:
+            logger.warning("Failed to load daily volume metrics for live positions: {}", exc)
+            return {}
+        if daily is None or daily.empty or "symbol" not in daily.columns or "volume" not in daily.columns:
+            return {}
+        body = daily.reset_index() if "trade_date" not in daily.columns else daily.copy()
+        if "trade_date" not in body.columns:
+            return {}
+        body["symbol"] = body["symbol"].astype(str)
+        body["trade_date"] = pd.to_datetime(body["trade_date"], errors="coerce")
+        body["volume"] = pd.to_numeric(body["volume"], errors="coerce")
+        body = body.dropna(subset=["symbol", "trade_date", "volume"]).sort_values(["symbol", "trade_date"])
+        result: dict[str, dict[str, float]] = {}
+        for symbol, group in body.groupby("symbol", sort=False):
+            volumes = group["volume"].dropna()
+            if len(volumes) < 2:
+                continue
+            avg_window = volumes.tail(6).iloc[:-1]
+            avg_volume = float(avg_window.mean() or 0.0) if len(avg_window) else 0.0
+            if avg_volume <= 0:
+                continue
+            result[str(symbol)] = {
+                "avg_volume_5": avg_volume,
+                "volume_ratio": float(volumes.iloc[-1]) / avg_volume,
             }
         return result
 
@@ -3768,96 +4254,106 @@ class LiveTradingService:
         price = float(result.get("filled_price") or order.get("reference_price") or order.get("price") or 0.0)
         if not symbol or side not in {"BUY", "SELL"} or qty <= 0 or price <= 0:
             raise ValueError("invalid strategy account fill")
-        async with async_session_factory() as session:
-            rows = (
-                await session.execute(
-                    select(LivePositionState).where(
-                        LivePositionState.profile_key == profile_key,
-                        LivePositionState.mode == mode,
+        async with self._strategy_account_write_lock:
+            async with async_session_factory() as session:
+                rows = (
+                    await session.execute(
+                        select(LivePositionState).where(
+                            LivePositionState.profile_key == profile_key,
+                            LivePositionState.mode == mode,
+                        )
                     )
-                )
-            ).scalars().all()
-            account = next((row for row in rows if row.symbol == STRATEGY_ACCOUNT_SYMBOL), None)
-            if account is None or not self._json_dict(account.state).get("initialized"):
-                raise ValueError("策略资金池未初始化")
-            account_state = self._json_dict(account.state)
-            position_row = next((row for row in rows if row.symbol == symbol), None)
-            position = self._json_dict(position_row.state if position_row else None)
-            cash = float(account_state.get("cash", 0.0) or 0.0)
-            realized_pnl = float(account_state.get("realized_pnl", 0.0) or 0.0)
-            fill_realized_pnl = 0.0
-            current_qty = float(position.get("quantity", 0.0) or 0.0)
-            avg_cost = float(position.get("avg_cost", price) or price)
-            filled_value = round(qty * price, 2)
-            if side == "BUY":
-                cash -= filled_value
-                next_qty = current_qty + qty
-                next_avg = ((avg_cost * current_qty) + filled_value) / max(next_qty, 1.0)
-                position = {
-                    **position,
-                    "symbol": symbol,
-                    "stock_name": order.get("stock_name") or position.get("stock_name"),
-                    "quantity": next_qty,
-                    "available": next_qty,
-                    "avg_cost": next_avg,
-                    "reference_price": price,
-                    "last_price": price,
-                    "market_value": round(next_qty * price, 2),
-                    "strategy_owned": True,
-                    "updated_from": str(result.get("updated_from") or ("live_fill" if mode == "live" else "paper_fill")),
-                    "updated_at": datetime.now().isoformat(timespec="seconds"),
-                }
-                if position_row is None:
-                    position_row = LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position)
-                position_row.state = position
-                session.add(position_row)
-            else:
-                sell_qty = min(current_qty, qty)
-                if sell_qty <= 0:
-                    raise ValueError(f"{symbol} 不在策略资金池持仓中")
-                cash += round(sell_qty * price, 2)
-                fill_realized_pnl = (price - avg_cost) * sell_qty
-                realized_pnl += fill_realized_pnl
-                next_qty = current_qty - sell_qty
-                if next_qty <= 1e-6:
-                    if position_row is not None:
-                        await session.delete(position_row)
-                elif position_row is not None:
-                    position_row.state = {
+                ).scalars().all()
+                account = next((row for row in rows if row.symbol == STRATEGY_ACCOUNT_SYMBOL), None)
+                if account is None or not self._json_dict(account.state).get("initialized"):
+                    raise ValueError("策略资金池未初始化")
+                account_state = self._json_dict(account.state)
+                position_row = next((row for row in rows if row.symbol == symbol), None)
+                position = self._json_dict(position_row.state if position_row else None)
+                cash = float(account_state.get("cash", 0.0) or 0.0)
+                realized_pnl = float(account_state.get("realized_pnl", 0.0) or 0.0)
+                fill_realized_pnl = 0.0
+                current_qty = float(position.get("quantity", 0.0) or 0.0)
+                avg_cost = float(position.get("avg_cost", price) or price)
+                filled_value = round(qty * price, 2)
+                if side == "BUY":
+                    cash -= filled_value
+                    next_qty = current_qty + qty
+                    next_avg = ((avg_cost * current_qty) + filled_value) / max(next_qty, 1.0)
+                    position = {
                         **position,
+                        "symbol": symbol,
+                        "stock_name": order.get("stock_name") or position.get("stock_name"),
                         "quantity": next_qty,
                         "available": next_qty,
+                        "avg_cost": next_avg,
                         "reference_price": price,
                         "last_price": price,
                         "market_value": round(next_qty * price, 2),
-                        "stock_name": order.get("stock_name") or position.get("stock_name"),
                         "strategy_owned": True,
                         "updated_from": str(result.get("updated_from") or ("live_fill" if mode == "live" else "paper_fill")),
                         "updated_at": datetime.now().isoformat(timespec="seconds"),
                     }
+                    if position_row is None:
+                        position_row = LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position)
+                    position_row.state = position
                     session.add(position_row)
-            live_positions = [
-                self._json_dict(row.state)
-                for row in rows
-                if row.symbol not in {STRATEGY_ACCOUNT_SYMBOL, symbol}
-            ]
-            if side == "BUY":
-                live_positions.append(position)
-            elif next_qty > 1e-6:
-                live_positions.append(self._json_dict(position_row.state if position_row else None))
-            market_value = round(sum(float(item.get("market_value", 0.0) or 0.0) for item in live_positions), 2)
-            account_state.update(
-                {
-                    "cash": round(cash, 2),
-                    "market_value": market_value,
-                    "total_asset": round(cash + market_value, 2),
-                    "realized_pnl": round(realized_pnl, 2),
-                    "updated_at": datetime.now().isoformat(timespec="seconds"),
-                }
-            )
-            account.state = account_state
-            session.add(account)
-            await session.commit()
+                else:
+                    sell_qty = min(current_qty, qty)
+                    if sell_qty <= 0:
+                        raise ValueError(f"{symbol} 不在策略资金池持仓中")
+                    cash += round(sell_qty * price, 2)
+                    fill_realized_pnl = (price - avg_cost) * sell_qty
+                    realized_pnl += fill_realized_pnl
+                    next_qty = current_qty - sell_qty
+                    if next_qty <= 1e-6:
+                        if position_row is not None:
+                            await session.delete(position_row)
+                    elif position_row is not None:
+                        position_row.state = {
+                            **position,
+                            "quantity": next_qty,
+                            "available": next_qty,
+                            "reference_price": price,
+                            "last_price": price,
+                            "market_value": round(next_qty * price, 2),
+                            "stock_name": order.get("stock_name") or position.get("stock_name"),
+                            "strategy_owned": True,
+                            "updated_from": str(result.get("updated_from") or ("live_fill" if mode == "live" else "paper_fill")),
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        session.add(position_row)
+                live_positions = [
+                    self._json_dict(row.state)
+                    for row in rows
+                    if row.symbol not in {STRATEGY_ACCOUNT_SYMBOL, symbol}
+                ]
+                if side == "BUY":
+                    live_positions.append(position)
+                elif next_qty > 1e-6:
+                    live_positions.append(self._json_dict(position_row.state if position_row else None))
+                market_value = round(sum(float(item.get("market_value", 0.0) or 0.0) for item in live_positions), 2)
+                position_cost_basis = self._positions_cost_basis({
+                    str(item.get("symbol") or ""): dict(item)
+                    for item in live_positions
+                    if str(item.get("symbol") or "").strip()
+                })
+                account_state.update(
+                    {
+                        "cash": round(cash, 2),
+                        "market_value": market_value,
+                        "total_asset": round(cash + market_value, 2),
+                        "position_cost_basis": position_cost_basis,
+                        "principal_cash": round(cash, 2),
+                        "principal_invested": round(position_cost_basis + cash, 2),
+                        "principal_basis": account_state.get("principal_basis", "position_cost_basis_plus_cash"),
+                        "realized_pnl": round(realized_pnl, 2),
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
+                )
+                account.state = account_state
+                session.add(account)
+                await session.commit()
         snapshot = await self._strategy_account_snapshot(profile_key=profile_key, mode=mode, params={})
         payload = await self._account_dict(snapshot, mode=mode)
         payload["last_fill"] = {
@@ -3872,6 +4368,10 @@ class LiveTradingService:
     async def _reconcile_strategy_account_from_trade_records(self, *, profile_key: str, mode: str) -> None:
         if mode != "live":
             return
+        async with self._strategy_account_write_lock:
+            await self._reconcile_strategy_account_from_trade_records_unlocked(profile_key=profile_key, mode=mode)
+
+    async def _reconcile_strategy_account_from_trade_records_unlocked(self, *, profile_key: str, mode: str) -> None:
         async with async_session_factory() as session:
             rows = (
                 await session.execute(
@@ -3962,6 +4462,7 @@ class LiveTradingService:
                 )
             )
             market_value = round(sum(float(position.get("market_value", 0.0) or 0.0) for position in positions.values()), 2)
+            position_cost_basis = self._positions_cost_basis(positions)
             for symbol, position in positions.items():
                 session.add(LivePositionState(profile_key=profile_key, mode=mode, symbol=symbol, state=position))
             account_state.update(
@@ -3969,6 +4470,10 @@ class LiveTradingService:
                     "cash": round(cash, 2),
                     "market_value": market_value,
                     "total_asset": round(cash + market_value, 2),
+                    "position_cost_basis": position_cost_basis,
+                    "principal_cash": round(cash, 2),
+                    "principal_invested": round(position_cost_basis + cash, 2),
+                    "principal_basis": account_state.get("principal_basis", "position_cost_basis_plus_cash"),
                     "realized_pnl": round(realized_pnl, 2),
                     "positions_source": "qmt_trade_records",
                     "reconciled_at": datetime.now().isoformat(timespec="seconds"),
@@ -4482,6 +4987,66 @@ class LiveTradingService:
             "message": row.message,
             "result_payload": compact_result or None,
             "created_at": row.created_at.isoformat(timespec="seconds") if row.created_at else None,
+        }
+
+    async def _close_live_trade_record_in_session(
+        self,
+        session: Any,
+        row: LiveTradeRecord,
+        *,
+        status: str,
+        trigger_source: str,
+        message: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        db_row = await session.scalar(select(LiveTradeRecord).where(LiveTradeRecord.record_id == row.record_id))
+        if db_row is None:
+            return None
+        result_payload = self._json_dict(db_row.result_payload)
+        quantity = float(db_row.quantity or 0.0)
+        filled_quantity = float(result_payload.get("filled_quantity") or 0.0)
+        remaining_quantity = max(0.0, quantity - filled_quantity)
+        result_payload.update(
+            {
+                "submitted": True,
+                "pending": False,
+                "status": status,
+                "order_id": db_row.order_id,
+                "message": message,
+                "filled_quantity": filled_quantity,
+                "remaining_quantity": 0.0,
+                "local_close_reason": reason,
+                "local_close_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        db_row.status = status
+        db_row.message = message
+        db_row.result_payload = result_payload
+        session.add(db_row)
+        session.add(
+            LiveOrderAudit(
+                audit_id=f"audit-{uuid.uuid4().hex}",
+                run_id=db_row.run_id,
+                profile_key=db_row.profile_key,
+                strategy_id=db_row.strategy_id,
+                trade_date=db_row.trade_date,
+                signal_hash=db_row.signal_hash,
+                trigger_source=trigger_source,
+                mode=db_row.mode,
+                status=status,
+                order_payload=self._json_dict(db_row.order_payload),
+                result_payload=self._json_dict(db_row.result_payload),
+                skip_reason=message,
+            )
+        )
+        return {
+            "record_id": db_row.record_id,
+            "order_id": db_row.order_id,
+            "symbol": db_row.symbol,
+            "status": status,
+            "filled_quantity": filled_quantity,
+            "remaining_quantity_before_close": remaining_quantity,
+            "message": message,
         }
 
     async def _has_submitted_signal(self, signal_hash: str) -> bool:

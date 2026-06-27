@@ -65,6 +65,7 @@ class QmtTradingService:
         self._account_snapshot_ttl_seconds = 3.0
         self._account_snapshot_timeout_seconds = 8.0
         self._account_snapshot_retry_seconds = (0.35, 0.75)
+        self._order_query_timeout_seconds = 8.0
 
     async def status(self) -> dict[str, Any]:
         data_dir = None
@@ -303,82 +304,94 @@ class QmtTradingService:
             if not settings.qmt_trader_path:
                 raise RuntimeError("QMT_TRADER_PATH is not configured")
 
-            trader = XtQuantTrader(
-                settings.qmt_trader_path,
-                int(datetime.now().timestamp() * 1000) % 2_000_000_000,
-            )
-            trader.start()
-            connect_result = trader.connect()
-            if connect_result not in (0, None):
-                raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
-            account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+            trader = None
             try:
-                trader.subscribe(account)
-            except Exception:
-                pass
-
-            orders = [
-                self._qmt_order_dict(order)
-                for order in (trader.query_stock_orders(account) or [])
-            ]
-            trades = [
-                self._qmt_trade_dict(trade)
-                for trade in (trader.query_stock_trades(account) or [])
-            ]
-            if wanted:
-                orders = [order for order in orders if str(order.get("order_id") or "") in wanted]
-                trades = [trade for trade in trades if str(trade.get("order_id") or "") in wanted]
-
-            by_order_id: dict[str, dict[str, Any]] = {}
-            for order in orders:
-                order_id = str(order.get("order_id") or "")
-                if not order_id:
-                    continue
-                by_order_id.setdefault(order_id, {"order_id": order_id, "order": order, "trades": []})
-                by_order_id[order_id]["order"] = order
-
-            for trade in trades:
-                order_id = str(trade.get("order_id") or "")
-                if not order_id:
-                    continue
-                entry = by_order_id.setdefault(order_id, {"order_id": order_id, "order": None, "trades": []})
-                entry["trades"].append(trade)
-
-            for entry in by_order_id.values():
-                order = dict(entry.get("order") or {})
-                trade_rows = list(entry.get("trades") or [])
-                traded_volume = sum(float(row.get("traded_volume") or 0.0) for row in trade_rows)
-                traded_amount = sum(float(row.get("traded_amount") or 0.0) for row in trade_rows)
-                if traded_volume <= 0:
-                    traded_volume = float(order.get("traded_volume") or 0.0)
-                    order_price = float(order.get("traded_price") or 0.0)
-                    traded_amount = traded_volume * order_price if traded_volume and order_price else 0.0
-                avg_price = (traded_amount / traded_volume) if traded_volume > 0 and traded_amount > 0 else float(order.get("traded_price") or 0.0)
-                order_volume = float(order.get("order_volume") or 0.0)
-                status = self._qmt_order_status(
-                    int(float(order.get("order_status") or 0)) if order else None,
-                    order_volume=order_volume,
-                    traded_volume=traded_volume,
+                trader = XtQuantTrader(
+                    settings.qmt_trader_path,
+                    int(datetime.now().timestamp() * 1000) % 2_000_000_000,
                 )
-                entry.update(
-                    {
-                        "status": status,
-                        "filled_quantity": traded_volume,
-                        "filled_price": avg_price,
-                        "filled_value": traded_amount if traded_amount > 0 else traded_volume * avg_price,
-                        "remaining_quantity": max(0.0, order_volume - traded_volume) if order_volume > 0 else 0.0,
-                        "order_status": order.get("order_status"),
-                        "status_msg": order.get("status_msg"),
-                        "symbol": order.get("symbol") or (trade_rows[0].get("symbol") if trade_rows else None),
-                        "stock_name": order.get("stock_name") or (trade_rows[0].get("stock_name") if trade_rows else None),
-                        "side": order.get("side") or (trade_rows[0].get("side") if trade_rows else None),
-                        "last_trade_time": max([str(row.get("traded_time") or "") for row in trade_rows] or [""]) or None,
-                    }
-                )
-            return {"orders": orders, "trades": trades, "by_order_id": by_order_id}
+                trader.start()
+                connect_result = trader.connect()
+                if connect_result not in (0, None):
+                    raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
+                account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+                try:
+                    trader.subscribe(account)
+                except Exception:
+                    pass
+
+                orders = [
+                    self._qmt_order_dict(order)
+                    for order in (trader.query_stock_orders(account) or [])
+                ]
+                trades = [
+                    self._qmt_trade_dict(trade)
+                    for trade in (trader.query_stock_trades(account) or [])
+                ]
+                if wanted:
+                    orders = [order for order in orders if str(order.get("order_id") or "") in wanted]
+                    trades = [trade for trade in trades if str(trade.get("order_id") or "") in wanted]
+
+                by_order_id: dict[str, dict[str, Any]] = {}
+                for order in orders:
+                    order_id = str(order.get("order_id") or "")
+                    if not order_id:
+                        continue
+                    by_order_id.setdefault(order_id, {"order_id": order_id, "order": order, "trades": []})
+                    by_order_id[order_id]["order"] = order
+
+                for trade in trades:
+                    order_id = str(trade.get("order_id") or "")
+                    if not order_id:
+                        continue
+                    entry = by_order_id.setdefault(order_id, {"order_id": order_id, "order": None, "trades": []})
+                    entry["trades"].append(trade)
+
+                for entry in by_order_id.values():
+                    order = dict(entry.get("order") or {})
+                    trade_rows = list(entry.get("trades") or [])
+                    traded_volume = sum(float(row.get("traded_volume") or 0.0) for row in trade_rows)
+                    traded_amount = sum(float(row.get("traded_amount") or 0.0) for row in trade_rows)
+                    if traded_volume <= 0:
+                        traded_volume = float(order.get("traded_volume") or 0.0)
+                        order_price = float(order.get("traded_price") or 0.0)
+                        traded_amount = traded_volume * order_price if traded_volume and order_price else 0.0
+                    avg_price = (traded_amount / traded_volume) if traded_volume > 0 and traded_amount > 0 else float(order.get("traded_price") or 0.0)
+                    order_volume = float(order.get("order_volume") or 0.0)
+                    status = self._qmt_order_status(
+                        int(float(order.get("order_status") or 0)) if order else None,
+                        order_volume=order_volume,
+                        traded_volume=traded_volume,
+                    )
+                    entry.update(
+                        {
+                            "status": status,
+                            "filled_quantity": traded_volume,
+                            "filled_price": avg_price,
+                            "filled_value": traded_amount if traded_amount > 0 else traded_volume * avg_price,
+                            "remaining_quantity": max(0.0, order_volume - traded_volume) if order_volume > 0 else 0.0,
+                            "order_status": order.get("order_status"),
+                            "status_msg": order.get("status_msg"),
+                            "symbol": order.get("symbol") or (trade_rows[0].get("symbol") if trade_rows else None),
+                            "stock_name": order.get("stock_name") or (trade_rows[0].get("stock_name") if trade_rows else None),
+                            "side": order.get("side") or (trade_rows[0].get("side") if trade_rows else None),
+                            "last_trade_time": max([str(row.get("traded_time") or "") for row in trade_rows] or [""]) or None,
+                        }
+                    )
+                return {"orders": orders, "trades": trades, "by_order_id": by_order_id}
+            finally:
+                self._stop_trader(trader)
 
         async with self._account_snapshot_lock:
-            return await asyncio.to_thread(_query)
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(_query),
+                    timeout=self._order_query_timeout_seconds,
+                )
+            except asyncio.TimeoutError as exc:
+                raise RuntimeError(
+                    f"QMT order update query timed out after {self._order_query_timeout_seconds:.0f}s"
+                ) from exc
 
     async def cancel_order(self, order_id: str | int) -> dict[str, Any]:
         normalized_order_id = self._normalize_order_id(order_id)

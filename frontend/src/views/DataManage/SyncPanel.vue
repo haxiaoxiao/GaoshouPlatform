@@ -469,7 +469,7 @@ const syncUnavailableReason = computed(() => (
   !serviceReady.value
     ? syncStatus.value.reason
       || String(syncStatus.value.details?.proxy_error || '')
-      || 'dev 同步服务未启动或状态接口不可用，请先启动 18810 同步服务。'
+      || 'PROD 同步服务未启动或状态接口不可用，请先启动 8810 同步服务。'
     : syncStatus.value.can_trigger === false
       ? syncStatus.value.reason || '后端当前拒绝新同步任务。'
       : isRunning.value && !queueModeEnabled.value
@@ -807,7 +807,7 @@ async function refreshStatus() {
       ...idleStatus(),
       sync_service_available: false,
       can_trigger: false,
-      reason: error?.message || 'dev 同步服务未启动或状态接口不可用',
+      reason: error?.message || 'PROD 同步服务未启动或状态接口不可用',
     }
     syncStatus.value = nextStatus
     emit('status-change', nextStatus)
@@ -820,7 +820,7 @@ function normalizeStatusAvailability(status: SyncStatus): SyncStatus {
       ...status,
       sync_service_available: false,
       can_trigger: false,
-      reason: status.reason || String(status.details.proxy_error || 'dev 同步服务未启动'),
+      reason: status.reason || String(status.details.proxy_error || 'PROD 同步服务未启动'),
     }
   }
   return status

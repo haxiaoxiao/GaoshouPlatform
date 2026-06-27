@@ -286,12 +286,20 @@ async def sync_symbol_timer_minutes(
         existing,
     )
     klines = []
-    for chunk_start, chunk_end in ranges:
-        fetch_task = qmt_gateway.get_kline_minute(symbol, chunk_start, chunk_end)
-        if timeout_seconds and timeout_seconds > 0:
-            klines.extend(await asyncio.wait_for(fetch_task, timeout=timeout_seconds))
-        else:
-            klines.extend(await fetch_task)
+    cache_cleaned: dict[str, Any] | None = None
+    try:
+        for chunk_start, chunk_end in ranges:
+            fetch_task = qmt_gateway.get_kline_minute(symbol, chunk_start, chunk_end)
+            if timeout_seconds and timeout_seconds > 0:
+                klines.extend(await asyncio.wait_for(fetch_task, timeout=timeout_seconds))
+            else:
+                klines.extend(await fetch_task)
+    finally:
+        if ranges and settings.qmt_minute_clean_cache_after_sync:
+            try:
+                cache_cleaned = await asyncio.to_thread(qmt_gateway.clean_local_cache, symbols=[symbol], data_type="kline")
+            except Exception as exc:
+                cache_cleaned = {"error": f"{type(exc).__name__}: {exc}"}
     rows = _filter_timer_rows(klines, timer_times, existing)
     await asyncio.to_thread(_insert_rows, rows)
     return {
@@ -301,6 +309,7 @@ async def sync_symbol_timer_minutes(
         "existing_points": len(existing),
         "expected_points": expected,
         "skipped": False,
+        "cache_cleaned": cache_cleaned,
     }
 
 

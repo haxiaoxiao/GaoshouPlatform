@@ -6,9 +6,10 @@
 
 ## 工作区边界（强制）
 
-- `E:\Projects\GaoshouPlatform-prod` 是生产环境仓库：默认只读、验证、查看日志、健康检查，以及经用户明确要求的数据清理；不要在这里做代码层级改动。
-- `E:\Projects\GaoshouPlatform-dev` 是开发环境仓库：所有代码修改、脚本新增、测试补充、依赖调整、文档方案落地，优先且默认在 dev 进行。
-- 如果当前工作目录在 prod，但任务涉及代码/配置/依赖/测试变更，先切到 dev 实施；除非用户明确要求修改 prod，否则不要把 dev 改动同步到 prod。
+- 临时边界（2026-06-25 起，用户明确指定）：这段时间直接在 `E:\Projects\GaoshouPlatform-prod` 进行 GaoshouPlatform 代码、配置、脚本、测试和文档开发；`E:\Projects\GaoshouPlatform-dev` 暂时放置，不作为默认开发仓库。
+- `E:\Projects\GaoshouPlatform-prod` 当前兼作生产运行仓库和临时开发仓库：改动前先看 git 状态和相关 diff，严格保持改动范围，避免覆盖已有未提交变更。
+- `E:\Projects\GaoshouPlatform-dev` 暂时只在用户明确要求时使用。
+- 如果当前工作目录在 prod，任务涉及代码/配置/依赖/测试变更，直接在 prod 实施；除非用户重新恢复 dev-first 规则，否则不要切到 dev。
 - prod 中如发现此前误改或临时文件，只能清理自己造成的变更；不得回滚、覆盖或删除用户/系统已有变更。
 
 ---

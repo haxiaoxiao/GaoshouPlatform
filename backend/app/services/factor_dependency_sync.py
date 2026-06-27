@@ -51,6 +51,7 @@ HIGH_VOLUME_FACTORS = {
     "avoid_high_volume_ratio",
     "high_volume_signal",
 }
+TIMER_STATUS_FACTORS = {"is_paused", "is_limit_up", "is_limit_down"}
 ALPHA101_FACTORS = {f"alpha101_{index:03d}" for index in range(1, 102)}
 CATALOG_FACTORS = (
     set(TA_FACTOR_SPECS)
@@ -153,11 +154,11 @@ def _build_coverage_gaps(
                 "sync_step": "tushare_daily",
                 "reason": "市值排序需要 stock_daily_basic.circ_mv/total_mv",
             }
-        if factor_name in {"is_paused", "is_limit_up", "is_limit_down"}:
-            checks[f"klines_minute:{timer_time}"] = {
-                "dependency": "klines_minute",
+        if factor_name in TIMER_STATUS_FACTORS:
+            checks[f"klines_minute_timer:{timer_time}"] = {
+                "dependency": "klines_minute_timer",
                 "label": f"分钟线 {timer_time}",
-                "latest_date": _latest_market_date("klines_minute", timer_time=timer_time),
+                "latest_date": _latest_market_date("klines_minute_timer", timer_time=timer_time),
                 "required_start": start_date.isoformat(),
                 "required_end": end_date.isoformat(),
                 "sync_step": "kline_minute",
@@ -208,6 +209,9 @@ def _build_coverage_gaps(
     for factor_name in factor_names:
         definition = get_factor_definition(factor_name) or {}
         for dependency in definition.get("dependencies") or []:
+            dep_base = str(dependency).split(".", 1)[0].strip()
+            if factor_name in TIMER_STATUS_FACTORS and dep_base in {"klines_minute", "klines_minute_timer"}:
+                continue
             _append_catalog_dependency_check(
                 checks,
                 dependency=str(dependency),
@@ -472,6 +476,25 @@ async def _sync_kline_minute_step(
     outer_progress: Any,
 ) -> dict[str, Any]:
     import app.services.sync_service as sync_service_module
+
+    timer_times = [str(item) for item in step.get("timer_times") or [] if str(item).strip()]
+    if timer_times:
+        from app.services.timer_minute_sync import parse_timer_times, sync_timer_minute_points
+
+        result = await sync_timer_minute_points(
+            symbols=await _resolve_plan_symbols(plan),
+            index_symbol=str(plan.get("index_symbol") or "") or None,
+            start=date.fromisoformat(step["start_date"]),
+            end=date.fromisoformat(step["end_date"]),
+            timer_times=parse_timer_times(timer_times),
+        )
+        sync_service_module._current_sync = outer_progress
+        return {
+            "sync_type": "timer_minute",
+            "status": "completed" if not result.get("failures") else "partial",
+            "dataset": "klines_minute_timer",
+            **result,
+        }
 
     progress = await service.sync_kline_minute(
         symbols=await _resolve_plan_symbols(plan),

@@ -4,6 +4,7 @@ from __future__ import annotations
 from threading import RLock
 from typing import AsyncGenerator
 
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
@@ -28,7 +29,16 @@ class DynamicAsyncSessionFactory:
                     url,
                     echo=settings.debug,
                     future=True,
+                    connect_args={"timeout": 30} if url.startswith("sqlite") else {},
                 )
+                if url.startswith("sqlite"):
+                    @event.listens_for(self._engine.sync_engine, "connect")
+                    def _set_sqlite_pragmas(dbapi_connection, _connection_record):
+                        cursor = dbapi_connection.cursor()
+                        cursor.execute("PRAGMA busy_timeout=30000")
+                        cursor.execute("PRAGMA journal_mode=WAL")
+                        cursor.close()
+
                 self._maker = async_sessionmaker(
                     self._engine,
                     class_=AsyncSession,

@@ -58,6 +58,22 @@ def _write_store_minute(rows: list[dict[str, Any]], *, dataset: str = "klines_mi
     store.write_minute(pd.DataFrame(rows), dataset=dataset)
 
 
+def _clean_qmt_kline_cache_after_download(progress: Any, symbols: list[str] | None) -> None:
+    if not symbols:
+        progress.details.setdefault("cache_cleaned", "skipped")
+        progress.details.setdefault("cache_clean_skipped_reason", "no_symbols")
+        return
+    if not app_settings.qmt_minute_clean_cache_after_sync:
+        progress.details.setdefault("cache_cleaned", "skipped")
+        return
+    progress.details["post_sync_step"] = "clean_local_cache"
+    try:
+        cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
+        progress.details["cache_cleaned"] = cleaned
+    except Exception as exc:
+        progress.details["cache_clean_error"] = str(exc)
+
+
 def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
     from app.db.duckdb import get_duckdb
 
@@ -2144,12 +2160,14 @@ class SyncService:
             _current_sync = None
             return progress
 
+        cleanup_symbols: list[str] | None = None
         try:
             # 如果没有指定股票列表，获取所有股票
             if symbols is None:
                 query = select(Stock.symbol)
                 result = await self.session.execute(query)
                 symbols = [row[0] for row in result.all()]
+            cleanup_symbols = list(symbols or [])
 
             progress.total = len(symbols)
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
@@ -2280,17 +2298,6 @@ class SyncService:
                         if progress.current % 10 == 0 or progress.current >= progress.total:
                             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
-            # 更新进度
-            if app_settings.qmt_minute_clean_cache_after_sync:
-                progress.details["post_sync_step"] = "clean_local_cache"
-                try:
-                    cleaned = qmt_gateway.clean_local_cache(symbols=symbols, data_type="kline")
-                    progress.details["cache_cleaned"] = cleaned
-                except Exception as exc:
-                    progress.details["cache_clean_error"] = str(exc)
-            else:
-                progress.details["cache_cleaned"] = "skipped"
-
             if app_settings.qmt_minute_compute_indicators_after_sync:
                 progress.details["post_sync_step"] = "compute_indicators"
                 indicator_scheduler.run_after_sync("kline_minute", symbols=symbols, trade_date=end_date)
@@ -2300,6 +2307,7 @@ class SyncService:
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
             progress.details["failed_symbols"] = failed_symbols[:100]
+            _clean_qmt_kline_cache_after_download(progress, cleanup_symbols)
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 记录日志
@@ -2320,6 +2328,7 @@ class SyncService:
             progress.status = "failed"
             progress.end_time = datetime.now()
             progress.error_message = str(e)
+            _clean_qmt_kline_cache_after_download(progress, cleanup_symbols)
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
             # 记录失败日志
@@ -2338,6 +2347,12 @@ class SyncService:
             raise
 
         finally:
+            if cleanup_symbols is not None and progress.details.get("cache_cleaned") is None and progress.details.get("cache_clean_error") is None:
+                _clean_qmt_kline_cache_after_download(progress, cleanup_symbols)
+                try:
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+                except Exception:
+                    logger.debug("Failed to persist QMT cache cleanup details after minute sync exit")
             _current_sync = None
 
         return progress
@@ -2767,7 +2782,7 @@ class SyncService:
                 progress.details["phase"] = "nga_sentiment"
                 progress.details["current_step"] = event.get("current_step")
                 progress.details["crawler_progress"] = event
-                if event.get("source") == "nga":
+                if event.get("source") in {"nga", "flocktrader"}:
                     progress.details["nga_progress"] = event
                 else:
                     progress.details.pop("nga_progress", None)
@@ -2786,6 +2801,10 @@ class SyncService:
                     "detail_page",
                     "threads_collected",
                     "cache_posts",
+                    "scan_time_basis",
+                    "cache_partition",
+                    "search_queries",
+                    "search_pages",
                 ):
                     if key in event:
                         progress.details[key] = event[key]

@@ -33,19 +33,22 @@ import { syncApi, type SyncStatus } from '@/api/sync'
 const quickSyncing = ref(false)
 const syncStatus = ref<SyncStatus | null>(null)
 const quickSyncBusy = computed(() => ['queued', 'running'].includes(syncStatus.value?.status || ''))
-const quickSyncDisabled = computed(() => (
+const quickSyncSubmitBlocked = computed(() => (
   quickSyncBusy.value
-  || quickSyncing.value
   || syncStatus.value?.can_trigger === false
   || syncStatus.value?.sync_service_available === false
   || syncStatus.value?.details?.sync_service_unavailable === true
+))
+const quickSyncDisabled = computed(() => (
+  quickSyncSubmitBlocked.value
+  || quickSyncing.value
 ))
 const syncUnavailableReason = computed(() => (
   quickSyncBusy.value
     ? `当前正在${syncStatus.value?.status === 'queued' ? '排队' : '执行'}：${syncTypeLabel(syncStatus.value?.sync_type)}，请等待完成或停止后再一键同步。`
     : syncStatus.value?.reason
       || String(syncStatus.value?.details?.proxy_error || '')
-      || 'dev 同步服务未启动或正在执行任务，请先启动 18810 同步服务后再提交。'
+      || 'PROD 同步服务未启动或正在执行任务，请先启动 8810 同步服务后再提交。'
 ))
 
 onMounted(loadSyncStatus)
@@ -58,7 +61,7 @@ async function loadSyncStatus() {
           ...status,
           sync_service_available: false,
           can_trigger: false,
-          reason: status.reason || String(status.details.proxy_error || 'dev 同步服务未启动'),
+          reason: status.reason || String(status.details.proxy_error || 'PROD 同步服务未启动'),
         }
       : status
   } catch (error: any) {
@@ -76,7 +79,7 @@ async function loadSyncStatus() {
       details: {},
       sync_service_available: false,
       can_trigger: false,
-      reason: error?.message || 'dev 同步服务状态接口不可用',
+      reason: error?.message || 'PROD 同步服务状态接口不可用',
     }
   }
 }
@@ -109,7 +112,7 @@ async function runQuickSync() {
   quickSyncing.value = true
   try {
     await loadSyncStatus()
-    if (quickSyncDisabled.value) {
+    if (quickSyncSubmitBlocked.value) {
       ElMessage.warning(syncUnavailableReason.value)
       return
     }

@@ -99,6 +99,16 @@ class LiveOrderCancelResubmitRequest(BaseModel):
     confirm_submit: bool = False
 
 
+class LiveOrderLocalCloseRequest(BaseModel):
+    profile_key: str | None = None
+    mode: str = Field(default="live", pattern="^(paper|live)$")
+    limit: int = Field(default=200, ge=1, le=1000)
+    record_ids: list[str] = Field(default_factory=list)
+    order_ids: list[str] = Field(default_factory=list)
+    reason: str = "client_cancelled"
+    confirm: bool = False
+
+
 class LiveStrategyAccountInitRequest(BaseModel):
     profile_key: str | None = None
     mode: str = Field(default="paper", pattern="^(paper|live)$")
@@ -300,6 +310,7 @@ async def pending_orders(
     profile_key: str | None = Query(default=None),
     mode: str = Query(default="live", pattern="^(paper|live)$"),
     limit: int = Query(default=100, ge=1, le=500),
+    sync: bool = Query(default=True),
 ) -> dict[str, Any]:
     try:
         return _ok(
@@ -307,6 +318,7 @@ async def pending_orders(
                 limit=limit,
                 profile_key=profile_key,
                 mode=mode,
+                sync=sync,
             )
         )
     except Exception as exc:
@@ -359,6 +371,24 @@ async def cancel_and_resubmit_orders(req: LiveOrderCancelResubmitRequest) -> dic
                 order_ids=req.order_ids,
                 confirm_cancel=req.confirm_cancel,
                 confirm_submit=req.confirm_submit,
+            )
+        )
+    except Exception as exc:
+        raise _error(exc) from exc
+
+
+@router.post("/orders/close-local")
+async def close_local_orders(req: LiveOrderLocalCloseRequest) -> dict[str, Any]:
+    try:
+        return _ok(
+            await live_trading_service.close_local_pending_orders(
+                profile_key=req.profile_key,
+                mode=req.mode,
+                limit=req.limit,
+                record_ids=req.record_ids,
+                order_ids=req.order_ids,
+                reason=req.reason,
+                confirm=req.confirm,
             )
         )
     except Exception as exc:

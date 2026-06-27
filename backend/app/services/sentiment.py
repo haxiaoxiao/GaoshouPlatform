@@ -179,7 +179,7 @@ class NgaIngestStats:
     search_queries: list[str] = field(default_factory=list)
     search_pages: list[dict[str, Any]] = field(default_factory=list)
     scan_time_basis: str = "last_reply_time"
-    cache_partition: str = "publish_time"
+    cache_partition: str = "last_reply_time"
     total_posts: int = 0
     analyzed_posts: int = 0
     matched_posts: int = 0
@@ -395,21 +395,21 @@ def _merge_nga_post_lists(*groups: list[dict[str, Any]]) -> list[dict[str, Any]]
     return [merged[key] for key in order]
 
 
-def _nga_publish_day(post: dict[str, Any]) -> date | None:
+def _nga_activity_day(post: dict[str, Any]) -> date | None:
+    last_reply_time = _parse_datetime(post.get("last_reply_time"))
+    if last_reply_time is not None:
+        return last_reply_time.date()
     publish_time = _parse_datetime(post.get("publish_time"))
-    if publish_time is not None:
-        return publish_time.date()
-    fallback_time = _parse_datetime(post.get("last_reply_time"))
-    return fallback_time.date() if fallback_time is not None else None
+    return publish_time.date() if publish_time is not None else None
 
 
-def _bucket_nga_posts_by_publish_day(posts: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
+def _bucket_nga_posts_by_activity_day(posts: list[dict[str, Any]]) -> dict[date, list[dict[str, Any]]]:
     buckets: dict[date, list[dict[str, Any]]] = {}
     for post in posts:
-        publish_day = _nga_publish_day(post)
-        if publish_day is None:
+        activity_day = _nga_activity_day(post)
+        if activity_day is None:
             continue
-        buckets.setdefault(publish_day, []).append(post)
+        buckets.setdefault(activity_day, []).append(post)
     return buckets
 
 
@@ -3170,46 +3170,70 @@ class SentimentIngestService:
             missing_days.append(day)
 
         if missing_days:
-            crawl_start = min(missing_days)
-            crawl_end = max(missing_days)
             self._emit_progress(
                 "nga.crawl.range_start",
                 current_step="crawl_range",
-                crawl_start=crawl_start.isoformat(),
-                crawl_end=crawl_end.isoformat(),
+                crawl_start=min(missing_days).isoformat(),
+                crawl_end=max(missing_days).isoformat(),
                 missing_dates=[day.isoformat() for day in missing_days],
+                crawl_mode="daily_recent_reply",
             )
-            crawled_posts = self._crawl_nga_range(crawl_start, crawl_end, max_pages=max_pages)
-            crawled_by_day = _bucket_nga_posts_by_publish_day(crawled_posts)
-            for day, posts in sorted(crawled_by_day.items()):
-                path = data_dir / _date_file_name(day)
-                if day in requested_day_set:
-                    existing = posts_by_day.get(day, [])
-                    posts_by_day[day] = _merge_nga_post_lists(existing, posts)
-                    _write_json_list(path, posts_by_day[day])
-                    self._emit_progress(
-                        "nga.cache.write",
-                        current_step="cache_write",
-                        current_date=day.isoformat(),
-                        current_date_file=str(path),
-                        cache_posts=len(posts_by_day[day]),
-                    )
-                    continue
-                if path.exists():
-                    posts = _merge_nga_post_lists(_read_json_list(path), posts)
-                _write_json_list(path, posts)
-                stats.extra_date_files.append(str(path))
+            crawled_by_day: dict[date, list[dict[str, Any]]] = {}
+            for missing_day in missing_days:
                 self._emit_progress(
-                    "nga.cache.write_extra",
-                    current_step="cache_write_extra",
-                    current_date=day.isoformat(),
-                    current_date_file=str(path),
-                    cache_posts=len(posts),
+                    "nga.crawl.day_start",
+                    current_step="crawl_day",
+                    current_date=missing_day.isoformat(),
+                    crawl_start=missing_day.isoformat(),
+                    crawl_end=missing_day.isoformat(),
+                    crawl_mode="daily_recent_reply",
                 )
+                day_posts = self._crawl_nga_day(missing_day, max_pages=max_pages)
+                crawled_posts.extend(day_posts)
+                day_buckets = _bucket_nga_posts_by_activity_day(day_posts)
+                posts = day_buckets.get(missing_day, [])
+                path = data_dir / _date_file_name(missing_day)
+                existing = posts_by_day.get(missing_day, [])
+                posts_by_day[missing_day] = _merge_nga_post_lists(existing, posts)
+                crawled_by_day[missing_day] = posts_by_day[missing_day]
+                _write_json_list(path, posts_by_day[missing_day])
+                self._emit_progress(
+                    "nga.cache.write",
+                    current_step="cache_write",
+                    current_date=missing_day.isoformat(),
+                    current_date_file=str(path),
+                    cache_posts=len(posts_by_day[missing_day]),
+                )
+                stats.crawled_dates.append(missing_day.isoformat())
+                if not posts_by_day[missing_day]:
+                    stats.empty_dates.append(missing_day.isoformat())
+                self._emit_progress(
+                    "nga.crawl.day_done",
+                    current_step="crawl_day_done",
+                    current_date=missing_day.isoformat(),
+                    total_posts=len(day_posts),
+                    cache_posts=len(posts_by_day[missing_day]),
+                    crawl_mode="daily_recent_reply",
+                )
+                for extra_day, extra_posts_for_day in sorted(day_buckets.items()):
+                    if extra_day == missing_day:
+                        continue
+                    extra_path = data_dir / _date_file_name(extra_day)
+                    existing_extra = _read_json_list(extra_path) if extra_path.exists() else []
+                    merged_extra = _merge_nga_post_lists(existing_extra, extra_posts_for_day)
+                    _write_json_list(extra_path, merged_extra)
+                    stats.extra_date_files.append(str(extra_path))
+                    self._emit_progress(
+                        "nga.cache.write_extra",
+                        current_step="cache_write_extra",
+                        current_date=extra_day.isoformat(),
+                        current_date_file=str(extra_path),
+                        cache_posts=len(merged_extra),
+                    )
             for day in missing_days:
-                posts = posts_by_day.get(day, [])
                 if day not in crawled_by_day:
                     path = data_dir / _date_file_name(day)
+                    posts = posts_by_day.get(day, [])
                     _write_json_list(path, posts)
                     self._emit_progress(
                         "nga.cache.write_empty",
@@ -3218,9 +3242,9 @@ class SentimentIngestService:
                         current_date_file=str(path),
                         cache_posts=0,
                     )
-                stats.crawled_dates.append(day.isoformat())
-                if not posts:
+                if day not in crawled_by_day and not posts:
                     stats.empty_dates.append(day.isoformat())
+            stats.empty_dates = list(dict.fromkeys(stats.empty_dates))
 
         raw_posts: list[dict[str, Any]] = []
         for day in requested_days:
@@ -3230,7 +3254,7 @@ class SentimentIngestService:
         extra_posts = [
             post
             for post in crawled_posts
-            if (publish_day := _nga_publish_day(post)) is not None and publish_day not in requested_day_set
+            if (activity_day := _nga_activity_day(post)) is not None and activity_day not in requested_day_set
         ]
         merged_posts = _merge_nga_post_lists(raw_posts, extra_posts)
         self._emit_progress(
@@ -3299,14 +3323,34 @@ class SentimentIngestService:
                 topics_on_page=len(topics),
                 threads_collected=len(collected),
             )
-            parsed_topic_times = [
-                value
-                for topic in topics
-                if (value := _parse_datetime(topic.get("publish_time"))) is not None
-            ]
+            stop_crawl = False
             for topic_index, topic in enumerate(topics, start=1):
                 tid = str(topic.get("tid") or "")
                 if not tid or tid in seen_tids:
+                    continue
+                topic_publish_time = _parse_datetime(topic.get("publish_time"))
+                topic_last_reply_time = _parse_datetime(topic.get("last_reply_time")) or topic_publish_time
+                if topic_last_reply_time is None:
+                    continue
+                if topic_last_reply_time < start_dt:
+                    topic_title = str(topic.get("title") or "")
+                    self._emit_progress(
+                        "nga.crawl.stop_before_start",
+                        current_step="crawl_stop",
+                        board_page=page,
+                        current_page=page,
+                        page_limit=page_limit,
+                        topic_index=topic_index,
+                        topics_on_page=len(topics),
+                        current_tid=tid,
+                        current_title=topic_title[:120],
+                        threads_collected=len(collected),
+                        stop_time=topic_last_reply_time.isoformat(),
+                        scan_time_basis="last_reply_time",
+                    )
+                    stop_crawl = True
+                    break
+                if topic_last_reply_time > end_dt:
                     continue
                 seen_tids.add(tid)
                 topic_title = str(topic.get("title") or "")
@@ -3338,18 +3382,20 @@ class SentimentIngestService:
                         threads_collected=len(collected),
                     )
                     continue
-                publish_time = _parse_datetime(thread_posts[0].get("publish_time")) or topic.get("publish_time")
-                last_reply_time = _parse_datetime(thread_posts[-1].get("publish_time")) or publish_time
-                if last_reply_time is None:
-                    continue
-                if last_reply_time < start_dt or last_reply_time > end_dt:
-                    continue
-                title = thread_posts[0].get("title") or topic.get("title") or ""
-                content = thread_posts[0].get("content") or title
+                publish_time = topic_publish_time or _parse_datetime(thread_posts[0].get("publish_time"))
+                last_reply_time = _parse_datetime(thread_posts[-1].get("publish_time")) or topic_last_reply_time
+                title = topic_title or thread_posts[0].get("title") or ""
+                first_post = thread_posts[0] if thread_posts else {}
+                content = (
+                    first_post.get("content")
+                    if _parse_datetime(first_post.get("publish_time")) == publish_time
+                    else title
+                ) or title
                 comments = [
                     {"content": post.get("content") or "", "publish_time": post.get("publish_time")}
-                    for post in thread_posts[1:]
+                    for post in thread_posts
                     if str(post.get("content") or "").strip()
+                    and _parse_datetime(post.get("publish_time")) != publish_time
                 ]
                 stock_codes = _extract_nga_post_symbols({"title": title, "content": content, "comments": comments})
                 sentiment_score, sentiment_label = _nga_sentiment(" ".join([title, content, *[str(item.get('content') or '') for item in comments]]))
@@ -3386,16 +3432,7 @@ class SentimentIngestService:
                     comments_count=len(comments),
                     threads_collected=len(collected),
                 )
-            if parsed_topic_times and all(item < start_dt for item in parsed_topic_times):
-                self._emit_progress(
-                    "nga.crawl.stop_before_start",
-                    current_step="crawl_stop",
-                    board_page=page,
-                    current_page=page,
-                    page_limit=page_limit,
-                    threads_collected=len(collected),
-                    oldest_page_time=min(parsed_topic_times).isoformat(),
-                )
+            if stop_crawl:
                 break
         self._emit_progress(
             "nga.crawl.done",
@@ -3549,7 +3586,7 @@ def _fetch_nga_search_html(query: str, *, page: int = 1) -> str:
 
 
 def _parse_nga_board_topics(html_text: str) -> list[dict[str, Any]]:
-    pattern = re.compile(
+    row_pattern = re.compile(
         r"<tr class='row\d+ topicrow'>.*?"
         r"href='/read\.php\?tid=(?P<tid>\d+)'.*?class='replies'>(?P<replies>\d+)</a>.*?"
         r"<a href='/read\.php\?tid=(?P=tid)'[^>]*class='topic'>(?P<title>.*?)</a>.*?"
@@ -3557,20 +3594,29 @@ def _parse_nga_board_topics(html_text: str) -> list[dict[str, Any]]:
         r"<span class='silver postdate'[^>]*>(?P<postdate>\d+)</span>",
         re.S,
     )
+    script_pattern = re.compile(
+        r"commonui\.topicArg\.add\(\s*'[^']*','[^']*','[^']*','[^']*',\s*'[^']*','[^']*','[^']*',\s*'(?P<fid>\d+)',(?P<tid>\d+),'[^']*','[^']*','[^']*',(?P<publish>\d+),(?P<last_reply>\d+),(?P<replies>\d+),",
+        re.S,
+    )
     topics: list[dict[str, Any]] = []
-    for match in pattern.finditer(html_text):
+    for match in row_pattern.finditer(html_text):
         title = _nga_clean_text(match.group("title"))
         if not title:
             continue
-        post_ts = int(match.group("postdate"))
+        tid = str(match.group("tid") or "").strip()
+        window = html_text[match.end(): match.end() + 1200]
+        script_match = script_pattern.search(window)
+        publish_ts = _to_int(script_match.group("publish")) if script_match else _to_int(match.group("postdate"))
+        last_reply_ts = _to_int(script_match.group("last_reply")) if script_match else publish_ts
         topics.append(
             {
-                "tid": match.group("tid"),
+                "tid": tid,
                 "title": title,
                 "author": _nga_clean_text(match.group("author")) or match.group("author_id"),
                 "author_id": match.group("author_id"),
-                "reply_count": _to_int(match.group("replies")),
-                "publish_time": datetime.fromtimestamp(post_ts),
+                "reply_count": _to_int(script_match.group("replies")) if script_match else _to_int(match.group("replies")),
+                "publish_time": datetime.fromtimestamp(publish_ts) if publish_ts else None,
+                "last_reply_time": datetime.fromtimestamp(last_reply_ts) if last_reply_ts else None,
             }
         )
     return topics
@@ -4309,6 +4355,9 @@ def normalize_nga_data_post(
         for alias in aliases:
             if alias and alias not in keywords and len(str(alias)) >= 2:
                 keywords.append(str(alias))
+    raw_with_activity_time = dict(raw)
+    if raw.get("publish_time") and "published_at_original" not in raw_with_activity_time:
+        raw_with_activity_time["published_at_original"] = raw.get("publish_time")
     return SentimentPostInput(
         source="flocktrader",
         source_post_id=f"{tid}:{symbol}",
@@ -4316,14 +4365,14 @@ def normalize_nga_data_post(
         title=str(raw.get("title") or "") or None,
         content=str(raw.get("content") or "") or None,
         author=str(raw.get("author") or "") or None,
-        published_at=_parse_datetime(raw.get("publish_time") or raw.get("last_reply_time")),
+        published_at=_parse_datetime(raw.get("last_reply_time") or raw.get("publish_time")),
         url=f"https://bbs.nga.cn/read.php?tid={tid}",
         reply_count=reply_count,
         comment_count=reply_count,
         sentiment_score=score,
         sentiment_label=_normalize_sentiment_label(str(raw.get("sentiment_label") or ""), score),
         keywords=keywords,
-        raw=raw,
+        raw=raw_with_activity_time,
     )
 
 

@@ -14,7 +14,10 @@
 
     <aside class="sidebar">
       <div class="sidebar__brand">
-        <div class="brand-icon" aria-hidden="true">GS</div>
+        <div class="brand-icon" aria-hidden="true">
+          GS
+          <span class="brand-env-badge">prod</span>
+        </div>
         <div v-if="!isCollapsed" class="brand-text">
           <span class="brand-name">GAOSHOU</span>
           <span class="brand-tagline">Quant Research Cockpit</span>
@@ -338,6 +341,7 @@ onUnmounted(() => {
 }
 
 .brand-icon {
+  position: relative;
   width: 40px;
   height: 40px;
   display: grid;
@@ -350,6 +354,26 @@ onUnmounted(() => {
   font-size: var(--text-sm);
   font-weight: 800;
   box-shadow: var(--shadow-glow);
+}
+
+.brand-env-badge {
+  position: absolute;
+  right: -10px;
+  bottom: -7px;
+  min-width: 32px;
+  padding: 2px 6px;
+  border: 1px solid rgba(248, 113, 113, 0.72);
+  border-radius: var(--radius-full);
+  background: rgba(127, 29, 29, 0.92);
+  color: #fecaca;
+  font-family: var(--font-data);
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: 0;
+  text-align: center;
+  text-transform: uppercase;
+  box-shadow: 0 0 14px rgba(248, 113, 113, 0.22);
 }
 
 .brand-text {

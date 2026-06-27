@@ -1280,7 +1280,7 @@ class QMTGateway:
                         if float_vol and quote_price:
                             float_value = float_vol * quote_price / 10000  # 万元
                         if turnover_rate is None and float_vol:
-                            volume = self._first_number(tick_data, ("volume", "pvolume", "成交量"))
+                            volume = self._first_number(tick_data, ("pvolume", "volume", "成交量"))
                             if volume is not None:
                                 turnover_rate = volume / float_vol
                     if turnover_rate is not None and abs(turnover_rate) > 1:

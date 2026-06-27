@@ -1,4 +1,9 @@
+from datetime import date
+
+import pandas as pd
+
 from app.services.tushare_relay import parse_relay_rows
+from app.services import tushare_relay_sync
 from app.services.tushare_relay_sync import (
     ANALYST_RELAY_DATASETS,
     FINANCIAL_STATEMENT_RELAY_DATASETS,
@@ -7,6 +12,34 @@ from app.services.tushare_relay_sync import (
     build_sync_catalog,
     _normalize_dataset_rows,
 )
+
+
+def test_dataset_coverage_uses_exact_partition_boundaries_with_cache(monkeypatch, tmp_path) -> None:
+    part = tmp_path / "klines_daily" / "year=2026" / "month=06"
+    part.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"symbol": "000001.SZ", "trade_date": date(2026, 6, 17), "close": 10.0},
+            {"symbol": "000002.SZ", "trade_date": date(2026, 6, 18), "close": 20.0},
+        ]
+    ).to_parquet(part / "part-0.parquet", index=False)
+
+    tushare_relay_sync._COVERAGE_CACHE.clear()
+    monkeypatch.setattr(tushare_relay_sync.settings, "parquet_data_dir", str(tmp_path))
+
+    result = tushare_relay_sync.dataset_coverage("klines_daily", "trade_date")
+    assert result["estimated"] is True
+    assert result["row_count"] is None
+    assert result["min_date"] == "2026-06-17"
+    assert result["max_date"] == "2026-06-18"
+
+    class ExplodingDuckDB:
+        def execute(self, *_args, **_kwargs):
+            raise AssertionError("cached coverage should not query DuckDB again")
+
+    monkeypatch.setattr(tushare_relay_sync, "get_duckdb", lambda: ExplodingDuckDB())
+    cached = tushare_relay_sync.dataset_coverage("klines_daily", "trade_date")
+    assert cached == result
 
 
 def test_parse_native_tushare_envelope() -> None:

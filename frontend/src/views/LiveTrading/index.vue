@@ -67,6 +67,33 @@
       </div>
     </section>
 
+    <section v-if="runtimeVisible" :class="['runtime-strip', `runtime-strip--${runtimeTone}`]">
+      <div class="runtime-strip__main">
+        <span class="runtime-strip__eyebrow">{{ runtimeState.scope }}</span>
+        <strong>{{ runtimeState.title }}</strong>
+        <small>{{ runtimeState.detail }}</small>
+      </div>
+      <div class="runtime-strip__progress">
+        <el-progress
+          :percentage="runtimeProgress"
+          :status="runtimeProgressStatus"
+          :stroke-width="8"
+          :show-text="false"
+        />
+        <span>{{ runtimeProgressText }}</span>
+      </div>
+      <div class="runtime-strip__steps">
+        <span
+          v-for="step in runtimeState.steps"
+          :key="step.id"
+          :class="['runtime-step', `runtime-step--${step.status}`]"
+          :title="step.detail || step.label"
+        >
+          {{ step.label }}
+        </span>
+      </div>
+    </section>
+
     <section class="desk-grid">
       <div class="strategy-config-stack">
         <article v-if="brokerAccountSnapshot" class="panel-card broker-account-panel">
@@ -260,7 +287,21 @@
             </span>
           </template>
           <template #default="{ row }">
-            <span :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
+            <div
+              v-if="column.key === 'quantity_available'"
+              class="stack-cell stack-cell--right"
+            >
+              <strong>{{ formatQuantity(row.quantity) }}</strong>
+              <small>{{ formatQuantity(row.available) }}</small>
+            </div>
+            <div
+              v-else-if="column.key === 'price_cost'"
+              class="stack-cell stack-cell--right"
+            >
+              <strong>{{ formatPrice(positionLastPrice(row)) }}</strong>
+              <small>{{ formatPrice(row.avg_cost) }}</small>
+            </div>
+            <span v-else :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
           </template>
         </el-table-column>
       </el-table>
@@ -397,12 +438,14 @@
         </div>
         <div class="table-actions">
           <span>{{ pendingOrders.length }} 笔实盘委托待确认</span>
+          <span :class="['pending-sync-pill', `pending-sync-pill--${orderSyncTone}`]">{{ orderSyncStatusText }}</span>
           <span class="stale-control">超过
             <el-input-number v-model="staleOrderMinutes" :min="0" :max="240" :step="1" size="small" controls-position="right" />
             分钟
           </span>
           <el-button text size="small" :loading="pendingLoading" @click="syncPendingOrderStatus">同步成交</el-button>
           <el-button text size="small" type="warning" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelPendingOrders">批量撤单</el-button>
+          <el-button text size="small" type="info" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="closeLocalPendingOrders()">本地关闭</el-button>
           <el-button text size="small" type="danger" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelAndResubmitPendingOrders">撤单再提交</el-button>
         </div>
       </div>
@@ -453,6 +496,11 @@
         </el-table-column>
         <el-table-column label="说明" min-width="220" resizable show-overflow-tooltip>
           <template #default="{ row }">{{ row.message || row.result_payload?.message || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="操作" width="104" fixed="right">
+          <template #default="{ row }">
+            <el-button text size="small" type="info" :loading="pendingActionLoading" @click="closeLocalPendingOrders([row])">本地关闭</el-button>
+          </template>
         </el-table-column>
       </el-table>
     </section>
@@ -630,7 +678,7 @@
         type="info"
         :closable="false"
         show-icon
-        title="再次调整时，输入的是策略资金池目标总资产：现金 + 策略持仓市值会被调到这个数，不清空已有策略持仓。"
+        title="再次调整时，输入的是目标本金：已有持仓按成本价×数量计入本金，剩余部分作为可用现金参与新目标调仓。"
       />
       <el-form class="capital-form" label-width="120px">
         <el-form-item label="当前 Profile">
@@ -639,7 +687,7 @@
         <el-form-item label="模式">
           <el-tag>{{ mode === 'paper' ? '模拟' : '实盘' }}</el-tag>
         </el-form-item>
-        <el-form-item label="目标总资产">
+        <el-form-item label="目标本金">
           <el-input-number
             v-model="capitalForm.capital"
             :min="10000"
@@ -651,7 +699,7 @@
         </el-form-item>
         <el-form-item label="重新初始化">
           <el-switch v-model="capitalForm.reset_existing" />
-          <span class="form-hint">关闭时为调整目标总资产；开启时清空策略资金池重来。</span>
+          <span class="form-hint">关闭时按成本本金口径调整；开启时清空策略资金池重来。</span>
         </el-form-item>
       </el-form>
       <template #footer>
@@ -698,7 +746,21 @@
             </span>
           </template>
           <template #default="{ row }">
-            <span :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
+            <div
+              v-if="column.key === 'quantity_available'"
+              class="stack-cell stack-cell--right"
+            >
+              <strong>{{ formatQuantity(row.quantity) }}</strong>
+              <small>{{ formatQuantity(row.available) }}</small>
+            </div>
+            <div
+              v-else-if="column.key === 'price_cost'"
+              class="stack-cell stack-cell--right"
+            >
+              <strong>{{ formatPrice(positionLastPrice(row)) }}</strong>
+              <small>{{ formatPrice(row.avg_cost) }}</small>
+            </div>
+            <span v-else :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
           </template>
         </el-table-column>
       </el-table>
@@ -817,12 +879,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
 import * as echarts from '@/lib/echarts'
 import { systemApi, type LiveTradingGuardrails } from '@/api/system'
+import { syncApi, type SyncStatus } from '@/api/sync'
 import {
   liveTradingApi,
   type LiveAccountSnapshot,
   type LiveAccountPosition,
   type LiveOrder,
   type LiveOrderAudit,
+  type LiveOrderSyncResponse,
   type LivePreflightResponse,
   type LiveSignalsResponse,
   type LiveStrategyProfile,
@@ -888,9 +952,15 @@ let flowChart: echarts.ECharts | null = null
 let statusChart: echarts.ECharts | null = null
 let accountEventSource: EventSource | null = null
 let accountPollTimer: number | null = null
+let orderSyncTimer: number | null = null
+let orderSyncBurstUntil = 0
+let orderSyncInFlight = false
 const liveStreamState = ref<'off' | 'connecting' | 'live' | 'polling' | 'error'>('off')
 const liveStreamUpdatedAt = ref<string | null>(null)
 const liveStreamError = ref('')
+const orderSyncState = ref<'idle' | 'syncing' | 'fresh' | 'watching' | 'error'>('idle')
+const orderSyncUpdatedAt = ref<string | null>(null)
+const orderSyncError = ref('')
 const newProfile = reactive({
   strategy_id: 62,
   profile_key: '',
@@ -903,12 +973,34 @@ const capitalForm = reactive({
   reset_existing: false,
 })
 
+type RuntimeStepStatus = 'pending' | 'running' | 'done' | 'warn' | 'error'
+type RuntimeTone = 'neutral' | 'running' | 'success' | 'warn' | 'error'
+
+interface RuntimeStep {
+  id: string
+  label: string
+  status: RuntimeStepStatus
+  detail?: string
+}
+
+const runtimeState = reactive({
+  visible: false,
+  active: false,
+  scope: '运行状态',
+  title: '待命',
+  detail: '等待操作',
+  tone: 'neutral' as RuntimeTone,
+  progress: 0,
+  updatedAt: '',
+  steps: [] as RuntimeStep[],
+})
+let runtimeSyncTimer: number | null = null
+
 type PositionColumnKey =
   | 'symbol'
   | 'stock_name'
-  | 'quantity'
-  | 'available'
-  | 'last_price'
+  | 'quantity_available'
+  | 'price_cost'
   | 'volume_ratio'
   | 'today_change_pct'
   | 'turnover_rate'
@@ -929,12 +1021,11 @@ interface PositionColumnDef {
 const positionColumnDefs: PositionColumnDef[] = [
   { key: 'symbol', prop: 'symbol', label: '代码', width: 92 },
   { key: 'stock_name', prop: 'stock_name', label: '股票名称', width: 120 },
-  { key: 'quantity', prop: 'quantity', label: '持仓', width: 88, align: 'right' },
-  { key: 'available', prop: 'available', label: '可用', width: 88, align: 'right' },
-  { key: 'last_price', prop: 'last_price', label: '最新价', width: 92, align: 'right' },
-  { key: 'volume_ratio', prop: 'volume_ratio', label: '量比', width: 72, align: 'right' },
-  { key: 'today_change_pct', prop: 'today_change_pct', label: '今日涨跌幅', width: 100, align: 'right' },
-  { key: 'turnover_rate', prop: 'turnover_rate', label: '换手率', width: 82, align: 'right' },
+  { key: 'quantity_available', label: '持仓/可用', width: 126, align: 'right' },
+  { key: 'price_cost', label: '最新价/成本价', width: 132, align: 'right' },
+  { key: 'volume_ratio', prop: 'volume_ratio', label: '量比', width: 82, align: 'right' },
+  { key: 'today_change_pct', prop: 'today_change_pct', label: '涨跌幅', width: 92, align: 'right' },
+  { key: 'turnover_rate', prop: 'turnover_rate', label: '换手率', width: 92, align: 'right' },
   { key: 'market_value', prop: 'market_value', label: '市值', width: 108, align: 'right' },
   { key: 'position_pct', prop: 'position_pct', label: '仓位', width: 78, align: 'right' },
   { key: 'unrealized_pnl_pct', prop: 'unrealized_pnl_pct', label: '总盈亏比例', width: 104, align: 'right' },
@@ -993,6 +1084,33 @@ const liveStreamStateClass = computed(() => {
   if (liveStreamState.value === 'error') return 'live-stream-pill--error'
   return 'live-stream-pill--off'
 })
+const orderSyncTone = computed(() => {
+  if (orderSyncState.value === 'syncing' || orderSyncState.value === 'watching') return 'syncing'
+  if (orderSyncState.value === 'error') return 'error'
+  if (orderSyncState.value === 'fresh') return 'fresh'
+  return 'idle'
+})
+const orderSyncStatusText = computed(() => {
+  if (mode.value !== 'live') return '模拟模式'
+  if (orderSyncState.value === 'syncing') return '正在同步成交'
+  if (orderSyncState.value === 'watching') return `追踪中 ${formatClock(orderSyncUpdatedAt.value)}`
+  if (orderSyncState.value === 'fresh') return `已同步 ${formatClock(orderSyncUpdatedAt.value)}`
+  if (orderSyncState.value === 'error') return orderSyncError.value || '同步失败'
+  return pendingOrders.value.length ? '等待同步' : '无待成交'
+})
+const runtimeVisible = computed(() => runtimeState.visible)
+const runtimeTone = computed(() => runtimeState.tone)
+const runtimeProgress = computed(() => Math.max(0, Math.min(100, Math.round(runtimeState.progress || 0))))
+const runtimeProgressStatus = computed(() => {
+  if (runtimeState.tone === 'success') return 'success'
+  if (runtimeState.tone === 'error') return 'exception'
+  if (runtimeState.tone === 'warn') return 'warning'
+  return undefined
+})
+const runtimeProgressText = computed(() => {
+  const updated = runtimeState.updatedAt ? ` · ${formatClock(runtimeState.updatedAt)}` : ''
+  return `${runtimeProgress.value}%${updated}`
+})
 const guardrailsDirty = computed(() => Boolean(
   liveGuardrails.value
   && (
@@ -1038,8 +1156,10 @@ const accountSummaryItems = computed(() => {
   const totalPnl = Number(account?.total_pnl || 0)
   const meta = account?.meta || {}
   const targetCapital = Number(meta.target_capital || meta.initial_capital || 0)
+  const positionCostBasis = Number(meta.position_cost_basis || 0)
   return [
-    { label: '目标总资产', value: formatMoney(targetCapital || null) },
+    { label: '目标本金', value: formatMoney(targetCapital || null) },
+    { label: '持仓成本', value: formatMoney(positionCostBasis) },
     { label: '可用现金', value: formatMoney(account?.cash) },
     { label: '总资产', value: formatMoney(account?.total_asset) },
     { label: '持仓市值', value: formatMoney(account?.market_value) },
@@ -1108,7 +1228,7 @@ const strategyReviewRows = computed(() => [
   { label: 'Profile Key', value: selectedProfileKey.value || '-' },
   { label: '模式', value: mode.value === 'paper' ? '模拟' : '实盘' },
   { label: '账户来源', value: accountSourceText.value },
-  { label: '目标总资产', value: accountSummaryItems.value.find(item => item.label === '目标总资产')?.value || '-' },
+  { label: '目标本金', value: accountSummaryItems.value.find(item => item.label === '目标本金')?.value || '-' },
   { label: '本周窗口', value: weeklyWindowLabel.value },
 ])
 const equityCurve = computed(() => weeklyAnalysis.value?.equity_curve || [])
@@ -1287,6 +1407,124 @@ function resetLiveGuardrailDraft() {
   guardrailDraft.auto_execute_enabled = liveGuardrails.value.auto_execute_enabled
 }
 
+function startRuntimeTask(
+  scope: string,
+  title: string,
+  detail: string,
+  steps: Array<{ id: string; label: string }>,
+) {
+  runtimeState.visible = true
+  runtimeState.active = true
+  runtimeState.scope = scope
+  runtimeState.title = title
+  runtimeState.detail = detail
+  runtimeState.tone = 'running'
+  runtimeState.progress = 4
+  runtimeState.updatedAt = new Date().toISOString()
+  runtimeState.steps = steps.map((step, index) => ({
+    ...step,
+    status: index === 0 ? 'running' : 'pending',
+  }))
+}
+
+function setRuntimeMessage(title: string, detail: string, progress?: number) {
+  runtimeState.title = title
+  runtimeState.detail = detail
+  runtimeState.updatedAt = new Date().toISOString()
+  if (progress != null) {
+    runtimeState.progress = Math.max(runtimeState.progress, progress)
+  }
+}
+
+function setRuntimeStep(id: string, status: RuntimeStepStatus, detail?: string, progress?: number) {
+  const index = runtimeState.steps.findIndex(step => step.id === id)
+  if (index >= 0) {
+    runtimeState.steps = runtimeState.steps.map((step, stepIndex) => {
+      if (step.id === id) return { ...step, status, detail: detail || step.detail }
+      if (status === 'running' && stepIndex < index && step.status === 'pending') {
+        return { ...step, status: 'done' }
+      }
+      return step
+    })
+  }
+  runtimeState.updatedAt = new Date().toISOString()
+  if (progress != null) {
+    runtimeState.progress = Math.max(runtimeState.progress, progress)
+  }
+}
+
+function finishRuntimeTask(tone: RuntimeTone, title: string, detail: string) {
+  runtimeState.active = false
+  runtimeState.tone = tone
+  runtimeState.title = title
+  runtimeState.detail = detail
+  runtimeState.updatedAt = new Date().toISOString()
+  runtimeState.progress = tone === 'success' ? 100 : Math.max(runtimeState.progress, 8)
+  runtimeState.steps = runtimeState.steps.map(step => {
+    if (tone === 'success') return { ...step, status: 'done' }
+    if (step.status === 'running') return { ...step, status: tone === 'error' ? 'error' : 'warn' }
+    return step
+  })
+}
+
+function startRuntimeSyncPolling() {
+  stopRuntimeSyncPolling()
+  const poll = async () => {
+    try {
+      applyRuntimeSyncStatus(await syncApi.getStatus())
+    } catch {
+      // The primary live-trading request should remain the source of truth.
+    }
+  }
+  void poll()
+  runtimeSyncTimer = window.setInterval(poll, 1500)
+}
+
+function stopRuntimeSyncPolling() {
+  if (runtimeSyncTimer == null) return
+  window.clearInterval(runtimeSyncTimer)
+  runtimeSyncTimer = null
+}
+
+function applyRuntimeSyncStatus(sync: SyncStatus) {
+  const state = String(sync.status || '')
+  if (state !== 'running' && state !== 'queued') return
+  const label = syncTypeLabel(sync.sync_type)
+  const percent = Number(sync.progress_percent || 0)
+  const total = Number(sync.total || 0)
+  const current = Number(sync.current || 0)
+  const countText = total > 0 ? `${current}/${total}` : stateLabel(state)
+  const detail = `${label} ${countText}，成功 ${sync.success_count || 0}，失败 ${sync.failed_count || 0}`
+  setRuntimeStep('sync', 'running', detail, 35 + Math.min(45, percent * 0.45))
+  setRuntimeMessage(`正在同步${label}`, detail, 35 + Math.min(45, percent * 0.45))
+}
+
+function syncTypeLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    live_intraday_factor_dependency: '盘中依赖',
+    factor_dependency: '因子依赖',
+    kline_minute: '分钟线',
+    kline_daily: '日线',
+    realtime_mv: '实时市值',
+    stock_info: '股票基础信息',
+    stock_full: '股票全量信息',
+    financial_data: '财务数据',
+  }
+  return labels[String(value || '')] || String(value || '同步任务')
+}
+
+function stateLabel(value: string) {
+  const labels: Record<string, string> = {
+    queued: '排队中',
+    running: '运行中',
+    completed: '已完成',
+    failed: '失败',
+    cancelled: '已取消',
+    idle: '空闲',
+  }
+  return labels[value] || value
+}
+
 async function loadGuardrails() {
   liveGuardrails.value = await systemApi.getLiveTradingGuardrails()
   resetLiveGuardrailDraft()
@@ -1397,6 +1635,7 @@ async function loadAll() {
         await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
       }
     }
+    updateOrderPolling()
   } finally {
     loading.value = false
   }
@@ -1439,6 +1678,8 @@ watch(mode, async () => {
   if (!selectedProfileKey.value) return
   signalData.value = null
   orderRows.value = []
+  stopOrderStatusPolling()
+  orderSyncState.value = 'idle'
   startAccountRealtime()
   await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
 })
@@ -1446,6 +1687,8 @@ watch(mode, async () => {
 watch(selectedProfileKey, () => {
   signalData.value = null
   orderRows.value = []
+  stopOrderStatusPolling()
+  orderSyncState.value = 'idle'
   startAccountRealtime()
 })
 
@@ -1552,8 +1795,25 @@ function startAccountRealtime() {
 
 async function loadPreflight() {
   if (!selectedProfileKey.value) return null
+  const ownsRuntime = !runtimeState.active
+  if (ownsRuntime) {
+    startRuntimeTask(
+      '运行检查',
+      '正在检查交易环境',
+      '读取账户、交易窗口、因子覆盖和数据依赖。',
+      [
+        { id: 'qmt', label: 'QMT状态' },
+        { id: 'account', label: '账户快照' },
+        { id: 'factor', label: '因子覆盖' },
+        { id: 'dependency', label: '依赖缺口' },
+      ],
+    )
+  }
   preflightLoading.value = true
   try {
+    if (ownsRuntime) {
+      setRuntimeStep('qmt', 'running', '确认行情、交易模块和实盘护栏。', 12)
+    }
     preflightData.value = await liveTradingApi.preflight({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
@@ -1563,7 +1823,38 @@ async function loadPreflight() {
       },
       evaluate_pipeline: true,
     })
+    if (ownsRuntime) {
+      const gaps = arrayField(preflightData.value.dependency_prepare, 'coverage_gaps')
+      const blocks = uniqueStrings([
+        ...(preflightData.value.blocking_reasons || []),
+        ...(preflightData.value.runner_blocking_reasons || []),
+      ])
+      setRuntimeStep('qmt', 'done', 'QMT和护栏状态已读取。', 28)
+      setRuntimeStep('account', 'done', '账户快照已读取。', 44)
+      setRuntimeStep(
+        'factor',
+        preflightData.value.factor_coverage?.some(item => Number(item.value_count || 0) === 0) ? 'warn' : 'done',
+        '因子覆盖已检查。',
+        72,
+      )
+      setRuntimeStep(
+        'dependency',
+        gaps.length ? 'warn' : 'done',
+        gaps.length ? dependencyLabels(gaps) : '依赖已覆盖。',
+        92,
+      )
+      finishRuntimeTask(
+        blocks.length ? 'warn' : 'success',
+        blocks.length ? '检查完成，有阻断项' : '检查完成，可以生成',
+        blocks[0] || String(preflightData.value.market_phase?.note || '预检通过。'),
+      )
+    }
     return preflightData.value
+  } catch (error) {
+    if (ownsRuntime) {
+      finishRuntimeTask('error', '检查失败', error instanceof Error ? error.message : '预检请求失败')
+    }
+    throw error
   } finally {
     preflightLoading.value = false
   }
@@ -1571,16 +1862,35 @@ async function loadPreflight() {
 
 async function loadSignals() {
   if (!selectedProfileKey.value) return
+  startRuntimeTask(
+    '生成信号',
+    '确认策略资金池',
+    '先确认本次策略 portfolio 的本金和持仓快照。',
+    [
+      { id: 'account', label: '资金池' },
+      { id: 'preflight', label: '预检' },
+      { id: 'sync', label: '盘中同步' },
+      { id: 'factor', label: '过滤因子' },
+      { id: 'basket', label: '订单篮子' },
+      { id: 'audit', label: '审计刷新' },
+    ],
+  )
+  setRuntimeStep('account', 'running', '读取策略资金池。', 8)
   if (!strategyAccountReady.value) {
     await loadAccount()
   }
   if (!strategyAccountReady.value) {
+    finishRuntimeTask('warn', '需要先圈定本金', '策略资金池未初始化，已打开本金设置。')
     ElMessage.warning('请先圈定量化交易本金，再生成信号。')
     capitalDialogOpen.value = true
     return
   }
   signalsLoading.value = true
+  startRuntimeSyncPolling()
   try {
+    setRuntimeStep('account', 'done', '策略资金池已确认。', 16)
+    setRuntimeStep('preflight', 'running', '后端正在执行预检、同步成交状态和依赖检查。', 28)
+    setRuntimeMessage('后端正在生成信号', '可能会同步当天分钟线，并按当前分钟预计算停牌/涨跌停过滤因子。', 32)
     signalData.value = await liveTradingApi.signals({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
@@ -1589,10 +1899,49 @@ async function loadSignals() {
         index_symbol: indexSymbol.value,
       },
     })
+    stopRuntimeSyncPolling()
     preflightData.value = signalData.value.preflight || preflightData.value
+    const blocks = uniqueStrings([
+      ...(signalData.value.preflight?.blocking_reasons || []),
+      ...(signalData.value.preflight?.runner_blocking_reasons || []),
+    ])
+    const intradayPrepare = signalData.value.preflight?.intraday_prepare || {}
+    const intradayStatus = String(intradayPrepare.status || '')
+    const intradayAttempted = Boolean(intradayPrepare.attempted)
+    const reason = String(signalData.value.reason || '')
+    setRuntimeStep('preflight', blocks.length ? 'warn' : 'done', blocks[0] || '预检已通过。', 45)
+    setRuntimeStep(
+      'sync',
+      intradayAttempted && intradayStatus === 'failed' ? 'error' : 'done',
+      intradayAttempted ? `盘中依赖准备 ${intradayStatus || '完成'}` : '无需额外盘中同步。',
+      72,
+    )
+    setRuntimeStep(
+      'factor',
+      intradayAttempted && intradayStatus === 'failed' ? 'error' : 'done',
+      intradayAttempted ? '交易过滤因子已按当前分钟处理。' : '过滤因子缓存已命中。',
+      82,
+    )
     orderRows.value = (signalData.value.orders || []).map(order => ({ ...order }))
+    setRuntimeStep(
+      'basket',
+      reason ? 'warn' : 'done',
+      reason || `${signalData.value.candidate_count || 0} 个候选，${orderRows.value.length} 条订单。`,
+      92,
+    )
+    setRuntimeStep('audit', 'running', '刷新订单审计。', 94)
     await loadAudits()
+    setRuntimeStep('audit', 'done', '审计已刷新。', 98)
+    finishRuntimeTask(
+      reason || blocks.length ? 'warn' : 'success',
+      reason ? '生成结束，有提示' : '可执行篮子已生成',
+      reason || `${orderRows.value.length} 条订单，信号 ${shortHash(signalData.value.signal_hash)}。`,
+    )
+  } catch (error) {
+    finishRuntimeTask('error', '生成失败', error instanceof Error ? error.message : '生成信号请求失败')
+    throw error
   } finally {
+    stopRuntimeSyncPolling()
     signalsLoading.value = false
   }
 }
@@ -1632,25 +1981,170 @@ async function loadPendingOrders() {
       limit: 120,
     })
     selectedPendingOrders.value = []
+    updateOrderSyncAfterPendingLoad()
   } finally {
     pendingLoading.value = false
   }
 }
 
-async function syncPendingOrderStatus() {
-  pendingLoading.value = true
+async function refreshLiveOrderViews(options: { skipPendingSync?: boolean; includeStatus?: boolean } = {}) {
+  const params = {
+    profile_key: selectedProfileKey.value || undefined,
+    mode: 'live' as const,
+  }
+  const pendingRequest = liveTradingApi.pendingOrders({
+    ...params,
+    limit: 120,
+    sync: !options.skipPendingSync,
+  })
+  const tasks: Promise<unknown>[] = [
+    pendingRequest.then(rows => {
+      pendingOrders.value = rows
+      selectedPendingOrders.value = []
+      updateOrderSyncAfterPendingLoad()
+    }),
+    loadAudits(),
+    loadTradeJournal(),
+    loadAccount(),
+  ]
+  if (options.includeStatus) {
+    tasks.push(liveTradingApi.status().then(next => { status.value = next }))
+  }
+  await Promise.all(tasks)
+}
+
+function markOrderSyncSuccess(result?: LiveOrderSyncResponse | null) {
+  orderSyncUpdatedAt.value = new Date().toISOString()
+  orderSyncError.value = ''
+  if (result && Number(result.pending_count || 0) > 0) {
+    orderSyncState.value = 'watching'
+  } else {
+    orderSyncState.value = 'fresh'
+  }
+}
+
+function markOrderSyncError(message: string) {
+  orderSyncUpdatedAt.value = new Date().toISOString()
+  orderSyncError.value = message
+  orderSyncState.value = 'error'
+}
+
+function updateOrderSyncAfterPendingLoad() {
+  if (mode.value !== 'live') {
+    orderSyncState.value = 'idle'
+    return
+  }
+  if (orderSyncState.value === 'syncing' || orderSyncState.value === 'error') return
+  if (pendingOrders.value.length) {
+    orderSyncState.value = 'watching'
+  } else if (orderSyncUpdatedAt.value) {
+    orderSyncState.value = 'fresh'
+  } else {
+    orderSyncState.value = 'idle'
+  }
+}
+
+async function syncLiveOrderStatus(options: { silent?: boolean; refresh?: boolean; includeStatus?: boolean } = {}) {
+  if (mode.value !== 'live' || !selectedProfileKey.value || orderSyncInFlight) return null
+  orderSyncInFlight = true
+  orderSyncState.value = 'syncing'
   try {
     const result = await liveTradingApi.syncOrders({
       profile_key: selectedProfileKey.value || undefined,
       mode: 'live',
       limit: 200,
     })
-    if (result.synced) {
-      ElMessage.success(`已同步 QMT 成交状态，更新 ${result.updated_count || 0} 笔。`)
-    } else {
-      ElMessage.warning(result.error || 'QMT 成交状态同步失败')
+    if (!result.synced) {
+      markOrderSyncError(result.error || 'QMT 成交状态同步失败')
+      if (!options.silent) {
+        ElMessage.warning(orderSyncError.value)
+      }
+      return result
     }
-    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+    markOrderSyncSuccess(result)
+    if (options.refresh !== false) {
+      await refreshLiveOrderViews({
+        skipPendingSync: true,
+        includeStatus: options.includeStatus,
+      })
+    }
+    if (!options.silent) {
+      if (result.account_reconcile_errors?.length) {
+        ElMessage.warning(`成交状态已同步，策略资金池稍后继续对齐：${result.account_reconcile_errors[0]}`)
+      } else {
+        ElMessage.success(`已同步 QMT 成交状态，更新 ${result.updated_count || 0} 笔。`)
+      }
+    }
+    return result
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'QMT 成交状态同步失败'
+    markOrderSyncError(message)
+    if (!options.silent) {
+      ElMessage.warning(message)
+    }
+    return null
+  } finally {
+    orderSyncInFlight = false
+    updateOrderPolling()
+  }
+}
+
+function startOrderStatusBurst(durationMs = 45000) {
+  if (mode.value !== 'live') return
+  orderSyncBurstUntil = Math.max(orderSyncBurstUntil, Date.now() + durationMs)
+  orderSyncState.value = 'watching'
+  updateOrderPolling()
+}
+
+function stopOrderStatusPolling() {
+  if (orderSyncTimer != null) {
+    window.clearInterval(orderSyncTimer)
+    orderSyncTimer = null
+  }
+  orderSyncBurstUntil = 0
+}
+
+function updateOrderPolling() {
+  if (mode.value !== 'live' || document.hidden) {
+    if (orderSyncTimer != null) {
+      window.clearInterval(orderSyncTimer)
+      orderSyncTimer = null
+    }
+    return
+  }
+  const shouldPoll = pendingOrders.value.length > 0 || Date.now() < orderSyncBurstUntil
+  if (!shouldPoll) {
+    if (orderSyncTimer != null) {
+      window.clearInterval(orderSyncTimer)
+      orderSyncTimer = null
+    }
+    return
+  }
+  if (orderSyncTimer != null) return
+  orderSyncTimer = window.setInterval(() => {
+    if (document.hidden || mode.value !== 'live') {
+      updateOrderPolling()
+      return
+    }
+    const intervalMs = Date.now() < orderSyncBurstUntil ? 2500 : 8000
+    void syncLiveOrderStatus({ silent: true, refresh: true, includeStatus: false })
+    if (orderSyncTimer != null && intervalMs === 8000) {
+      window.clearInterval(orderSyncTimer)
+      orderSyncTimer = window.setInterval(() => {
+        if (document.hidden || mode.value !== 'live') {
+          updateOrderPolling()
+          return
+        }
+        void syncLiveOrderStatus({ silent: true, refresh: true, includeStatus: false })
+      }, intervalMs)
+    }
+  }, 2500)
+}
+
+async function syncPendingOrderStatus() {
+  pendingLoading.value = true
+  try {
+    await syncLiveOrderStatus({ silent: false, refresh: true, includeStatus: true })
   } finally {
     pendingLoading.value = false
   }
@@ -1695,7 +2189,43 @@ async function cancelPendingOrders() {
       confirm: true,
     })
     ElMessage.success(`已向 QMT 发送 ${result.cancel_count || 0} 笔撤单请求。`)
-    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+    await refreshLiveOrderViews({ includeStatus: true })
+    startOrderStatusBurst(30000)
+  } finally {
+    pendingActionLoading.value = false
+  }
+}
+
+async function closeLocalPendingOrders(inputRows?: LiveTradeRecord[]) {
+  const rows = inputRows?.length ? inputRows : selectedOrStalePendingRows()
+  const useSelectedRows = Boolean(inputRows?.length) || selectedPendingOrders.value.length > 0
+  if (!rows.length) {
+    ElMessage.info(`没有超过 ${staleOrderMinutes.value} 分钟的待确认委托；也可以勾选具体订单后再本地关闭。`)
+    return
+  }
+  await ElMessageBox.confirm(
+    `确认只在平台本地关闭 ${rows.length} 笔待确认委托？这个操作不会向 QMT 发送撤单，只用于你已在客户端撤单或确认不会成交的记录。`,
+    '本地关闭待确认委托',
+    {
+      type: 'warning',
+      confirmButtonText: '本地关闭',
+      cancelButtonText: '取消',
+    },
+  )
+  pendingActionLoading.value = true
+  try {
+    const result = await liveTradingApi.closeLocalOrders({
+      profile_key: selectedProfileKey.value || undefined,
+      mode: 'live',
+      limit: 200,
+      record_ids: rows.map(row => row.record_id),
+      order_ids: rows.map(row => String(row.order_id || '')).filter(Boolean),
+      reason: useSelectedRows ? 'user_confirmed_client_cancelled' : `stale_${staleOrderMinutes.value}m_user_confirmed`,
+      confirm: true,
+    })
+    ElMessage.success(`已本地关闭 ${result.closed_count || 0} 笔待确认委托。`)
+    selectedPendingOrders.value = []
+    await refreshLiveOrderViews({ includeStatus: true })
   } finally {
     pendingActionLoading.value = false
   }
@@ -1747,7 +2277,8 @@ async function cancelAndResubmitPendingOrders() {
     } else {
       ElMessage.warning(result.message || '撤单后尚未提交新订单。')
     }
-    await Promise.all([loadAccount(), loadPendingOrders(), loadTradeJournal(), loadAudits()])
+    await refreshLiveOrderViews({ includeStatus: true })
+    startOrderStatusBurst(result.submitted ? 45000 : 30000)
   } finally {
     pendingActionLoading.value = false
   }
@@ -1777,8 +2308,18 @@ async function startRunner() {
       cancelButtonText: '取消',
     })
   }
+  startRuntimeTask(
+    '自动运行',
+    '正在启动 runner',
+    '提交启动请求并刷新 runner 状态。',
+    [
+      { id: 'start', label: '启动请求' },
+      { id: 'status', label: '状态刷新' },
+    ],
+  )
   runnerLoading.value = true
   try {
+    setRuntimeStep('start', 'running', '后端正在启动自动交易循环。', 35)
     await liveTradingApi.startRunner({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
@@ -1788,19 +2329,43 @@ async function startRunner() {
       },
       interval_seconds: 60,
     })
+    setRuntimeStep('start', 'done', 'runner 已启动。', 72)
     ElMessage.success('自动交易已启动')
+    setRuntimeStep('status', 'running', '刷新 runner 状态。', 86)
     status.value = await liveTradingApi.status()
+    setRuntimeStep('status', 'done', '状态已刷新。', 96)
+    finishRuntimeTask('success', 'runner 已启动', status.value.runner.run_id || '自动运行循环已进入后台。')
+  } catch (error) {
+    finishRuntimeTask('error', 'runner 启动失败', error instanceof Error ? error.message : '启动请求失败')
+    throw error
   } finally {
     runnerLoading.value = false
   }
 }
 
 async function stopRunner() {
+  startRuntimeTask(
+    '自动运行',
+    '正在停止 runner',
+    '发送停止请求并刷新状态。',
+    [
+      { id: 'stop', label: '停止请求' },
+      { id: 'status', label: '状态刷新' },
+    ],
+  )
   runnerLoading.value = true
   try {
+    setRuntimeStep('stop', 'running', '后端正在停止自动交易循环。', 40)
     await liveTradingApi.stopRunner()
+    setRuntimeStep('stop', 'done', 'runner 已停止。', 72)
     ElMessage.success('自动交易已停止')
+    setRuntimeStep('status', 'running', '刷新 runner 状态。', 86)
     status.value = await liveTradingApi.status()
+    setRuntimeStep('status', 'done', '状态已刷新。', 96)
+    finishRuntimeTask('success', 'runner 已停止', '自动运行循环已退出。')
+  } catch (error) {
+    finishRuntimeTask('error', 'runner 停止失败', error instanceof Error ? error.message : '停止请求失败')
+    throw error
   } finally {
     runnerLoading.value = false
   }
@@ -1812,11 +2377,28 @@ async function takeoverRunner() {
     confirmButtonText: '接管',
     cancelButtonText: '取消',
   })
+  startRuntimeTask(
+    '人工接管',
+    '正在切换接管状态',
+    '停止自动提交，并刷新 runner 状态。',
+    [
+      { id: 'takeover', label: '接管请求' },
+      { id: 'status', label: '状态刷新' },
+    ],
+  )
   runnerLoading.value = true
   try {
+    setRuntimeStep('takeover', 'running', '后端正在切换人工接管。', 40)
     await liveTradingApi.takeover('human takeover from UI')
+    setRuntimeStep('takeover', 'done', '人工接管已生效。', 72)
     ElMessage.warning('已切换为人工接管')
+    setRuntimeStep('status', 'running', '刷新 runner 状态。', 86)
     status.value = await liveTradingApi.status()
+    setRuntimeStep('status', 'done', '状态已刷新。', 96)
+    finishRuntimeTask('warn', '已人工接管', '自动提交已停止，后续由人工处理。')
+  } catch (error) {
+    finishRuntimeTask('error', '人工接管失败', error instanceof Error ? error.message : '接管请求失败')
+    throw error
   } finally {
     runnerLoading.value = false
   }
@@ -1834,27 +2416,56 @@ async function submitOrders() {
     confirmButtonText: '确认提交',
     cancelButtonText: '取消',
   })
-  const result = await liveTradingApi.submitOrders({
-    mode: mode.value,
-    orders: orders as unknown as Record<string, unknown>[],
-    confirm: true,
-  })
-  submitResult.value = result
-  submitResultDialogOpen.value = true
-  if (submitResultPendingCount.value) {
-    ElMessage.warning(`${submitResultPendingCount.value} 笔真实委托已提交，等待成交确认。`)
-  } else if (submitResultFailedCount.value) {
-    ElMessage.warning(`${submitResultFailedCount.value} 笔订单提交失败，请查看提交结果。`)
-  } else {
-    ElMessage.success('订单提交完成')
+  startRuntimeTask(
+    '提交篮子',
+    mode.value === 'live' ? '正在提交真实委托' : '正在提交模拟订单',
+    `${orders.length} 条订单正在处理。`,
+    [
+      { id: 'submit', label: '提交请求' },
+      { id: 'refresh', label: '刷新账户' },
+      { id: 'audit', label: '刷新记录' },
+    ],
+  )
+  try {
+    setRuntimeStep('submit', 'running', `${orders.length} 条订单正在提交。`, 32)
+    const result = await liveTradingApi.submitOrders({
+      mode: mode.value,
+      orders: orders as unknown as Record<string, unknown>[],
+      confirm: true,
+    })
+    submitResult.value = result
+    submitResultDialogOpen.value = true
+    setRuntimeStep(
+      'submit',
+      submitResultFailedCount.value ? 'warn' : 'done',
+      submitResultFailedCount.value ? `${submitResultFailedCount.value} 笔失败。` : '提交请求已完成。',
+      62,
+    )
+    if (submitResultPendingCount.value) {
+      ElMessage.warning(`${submitResultPendingCount.value} 笔真实委托已提交，等待成交确认。`)
+    } else if (submitResultFailedCount.value) {
+      ElMessage.warning(`${submitResultFailedCount.value} 笔订单提交失败，请查看提交结果。`)
+    } else {
+      ElMessage.success('订单提交完成')
+    }
+    setRuntimeStep('refresh', 'running', '刷新账户、待成交和状态。', 76)
+    await refreshLiveOrderViews({ includeStatus: true })
+    if (mode.value === 'live' && submitResultPendingCount.value) {
+      setRuntimeStep('refresh', 'running', '正在向 QMT 拉取首轮成交回报。', 82)
+      await syncLiveOrderStatus({ silent: true, refresh: true, includeStatus: true })
+      startOrderStatusBurst(45000)
+    }
+    setRuntimeStep('refresh', 'done', '账户、待成交和状态已刷新。', 88)
+    setRuntimeStep('audit', 'done', '审计和复盘已刷新。', 98)
+    finishRuntimeTask(
+      submitResultFailedCount.value ? 'warn' : 'success',
+      submitResultFailedCount.value ? '提交完成，有失败项' : '订单提交完成',
+      pendingOrders.value.length ? `${pendingOrders.value.length} 笔仍等待成交确认，系统会继续自动同步。` : '账户、审计和成交状态已刷新。',
+    )
+  } catch (error) {
+    finishRuntimeTask('error', '订单提交失败', error instanceof Error ? error.message : '提交请求失败')
+    throw error
   }
-  await Promise.all([
-    loadAccount(),
-    loadAudits(),
-    loadTradeJournal(),
-    loadPendingOrders(),
-    liveTradingApi.status().then(next => { status.value = next }),
-  ])
 }
 
 async function initializeCapitalPool() {
@@ -1877,7 +2488,7 @@ async function initializeCapitalPool() {
     })
     capitalDialogOpen.value = false
     capitalForm.reset_existing = false
-    ElMessage.success(adjustingCapital ? '量化资金池目标总资产已调整' : '量化资金池已初始化')
+    ElMessage.success(adjustingCapital ? '量化资金池目标本金已调整' : '量化资金池已初始化')
     await Promise.all([loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
   } finally {
     capitalSaving.value = false
@@ -1982,8 +2593,11 @@ function candidateSymbol(candidate: Record<string, unknown>) {
 async function onProfileChange() {
   signalData.value = null
   orderRows.value = []
+  stopOrderStatusPolling()
+  orderSyncState.value = 'idle'
   startAccountRealtime()
   await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
+  updateOrderPolling()
 }
 
 function formatHeatFilterNote(note: string) {
@@ -2343,8 +2957,6 @@ function positionColumnHeaderClass(key: PositionColumnKey) {
 function positionCellValue(row: LiveAccountPosition, key: PositionColumnKey) {
   if (key === 'symbol') return row.symbol || '-'
   if (key === 'stock_name') return row.stock_name || '-'
-  if (key === 'quantity' || key === 'available') return formatQuantity(row[key])
-  if (key === 'last_price') return formatPrice(row.last_price)
   if (key === 'volume_ratio') return row.volume_ratio == null ? '-' : Number(row.volume_ratio).toFixed(2)
   if (key === 'today_change_pct' || key === 'turnover_rate' || key === 'position_pct' || key === 'unrealized_pnl_pct') {
     return formatPercent(row[key])
@@ -2359,6 +2971,10 @@ function positionCellClass(row: LiveAccountPosition, key: PositionColumnKey) {
   return ''
 }
 
+function positionLastPrice(row: LiveAccountPosition) {
+  return row.last_price ?? row.latest_price ?? null
+}
+
 function handlePageContextAction(event: Event) {
   const action = String((event as CustomEvent<{ action?: string }>).detail?.action || '')
   if (action === 'open-strategy-review') {
@@ -2367,6 +2983,17 @@ function handlePageContextAction(event: Event) {
   }
   if (action === 'open-capital-positions') {
     openPositionsDialog()
+  }
+}
+
+function handleVisibilityChange() {
+  if (document.hidden) {
+    updateOrderPolling()
+    return
+  }
+  updateOrderPolling()
+  if (mode.value === 'live' && pendingOrders.value.length) {
+    void syncLiveOrderStatus({ silent: true, refresh: true, includeStatus: true })
   }
 }
 
@@ -2397,7 +3024,7 @@ const pageContextBlocks = computed(() => [
     rows: [
       { label: '状态', value: strategyAccountStatusText.value, tone: strategyAccountReady.value ? 'good' : 'warn' },
       { label: '来源', value: accountSourceText.value, tone: accountSnapshot.value?.error ? 'warn' : 'good' },
-      { label: '目标资产', value: accountSummaryItems.value.find(item => item.label === '目标总资产')?.value || '-' },
+      { label: '目标本金', value: accountSummaryItems.value.find(item => item.label === '目标本金')?.value || '-' },
       { label: '可用现金', value: formatMoney(accountSnapshot.value?.cash) },
       { label: '总资产', value: formatMoney(accountSnapshot.value?.total_asset) },
       { label: '持仓市值', value: formatMoney(accountSnapshot.value?.market_value) },
@@ -2418,13 +3045,20 @@ usePageContext(pageContextBlocks)
 
 onMounted(() => {
   window.addEventListener('page-context-action', handlePageContextAction)
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   loadAll()
-    .then(() => startAccountRealtime())
+    .then(() => {
+      startAccountRealtime()
+      updateOrderPolling()
+    })
     .catch(error => ElMessage.error(error?.message || '实盘交易模块加载失败'))
 })
 
 onUnmounted(() => {
   window.removeEventListener('page-context-action', handlePageContextAction)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  stopRuntimeSyncPolling()
+  stopOrderStatusPolling()
   stopAccountRealtime()
   disposeStrategyReviewCharts()
 })
@@ -2667,6 +3301,135 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
+.runtime-strip {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.95fr) minmax(180px, 0.45fr) minmax(320px, 1.2fr);
+  gap: var(--space-3);
+  align-items: center;
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid rgba(125, 211, 252, 0.24);
+  border-radius: var(--radius-md);
+  background:
+    linear-gradient(135deg, rgba(14, 116, 144, 0.2), rgba(15, 23, 42, 0.72)),
+    var(--bg-surface);
+  box-shadow: var(--shadow-card);
+}
+
+.runtime-strip--success {
+  border-color: rgba(134, 239, 172, 0.32);
+  background:
+    linear-gradient(135deg, rgba(22, 101, 52, 0.2), rgba(15, 23, 42, 0.72)),
+    var(--bg-surface);
+}
+
+.runtime-strip--warn {
+  border-color: rgba(253, 230, 138, 0.34);
+  background:
+    linear-gradient(135deg, rgba(146, 64, 14, 0.2), rgba(15, 23, 42, 0.72)),
+    var(--bg-surface);
+}
+
+.runtime-strip--error {
+  border-color: rgba(252, 165, 165, 0.34);
+  background:
+    linear-gradient(135deg, rgba(127, 29, 29, 0.24), rgba(15, 23, 42, 0.72)),
+    var(--bg-surface);
+}
+
+.runtime-strip__main {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.runtime-strip__eyebrow {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.runtime-strip__main strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: var(--text-base);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-strip__main small {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-strip__progress {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.runtime-strip__progress span {
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
+.runtime-strip__steps {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.runtime-step {
+  display: inline-flex;
+  align-items: center;
+  max-width: 132px;
+  min-height: 24px;
+  padding: 0 9px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: var(--radius-full);
+  background: rgba(15, 23, 42, 0.5);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  line-height: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-step--running {
+  border-color: rgba(125, 211, 252, 0.48);
+  background: rgba(14, 116, 144, 0.2);
+  color: #7dd3fc;
+  box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.08);
+}
+
+.runtime-step--done {
+  border-color: rgba(134, 239, 172, 0.34);
+  background: rgba(22, 101, 52, 0.18);
+  color: #86efac;
+}
+
+.runtime-step--warn {
+  border-color: rgba(253, 230, 138, 0.38);
+  background: rgba(146, 64, 14, 0.18);
+  color: #fde68a;
+}
+
+.runtime-step--error {
+  border-color: rgba(252, 165, 165, 0.38);
+  background: rgba(127, 29, 29, 0.2);
+  color: #fca5a5;
+}
+
 .guardrail-toggle {
   display: flex;
   align-items: center;
@@ -2820,6 +3583,38 @@ onUnmounted(() => {
 
 .pending-order-panel :deep(.el-table) {
   margin: 0 var(--space-4);
+}
+
+.pending-sync-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(15, 23, 42, 0.48);
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.pending-sync-pill--syncing,
+.pending-sync-pill--watching {
+  border-color: rgba(56, 189, 248, 0.32);
+  background: rgba(8, 47, 73, 0.26);
+  color: #bae6fd;
+}
+
+.pending-sync-pill--fresh {
+  border-color: rgba(34, 197, 94, 0.32);
+  background: rgba(20, 83, 45, 0.22);
+  color: #bbf7d0;
+}
+
+.pending-sync-pill--error {
+  border-color: rgba(248, 113, 113, 0.34);
+  background: rgba(127, 29, 29, 0.24);
+  color: #fecaca;
 }
 
 .submit-summary {
@@ -3246,6 +4041,30 @@ onUnmounted(() => {
   color: #fde68a !important;
 }
 
+.stack-cell {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  line-height: 1.25;
+}
+
+.stack-cell--right {
+  justify-items: end;
+}
+
+.stack-cell strong {
+  color: var(--text-primary);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.stack-cell small {
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
 :global(.strategy-review-dialog.el-dialog),
 :global(.strategy-review-dialog .el-dialog) {
   border: 1px solid rgba(148, 163, 184, 0.24);
@@ -3543,6 +4362,7 @@ onUnmounted(() => {
   .lower-grid,
   .trade-journal-grid,
   .status-band,
+  .runtime-strip,
   .summary-band,
   .submit-summary,
   .preflight-grid,
@@ -3557,7 +4377,8 @@ onUnmounted(() => {
   }
 
   .actions,
-  .table-actions {
+  .table-actions,
+  .runtime-strip__steps {
     justify-content: flex-start;
   }
 }

@@ -34,7 +34,7 @@ from app.services.tushare_relay_specs import (
 CATALOG_CACHE_TTL_SECONDS = 300
 COVERAGE_CACHE_TTL_SECONDS = 300
 _CATALOG_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": None}
-_COVERAGE_CACHE: dict[tuple[str, str, bool], tuple[float, dict[str, Any]]] = {}
+_COVERAGE_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, Any]]] = {}
 _FAST_COVERAGE_DATASETS = {"klines_daily", "klines_minute", "factor_values"}
 
 
@@ -312,7 +312,7 @@ def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
 
 
 def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dict[str, Any]:
-    cache_key = (dataset, date_col, exact)
+    cache_key = (str(settings.parquet_data_dir), dataset, date_col, exact)
     now = time.monotonic()
     cached = _COVERAGE_CACHE.get(cache_key)
     if cached and now < cached[0]:
@@ -323,6 +323,9 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
         return {"row_count": 0, "min_date": None, "max_date": None}
     fast = _fast_dataset_coverage(dataset, date_col)
     if not exact and (dataset in _FAST_COVERAGE_DATASETS or int(fast.get("partition_count") or 0) > 24):
+        boundary = _exact_partition_boundaries(dataset, date_col)
+        if boundary:
+            fast = {**fast, **boundary}
         _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, fast)
         return copy.deepcopy(fast)
     try:
@@ -352,6 +355,51 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
 
 def _quote_identifier(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _exact_partition_boundaries(dataset: str, date_col: str) -> dict[str, str | None] | None:
+    root = Path(settings.parquet_data_dir) / dataset
+    partitions: list[tuple[int, int, Path]] = []
+    for year_dir in root.glob("year=*"):
+        try:
+            year = int(year_dir.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            continue
+        for month_dir in year_dir.glob("month=*"):
+            try:
+                month = int(month_dir.name.split("=", 1)[1])
+            except (IndexError, ValueError):
+                continue
+            if any(month_dir.glob("*.parquet")):
+                partitions.append((year, month, month_dir))
+    if not partitions:
+        return None
+
+    min_partition = min(partitions, key=lambda item: (item[0], item[1]))[2]
+    max_partition = max(partitions, key=lambda item: (item[0], item[1]))[2]
+    date_expr = _quote_identifier(date_col)
+    try:
+        min_value = _partition_boundary_value(min_partition, date_expr, "min")
+        max_value = _partition_boundary_value(max_partition, date_expr, "max")
+    except Exception as exc:
+        logger.debug("Failed exact partition boundary read for {}.{}: {}", dataset, date_col, exc)
+        return None
+    return {
+        "min_date": str(min_value) if min_value is not None else None,
+        "max_date": str(max_value) if max_value is not None else None,
+    }
+
+
+def _partition_boundary_value(partition_dir: Path, date_expr: str, aggregate: str) -> Any:
+    pattern = str(partition_dir / "*.parquet").replace("\\", "/")
+    row = get_duckdb().execute(
+        f"""
+        SELECT {aggregate}({date_expr}) AS boundary_date
+        FROM read_parquet(?, hive_partitioning=true)
+        """,
+        [pattern],
+    ).fetchone()
+    return row[0] if row else None
 
 
 def _fast_dataset_coverage(dataset: str, date_col: str) -> dict[str, Any]:

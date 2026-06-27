@@ -85,8 +85,8 @@ class Settings(BaseSettings):
     qmt_financial_compute_indicators_after_sync: bool = False
     qmt_minute_clean_cache_after_sync: bool = False
     qmt_minute_compute_indicators_after_sync: bool = False
-    sync_service_url: str = "http://127.0.0.1:18810"
-    sync_service_port: int = 18810
+    sync_service_url: str = "http://127.0.0.1:8810"
+    sync_service_port: int = 8810
     enable_sync_scheduler: bool = True
     indevs_tushare_api_key: str = ""
     indevs_tushare_base_urls: str = (
@@ -126,8 +126,8 @@ class Settings(BaseSettings):
 
     # API 配置
     api_prefix: str = "/api"
-    backend_port: int = 18800
-    frontend_port: int = 13500
+    backend_port: int = 8800
+    frontend_port: int = 3500
 
     @property
     def base_dir(self) -> Path:

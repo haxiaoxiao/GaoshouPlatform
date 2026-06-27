@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import date, datetime
 from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.config import settings
-from app.db.models.live_trading import LiveStrategyProfile
+from app.db.models.live_trading import LiveStrategyProfile, LiveTradeRecord
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory, init_db
 from app.main import app
@@ -221,6 +222,193 @@ async def test_cashaware_parser_and_duplicate_paper_audit(monkeypatch, tmp_path)
     assert second["duplicate"] is True
     assert any(item["status"] == "paper_filled" for item in audits)
     assert any(item["status"] == "duplicate" for item in audits)
+
+
+def test_live_execution_filter_time_uses_filter_timer_and_early_completed_minute(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 6, 25, 9, 35, 30)
+
+    monkeypatch.setattr("app.services.live_trading.datetime", FixedDatetime)
+
+    filters = [
+        {"name": "is_paused", "as_of_time": "10:30", "params": {"time": "10:30"}},
+        {"name": "is_limit_up", "as_of_time": "10:30", "params": {"time": "10:30"}},
+    ]
+
+    timer_text = live_trading_service._live_execution_filter_time(
+        params={},
+        filters=filters,
+        trade_date=date(2026, 6, 25),
+    )
+    adjusted_params, adjusted_filters = live_trading_service._apply_live_execution_filter_time(
+        params={},
+        filters=filters,
+        mode="live",
+        trade_date=date(2026, 6, 25),
+    )
+
+    assert timer_text == "09:35"
+    assert adjusted_params["live_execution_filter_time"] == "09:35"
+    assert adjusted_filters[0]["as_of_time"] == "09:35"
+    assert adjusted_filters[0]["params"]["time"] == "09:35"
+
+
+def test_live_execution_filter_time_snaps_to_latest_configured_timer(monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls):
+            return cls(2026, 6, 25, 10, 15, 0)
+
+    monkeypatch.setattr("app.services.live_trading.datetime", FixedDatetime)
+
+    timer_text = live_trading_service._live_execution_filter_time(
+        params={"timer_times": ["10:00", "10:30"]},
+        filters=[],
+        trade_date=date(2026, 6, 25),
+    )
+
+    assert timer_text == "10:00"
+
+
+def test_live_intraday_sync_plan_skips_full_minute_sync() -> None:
+    preflight = {
+        "dependency_prepare": {
+            "sync_plan": {
+                "steps": [
+                    {"type": "kline_minute", "start_date": "2026-06-26", "end_date": "2026-06-26"},
+                    {
+                        "type": "kline_minute",
+                        "start_date": "2026-06-26",
+                        "end_date": "2026-06-26",
+                        "timer_times": ["14:30"],
+                    },
+                    {
+                        "type": "tushare_daily",
+                        "start_date": "2026-06-26",
+                        "end_date": "2026-06-26",
+                        "datasets": ["stock_daily_basic", "stock_limit_prices"],
+                    },
+                ],
+                "coverage_gaps": [
+                    {"sync_step": "kline_minute", "dependency": "klines_minute"},
+                    {"sync_step": "kline_minute", "dependency": "klines_minute_timer", "timer_time": "14:30"},
+                    {"sync_step": "tushare_daily", "dependency": "stock_daily_basic"},
+                    {"sync_step": "tushare_daily", "dependency": "stock_limit_prices"},
+                ],
+            }
+        }
+    }
+
+    plan = live_trading_service._intraday_sync_plan(preflight)
+
+    assert plan is not None
+    assert plan["steps"] == [
+        {
+            "type": "kline_minute",
+            "start_date": "2026-06-26",
+            "end_date": "2026-06-26",
+            "timer_times": ["14:30"],
+        },
+        {
+            "type": "tushare_daily",
+            "start_date": "2026-06-26",
+            "end_date": "2026-06-26",
+            "datasets": ["stock_limit_prices"],
+        },
+    ]
+    assert plan["coverage_gaps"] == [
+        {"sync_step": "kline_minute", "dependency": "klines_minute_timer", "timer_time": "14:30"},
+        {"sync_step": "tushare_daily", "dependency": "stock_limit_prices"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_closes_cancel_requested_order_missing_from_qmt(monkeypatch, tmp_path):
+    await _prepare_live_db(monkeypatch, tmp_path)
+    async with async_session_factory() as session:
+        session.add(
+            LiveTradeRecord(
+                record_id="trade-missing-cancel",
+                run_id=None,
+                profile_key="tsmf_cashaware_aggressive",
+                strategy_id=63,
+                trade_date=date(2026, 6, 24),
+                signal_hash="hash-missing-cancel",
+                trigger_source="manual",
+                mode="live",
+                status="cancel_requested",
+                symbol="002587.SZ",
+                stock_name="奥拓电子",
+                side="BUY",
+                quantity=400,
+                reference_price=7.18,
+                order_value=2872,
+                order_id="135266319",
+                message="已向 QMT 发送撤单请求，等待确认。",
+                order_payload={"symbol": "002587.SZ", "side": "BUY", "quantity": 400},
+                result_payload={"submitted": True, "pending": True, "status": "cancel_requested", "order_id": "135266319"},
+            )
+        )
+        await session.commit()
+
+    async def fake_query_order_updates(order_ids):
+        assert list(order_ids) == ["135266319"]
+        return {"orders": [], "trades": [], "by_order_id": {}}
+
+    monkeypatch.setattr("app.services.live_trading.qmt_trading_service.query_order_updates", fake_query_order_updates)
+
+    result = await live_trading_service.sync_order_status(profile_key="tsmf_cashaware_aggressive", mode="live", limit=10)
+    pending = await live_trading_service.list_pending_orders(profile_key="tsmf_cashaware_aggressive", mode="live", sync=False)
+
+    assert result["updated_count"] == 1
+    assert result["pending_count"] == 0
+    assert result["locally_closed"][0]["record_id"] == "trade-missing-cancel"
+    assert pending == []
+
+
+@pytest.mark.asyncio
+async def test_close_local_pending_orders_marks_cancelled(monkeypatch, tmp_path):
+    await _prepare_live_db(monkeypatch, tmp_path)
+    async with async_session_factory() as session:
+        session.add(
+            LiveTradeRecord(
+                record_id="trade-local-close",
+                run_id=None,
+                profile_key="tsmf_cashaware_aggressive",
+                strategy_id=63,
+                trade_date=date(2026, 6, 24),
+                signal_hash="hash-local-close",
+                trigger_source="manual",
+                mode="live",
+                status="cancel_requested",
+                symbol="002835.SZ",
+                stock_name="同为股份",
+                side="BUY",
+                quantity=300,
+                reference_price=12.12,
+                order_value=3636,
+                order_id="135266309",
+                message="已向 QMT 发送撤单请求，等待确认。",
+                order_payload={"symbol": "002835.SZ", "side": "BUY", "quantity": 300},
+                result_payload={"submitted": True, "pending": True, "status": "cancel_requested", "order_id": "135266309"},
+            )
+        )
+        await session.commit()
+
+    result = await live_trading_service.close_local_pending_orders(
+        profile_key="tsmf_cashaware_aggressive",
+        mode="live",
+        record_ids=["trade-local-close"],
+        reason="unit_test_client_cancelled",
+        confirm=True,
+    )
+    pending = await live_trading_service.list_pending_orders(profile_key="tsmf_cashaware_aggressive", mode="live", sync=False)
+
+    assert result["closed"] is True
+    assert result["closed_count"] == 1
+    assert pending == []
 
 
 @pytest.mark.asyncio

@@ -20,10 +20,10 @@ async def test_data_summary_returns_unified_frontend_contract(monkeypatch):
             key: {
                 "row_count": 100,
                 "min_date": "2026-05-01",
-                "max_date": "2026-05-29 15:00:00" if date_col == "datetime" else "2026-05-29",
+                "max_date": "2026-05-29 15:00:00" if spec[1] == "datetime" else "2026-05-29",
                 "estimated": key == "market_minute",
             }
-            for key, (_dataset, date_col) in specs.items()
+            for key, spec in specs.items()
         }
 
     async def fake_sqlite_summary(_session, *, model, **_kwargs):

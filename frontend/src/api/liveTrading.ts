@@ -100,6 +100,7 @@ export interface LiveSignalsResponse {
     details: Array<Record<string, unknown>>
   } | null
   quote_error?: string | null
+  reason?: string | null
   heat_filter_note?: string | null
   order_submit_enabled: boolean
   auto_execute_enabled: boolean
@@ -132,6 +133,8 @@ export interface LivePreflightResponse {
     filter_names: string[]
     min_factor_coverage: number
     rebalance_time: string
+    execution_filter_time?: string | null
+    execution_filter_time_source?: string | null
   }
   dependency_prepare?: Record<string, unknown> | null
   dependency_error?: string | null
@@ -237,6 +240,7 @@ export interface LiveOrderSyncResponse {
   orders?: Array<Record<string, unknown>>
   trades?: Array<Record<string, unknown>>
   fill_events?: Array<Record<string, unknown>>
+  account_reconcile_errors?: string[]
 }
 
 export interface LiveCancelOrdersResponse {
@@ -246,6 +250,15 @@ export interface LiveCancelOrdersResponse {
   results?: Array<Record<string, unknown>>
   sync_result?: LiveOrderSyncResponse
   orders?: LiveTradeRecord[]
+}
+
+export interface LiveLocalCloseOrdersResponse {
+  closed: boolean
+  closed_count: number
+  message?: string | null
+  records?: Array<Record<string, unknown>>
+  orders?: LiveTradeRecord[]
+  account_reconcile_errors?: string[]
 }
 
 export interface LiveCancelResubmitResponse {
@@ -353,6 +366,7 @@ export interface LiveAccountPosition {
   available: number
   avg_cost: number
   last_price?: number | null
+  latest_price?: number | null
   market_value: number
   cost_value?: number
   unrealized_pnl?: number
@@ -436,11 +450,12 @@ export const liveTradingApi = {
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request.get<LiveOrderAudit[]>(`/live-trading/orders/audit${suffix}`)
   },
-  pendingOrders: (params?: { profile_key?: string; mode?: LiveTradingMode; limit?: number }) => {
+  pendingOrders: (params?: { profile_key?: string; mode?: LiveTradingMode; limit?: number; sync?: boolean }) => {
     const query = new URLSearchParams()
     if (params?.profile_key) query.set('profile_key', params.profile_key)
     if (params?.mode) query.set('mode', params.mode)
     if (params?.limit) query.set('limit', String(params.limit))
+    if (params?.sync != null) query.set('sync', String(params.sync))
     const suffix = query.toString() ? `?${query.toString()}` : ''
     return request.get<LiveTradeRecord[]>(`/live-trading/orders/pending${suffix}`)
   },
@@ -455,6 +470,15 @@ export const liveTradingApi = {
     order_ids?: string[]
     confirm?: boolean
   }) => request.post<LiveCancelOrdersResponse>('/live-trading/orders/cancel', data),
+  closeLocalOrders: (data: {
+    profile_key?: string | null
+    mode?: LiveTradingMode
+    limit?: number
+    record_ids?: string[]
+    order_ids?: string[]
+    reason?: string
+    confirm?: boolean
+  }) => request.post<LiveLocalCloseOrdersResponse>('/live-trading/orders/close-local', data),
   cancelAndResubmit: (data: {
     profile_key?: string | null
     mode?: LiveTradingMode
