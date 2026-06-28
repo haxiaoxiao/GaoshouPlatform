@@ -162,7 +162,7 @@
               <small v-if="!runnerRailLogs.length">暂无执行日志</small>
             </div>
           </aside>
-          <div class="editor-panel">
+          <div v-if="layoutMode !== 'C'" class="editor-panel">
             <div class="editor-toolbar">
               <el-input v-model="activeStrategy.name" size="small" class="strategy-name-input" placeholder="策略名称" />
               <el-tabs v-model="editorTab" class="editor-tabs">

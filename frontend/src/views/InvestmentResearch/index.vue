@@ -76,133 +76,220 @@
         </article>
       </section>
 
-      <section class="research-tool-grid">
-        <article class="research-panel research-panel--tools">
+      <!-- Layout A: 默认双栏笔记本模式 (保留原有展示) -->
+      <template v-if="layoutMode === 'A'">
+        <section class="research-tool-grid">
+          <article class="research-panel research-panel--tools">
+            <div class="panel-header">
+              <div>
+                <strong>研究操作台</strong>
+                <span>把想法、证据、实验和复盘拆成可推进的动作</span>
+              </div>
+            </div>
+            <div class="tool-card-grid">
+              <a v-for="tool in researchTools" :key="tool.title" class="tool-card" :href="tool.href">
+                <span>{{ tool.kicker }}</span>
+                <strong>{{ tool.title }}</strong>
+                <small>{{ tool.description }}</small>
+              </a>
+            </div>
+          </article>
+
+          <article class="research-panel research-panel--links">
+            <div class="panel-header">
+              <div>
+                <strong>外部链接 / 本地笔记</strong>
+                <span>研报、代码、笔记和可视化思维工具放在同一排入口</span>
+              </div>
+            </div>
+            <div class="link-list">
+              <a
+                v-for="link in externalLinks"
+                :key="link.title"
+                :href="link.href"
+                :target="link.href.startsWith('/') ? undefined : '_blank'"
+                rel="noreferrer"
+              >
+                <span>{{ link.title }}</span>
+                <small>{{ link.description }}</small>
+              </a>
+            </div>
+          </article>
+        </section>
+
+        <section class="research-panel research-panel--main">
           <div class="panel-header">
             <div>
-              <strong>研究操作台</strong>
-              <span>把想法、证据、实验和复盘拆成可推进的动作</span>
+              <strong>研报落地清单</strong>
+              <span>当前显示 {{ filteredManifestRows.length }} / {{ paperManifest.length }} 篇</span>
             </div>
           </div>
-          <div class="tool-card-grid">
-            <a v-for="tool in researchTools" :key="tool.title" class="tool-card" :href="tool.href">
-              <span>{{ tool.kicker }}</span>
-              <strong>{{ tool.title }}</strong>
-              <small>{{ tool.description }}</small>
-            </a>
-          </div>
-        </article>
+          <el-table
+            :data="filteredManifestRows"
+            v-loading="loading"
+            size="small"
+            height="100%"
+            class="research-table"
+          >
+            <el-table-column prop="paper_id" label="#" width="58" fixed />
+            <el-table-column prop="title" label="研报" min-width="280" show-overflow-tooltip fixed />
+            <el-table-column prop="strategy_type" label="类型" width="126" show-overflow-tooltip />
+            <el-table-column prop="data_frequency" label="频率" width="104" show-overflow-tooltip />
+            <el-table-column prop="rebalance_frequency" label="调仓" width="104" show-overflow-tooltip />
+            <el-table-column label="状态" width="130">
+              <template #default="{ row }">
+                <el-tag :type="paperStatusType(row.landing_status)" size="small" effect="plain">
+                  {{ paperStatusLabel(row.landing_status) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="landing_grade" label="等级" width="72" />
+            <el-table-column label="已映射因子" min-width="240">
+              <template #default="{ row }">
+                <div class="tag-list">
+                  <el-tag
+                    v-for="name in row.factor_names"
+                    :key="name"
+                    size="small"
+                    effect="plain"
+                  >
+                    <router-link :to="{ name: 'FactorDetail', params: { factorName: name } }">
+                      {{ name }}
+                    </router-link>
+                  </el-tag>
+                  <span v-if="!row.factor_names.length">-</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="验证指标" min-width="190" show-overflow-tooltip>
+              <template #default="{ row }">
+                {{ row.validation_metrics.join(', ') }}
+              </template>
+            </el-table-column>
+            <el-table-column prop="platform_mapping" label="平台映射" min-width="220" show-overflow-tooltip />    
+            <el-table-column prop="notes" label="备注" min-width="260" show-overflow-tooltip />
+          </el-table>
+        </section>
 
-        <article class="research-panel research-panel--links">
+        <section class="research-panel" v-if="paperExperiments.length">
           <div class="panel-header">
             <div>
-              <strong>外部链接 / 本地笔记</strong>
-              <span>研报、代码、笔记和可视化思维工具放在同一排入口</span>
+              <strong>AI/ML 离线实验</strong>
+              <span>共 {{ paperExperiments.length }} 个实验规格</span>
             </div>
           </div>
-          <div class="link-list">
-            <a
-              v-for="link in externalLinks"
-              :key="link.title"
-              :href="link.href"
-              :target="link.href.startsWith('/') ? undefined : '_blank'"
-              rel="noreferrer"
-            >
-              <span>{{ link.title }}</span>
-              <small>{{ link.description }}</small>
-            </a>
-          </div>
-        </article>
-      </section>
-
-      <section class="research-panel research-panel--main">
-        <div class="panel-header">
-          <div>
-            <strong>研报落地清单</strong>
-            <span>当前显示 {{ filteredManifestRows.length }} / {{ paperManifest.length }} 篇</span>
-          </div>
-        </div>
-        <el-table
-          :data="filteredManifestRows"
-          v-loading="loading"
-          size="small"
-          height="100%"
-          class="research-table"
-        >
-          <el-table-column prop="paper_id" label="#" width="58" fixed />
-          <el-table-column prop="title" label="研报" min-width="280" show-overflow-tooltip fixed />
-          <el-table-column prop="strategy_type" label="类型" width="126" show-overflow-tooltip />
-          <el-table-column prop="data_frequency" label="频率" width="104" show-overflow-tooltip />
-          <el-table-column prop="rebalance_frequency" label="调仓" width="104" show-overflow-tooltip />
-          <el-table-column label="状态" width="130">
-            <template #default="{ row }">
-              <el-tag :type="paperStatusType(row.landing_status)" size="small" effect="plain">
-                {{ paperStatusLabel(row.landing_status) }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column prop="landing_grade" label="等级" width="72" />
-          <el-table-column label="已映射因子" min-width="240">
-            <template #default="{ row }">
-              <div class="tag-list">
-                <el-tag
-                  v-for="name in row.factor_names"
-                  :key="name"
-                  size="small"
-                  effect="plain"
-                >
-                  <router-link :to="{ name: 'FactorDetail', params: { factorName: name } }">
+          <el-table :data="paperExperiments" size="small" max-height="260" class="research-table">
+            <el-table-column prop="name" label="实验" min-width="220" show-overflow-tooltip />
+            <el-table-column label="报告" width="110">
+              <template #default="{ row }">{{ row.paper_ids.join(', ') }}</template>
+            </el-table-column>
+            <el-table-column label="模型族" min-width="180">
+              <template #default="{ row }">
+                <div class="tag-list">
+                  <el-tag v-for="name in row.model_family" :key="name" size="small" effect="plain">
                     {{ name }}
-                  </router-link>
-                </el-tag>
-                <span v-if="!row.factor_names.length">-</span>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="验证指标" min-width="190" show-overflow-tooltip>
-            <template #default="{ row }">
-              {{ row.validation_metrics.join(', ') }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="platform_mapping" label="平台映射" min-width="220" show-overflow-tooltip />
-          <el-table-column prop="notes" label="备注" min-width="260" show-overflow-tooltip />
-        </el-table>
-      </section>
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="特征组" min-width="240">
+              <template #default="{ row }">
+                <div class="tag-list">
+                  <el-tag v-for="name in row.feature_groups" :key="name" size="small" effect="plain">
+                    {{ name }}
+                  </el-tag>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="status" label="状态" width="120" />
+            <el-table-column prop="target_policy" label="标签约束" min-width="300" show-overflow-tooltip />       
+          </el-table>
+        </section>
+      </template>
 
-      <section class="research-panel" v-if="paperExperiments.length">
-        <div class="panel-header">
-          <div>
-            <strong>AI/ML 离线实验</strong>
-            <span>共 {{ paperExperiments.length }} 个实验规格</span>
+      <!-- Layout B: Kanban Mode -->
+      <template v-else-if="layoutMode === 'B'">
+        <section class="research-kanban-board">
+          <!-- Draft / Pending column -->
+          <article class="kanban-column">
+            <div class="kanban-column__head">
+              <strong>待研究 (Draft)</strong>
+              <span>{{ filteredManifestRows.filter(r => r.landing_status === 'pending_research' || r.landing_status === 'pending_data').length }}</span>
+            </div>
+            <div class="kanban-column__body">
+              <div
+                v-for="row in filteredManifestRows.filter(r => r.landing_status === 'pending_research' || r.landing_status === 'pending_data')"
+                :key="row.paper_id"
+                class="kanban-card"
+              >
+                <strong>{{ row.title }}</strong>
+                <small>{{ row.strategy_type }} · {{ paperStatusLabel(row.landing_status) }}</small>
+              </div>
+            </div>
+          </article>
+          <!-- Active / In Progress column -->
+          <article class="kanban-column">
+            <div class="kanban-column__head">
+              <strong>进行中 (Active)</strong>
+              <span>{{ filteredManifestRows.filter(r => r.landing_status.startsWith('partial')).length }}</span>
+            </div>
+            <div class="kanban-column__body">
+              <div
+                v-for="row in filteredManifestRows.filter(r => r.landing_status.startsWith('partial'))"
+                :key="row.paper_id"
+                class="kanban-card"
+              >
+                <strong>{{ row.title }}</strong>
+                <small>{{ row.strategy_type }} · {{ paperStatusLabel(row.landing_status) }}</small>
+                <div class="tag-list" style="margin-top: 6px;">
+                  <el-tag v-for="name in row.factor_names" :key="name" size="small" effect="plain">{{ name }}</el-tag>
+                </div>
+              </div>
+            </div>
+          </article>
+          <!-- Done / Validated column -->
+          <article class="kanban-column">
+            <div class="kanban-column__head">
+              <strong>已验证 (Done)</strong>
+              <span>{{ filteredManifestRows.filter(r => r.landing_status.startsWith('implemented')).length }}</span>
+            </div>
+            <div class="kanban-column__body">
+              <div
+                v-for="row in filteredManifestRows.filter(r => r.landing_status.startsWith('implemented'))"
+                :key="row.paper_id"
+                class="kanban-card kanban-card--done"
+              >
+                <strong>{{ row.title }}</strong>
+                <small>{{ row.strategy_type }} · {{ paperStatusLabel(row.landing_status) }}</small>
+              </div>
+            </div>
+          </article>
+        </section>
+      </template>
+
+      <!-- Layout C: Timeline Mode -->
+      <template v-else-if="layoutMode === 'C'">
+        <section class="research-timeline-view">
+          <div class="timeline-header">
+            <strong>实验日志流 (Timeline)</strong>
+            <span>将最新状态的研报平铺，强调近期修改动作</span>
           </div>
-        </div>
-        <el-table :data="paperExperiments" size="small" max-height="260" class="research-table">
-          <el-table-column prop="name" label="实验" min-width="220" show-overflow-tooltip />
-          <el-table-column label="报告" width="110">
-            <template #default="{ row }">{{ row.paper_ids.join(', ') }}</template>
-          </el-table-column>
-          <el-table-column label="模型族" min-width="180">
-            <template #default="{ row }">
-              <div class="tag-list">
-                <el-tag v-for="name in row.model_family" :key="name" size="small" effect="plain">
-                  {{ name }}
-                </el-tag>
+          <div class="timeline-body">
+            <div v-for="row in filteredManifestRows" :key="row.paper_id" class="timeline-item">
+              <div class="timeline-marker"></div>
+              <div class="timeline-content">
+                <strong>{{ row.title }}</strong>
+                <span class="timeline-meta">{{ paperStatusLabel(row.landing_status) }} · {{ row.landing_grade }}级 · {{ row.data_frequency }}</span>
+                <p v-if="row.notes" class="timeline-note">{{ row.notes }}</p>
+                <div class="tag-list" v-if="row.factor_names.length" style="margin-top: 8px;">
+                  <span style="font-size: 11px; color: var(--text-muted); margin-right: 4px;">因子映射:</span>
+                  <el-tag v-for="name in row.factor_names" :key="name" size="small" effect="plain">{{ name }}</el-tag>
+                </div>
               </div>
-            </template>
-          </el-table-column>
-          <el-table-column label="特征组" min-width="240">
-            <template #default="{ row }">
-              <div class="tag-list">
-                <el-tag v-for="name in row.feature_groups" :key="name" size="small" effect="plain">
-                  {{ name }}
-                </el-tag>
-              </div>
-            </template>
-          </el-table-column>
-          <el-table-column prop="status" label="状态" width="120" />
-          <el-table-column prop="target_policy" label="标签约束" min-width="300" show-overflow-tooltip />
-        </el-table>
-      </section>
+            </div>
+          </div>
+        </section>
+      </template>
     </section>
   </div>
 </template>
