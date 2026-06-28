@@ -3,12 +3,9 @@
     class="app-shell"
     :class="{
       'app-shell--collapsed': isCollapsed,
-      'app-shell--context-collapsed': isContextCollapsed,
     }"
   >
     <div class="ambient-bg" aria-hidden="true">
-      <div class="gradient-orb gradient-orb--primary"></div>
-      <div class="gradient-orb gradient-orb--secondary"></div>
       <div class="grid-pattern"></div>
     </div>
 
@@ -16,7 +13,7 @@
       <div class="sidebar__brand">
         <div class="brand-icon" aria-hidden="true">
           GS
-          <span class="brand-env-badge">prod</span>
+          <span class="brand-env-badge">dev</span>
         </div>
         <div v-if="!isCollapsed" class="brand-text">
           <span class="brand-name">GAOSHOU</span>
@@ -92,9 +89,19 @@
         </label>
 
         <div class="topbar__right">
-          <button class="action-btn action-btn--text" type="button" @click="toggleContextRail">
-            {{ isContextCollapsed ? '打开上下文' : '收起上下文' }}
-          </button>
+          <el-select
+            v-model="currentTheme"
+            class="theme-switcher"
+            size="small"
+            placeholder="选择主题"
+            aria-label="选择主题"
+            @change="changeTheme"
+          >
+            <el-option label="Terminal Light (航天终端灰)" value="theme-terminal-light" />
+            <el-option label="Cyber Chalk (霓虹数码白)" value="theme-cyber-chalk" />
+            <el-option label="Ivory & Pine (象牙暖白松风)" value="theme-ivory-forest" />
+            <el-option label="Swiss Minimalist (瑞士网格纯白)" value="theme-swiss-minimalist" />
+          </el-select>
           <div class="notification-wrapper">
             <button class="action-btn" title="通知" type="button" @click="toggleNotificationPanel">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -119,36 +126,6 @@
 
       <StatusBar />
     </main>
-
-    <aside v-if="!isContextCollapsed" class="context-rail" aria-label="当前页面上下文">
-      <div class="context-rail__header">
-        <div>
-          <span class="page-kicker">CONTEXT</span>
-          <h2>{{ pageTitle }}上下文</h2>
-        </div>
-        <span class="context-badge">{{ contextBadge }}</span>
-      </div>
-
-      <section
-        v-for="block in contextBlocks"
-        :key="block.title"
-        class="context-card"
-        :class="{ 'context-card--actionable': Boolean(block.action) }"
-        :role="block.action ? 'button' : undefined"
-        :tabindex="block.action ? 0 : undefined"
-        @click="handleContextAction(block)"
-        @keydown.enter.prevent="handleContextAction(block)"
-        @keydown.space.prevent="handleContextAction(block)"
-      >
-        <h3>{{ block.title }}</h3>
-        <div class="context-list">
-          <div v-for="row in block.rows" :key="`${block.title}-${row.label}`" class="context-row">
-            <span>{{ row.label }}</span>
-            <strong :class="row.tone ? `context-value--${row.tone}` : undefined">{{ row.value }}</strong>
-          </div>
-        </div>
-      </section>
-    </aside>
   </div>
 </template>
 
@@ -160,9 +137,7 @@ import {
   navItemsForSection,
   resolveNavItem,
   type AppNavItem,
-  type ContextBlock,
 } from '@/app/navigation'
-import { useResolvedPageContext } from '@/app/pageContext'
 import { useNotificationStore } from '@/stores/notification'
 import NotificationPanel from '@/components/NotificationPanel.vue'
 import StatusBar from '@/components/StatusBar.vue'
@@ -171,15 +146,12 @@ const notificationStore = useNotificationStore()
 const route = useRoute()
 
 const isCollapsed = ref(false)
-const isContextCollapsed = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
 const showNotifications = ref(false)
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
-const fallbackContextBlocks = computed<ContextBlock[]>(() => activeNavItem.value?.context || [])
-const resolvedContext = useResolvedPageContext(fallbackContextBlocks)
 
 const pageTitle = computed(() => {
   const title = route.meta.title
@@ -196,26 +168,12 @@ const pageKicker = computed(() => {
   return typeof kicker === 'string' ? kicker : activeNavItem.value?.kicker || 'GAOSHOU'
 })
 
-const contextBlocks = computed<ContextBlock[]>(() => resolvedContext.value.blocks)
-const contextBadge = computed(() => resolvedContext.value.isDynamic ? 'Live' : 'Guide')
-
 function toggleSidebar() {
   isCollapsed.value = !isCollapsed.value
 }
 
-function toggleContextRail() {
-  isContextCollapsed.value = !isContextCollapsed.value
-}
-
 function toggleNotificationPanel() {
   showNotifications.value = !showNotifications.value
-}
-
-function handleContextAction(block: ContextBlock) {
-  if (!block.action) return
-  window.dispatchEvent(new CustomEvent('page-context-action', {
-    detail: { action: block.action, title: block.title },
-  }))
 }
 
 function closeNotificationPanel(e: MouseEvent) {
@@ -229,9 +187,44 @@ function isActive(item: AppNavItem) {
   return activeNavItem.value?.key === item.key
 }
 
+const THEME_CLASS_NAMES = [
+  'theme-terminal-light',
+  'theme-cyber-chalk',
+  'theme-ivory-forest',
+  'theme-swiss-minimalist',
+] as const
+
+type ThemeClassName = typeof THEME_CLASS_NAMES[number]
+
+const DEFAULT_THEME: ThemeClassName = 'theme-ivory-forest'
+
+function resolveInitialTheme(): ThemeClassName {
+  const storedTheme = localStorage.getItem('gs-theme')
+  return THEME_CLASS_NAMES.includes(storedTheme as ThemeClassName)
+    ? (storedTheme as ThemeClassName)
+    : DEFAULT_THEME
+}
+
+function applyTheme(theme: ThemeClassName) {
+  document.documentElement.classList.remove(...THEME_CLASS_NAMES)
+  document.documentElement.classList.add(theme)
+}
+
+const currentTheme = ref<ThemeClassName>(resolveInitialTheme())
+
+function changeTheme(val: string) {
+  const nextTheme = THEME_CLASS_NAMES.includes(val as ThemeClassName)
+    ? (val as ThemeClassName)
+    : DEFAULT_THEME
+  currentTheme.value = nextTheme
+  localStorage.setItem('gs-theme', nextTheme)
+  applyTheme(nextTheme)
+}
+
 onMounted(() => {
   document.addEventListener('click', closeNotificationPanel)
   notificationStore.startTaskPolling()
+  applyTheme(currentTheme.value)
 })
 
 onUnmounted(() => {
@@ -243,20 +236,17 @@ onUnmounted(() => {
 <style scoped>
 .app-shell {
   --sidebar-width: 252px;
-  --context-width: 320px;
   display: grid;
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr) var(--context-width);
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
   position: relative;
+  isolation: isolate;
+  background: var(--bg-void);
 }
 
 .app-shell--collapsed {
   --sidebar-width: 76px;
-}
-
-.app-shell--context-collapsed {
-  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
 }
 
 .ambient-bg {
@@ -267,58 +257,29 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.gradient-orb {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(80px);
-  opacity: 0.36;
-  animation: float 20s ease-in-out infinite;
-}
-
-.gradient-orb--primary {
-  width: 620px;
-  height: 620px;
-  background: radial-gradient(circle, rgba(103, 212, 255, 0.14) 0%, transparent 70%);
-  top: -220px;
-  right: -120px;
-}
-
-.gradient-orb--secondary {
-  width: 520px;
-  height: 520px;
-  background: radial-gradient(circle, rgba(231, 185, 79, 0.1) 0%, transparent 70%);
-  bottom: -180px;
-  left: 18%;
-  animation-delay: -10s;
-}
-
 .grid-pattern {
   position: absolute;
   inset: 0;
   background-image:
-    linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
-  background-size: 60px 60px;
-}
-
-@keyframes float {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33% { transform: translate(30px, -30px) scale(1.05); }
-  66% { transform: translate(-20px, 20px) scale(0.95); }
+    linear-gradient(rgba(34, 48, 42, 0.026) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 48, 42, 0.022) 1px, transparent 1px);
+  background-size: 72px 72px;
+  mask-image: linear-gradient(180deg, rgba(0, 0, 0, 0.64), rgba(0, 0, 0, 0.12));
 }
 
 .sidebar,
-.main-area,
-.context-rail {
+.main-area {
   position: relative;
   z-index: var(--z-elevated);
 }
 
 .sidebar {
   height: 100vh;
-  background: rgba(12, 15, 20, 0.94);
-  border-right: 1px solid var(--border-subtle);
-  backdrop-filter: blur(20px);
+  background:
+    linear-gradient(180deg, rgba(245, 242, 234, 0.98), rgba(238, 243, 240, 0.9)),
+    var(--bg-elevated);
+  border-right: 1px solid var(--border-default);
+  box-shadow: inset -1px 0 0 rgba(253, 251, 247, 0.62);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -348,12 +309,12 @@ onUnmounted(() => {
   place-items: center;
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
-  color: var(--accent-primary);
+  background: linear-gradient(145deg, var(--accent-primary), var(--accent-secondary));
+  color: #fdfbf7;
   font-family: var(--font-display);
   font-size: var(--text-sm);
   font-weight: 800;
-  box-shadow: var(--shadow-glow);
+  box-shadow: 0 10px 22px rgba(27, 61, 50, 0.16);
 }
 
 .brand-env-badge {
@@ -362,10 +323,10 @@ onUnmounted(() => {
   bottom: -7px;
   min-width: 32px;
   padding: 2px 6px;
-  border: 1px solid rgba(248, 113, 113, 0.72);
+  border: 1px solid rgba(168, 50, 50, 0.28);
   border-radius: var(--radius-full);
-  background: rgba(127, 29, 29, 0.92);
-  color: #fecaca;
+  background: var(--status-critical-bg);
+  color: var(--status-critical);
   font-family: var(--font-data);
   font-size: 9px;
   font-weight: 900;
@@ -373,7 +334,7 @@ onUnmounted(() => {
   letter-spacing: 0;
   text-align: center;
   text-transform: uppercase;
-  box-shadow: 0 0 14px rgba(248, 113, 113, 0.22);
+  box-shadow: 0 6px 14px rgba(168, 50, 50, 0.12);
 }
 
 .brand-text {
@@ -394,6 +355,9 @@ onUnmounted(() => {
 .brand-tagline {
   color: var(--text-muted);
   font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .sidebar__nav {
@@ -439,12 +403,12 @@ onUnmounted(() => {
 
 .nav-item:hover {
   color: var(--text-primary);
-  background: rgba(255, 255, 255, 0.045);
+  background: rgba(235, 231, 220, 0.66);
 }
 
 .nav-item--active {
   color: var(--text-bright);
-  background: rgba(103, 212, 255, 0.11);
+  background: linear-gradient(90deg, rgba(27, 61, 50, 0.12), rgba(238, 243, 240, 0.88));
   box-shadow: inset 3px 0 0 var(--accent-primary);
 }
 
@@ -455,7 +419,13 @@ onUnmounted(() => {
   place-items: center;
   border: 1px solid var(--border-default);
   border-radius: 7px;
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.02));
+  background: linear-gradient(180deg, rgba(253, 251, 247, 0.8), rgba(235, 231, 220, 0.56));
+}
+
+.nav-item--active .nav-item__icon {
+  border-color: rgba(27, 61, 50, 0.28);
+  background: var(--bg-active);
+  color: var(--accent-primary);
 }
 
 .nav-item__icon :deep(svg) {
@@ -482,10 +452,12 @@ onUnmounted(() => {
 .nav-item__hint {
   color: var(--text-ghost);
   font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.nav-item__indicator,
-.context-badge {
+.nav-item__indicator {
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-full);
   color: var(--text-secondary);
@@ -499,7 +471,7 @@ onUnmounted(() => {
   padding: var(--space-3);
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.025);
+  background: rgba(253, 251, 247, 0.6);
 }
 
 .sidebar__footer strong,
@@ -552,6 +524,9 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(253, 251, 247, 0.94), rgba(245, 242, 234, 0.54)),
+    var(--bg-void);
 }
 
 .topbar {
@@ -561,10 +536,10 @@ onUnmounted(() => {
   gap: var(--space-3);
   align-items: center;
   padding: var(--space-3) var(--space-5);
-  background: rgba(16, 20, 26, 0.82);
-  border-bottom: 1px solid var(--border-subtle);
-  backdrop-filter: blur(14px);
-  box-shadow: var(--shadow-sm);
+  background: rgba(253, 251, 247, 0.92);
+  border-bottom: 1px solid var(--border-default);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 22px rgba(34, 48, 42, 0.04);
 }
 
 .topbar__left {
@@ -595,6 +570,8 @@ onUnmounted(() => {
   font-weight: 750;
   line-height: 1.1;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -615,7 +592,7 @@ onUnmounted(() => {
   align-items: center;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: rgba(4, 6, 9, 0.45);
+  background: rgba(245, 242, 234, 0.74);
   padding: 0 var(--space-3);
   color: var(--text-muted);
 }
@@ -643,7 +620,7 @@ onUnmounted(() => {
 .search-kbd {
   border: 1px solid var(--border-default);
   border-radius: var(--radius-sm);
-  background: rgba(255, 255, 255, 0.04);
+  background: rgba(238, 243, 240, 0.92);
   color: var(--text-muted);
   font-family: var(--font-display);
   font-size: var(--text-xs);
@@ -651,10 +628,16 @@ onUnmounted(() => {
 }
 
 .topbar__right {
+  min-width: 0;
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: var(--space-2);
+}
+
+.theme-switcher {
+  width: 168px;
+  flex: 0 0 168px;
 }
 
 .action-btn {
@@ -665,7 +648,7 @@ onUnmounted(() => {
   place-items: center;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.035);
+  background: rgba(253, 251, 247, 0.8);
   color: var(--text-secondary);
   cursor: pointer;
   font-family: var(--font-ui);
@@ -698,7 +681,7 @@ onUnmounted(() => {
   place-items: center;
   border-radius: var(--radius-full);
   background: var(--accent-warning);
-  color: #070a0e;
+  color: #fdfbf7;
   font-size: 10px;
   font-weight: 800;
 }
@@ -714,7 +697,7 @@ onUnmounted(() => {
   place-items: center;
   border-radius: var(--radius-md);
   background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
-  color: #071014;
+  color: #fdfbf7;
   cursor: default;
   font-weight: 800;
 }
@@ -724,90 +707,9 @@ onUnmounted(() => {
   min-height: 0;
   overflow: hidden;
   padding: var(--space-5);
+  background:
+    linear-gradient(180deg, rgba(245, 242, 234, 0.48), rgba(253, 251, 247, 0.28));
 }
-
-.context-rail {
-  height: 100vh;
-  overflow: auto;
-  padding: var(--space-4);
-  border-left: 1px solid var(--border-subtle);
-  background: rgba(16, 20, 26, 0.88);
-  backdrop-filter: blur(18px);
-}
-
-.context-rail__header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin-bottom: var(--space-4);
-}
-
-.context-rail__header h2 {
-  margin: 4px 0 0;
-  color: var(--text-bright);
-  font-size: var(--text-lg);
-}
-
-.context-card {
-  padding: var(--space-3);
-  margin-bottom: var(--space-3);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.025);
-}
-
-.context-card--actionable {
-  cursor: pointer;
-  outline: none;
-  transition:
-    border-color var(--duration-fast) var(--ease-out),
-    background var(--duration-fast) var(--ease-out);
-}
-
-.context-card--actionable:hover,
-.context-card--actionable:focus-visible {
-  border-color: rgba(125, 211, 252, 0.48);
-  background: rgba(14, 116, 144, 0.12);
-}
-
-.context-card h3 {
-  margin: 0 0 var(--space-3);
-  color: var(--text-bright);
-  font-size: var(--text-sm);
-}
-
-.context-list {
-  display: grid;
-  gap: var(--space-2);
-}
-
-.context-row {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: var(--space-3);
-  color: var(--text-muted);
-  font-size: 0.78rem;
-  line-height: 1.45;
-}
-
-.context-row strong {
-  color: var(--text-primary);
-  font-family: var(--font-data);
-  font-size: 0.82rem;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-  line-height: 1.35;
-  max-width: 58%;
-  overflow-wrap: anywhere;
-  text-align: right;
-}
-
-.context-value--good { color: var(--status-ready) !important; }
-.context-value--warn { color: var(--accent-warning) !important; }
-.context-value--bad { color: var(--status-attention) !important; }
-.context-value--neutral { color: var(--accent-primary) !important; }
 
 .page-enter-active,
 .page-leave-active {
@@ -830,10 +732,6 @@ onUnmounted(() => {
   .app-shell {
     grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
   }
-
-  .context-rail {
-    display: none;
-  }
 }
 
 @media (max-width: 1024px) {
@@ -848,8 +746,7 @@ onUnmounted(() => {
 
 @media (max-width: 760px) {
   .app-shell,
-  .app-shell--collapsed,
-  .app-shell--context-collapsed {
+  .app-shell--collapsed {
     --sidebar-width: 100%;
     display: grid;
     grid-template-columns: 1fr;
@@ -875,6 +772,16 @@ onUnmounted(() => {
   .page-copy {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .theme-switcher {
+    width: min(100%, 220px);
+    flex: 1 1 180px;
+  }
+
+  .page-title,
+  .page-subtitle {
+    white-space: normal;
   }
 
   .main-area {
