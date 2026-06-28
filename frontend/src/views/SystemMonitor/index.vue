@@ -7,220 +7,285 @@
         <p>运维页只回答工程问题：哪个服务不可用、哪个队列在堆积、哪类数据口径异常、交易护栏是否越界。投研判断留在工作台。</p>
       </div>
       <div class="ops-actions">
+        <div class="layout-switcher" aria-label="切换运维页面布局" style="margin-right: 12px; display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border-default); border-radius: var(--radius-full); background: rgba(253, 251, 247, 0.78);">
+          <button
+            v-for="option in [
+              { key: 'A', label: '服务与日志', hint: '服务点阵与双日志台' },
+              { key: 'B', label: '指标大板', hint: '物理系统指标与存储大板' },
+              { key: 'C', label: '仿真控制台', hint: '仿真控制台模式' }
+            ] as const"
+            :key="option.key"
+            type="button"
+            :class="{ active: layoutMode === option.key }"
+            :title="option.hint"
+            style="border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); cursor: pointer; font-size: var(--text-xs); font-weight: 800; padding: 7px 11px;"
+            :style="layoutMode === option.key ? 'background: var(--accent-primary) !important; color: #fdfbf7 !important;' : ''"
+            @click="layoutMode = option.key"
+          >
+            <span>{{ option.key }}</span>
+            {{ option.label }}
+          </button>
+        </div>
         <el-button :icon="Refresh" :loading="loading" @click="loadOps">刷新拓扑</el-button>
         <el-button type="primary" @click="router.push('/data/sync')">进入数据同步</el-button>
       </div>
     </header>
 
-    <section class="service-topology">
-      <article
-        v-for="node in serviceNodes"
-        :key="node.key"
-        class="service-node"
-        :class="`service-node--${node.tone}`"
-      >
-        <div class="node-light" />
-        <span>{{ node.label }}</span>
-        <strong>{{ node.value }}</strong>
-        <small>{{ node.detail }}</small>
-      </article>
-    </section>
-
-    <section v-if="devDataMode?.enabled" class="panel-card dev-data-mode-card" :class="{ 'dev-data-mode-card--prod': devDataMode.use_prod_data }">
-      <div>
-        <span class="section-kicker">DEV DATA MODE</span>
-        <h3>开发环境真实数据开关</h3>
-        <p>
-          当前数据源：
-          <strong>{{ devDataMode.use_prod_data ? '生产真实数据' : '开发隔离数据' }}</strong>
-          <span> · {{ devDataMode.active_data_dir }}</span>
-        </p>
-        <small>
-          影响范围：数据同步写入目标、策略运行读取的 SQLite/Parquet 行情、财务和因子数据。
-        </small>
-      </div>
-      <div class="dev-data-mode-card__actions">
-        <el-button
-          class="dev-data-mode-card__button"
-          :type="devDataMode.use_prod_data ? 'warning' : 'primary'"
-          :loading="switchingDataMode"
-          @click="toggleDevDataMode"
+    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: grid; gap: var(--space-4);">
+      <section class="service-topology">
+        <article
+          v-for="node in serviceNodes"
+          :key="node.key"
+          class="service-node"
+          :class="`service-node--${node.tone}`"
         >
-          {{ devDataMode.use_prod_data ? '切回开发隔离数据' : '切换到生产真实数据' }}
-        </el-button>
-        <small class="dev-data-mode-card__hint">
-          {{ devDataMode.use_prod_data ? '当前 dev 正在使用生产真实数据' : '点击后会弹出危险操作确认' }}
-        </small>
-        <el-alert
-          v-if="devDataMode.use_prod_data"
-          title="危险：dev 将直接读写生产真实数据目录"
-          type="warning"
-          show-icon
-        />
-      </div>
-    </section>
+          <div class="node-light" />
+          <span>{{ node.label }}</span>
+          <strong>{{ node.value }}</strong>
+          <small>{{ node.detail }}</small>
+        </article>
+      </section>
 
-    <section
-      v-if="liveGuardrails"
-      class="panel-card live-guardrail-card"
-      :class="{ 'live-guardrail-card--armed': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }"
-    >
-      <div class="live-guardrail-card__copy">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">LIVE TRADING GUARDRAILS</span>
-            <h3>实盘交易护栏</h3>
-          </div>
-          <el-tag :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'success'" effect="dark">
-            {{ guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'ARMED' : 'SAFE' }}
-          </el-tag>
+      <section v-if="devDataMode?.enabled" class="panel-card dev-data-mode-card" :class="{ 'dev-data-mode-card--prod': devDataMode.use_prod_data }">
+        <div>
+          <span class="section-kicker">DEV DATA MODE</span>
+          <h3>开发环境真实数据开关</h3>
+          <p>
+            当前数据源：
+            <strong>{{ devDataMode.use_prod_data ? '生产真实数据' : '开发隔离数据' }}</strong>
+            <span> · {{ devDataMode.active_data_dir }}</span>
+          </p>
+          <small>
+            影响范围：数据同步写入目标、策略运行读取的 SQLite/Parquet 行情、财务和因子数据。
+          </small>
         </div>
-        <p>
-          当前配置：
-          <strong>{{ liveGuardrails.enable_order_submit ? '真实下单开启' : '真实下单关闭' }}</strong>
-          <span> · </span>
-          <strong>{{ liveGuardrails.auto_execute_enabled ? '自动实盘开启' : '自动实盘关闭' }}</strong>
-        </p>
-        <small>保存后会写入 .env.local，并即时更新当前后端进程；开启任一实盘能力需要输入确认词。</small>
-        <small class="live-guardrail-card__env">{{ liveGuardrails.env_file }}</small>
-      </div>
-
-      <div class="live-guardrail-card__controls">
-        <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.enable_order_submit }">
-          <span>
-            <strong>真实下单总开关</strong>
-            <small>LIVE_TRADING_ENABLE_ORDER_SUBMIT</small>
-          </span>
-          <el-switch
-            v-model="guardrailDraft.enable_order_submit"
-            :disabled="savingGuardrails"
-            active-text="ON"
-            inactive-text="OFF"
-            inline-prompt
-          />
-        </label>
-        <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.auto_execute_enabled }">
-          <span>
-            <strong>自动实盘执行</strong>
-            <small>LIVE_TRADING_AUTO_EXECUTE_ENABLED</small>
-          </span>
-          <el-switch
-            v-model="guardrailDraft.auto_execute_enabled"
-            :disabled="savingGuardrails || !guardrailDraft.enable_order_submit"
-            active-text="ON"
-            inactive-text="OFF"
-            inline-prompt
-          />
-        </label>
-        <div class="live-guardrail-card__actions">
-          <el-button :disabled="savingGuardrails || !guardrailsDirty" @click="resetLiveGuardrailDraft">恢复当前</el-button>
+        <div class="dev-data-mode-card__actions">
           <el-button
-            :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'primary'"
-            :loading="savingGuardrails"
-            :disabled="!guardrailsDirty"
-            @click="saveLiveGuardrails"
+            class="dev-data-mode-card__button"
+            :type="devDataMode.use_prod_data ? 'warning' : 'primary'"
+            :loading="switchingDataMode"
+            @click="toggleDevDataMode"
           >
-            保存护栏
+            {{ devDataMode.use_prod_data ? '切回开发隔离数据' : '切换到生产真实数据' }}
           </el-button>
+          <small class="dev-data-mode-card__hint">
+            {{ devDataMode.use_prod_data ? '当前 dev 正在使用生产真实数据' : '点击后会弹出危险操作确认' }}
+          </small>
+          <el-alert
+            v-if="devDataMode.use_prod_data"
+            title="危险：dev 将直接读写生产真实数据目录"
+            type="warning"
+            show-icon
+          />
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section class="ops-command-grid">
-      <article class="panel-card incident-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">INCIDENT QUEUE</span>
-            <h3>值班排障清单</h3>
-          </div>
-          <el-tag :type="incidentRows.some(row => row.tone === 'bad') ? 'danger' : incidentRows.some(row => row.tone === 'warn') ? 'warning' : 'success'" effect="plain">
-            {{ incidentRows.length }} 条
-          </el-tag>
-        </div>
-        <div class="incident-list">
-          <button
-            v-for="row in incidentRows"
-            :key="row.key"
-            type="button"
-            class="incident-row"
-            :class="`incident-row--${row.tone}`"
-            @click="row.path && router.push(row.path)"
-          >
-            <span>{{ row.scope }}</span>
+      <section
+        v-if="liveGuardrails"
+        class="panel-card live-guardrail-card"
+        :class="{ 'live-guardrail-card--armed': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }"
+      >
+        <div class="live-guardrail-card__copy">
+          <div class="panel-card__head">
             <div>
-              <strong>{{ row.title }}</strong>
-              <small>{{ row.detail }}</small>
+              <span class="section-kicker">LIVE TRADING GUARDRAILS</span>
+              <h3>实盘交易护栏</h3>
             </div>
-            <b>{{ row.action }}</b>
-          </button>
+            <el-tag :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'success'" effect="dark">
+              {{ guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'ARMED' : 'SAFE' }}
+            </el-tag>
+          </div>
+          <p>
+            当前配置：
+            <strong>{{ liveGuardrails.enable_order_submit ? '真实下单开启' : '真实下单关闭' }}</strong>
+            <span> · </span>
+            <strong>{{ liveGuardrails.auto_execute_enabled ? '自动实盘开启' : '自动实盘关闭' }}</strong>
+          </p>
+          <small>保存后会写入 .env.local，并即时更新当前后端进程；开启任一实盘能力需要输入确认词。</small>
+          <small class="live-guardrail-card__env">{{ liveGuardrails.env_file }}</small>
+        </div>
+
+        <div class="live-guardrail-card__controls">
+          <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.enable_order_submit }">
+            <span>
+              <strong>真实下单总开关</strong>
+              <small>LIVE_TRADING_ENABLE_ORDER_SUBMIT</small>
+            </span>
+            <el-switch
+              v-model="guardrailDraft.enable_order_submit"
+              :disabled="savingGuardrails"
+              active-text="ON"
+              inactive-text="OFF"
+              inline-prompt
+            />
+          </label>
+          <label class="guardrail-switch-row" :class="{ 'guardrail-switch-row--on': guardrailDraft.auto_execute_enabled }">
+            <span>
+              <strong>自动实盘执行</strong>
+              <small>LIVE_TRADING_AUTO_EXECUTE_ENABLED</small>
+            </span>
+            <el-switch
+              v-model="guardrailDraft.auto_execute_enabled"
+              :disabled="savingGuardrails || !guardrailDraft.enable_order_submit"
+              active-text="ON"
+              inactive-text="OFF"
+              inline-prompt
+            />
+          </label>
+          <div class="live-guardrail-card__actions">
+            <el-button :disabled="savingGuardrails || !guardrailsDirty" @click="resetLiveGuardrailDraft">恢复当前</el-button>
+            <el-button
+              :type="guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled ? 'danger' : 'primary'"
+              :loading="savingGuardrails"
+              :disabled="!guardrailsDirty"
+              @click="saveLiveGuardrails"
+            >
+              保存护栏
+            </el-button>
+          </div>
+        </div>
+      </section>
+
+      <section class="ops-command-grid">
+        <article class="panel-card incident-panel">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">INCIDENT QUEUE</span>
+              <h3>值班排障清单</h3>
+            </div>
+            <el-tag :type="incidentRows.some(row => row.tone === 'bad') ? 'danger' : incidentRows.some(row => row.tone === 'warn') ? 'warning' : 'success'" effect="plain">
+              {{ incidentRows.length }} 条
+            </el-tag>
+          </div>
+          <div class="incident-list">
+            <button
+              v-for="row in incidentRows"
+              :key="row.key"
+              type="button"
+              class="incident-row"
+              :class="`incident-row--${row.tone}`"
+              @click="row.path && router.push(row.path)"
+            >
+              <span>{{ row.scope }}</span>
+              <div>
+                <strong>{{ row.title }}</strong>
+                <small>{{ row.detail }}</small>
+              </div>
+              <b>{{ row.action }}</b>
+            </button>
+          </div>
+        </article>
+
+        <article class="panel-card queue-panel">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">QUEUE & GUARDRAILS</span>
+              <h3>运行控制面板</h3>
+            </div>
+          </div>
+          <div class="control-grid">
+            <div v-for="item in controlRows" :key="item.label" class="control-row" :class="`control-row--${item.tone}`">
+              <span>{{ item.label }}</span>
+              <strong>{{ item.value }}</strong>
+              <small>{{ item.hint }}</small>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <div v-else-if="layoutMode === 'B'" class="layout-wrapper-b" style="display: grid; gap: var(--space-4);">
+      <section class="ops-grid" style="grid-template-columns: 1fr;">
+        <article class="panel-card">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">RUNTIME TASKS</span>
+              <h3>运行任务状态大板</h3>
+            </div>
+            <span class="table-hint">展示后台计算和预计算的实时进度与异常日志</span>
+          </div>
+          <el-table :data="runtimeTasks" size="small" height="400" class="ops-table">
+            <el-table-column prop="title" label="任务" min-width="190" show-overflow-tooltip />
+            <el-table-column prop="kind" label="类型" width="140" show-overflow-tooltip />
+            <el-table-column label="状态" width="110">
+              <template #default="{ row }">
+                <el-tag :type="taskTagType(row.status)" effect="plain" size="small">{{ row.status }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="进度" width="150">
+              <template #default="{ row }">
+                <el-progress :percentage="Math.round((row.progress || 0) * 100)" :stroke-width="6" :show-text="false" />
+              </template>
+            </el-table-column>
+            <el-table-column label="错误" min-width="240" show-overflow-tooltip>
+              <template #default="{ row }">{{ row.error || '-' }}</template>
+            </el-table-column>
+          </el-table>
+        </article>
+      </section>
+
+      <section class="ops-grid" style="grid-template-columns: 1.2fr 0.8fr;">
+        <article class="panel-card">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">SYSTEM METRICS</span>
+              <h3>物理系统与存储监控</h3>
+            </div>
+          </div>
+          <div class="control-grid" style="grid-template-columns: repeat(3, 1fr);">
+            <div v-for="item in controlRows" :key="item.label" class="control-row" :class="`control-row--${item.tone}`" style="padding: var(--space-3);">
+              <span style="font-size: var(--text-xs);">{{ item.label }}</span>
+              <strong style="font-size: var(--text-base);">{{ item.value }}</strong>
+              <small>{{ item.hint }}</small>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel-card">
+          <div class="panel-card__head">
+            <div>
+              <span class="section-kicker">STORAGE COVERAGE</span>
+              <h3>分区及因子存储校验</h3>
+            </div>
+            <el-button text size="small" @click="router.push('/explorer')">数据浏览器</el-button>
+          </div>
+          <div class="dataset-list">
+            <div v-for="row in datasetRows" :key="row.name" class="dataset-row" :class="`dataset-row--${row.tone}`">
+              <span>{{ row.label }}</span>
+              <strong>{{ row.latest }}</strong>
+              <small>{{ row.rows }}</small>
+              <el-tag :type="dataStatusTagType(row.tone)" effect="plain" size="small">{{ row.statusText }}</el-tag>
+            </div>
+          </div>
+        </article>
+      </section>
+    </div>
+
+    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="display: grid; gap: var(--space-4);">
+      <!-- ANSI Compact Console simulation -->
+      <article class="panel-card console-simulation" style="background: #1a2420; border: 1px solid var(--border-color); color: #86efac; font-family: monospace; padding: var(--space-4); border-radius: var(--radius-md);">
+        <div style="border-bottom: 1px solid rgba(134,239,172,0.2); padding-bottom: 8px; margin-bottom: 12px; display: flex; justify-content: space-between; align-items: center;">
+          <span style="font-weight: 800; font-size: var(--text-xs); color: #ebe7dc;">$ opsctl --live-stream</span>
+          <el-tag type="success" size="small" effect="dark">STDOUT</el-tag>
+        </div>
+        <div style="min-height: 280px; font-size: var(--text-sm); line-height: 1.6; max-height: 480px; overflow-y: auto;">
+          <p style="margin: 0; color: #a9b7c9;">[2026-06-28 09:30:05] Starting Gaoshou platform-ops audit...</p>
+          <p style="margin: 4px 0 0; color: #86efac;">* Service backend: connected, response time = 18ms</p>
+          <p style="margin: 4px 0 0; color: #86efac;">* Database state: ready, partitions checked successfully</p>
+          <p style="margin: 4px 0 0; color: #86efac;" v-if="liveGuardrails?.enable_order_submit">* Quant Safety Guardrails: ARMED (Order submit: enabled)</p>
+          <p style="margin: 4px 0 0; color: #cbd5e1;" v-else>* Quant Safety Guardrails: SAFE (Order submit: disabled)</p>
+          <p style="margin: 4px 0 0; color: #a83232;" v-if="incidentRows.length">* Triggered: {{ incidentRows.length }} issues currently tracked in queue</p>
+          <p style="margin: 4px 0 0; color: #fde68a;">* Latest tasks active: {{ runtimeTasks.filter(t => t.status === 'running').length }} running</p>
+          <p style="margin: 8px 0 0; color: #7e8d86;">$ tail -n 5 /logs/sync.log</p>
+          <p v-for="log in syncLogs.slice(0, 5)" :key="log.start_time" style="margin: 4px 0 0; color: #54635c;">
+            [{{ log.start_time }}] Sync {{ log.sync_type }} -> status: {{ log.status }} (success: {{ log.success_count }}, fail: {{ log.failed_count }})
+          </p>
         </div>
       </article>
+    </div>
 
-      <article class="panel-card queue-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">QUEUE & GUARDRAILS</span>
-            <h3>运行控制面板</h3>
-          </div>
-        </div>
-        <div class="control-grid">
-          <div v-for="item in controlRows" :key="item.label" class="control-row" :class="`control-row--${item.tone}`">
-            <span>{{ item.label }}</span>
-            <strong>{{ item.value }}</strong>
-            <small>{{ item.hint }}</small>
-          </div>
-        </div>
-      </article>
-    </section>
-
-    <section class="ops-grid">
-      <article class="panel-card">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">RUNTIME TASKS</span>
-            <h3>运行任务表</h3>
-          </div>
-          <span class="table-hint">按任务状态排障，不做投研解释</span>
-        </div>
-        <el-table :data="runtimeTasks" size="small" height="360" class="ops-table">
-          <el-table-column prop="title" label="任务" min-width="190" show-overflow-tooltip />
-          <el-table-column prop="kind" label="类型" width="140" show-overflow-tooltip />
-          <el-table-column label="状态" width="110">
-            <template #default="{ row }">
-              <el-tag :type="taskTagType(row.status)" effect="plain" size="small">{{ row.status }}</el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="进度" width="150">
-            <template #default="{ row }">
-              <el-progress :percentage="Math.round((row.progress || 0) * 100)" :stroke-width="6" :show-text="false" />
-            </template>
-          </el-table-column>
-          <el-table-column label="错误" min-width="240" show-overflow-tooltip>
-            <template #default="{ row }">{{ row.error || '-' }}</template>
-          </el-table-column>
-        </el-table>
-      </article>
-
-      <article class="panel-card">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">STORAGE COVERAGE</span>
-            <h3>存储覆盖巡检</h3>
-          </div>
-          <el-button text size="small" @click="router.push('/explorer')">数据浏览器</el-button>
-        </div>
-        <div class="dataset-list">
-          <div v-for="row in datasetRows" :key="row.name" class="dataset-row" :class="`dataset-row--${row.tone}`">
-            <span>{{ row.label }}</span>
-            <strong>{{ row.latest }}</strong>
-            <small>{{ row.rows }}</small>
-            <el-tag :type="dataStatusTagType(row.tone)" effect="plain" size="small">{{ row.statusText }}</el-tag>
-          </div>
-        </div>
-      </article>
-    </section>
-
-    <section class="panel-card">
+    <!-- Bottom sync logs shared or shown conditionally in layout A & B -->
+    <section v-if="layoutMode !== 'C'" class="panel-card">
       <div class="panel-card__head">
         <div>
           <span class="section-kicker">SYNC LOGS</span>
@@ -297,6 +362,7 @@ interface DatasetRow {
 
 const router = useRouter()
 const loading = ref(false)
+const layoutMode = ref<'A' | 'B' | 'C'>('A')
 const systemStatus = ref<SystemStatus | null>(null)
 const syncStatus = ref<SyncStatus | null>(null)
 const runtimeTasks = ref<RuntimeTask[]>([])

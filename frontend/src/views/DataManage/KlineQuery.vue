@@ -421,8 +421,8 @@ useResizeObserver(tableCardRef, ([entry]) => {
 
 .query-form {
   padding: 16px;
-  background: linear-gradient(180deg, #121b26 0%, #0c141d 100%);
-  border: 1px solid rgba(136, 160, 190, 0.28);
+  background: linear-gradient(180deg, var(--bg-primary) 0%, var(--bg-primary) 100%);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
   flex-shrink: 0;
 }
@@ -440,8 +440,8 @@ useResizeObserver(tableCardRef, ([entry]) => {
 
 .chart-card,
 .table-card {
-  border-color: rgba(136, 160, 190, 0.24);
-  background: #0d141e;
+  border-color: var(--border-subtle);
+  background: var(--bg-primary);
 }
 
 :deep(.el-form-item__label) {
@@ -450,18 +450,18 @@ useResizeObserver(tableCardRef, ([entry]) => {
 
 :deep(.el-card__header) {
   color: var(--text-bright);
-  background: #101923;
+  background: var(--bg-elevated);
   border-bottom-color: rgba(136, 160, 190, 0.22);
 }
 
 :deep(.el-table-v2) {
-  --el-table-v2-row-hover-bg-color: #1b3142;
-  --el-table-v2-row-bg-color: #0f1823;
-  --el-table-v2-header-bg-color: #121d2a;
-  --el-table-v2-header-text-color: #c9d5e6;
-  --el-table-v2-border-color: rgba(119, 146, 176, 0.46);
-  color: #edf3fa;
-  background: #0b1018;
+  --el-table-v2-row-hover-bg-color: var(--bg-hover);
+  --el-table-v2-row-bg-color: var(--bg-primary);
+  --el-table-v2-header-bg-color: var(--bg-elevated);
+  --el-table-v2-header-text-color: var(--text-secondary);
+  --el-table-v2-border-color: var(--border-subtle);
+  color: var(--text-primary);
+  background: var(--bg-primary);
 }
 
 :deep(.el-table-v2__main),
@@ -472,17 +472,17 @@ useResizeObserver(tableCardRef, ([entry]) => {
 :deep(.el-table-v2__row),
 :deep(.el-table-v2__row-cell) {
   background: transparent;
-  color: #edf3fa;
+  color: var(--text-primary);
 }
 
 :deep(.el-table-v2__header-cell) {
-  color: #c9d5e6;
-  background: #121d2a;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
   font-weight: 700;
 }
 
 :deep(.el-table-v2__row:hover .el-table-v2__row-cell) {
-  background: #1b3142;
+  background: var(--bg-hover);
 }
 
 .chart-card {

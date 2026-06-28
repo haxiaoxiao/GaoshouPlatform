@@ -1,13 +1,26 @@
 <template>
   <div class="investment-research">
-    <section class="research-shell">
+    <section class="research-shell" :class="`research-shell--layout-${layoutMode.toLowerCase()}`">
       <header class="research-header">
         <div class="research-title">
           <span class="panel-kicker">INVESTMENT RESEARCH</span>
-          <h2>投研工作台</h2>
-          <p>跟踪研报落地状态、因子映射和离线实验入口。</p>
+          <h2>研究实验室</h2>
+          <p>{{ activeLayoutDescription }}</p>
         </div>
         <div class="research-actions">
+          <div class="layout-switcher" aria-label="切换研究实验室布局">
+            <button
+              v-for="option in researchLayoutOptions"
+              :key="option.key"
+              type="button"
+              :class="{ active: layoutMode === option.key }"
+              :title="option.hint"
+              @click="layoutMode = option.key"
+            >
+              <span>{{ option.key }}</span>
+              {{ option.label }}
+            </button>
+          </div>
           <el-input
             v-model="keyword"
             :prefix-icon="Search"
@@ -53,6 +66,14 @@
           <span>待数据源</span>
           <strong>{{ manifestSummary.pendingData }}</strong>
         </div>
+      </section>
+
+      <section class="research-layout-strip">
+        <article v-for="item in researchLayoutNotes" :key="item.title">
+          <span>{{ item.kicker }}</span>
+          <strong>{{ item.title }}</strong>
+          <small>{{ item.description }}</small>
+        </article>
       </section>
 
       <section class="research-tool-grid">
@@ -202,6 +223,39 @@ const keyword = ref('')
 const statusFilter = ref('')
 const loading = ref(false)
 const loadError = ref('')
+const layoutMode = ref<'A' | 'B' | 'C'>('A')
+
+const researchLayoutOptions = [
+  { key: 'A' as const, label: '笔记本', hint: '双栏笔记本模式' },
+  { key: 'B' as const, label: '看板', hint: 'Draft / In Progress / Validated / Archived' },
+  { key: 'C' as const, label: '日历流', hint: '按时间线追踪研究活动' },
+]
+const activeLayoutDescription = computed(() => {
+  if (layoutMode.value === 'B') return '以看板方式推进研究想法，把研报、因子映射、实验和复盘压缩成状态流。'
+  if (layoutMode.value === 'C') return '以日志日历流复盘每天的研究活动点，强调证据链和实验结论。'
+  return '双栏笔记本模式：左侧研究想法清单，右侧落地清单、证据链和离线实验。'
+})
+const researchLayoutNotes = computed(() => {
+  if (layoutMode.value === 'B') {
+    return [
+      { kicker: 'DRAFT', title: '待研究', description: '把 pending / partial 的研报沉淀为可证伪假设。' },
+      { kicker: 'ACTIVE', title: '进行中', description: '因子映射、数据源补齐和离线实验同屏推进。' },
+      { kicker: 'DONE', title: '已验证', description: '已落地因子和策略候选进入评估/回测链路。' },
+    ]
+  }
+  if (layoutMode.value === 'C') {
+    return [
+      { kicker: 'TODAY', title: '今日活动', description: '筛选、刷新和实验更新都会落在当前研究日志里。' },
+      { kicker: 'EVIDENCE', title: '证据链', description: '行情、公告、财务、舆情和研报按日期对齐。' },
+      { kicker: 'ARCHIVE', title: '失败复盘', description: '保留被否决假设，防止重复踩坑。' },
+    ]
+  }
+  return [
+    { kicker: 'IDEAS', title: '研究想法清单', description: '把假设、状态和落地等级放在左侧快速扫描。' },
+    { kicker: 'NOTEBOOK', title: '主笔记区', description: '研报落地清单作为当前笔记主体，保留筛选和表格行为。' },
+    { kicker: 'CHAIN', title: '证据链入口', description: '外部笔记、因子定义、因子评估和策略回测一键跳转。' },
+  ]
+})
 
 const researchTools = [
   {
@@ -339,6 +393,7 @@ const pageContextBlocks = computed(() => [
     title: 'Research',
     rows: [
       { label: '刷新状态', value: loading.value ? '加载中' : '已就绪', tone: loading.value ? 'warn' : 'good' },
+      { label: '布局', value: researchLayoutOptions.find(item => item.key === layoutMode.value)?.label || '笔记本' },
       { label: '关键词', value: keyword.value.trim() || '-' },
       { label: '状态筛选', value: statusFilter.value || '全部' },
       { label: '错误', value: loadError.value || '无', tone: loadError.value ? 'warn' : 'good' },
@@ -369,8 +424,10 @@ onMounted(() => {
   padding: 14px;
   color: var(--text-primary);
   background:
-    linear-gradient(135deg, rgba(56, 189, 248, 0.04), transparent 28%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.016), transparent 44%);
+    linear-gradient(rgba(34, 48, 42, 0.024) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(34, 48, 42, 0.02) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(253, 251, 247, 0.9), rgba(245, 242, 234, 0.62));
+  background-size: 56px 56px, 56px 56px, auto;
 }
 
 .research-shell {
@@ -384,16 +441,15 @@ onMounted(() => {
 
 .research-header {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) minmax(520px, auto);
   align-items: end;
   gap: 16px;
   padding: 16px 18px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 16px;
   background:
-    linear-gradient(135deg, rgba(56, 189, 248, 0.11), transparent 36%),
-    linear-gradient(90deg, rgba(251, 191, 36, 0.055), transparent 24%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    linear-gradient(135deg, rgba(238, 243, 240, 0.9), transparent 46%),
+    linear-gradient(180deg, rgba(253, 251, 247, 0.8), rgba(245, 242, 234, 0.72)),
     var(--bg-elevated);
   box-shadow: var(--shadow-card);
 }
@@ -407,14 +463,16 @@ onMounted(() => {
 
 .panel-kicker {
   font-family: var(--font-data);
-  font-size: 11px;
+  font-size: var(--text-xs);
   color: var(--accent-primary);
-  letter-spacing: 0;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
 .research-title h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: var(--text-2xl);
   line-height: 1.1;
   letter-spacing: 0;
 }
@@ -422,14 +480,45 @@ onMounted(() => {
 .research-title p {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--text-sm);
 }
 
 .research-actions {
   display: grid;
-  grid-template-columns: minmax(220px, 320px) 150px auto;
+  grid-template-columns: 1fr minmax(220px, 320px) 150px auto;
   align-items: center;
   gap: 8px;
+}
+
+.layout-switcher {
+  display: inline-flex;
+  gap: 4px;
+  justify-self: start;
+  padding: 4px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: rgba(253, 251, 247, 0.78);
+}
+
+.layout-switcher button {
+  border: 0;
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: var(--text-xs);
+  font-weight: 800;
+  padding: 7px 11px;
+}
+
+.layout-switcher button span {
+  margin-right: 4px;
+  font-family: var(--font-data);
+}
+
+.layout-switcher button.active {
+  background: var(--accent-primary);
+  color: #fdfbf7;
 }
 
 .search-input,
@@ -456,9 +545,9 @@ onMounted(() => {
 .summary-grid > div {
   padding: 11px 12px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 14px;
   background:
-    linear-gradient(180deg, rgba(56, 189, 248, 0.045), transparent),
+    linear-gradient(180deg, rgba(238, 243, 240, 0.68), rgba(253, 251, 247, 0.42)),
     var(--bg-elevated);
 }
 
@@ -476,6 +565,43 @@ onMounted(() => {
   font-weight: 650;
 }
 
+.research-layout-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.research-layout-strip article {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--border-default);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(238, 243, 240, 0.68), rgba(253, 251, 247, 0.42)),
+    var(--bg-surface);
+}
+
+.research-layout-strip span {
+  color: var(--accent-primary);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  font-weight: 900;
+  letter-spacing: 0.08em;
+}
+
+.research-layout-strip strong {
+  color: var(--text-bright);
+  font-size: var(--text-base);
+}
+
+.research-layout-strip small {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+}
+
 .research-panel {
   display: flex;
   min-height: 0;
@@ -483,8 +609,8 @@ onMounted(() => {
   gap: 10px;
   padding: 12px 14px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  background: rgba(15, 15, 19, 0.76);
+  border-radius: 16px;
+  background: rgba(253, 251, 247, 0.78);
   overflow: hidden;
 }
 
@@ -553,16 +679,16 @@ onMounted(() => {
   min-width: 0;
   padding: 11px 12px;
   border: 1px solid var(--border-subtle);
-  border-radius: 8px;
+  border-radius: 14px;
   color: inherit;
-  background: rgba(10, 14, 20, 0.5);
+  background: rgba(253, 251, 247, 0.68);
   text-decoration: none;
 }
 
 .tool-card:hover,
 .link-list a:hover {
-  border-color: rgba(56, 189, 248, 0.38);
-  background: rgba(56, 189, 248, 0.08);
+  border-color: rgba(27, 61, 50, 0.26);
+  background: var(--bg-hover);
 }
 
 .tool-card span {
@@ -591,13 +717,13 @@ onMounted(() => {
 }
 
 :deep(.el-table) {
-  --el-table-bg-color: transparent;
-  --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: rgba(15, 23, 42, 0.9);
-  --el-table-header-text-color: #cbd5e1;
-  --el-table-text-color: #dbe4f0;
-  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.08);
-  --el-table-border-color: rgba(148, 163, 184, 0.16);
+  --el-table-bg-color: var(--bg-primary);
+  --el-table-tr-bg-color: var(--bg-primary);
+  --el-table-header-bg-color: var(--bg-elevated);
+  --el-table-header-text-color: var(--text-secondary);
+  --el-table-text-color: var(--text-primary);
+  --el-table-row-hover-bg-color: var(--bg-hover);
+  --el-table-border-color: var(--border-subtle);
 }
 
 :deep(.el-table th.el-table__cell),
@@ -608,26 +734,26 @@ onMounted(() => {
 :deep(.el-table__body tr.current-row > td.el-table__cell),
 :deep(.el-table__body tr.hover-row > td.el-table__cell),
 :deep(.el-table__body tr:hover > td.el-table__cell) {
-  background: rgba(56, 189, 248, 0.08);
+  background: var(--bg-hover);
 }
 
 :deep(.el-input__wrapper),
 :deep(.el-select__wrapper) {
-  background: rgba(15, 23, 42, 0.76);
-  box-shadow: 0 0 0 1px rgba(148, 163, 184, 0.18) inset;
+  background: rgba(253, 251, 247, 0.86);
+  box-shadow: 0 0 0 1px var(--border-subtle) inset;
 }
 
 :deep(.el-button:not(.el-button--primary)) {
   color: var(--text-primary);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)), rgba(31, 41, 55, 0.72);
-  border-color: rgba(148, 163, 184, 0.18);
+  background: var(--bg-primary);
+  border-color: var(--border-default);
 }
 
 :deep(.el-tag) {
-  color: #dbe4f0;
-  background-color: rgba(51, 65, 85, 0.38);
-  background-image: linear-gradient(180deg, rgba(148, 163, 184, 0.14), rgba(148, 163, 184, 0.06));
-  border-color: rgba(148, 163, 184, 0.24);
+  color: var(--accent-primary);
+  background-color: var(--bg-active);
+  background-image: none;
+  border-color: rgba(27, 61, 50, 0.18);
 }
 
 :deep(.el-tag--success) {
@@ -661,11 +787,12 @@ onMounted(() => {
   }
 
   .research-actions {
-    grid-template-columns: minmax(0, 1fr) 150px auto;
+    grid-template-columns: 1fr 1fr auto;
   }
 
   .research-tool-grid,
-  .tool-card-grid {
+  .tool-card-grid,
+  .research-layout-strip {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -683,7 +810,8 @@ onMounted(() => {
   .summary-grid,
   .research-tool-grid,
   .tool-card-grid,
-  .link-list {
+  .link-list,
+  .research-layout-strip {
     grid-template-columns: 1fr;
   }
 

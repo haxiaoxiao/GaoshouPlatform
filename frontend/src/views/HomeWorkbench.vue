@@ -1,113 +1,286 @@
 <template>
-  <div class="page-frame home-workbench">
-    <header class="panel-card workbench-hero">
-      <div>
-        <span class="section-kicker">INVESTMENT DECISION DESK</span>
-        <h2>今日投研工作台</h2>
-        <p>工作台只回答一个问题：今天应该先研究、补数据、跑回测，还是保持交易护栏。底层服务细节留给系统运维。</p>
+  <div class="home-workbench" :class="`home-mode-${layoutMode.toLowerCase()}`">
+    <header class="workbench-header">
+      <div class="header-brand">
+        <div class="eyebrow">INVESTMENT DECISION DESK</div>
+        <div class="title-row">
+          <h2>今日投研工作台</h2>
+          <span class="decision-pill" :class="`pill--${decisionTone}`">
+            <span class="status-dot"></span>
+            {{ decisionSummary }}
+          </span>
+        </div>
       </div>
-      <div class="hero-actions">
-        <el-button :icon="Refresh" :loading="loading" @click="loadWorkbench">刷新判断</el-button>
-        <el-button type="primary" @click="router.push(primaryAction.path)">{{ primaryAction.label }}</el-button>
+
+      <div class="header-actions">
+        <div class="layout-switcher" aria-label="布局预览切换">
+          <button
+            v-for="option in layoutOptions"
+            :key="option.mode"
+            :class="{ active: layoutMode === option.mode }"
+            :title="option.hint"
+            :aria-pressed="layoutMode === option.mode"
+            @click="layoutMode = option.mode"
+          >
+            <span>{{ option.mode }}</span>
+            {{ option.label }}
+          </button>
+        </div>
+        <el-button size="small" :icon="Refresh" :loading="loading" @click="loadWorkbench">刷新判断</el-button>
+        <el-button size="small" type="primary" class="btn-pine" @click="router.push(primaryAction.path)">
+          {{ primaryAction.label }}
+        </el-button>
       </div>
     </header>
 
-    <section class="decision-strip">
-      <article class="decision-score" :class="`decision-score--${decisionTone}`">
-        <span>Research Readiness</span>
-        <strong>{{ readinessScore }}</strong>
-        <small>{{ decisionSummary }}</small>
-      </article>
-      <article v-for="card in focusCards" :key="card.key" class="focus-card" :class="`focus-card--${card.tone}`">
-        <span>{{ card.label }}</span>
-        <strong>{{ card.value }}</strong>
-        <small>{{ card.hint }}</small>
-      </article>
-    </section>
+    <div v-if="layoutMode === 'A'" class="layout-a split-pane">
+      <aside class="split-rail">
+        <div class="panel-kicker">PIPELINE</div>
+        <nav class="pipeline-nav">
+          <button v-for="stage in pipelineStages" :key="stage.path" class="pipeline-step" @click="router.push(stage.path)">
+            <span class="step-index">{{ stage.kicker.split(' ')[0] }}</span>
+            <span class="step-copy">
+              <strong>{{ stage.title }}</strong>
+              <small>{{ stage.description }}</small>
+            </span>
+          </button>
+        </nav>
+      </aside>
 
-    <section class="decision-layout">
-      <article class="panel-card action-panel">
-        <div class="panel-card__head">
+      <main class="split-work">
+        <section class="readiness-strip" :class="`strip--${decisionTone}`">
           <div>
-            <span class="section-kicker">TODAY'S CALLS</span>
-            <h3>今日行动建议</h3>
+            <span class="panel-kicker">READINESS</span>
+            <strong>{{ readinessScore }}</strong>
           </div>
-          <el-button text size="small" @click="router.push('/research')">进入研究实验室</el-button>
-        </div>
-        <div class="action-stack">
-          <button
-            v-for="action in actionRows"
-            :key="action.key"
-            type="button"
-            class="action-row"
-            :class="`action-row--${action.tone}`"
-            @click="router.push(action.path)"
-          >
-            <span>{{ action.kicker }}</span>
-            <div>
-              <strong>{{ action.title }}</strong>
-              <small>{{ action.description }}</small>
+          <p>{{ decisionSummary }}</p>
+        </section>
+
+        <section class="pane-section">
+          <div class="section-heading">
+            <span>今日行动建议</span>
+            <small>TODAY'S CALLS</small>
+          </div>
+          <div class="table-wrap">
+            <table class="quant-table">
+              <thead>
+                <tr>
+                  <th>级别</th>
+                  <th>模块</th>
+                  <th>建议动作</th>
+                  <th class="text-right">入口</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="action in actionRows"
+                  :key="action.key"
+                  class="clickable-row"
+                  @click="router.push(action.path)"
+                >
+                  <td><span class="tone-chip" :class="`tone-chip--${action.tone}`">{{ action.kicker }}</span></td>
+                  <td class="text-strong">{{ action.key.toUpperCase() }}</td>
+                  <td>
+                    <div class="task-copy">
+                      <strong>{{ action.title }}</strong>
+                      <span>{{ action.description }}</span>
+                    </div>
+                  </td>
+                  <td class="text-right action-link">{{ action.cta }} →</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+      </main>
+
+      <aside class="split-aside">
+        <section class="pane-section">
+          <div class="panel-kicker">FOCUS</div>
+          <div class="status-stack">
+            <div v-for="card in focusCards" :key="card.key" class="status-row" :class="`row--${card.tone}`">
+              <span class="status-dot"></span>
+              <span class="status-name" :title="card.hint">{{ card.label }}</span>
+              <strong>{{ card.value }}</strong>
             </div>
-            <b>{{ action.cta }}</b>
-          </button>
-        </div>
-      </article>
+          </div>
+        </section>
 
-      <article class="panel-card input-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">RESEARCH INPUTS</span>
-            <h3>投研输入口径</h3>
+        <section class="pane-section">
+          <div class="panel-kicker">INPUTS</div>
+          <div class="status-stack">
+            <div v-for="row in researchInputRows" :key="row.label" class="status-row" :class="`row--${row.tone}`">
+              <span class="status-dot"></span>
+              <span class="status-name">{{ row.label }}</span>
+              <strong>{{ row.value }}</strong>
+            </div>
           </div>
-          <el-button text size="small" @click="router.push('/data')">查看详情</el-button>
-        </div>
-        <div class="input-grid">
-          <div v-for="row in researchInputRows" :key="row.label" class="input-row" :class="`input-row--${row.tone}`">
-            <span>{{ row.label }}</span>
-            <strong>{{ row.value }}</strong>
-            <small>{{ row.hint }}</small>
-          </div>
-        </div>
-      </article>
-    </section>
+        </section>
 
-    <section class="workbench-grid">
-      <article class="panel-card pipeline-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">RESEARCH PIPELINE</span>
-            <h3>投研流水线推进</h3>
-          </div>
-        </div>
-        <div class="pipeline-rail">
-          <button v-for="stage in pipelineStages" :key="stage.path" type="button" class="pipeline-step" @click="router.push(stage.path)">
-            <span>{{ stage.kicker }}</span>
-            <strong>{{ stage.title }}</strong>
-            <p>{{ stage.description }}</p>
-          </button>
-        </div>
-      </article>
-
-      <article class="panel-card handoff-panel">
-        <div class="panel-card__head">
-          <div>
-            <span class="section-kicker">HANDOFF TAPE</span>
-            <h3>最近影响研究的事件</h3>
-          </div>
-          <el-button text size="small" @click="router.push('/monitor')">运维排障</el-button>
-        </div>
-        <div v-if="handoffRows.length" class="handoff-list">
-          <div v-for="row in handoffRows" :key="row.key" class="handoff-row">
-            <div>
+        <section class="pane-section">
+          <div class="panel-kicker">HANDOFF</div>
+          <div class="event-stack">
+            <button v-for="row in handoffRows" :key="row.key" class="event-row" type="button">
+              <span class="event-meta">
+                <span>{{ row.subtitle }}</span>
+                <em :class="`badge--${row.tone}`">{{ row.status }}</em>
+              </span>
               <strong>{{ row.title }}</strong>
-              <span>{{ row.subtitle }}</span>
-            </div>
-            <b :class="`tone-${row.tone}`">{{ row.status }}</b>
+            </button>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <div v-else-if="layoutMode === 'B'" class="layout-b matrix-sheet">
+      <section class="matrix-summary">
+        <div>
+          <span>就绪评分</span>
+          <strong :class="`text--${decisionTone}`">{{ readinessScore }}</strong>
+        </div>
+        <div>
+          <span>同步写入</span>
+          <strong :class="hasBlockingSync ? 'text--warn' : 'text--good'">
+            {{ hasBlockingSync ? '进行中' : '无阻塞' }}
+          </strong>
+        </div>
+        <div>
+          <span>交易护栏</span>
+          <strong :class="tradeRiskOpen ? 'text--bad' : 'text--good'">
+            {{ tradeRiskOpen ? '真实下单开启' : '仅信号' }}
+          </strong>
+        </div>
+        <div>
+          <span>最近回测</span>
+          <strong>{{ latestBacktestText }}</strong>
+        </div>
+      </section>
+
+      <section class="matrix-table-section">
+        <div class="section-heading">
+          <span>矩阵审计表</span>
+          <small>DIAGNOSTIC MATRIX</small>
+        </div>
+        <div class="table-wrap">
+          <table class="quant-table matrix-table">
+            <thead>
+              <tr>
+                <th>模块</th>
+                <th>时间 / 状态</th>
+                <th>诊断</th>
+                <th>建议动作</th>
+                <th>关联页面</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in researchInputRows" :key="row.label">
+                <td class="text-strong">{{ row.label }}</td>
+                <td class="font-mono muted">{{ row.value }}</td>
+                <td>
+                  <span class="tone-chip" :class="`tone-chip--${row.tone}`">
+                    {{ row.tone === 'good' ? 'READY' : 'GAP' }}
+                  </span>
+                </td>
+                <td>{{ row.hint }}</td>
+                <td class="font-mono muted">/data</td>
+              </tr>
+              <tr
+                v-for="action in actionRows"
+                :key="action.key"
+                class="clickable-row action-audit-row"
+                @click="router.push(action.path)"
+              >
+                <td class="text-strong">{{ action.kicker }}</td>
+                <td class="font-mono muted">待执行</td>
+                <td><span class="tone-chip" :class="`tone-chip--${action.tone}`">{{ action.tone.toUpperCase() }}</span></td>
+                <td>
+                  <strong class="action-link">{{ action.title }}</strong>
+                  <span class="audit-desc">{{ action.description }}</span>
+                </td>
+                <td class="font-mono muted">{{ action.path }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="matrix-tape">
+        <span class="panel-kicker">HANDOFF TAPE</span>
+        <div class="tape-scroll">
+          <div v-for="row in handoffRows" :key="row.key" class="tape-item">
+            <span class="font-mono">[{{ row.subtitle.slice(-5) }}]</span>
+            <strong>{{ row.title }}</strong>
+            <em :class="`badge--${row.tone}`">{{ row.status }}</em>
           </div>
         </div>
-        <p v-else class="empty-copy">暂无影响投研决策的近期事件。</p>
-      </article>
-    </section>
+      </section>
+    </div>
+
+    <div v-else class="layout-c console-dashboard">
+      <section class="console-panel">
+        <div class="console-title">ACTIVE WORKFLOW TERMINAL</div>
+        <div class="console-window">
+          <div class="console-line">
+            <span class="prompt">$</span>
+            <span>select.step --active</span>
+          </div>
+          <div class="console-output">
+            <span class="console-muted">CURRENT WORKFLOW STATE</span>
+            <div class="console-pills">
+              <button v-for="stage in pipelineStages" :key="stage.path" type="button" @click="router.push(stage.path)">
+                {{ stage.kicker.split(' ')[0] }} {{ stage.title }}
+              </button>
+            </div>
+          </div>
+
+          <div class="console-line spaced">
+            <span class="prompt">$</span>
+            <span>suggest.actions --target=ready</span>
+          </div>
+          <div class="console-output">
+            <button
+              v-for="action in actionRows"
+              :key="action.key"
+              class="console-action"
+              type="button"
+              @click="router.push(action.path)"
+            >
+              <span :class="`console-tone--${action.tone}`">[{{ action.kicker }}]</span>
+              <strong>{{ action.title }}</strong>
+              <em>{{ action.description }}</em>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <section class="console-panel">
+        <div class="console-title">CONSOLE METERS</div>
+        <div class="console-window">
+          <div class="meter-block">
+            <span>READINESS METER: {{ readinessScore }}</span>
+            <strong>[{{ consoleBar }}]</strong>
+          </div>
+
+          <div class="terminal-list">
+            <div class="terminal-heading">SYSTEM STATE</div>
+            <div v-for="row in consoleStatusRows" :key="row.label" class="terminal-row">
+              <span>{{ row.label }}</span>
+              <i></i>
+              <strong :class="`console-tone--${row.tone}`">[{{ row.value }}]</strong>
+            </div>
+          </div>
+
+          <div class="terminal-list">
+            <div class="terminal-heading">DATA INGESTION</div>
+            <div v-for="row in researchInputRows" :key="row.label" class="terminal-row">
+              <span>{{ row.label }}</span>
+              <i></i>
+              <strong :class="`console-tone--${row.tone}`">[{{ row.value.split(' ')[0] || 'EMPTY' }}]</strong>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -123,6 +296,13 @@ import { backtestApi, type Backtest } from '@/api/backtest'
 import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral'
+type LayoutMode = 'A' | 'B' | 'C'
+
+interface LayoutOption {
+  mode: LayoutMode
+  label: string
+  hint: string
+}
 
 interface FocusCard {
   key: string
@@ -150,6 +330,8 @@ interface HandoffRow {
   tone: Tone
 }
 
+const layoutMode = ref<LayoutMode>('A')
+
 const router = useRouter()
 const loading = ref(false)
 const systemStatus = ref<SystemStatus | null>(null)
@@ -160,12 +342,19 @@ const runtimeTasks = ref<RuntimeTask[]>([])
 const latestBacktests = ref<Backtest[]>([])
 const liveStatus = ref<LiveTradingStatus | null>(null)
 
+const layoutOptions: LayoutOption[] = [
+  { mode: 'A', label: 'Split Pane', hint: '分栏终端' },
+  { mode: 'B', label: 'Matrix Audit Sheet', hint: '矩阵审计表' },
+  { mode: 'C', label: 'Console Dashboard', hint: '极客命令行' },
+]
+
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
 const latestBacktest = computed(() => latestBacktests.value[0] || null)
 const dataReadyCount = computed(() => researchInputRows.value.filter(row => row.tone === 'good').length)
 const hasBlockingSync = computed(() => ['queued', 'running'].includes(syncStatus.value?.status || ''))
 const tradeRiskOpen = computed(() => liveStatus.value?.order_submit_enabled === true)
+const latestBacktestText = computed(() => latestBacktest.value ? backtestStatusLabel(latestBacktest.value.status) : '未运行')
 
 const readinessScore = computed(() => {
   let score = 40
@@ -193,6 +382,35 @@ const decisionSummary = computed(() => {
   if (!latestBacktest.value) return '数据已可看，建议先跑一轮基准回测'
   return '可以进入因子评估或策略迭代'
 })
+
+const readinessPercent = computed(() => Number(readinessScore.value.replace('%', '')))
+const consoleBar = computed(() => {
+  const completed = Math.round(readinessPercent.value / 4)
+  return `${'='.repeat(completed)}>${'.'.repeat(Math.max(0, 25 - completed))}`
+})
+
+const consoleStatusRows = computed(() => [
+  {
+    label: 'SYSTEM HEALTH',
+    value: systemStatus.value?.status === 'healthy' || systemStatus.value?.status === 'ok' ? 'OK' : 'CHECK',
+    tone: systemStatus.value?.status === 'healthy' || systemStatus.value?.status === 'ok' ? 'good' as Tone : 'warn' as Tone,
+  },
+  {
+    label: 'MUTATING SYNC',
+    value: hasBlockingSync.value ? 'ACTIVE' : 'NONE',
+    tone: hasBlockingSync.value ? 'warn' as Tone : 'good' as Tone,
+  },
+  {
+    label: 'LAST BACKTEST',
+    value: latestBacktest.value ? latestBacktest.value.status.toUpperCase() : 'NONE',
+    tone: latestBacktest.value?.status === 'failed' ? 'bad' as Tone : latestBacktest.value ? 'good' as Tone : 'neutral' as Tone,
+  },
+  {
+    label: 'REAL ORDER ROUTE',
+    value: tradeRiskOpen.value ? 'ACTIVE' : 'SIGNAL',
+    tone: tradeRiskOpen.value ? 'bad' as Tone : 'good' as Tone,
+  },
+])
 
 const primaryAction = computed(() => {
   const firstAction = actionRows.value[0]
@@ -458,316 +676,819 @@ onMounted(loadWorkbench)
 </script>
 
 <style scoped>
-.home-workbench {
-  overflow: auto;
+/* ─── 象牙暖白松风 Theme (Quant Compact Style) ─── */
+.theme-pine-quant {
+  --bg-page: #fdfbf7;         /* Warm Ivory White (象牙白) */
+  --bg-card: #f5f2ea;         /* Slightly darker warm tone for elements */
+  --bg-hover: #ebe7dc;        /* Hover transition tone */
+  --border-color: #e5dfd3;    /* Precise, hair-thin lines */
+  --text-main: #22302a;       /* Deep Pine Black / Dark Ink */
+  --text-sub: #54635c;        /* Moss Green Muted */
+  --text-light: #7e8d86;      /* Lighter Moss Gray */
+  
+  /* Brand Accent Colors */
+  --pine-primary: #1b3d32;    /* Deep Pine Green (松风绿) */
+  --pine-secondary: #355e4f;  /* Medium Pine Green */
+  --pine-bg-light: #eef3f0;   /* Muted Pine background tint */
+
+  /* Quant Semantics (Muted Traditional Chinese Tones) */
+  --color-good: #2d6a4f;      /* Soft Jade Green */
+  --color-good-bg: #eaf5f0;
+  --color-warn: #b27a1e;      /* Soft Ochre Yellow */
+  --color-warn-bg: #fdf6e6;
+  --color-bad: #a83232;       /* Soft Madder Red */
+  --color-bad-bg: #fbf1f1;
+  --color-neutral: #5c6863;
+  --color-neutral-bg: #f2f2ef;
+
+  background-color: var(--bg-page);
+  color: var(--text-main);
+  min-height: 100vh;
+  box-sizing: border-box;
+  padding: 16px 20px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: -0.01em;
 }
 
-.workbench-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-4);
-  align-items: center;
-  padding: var(--space-5);
-  border-color: rgba(56, 189, 248, 0.2);
+/* Common Kicker Style */
+.section-kicker {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--pine-secondary);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
-.workbench-hero h2 {
-  margin: var(--space-1) 0 var(--space-2);
-  font-size: 25px;
-}
-
-.workbench-hero p {
-  margin: 0;
-  max-width: 860px;
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
-}
-
-.hero-actions {
+/* Header Section */
+.workbench-header {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: var(--space-2);
-}
-
-.decision-strip {
-  display: grid;
-  grid-template-columns: minmax(240px, 1.35fr) repeat(4, minmax(0, 1fr));
-  gap: var(--space-3);
-}
-
-.decision-score,
-.focus-card {
-  display: flex;
-  min-height: 122px;
-  flex-direction: column;
   justify-content: space-between;
-  gap: var(--space-2);
-  padding: var(--space-4);
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(10, 14, 20, 0.68));
-  box-shadow: var(--shadow-card);
+  align-items: center;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 12px;
+  margin-bottom: 16px;
 }
 
-.decision-score strong {
-  color: var(--text-bright);
-  font-family: var(--font-data);
-  font-size: 34px;
-  letter-spacing: -0.04em;
-}
-
-.focus-card strong {
-  color: var(--text-bright);
-  font-family: var(--font-data);
-  font-size: 18px;
-}
-
-.decision-score span,
-.decision-score small,
-.focus-card span,
-.focus-card small {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-  line-height: 1.5;
-}
-
-.decision-score--good,
-.focus-card--good {
-  border-color: rgba(34, 197, 94, 0.32);
-}
-
-.decision-score--warn,
-.focus-card--warn {
-  border-color: rgba(245, 158, 11, 0.34);
-}
-
-.decision-score--bad,
-.focus-card--bad {
-  border-color: rgba(239, 68, 68, 0.36);
-}
-
-.decision-layout,
-.workbench-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1.18fr) minmax(360px, 0.82fr);
-  gap: var(--space-4);
-}
-
-.action-stack,
-.input-grid,
-.handoff-list {
+.header-brand {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
-  padding: var(--space-4);
+  gap: 2px;
 }
 
-.action-row {
-  display: grid;
-  grid-template-columns: 118px minmax(0, 1fr) auto;
+.title-group {
+  display: flex;
   align-items: center;
-  gap: var(--space-3);
+  gap: 12px;
+}
+
+.title-group h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--pine-primary);
+}
+
+.decision-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 4px;
+  border: 1px solid transparent;
+}
+
+.decision-pill .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.pill--good {
+  background: var(--color-good-bg);
+  color: var(--color-good);
+  border-color: rgba(45, 106, 79, 0.2);
+}
+.pill--good .dot { background-color: var(--color-good); }
+
+.pill--warn {
+  background: var(--color-warn-bg);
+  color: var(--color-warn);
+  border-color: rgba(178, 122, 30, 0.2);
+}
+.pill--warn .dot { background-color: var(--color-warn); }
+
+.pill--bad {
+  background: var(--color-bad-bg);
+  color: var(--color-bad);
+  border-color: rgba(168, 50, 50, 0.2);
+}
+.pill--bad .dot { background-color: var(--color-bad); }
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+/* Segmented Control Switcher */
+.layout-switcher {
+  display: flex;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  padding: 2px;
+  border-radius: 4px;
+}
+
+.layout-switcher button {
+  background: transparent;
+  border: none;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-sub);
+  padding: 4px 8px;
+  cursor: pointer;
+  border-radius: 3px;
+  transition: all 0.15s ease;
+}
+
+.layout-switcher button.active {
+  background-color: var(--pine-primary);
+  color: #ffffff;
+}
+
+/* Button overrides for element-plus */
+:deep(.el-button) {
+  border-radius: 4px;
+  border-color: var(--border-color);
+  background-color: var(--bg-card);
+  color: var(--text-main);
+  font-weight: 500;
+}
+:deep(.el-button:hover) {
+  background-color: var(--bg-hover);
+  border-color: var(--text-light);
+  color: var(--pine-primary);
+}
+
+:deep(.el-button--primary.btn-pine) {
+  background-color: var(--pine-primary) !important;
+  border-color: var(--pine-primary) !important;
+  color: #ffffff !important;
+}
+:deep(.el-button--primary.btn-pine:hover) {
+  background-color: var(--pine-secondary) !important;
+  border-color: var(--pine-secondary) !important;
+}
+
+/* ========================================== */
+/* MODE 1: SPLIT PANE STYLES                  */
+/* ========================================== */
+.layout-split {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr) 280px;
+  gap: 1px;
+  background-color: var(--border-color);
+  border: 1px solid var(--border-color);
+  margin-top: 16px;
+}
+
+.layout-split > div {
+  background-color: var(--bg-page);
+  padding: 16px;
+  box-sizing: border-box;
+}
+
+.split-sidebar {
+  border-right: 1px solid var(--border-color);
+}
+
+.sidebar-title {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-light);
+  letter-spacing: 0.1em;
+  margin-bottom: 12px;
+}
+
+.pipeline-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pipeline-nav-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  background: transparent;
+  border: none;
   width: 100%;
-  padding: 13px 14px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  color: var(--text-primary);
   text-align: left;
-  background: rgba(10, 14, 20, 0.58);
+  padding: 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.pipeline-nav-btn:hover {
+  background-color: var(--bg-card);
+}
+
+.nav-num {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pine-secondary);
+}
+
+.nav-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.nav-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.nav-desc {
+  font-size: 10px;
+  color: var(--text-light);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+.readiness-banner {
+  padding: 12px;
+  border-radius: 4px;
+  margin-bottom: 16px;
+  border-left: 4px solid transparent;
+}
+
+.readiness-banner--good {
+  background-color: var(--color-good-bg);
+  border-left-color: var(--color-good);
+}
+.readiness-banner--warn {
+  background-color: var(--color-warn-bg);
+  border-left-color: var(--color-warn);
+}
+.readiness-banner--bad {
+  background-color: var(--color-bad-bg);
+  border-left-color: var(--color-bad);
+}
+
+.banner-title {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  color: var(--text-sub);
+  letter-spacing: 0.08em;
+}
+
+.banner-core {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 4px;
+}
+
+.banner-score {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--text-main);
+}
+
+.banner-hint {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+/* Shared Tables */
+.quant-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+
+.quant-table th {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 10px;
+  color: var(--text-light);
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border-color);
+  font-weight: 600;
+}
+
+.quant-table td {
+  padding: 8px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 12px;
+  color: var(--text-main);
+  vertical-align: middle;
+}
+
+.quant-table tr.clickable-row {
   cursor: pointer;
 }
 
-.action-row:hover {
-  border-color: rgba(56, 189, 248, 0.42);
-  background: rgba(56, 189, 248, 0.08);
+.quant-table tr.clickable-row:hover {
+  background-color: var(--bg-hover);
 }
 
-.action-row span {
-  color: var(--accent-primary);
-  font-family: var(--font-data);
-  font-size: var(--text-xs);
+.text-right {
+  text-align: right !important;
 }
 
-.action-row strong,
-.handoff-row strong {
-  color: var(--text-bright);
+.text-bold {
+  font-weight: 600;
 }
 
-.action-row small {
-  display: block;
+.text-secondary {
+  color: var(--text-sub) !important;
+}
+
+.font-mono {
+  font-family: "Consolas", Monaco, monospace;
+}
+
+.text-link {
+  color: var(--pine-secondary);
+  font-weight: 600;
+}
+
+.table-kicker {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 4px;
+  border-radius: 2px;
+}
+
+.table-kicker.kicker--good {
+  background-color: var(--color-good-bg);
+  color: var(--color-good);
+}
+.table-kicker.kicker--warn {
+  background-color: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+.table-kicker.kicker--bad {
+  background-color: var(--color-bad-bg);
+  color: var(--color-bad);
+}
+.table-kicker.kicker--neutral {
+  background-color: var(--color-neutral-bg);
+  color: var(--color-neutral);
+}
+
+.task-title-wrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.task-main-title {
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.task-sub-title {
+  font-size: 10px;
+  color: var(--text-light);
+  margin-top: 1px;
+}
+
+.dense-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dense-status-item {
+  display: flex;
+  align-items: center;
+  padding: 6px 8px;
+  background-color: var(--bg-card);
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+.dense-status-item .status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 8px;
+}
+
+.item-tone--good .status-dot { background-color: var(--color-good); }
+.item-tone--warn .status-dot { background-color: var(--color-warn); }
+.item-tone--bad .status-dot { background-color: var(--color-bad); }
+
+.status-label {
+  font-weight: 600;
+  flex-grow: 1;
+}
+
+.status-value {
+  font-family: "Consolas", Monaco, monospace;
+  color: var(--text-sub);
+}
+
+.compact-feed {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.feed-node {
+  border-bottom: 1px dashed var(--border-color);
+  padding-bottom: 6px;
+}
+.feed-node:last-child {
+  border-bottom: none;
+}
+
+.node-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.node-time {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 9px;
+  color: var(--text-light);
+}
+
+.node-badge {
+  font-size: 9px;
+  font-weight: 600;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+.badge-tone--good {
+  background-color: var(--color-good-bg);
+  color: var(--color-good);
+}
+.badge-tone--warn {
+  background-color: var(--color-warn-bg);
+  color: var(--color-warn);
+}
+.badge-tone--bad {
+  background-color: var(--color-bad-bg);
+  color: var(--color-bad);
+}
+.badge-tone--neutral {
+  background-color: var(--color-neutral-bg);
+  color: var(--color-neutral);
+}
+
+.node-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+  margin-top: 2px;
+}
+
+.margin-top-lg {
+  margin-top: 24px;
+}
+
+.section-title {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pine-secondary);
+  letter-spacing: 0.08em;
+  margin-bottom: 8px;
+}
+
+/* ========================================== */
+/* MODE 2: MATRIX AUDIT SHEET STYLES          */
+/* ========================================== */
+.layout-matrix {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.matrix-summary-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-card);
+  border-radius: 4px;
+}
+
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  padding: 10px 16px;
+  border-right: 1px solid var(--border-color);
+}
+.summary-item:last-child {
+  border-right: none;
+}
+
+.summary-item .label {
+  font-size: 10px;
+  color: var(--text-light);
+  text-transform: uppercase;
+}
+
+.summary-item .val {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-main);
   margin-top: 4px;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  line-height: 1.5;
 }
 
-.action-row b {
-  color: var(--text-bright);
-  font-size: var(--text-xs);
+.summary-item .val.score {
+  font-size: 20px;
+}
+
+.color--good { color: var(--color-good) !important; }
+.color--warn { color: var(--color-warn) !important; }
+.color--bad { color: var(--color-bad) !important; }
+
+.status-badge-flat {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.text-light-desc {
+  color: var(--text-sub);
+}
+
+.matrix-action-tr td {
+  background-color: var(--color-warn-bg);
+}
+
+.text-warn-color {
+  color: var(--color-warn);
+}
+
+.action-desc-small {
+  font-size: 10px;
+  font-weight: normal;
+  color: var(--text-light);
+}
+
+.matrix-log-tape {
+  border: 1px solid var(--border-color);
+  background-color: var(--bg-card);
+  padding: 8px 12px;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.tape-title {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-light);
   white-space: nowrap;
 }
 
-.action-row--good {
-  border-color: rgba(34, 197, 94, 0.26);
-}
-
-.action-row--warn {
-  border-color: rgba(245, 158, 11, 0.3);
-}
-
-.action-row--bad {
-  border-color: rgba(239, 68, 68, 0.34);
-}
-
-.input-row {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr);
-  gap: 4px var(--space-3);
-  padding: 11px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: rgba(10, 14, 20, 0.58);
-}
-
-.input-row span,
-.input-row small,
-.handoff-row span {
-  color: var(--text-muted);
-  font-size: var(--text-xs);
-}
-
-.input-row strong {
-  color: var(--text-primary);
-  font-family: var(--font-data);
-}
-
-.input-row small {
-  grid-column: 2;
-}
-
-.input-row--good {
-  border-color: rgba(34, 197, 94, 0.2);
-}
-
-.input-row--warn {
-  border-color: rgba(245, 158, 11, 0.28);
-}
-
-.pipeline-panel {
-  padding-bottom: var(--space-4);
-}
-
-.pipeline-rail {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  gap: var(--space-3);
-  padding: 0 var(--space-4);
-}
-
-.pipeline-step {
-  position: relative;
-  min-height: 170px;
-  padding: var(--space-4);
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-lg);
-  color: var(--text-primary);
-  text-align: left;
-  background: rgba(10, 14, 20, 0.58);
-  cursor: pointer;
-}
-
-.pipeline-step:hover {
-  border-color: rgba(56, 189, 248, 0.42);
-  background: rgba(56, 189, 248, 0.08);
-}
-
-.pipeline-step span {
-  color: var(--accent-primary);
-  font-family: var(--font-data);
-  font-size: var(--text-xs);
-}
-
-.pipeline-step strong {
-  display: block;
-  margin: var(--space-2) 0;
-  color: var(--text-bright);
-  font-size: var(--text-base);
-}
-
-.pipeline-step p {
-  margin: 0;
-  color: var(--text-secondary);
-  font-size: var(--text-xs);
-  line-height: 1.55;
-}
-
-.handoff-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-3);
-  padding: 11px 12px;
-  border: 1px solid var(--border-subtle);
-  border-radius: var(--radius-md);
-  background: rgba(10, 14, 20, 0.58);
-}
-
-.handoff-row div {
+.tape-scroll {
   display: flex;
-  min-width: 0;
+  gap: 18px;
+  overflow-x: auto;
+  flex-grow: 1;
+}
+
+.tape-log-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.tape-log-item .time {
+  font-family: "Consolas", Monaco, monospace;
+  color: var(--text-light);
+}
+
+.tape-log-item .title {
+  color: var(--text-main);
+}
+
+.tape-log-item .badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 2px;
+}
+
+/* ========================================== */
+/* MODE 3: CONSOLE STYLES                     */
+/* ========================================== */
+.layout-console {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.console-title {
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--pine-secondary);
+  margin-bottom: 8px;
+}
+
+.cli-pane {
+  background-color: #1a2420; /* Ultra-dark moss green console */
+  border: 1px solid #2f3e38;
+  border-radius: 6px;
+  padding: 16px;
+  color: #c9d6d0; /* Muted ivory-green code text */
+  font-family: "Consolas", Monaco, monospace;
+  font-size: 12px;
+  min-height: 280px;
+  box-sizing: border-box;
+}
+
+.cli-line {
+  display: flex;
+  gap: 8px;
+}
+
+.cli-prompt {
+  color: #639c80; /* Pine terminal prompt symbol */
+}
+
+.cli-command {
+  color: #f7f9f8;
+}
+
+.cli-response {
+  margin-left: 16px;
+  margin-top: 4px;
+  display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 4px;
 }
 
-.tone-good {
-  color: var(--status-ready);
+.response-lead {
+  color: #7b9388;
+  font-size: 11px;
 }
 
-.tone-warn {
-  color: var(--color-warning);
+.workflow-cli-nodes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
 }
 
-.tone-bad {
-  color: var(--status-attention);
+.cli-node-pill {
+  background-color: #273730;
+  border: 1px solid #374b42;
+  color: #e6ede8;
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 11px;
+  transition: all 0.2s ease;
 }
 
-.tone-neutral {
-  color: var(--text-secondary);
+.cli-node-pill:hover {
+  background-color: var(--pine-primary);
+  border-color: var(--pine-secondary);
 }
 
-@media (max-width: 1500px) {
-  .decision-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .pipeline-rail {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
+.margin-top-md {
+  margin-top: 16px;
 }
 
-@media (max-width: 980px) {
-  .workbench-hero,
-  .decision-layout,
-  .workbench-grid {
+.suggest-cli-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.cli-action-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: 3px;
+}
+.cli-action-row:hover {
+  background-color: #25332d;
+}
+
+.cli-action-row .tag {
+  font-weight: 700;
+  font-size: 10px;
+}
+
+.tag-tone--good { color: #5bc295; }
+.tag-tone--warn { color: #d09d43; }
+.tag-tone--bad { color: #d96262; }
+.tag-tone--neutral { color: #8ea097; }
+
+.command-link {
+  color: #ffffff;
+  text-decoration: underline;
+}
+
+.cli-action-row .desc {
+  color: #7b9388;
+  font-size: 11px;
+}
+
+.meter-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meter-label {
+  font-weight: 700;
+  color: #7b9388;
+}
+
+.ascii-bar {
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  color: #5bc295;
+  font-weight: bold;
+}
+
+.cli-checklist {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.checklist-header {
+  font-weight: 700;
+  color: #639c80;
+  font-size: 11px;
+  border-bottom: 1px dashed #2f3e38;
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+}
+
+.checklist-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.checklist-item .label {
+  color: #e6ede8;
+}
+
+.checklist-item .dots {
+  flex-grow: 1;
+  color: #31443c;
+  overflow: hidden;
+  text-align: center;
+}
+
+.checklist-item .status-text {
+  font-weight: 700;
+}
+
+.color-good { color: #5bc295 !important; }
+.color-warn { color: #d09d43 !important; }
+.color-bad { color: #d96262 !important; }
+
+/* Responsive adjustments for layouts */
+@media (max-width: 1200px) {
+  .layout-split {
     grid-template-columns: 1fr;
   }
-
-  .hero-actions {
-    justify-content: flex-start;
+  .split-sidebar, .split-right {
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
   }
-}
-
-@media (max-width: 680px) {
-  .decision-strip,
-  .pipeline-rail,
-  .action-row,
-  .input-row {
+  .layout-console {
     grid-template-columns: 1fr;
-  }
-
-  .input-row small {
-    grid-column: auto;
   }
 }
 </style>

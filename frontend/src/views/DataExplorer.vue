@@ -1,267 +1,402 @@
 <template>
-  <div class="data-explorer">
-    <aside class="explorer-sidebar">
-      <section class="side-section">
-        <div class="side-title">
-          <span>TABLES</span>
-          <strong>数据表</strong>
-        </div>
-        <el-input v-model="tableSearch" placeholder="搜索表名" clearable size="small" />
-        <div v-if="tablesLoading" class="side-state">正在加载数据表...</div>
-        <div v-else-if="!filteredTables.length" class="side-state">暂无数据表</div>
-        <div v-else class="table-list">
+  <div class="data-explorer-container theme-pine-quant">
+    <!-- Header of the page -->
+    <header class="workspace-header">
+      <div class="header-left">
+        <span class="panel-kicker">DATA EXPLORER / 数据浏览器</span>
+        <h2>{{ selectedTable || '选择数据表' }}</h2>
+        <p v-if="selectedTableInfo">
+          {{ selectedTableInfo.label || selectedTableInfo.name }} · {{ formatRowCount(selectedTableInfo.row_count) }}
+          <template v-if="selectedTableInfo.min_date || selectedTableInfo.max_date">
+            · {{ selectedTableInfo.min_date || '-' }} 至 {{ selectedTableInfo.max_date || '-' }}
+          </template>
+          <template v-if="selectedTableInfo.date_column">
+            · 日期字段 {{ selectedTableInfo.date_column }}
+          </template>
+        </p>
+        <p v-else>选择左侧表后，通过快捷筛选或条件构造器查询。</p>
+      </div>
+
+      <div class="header-actions">
+        <!-- Layout Switcher -->
+        <div class="layout-switcher" aria-label="切换数据查看布局">
           <button
-            v-for="table in filteredTables"
-            :key="table.name"
-            class="table-item"
-            :class="{ 'table-item--selected': selectedTable === table.name }"
-            @click="selectTable(table.name)"
+            v-for="mode in layoutModes"
+            :key="mode.key"
+            type="button"
+            :class="{ active: layoutMode === mode.key }"
+            @click="layoutMode = mode.key"
           >
-            <span>
-              <strong>{{ table.label || table.name }}</strong>
-              <em>{{ table.name }}</em>
-            </span>
-            <small>{{ table.category || 'parquet' }} · {{ formatRowCount(table.row_count) }}</small>
+            {{ mode.label }}
           </button>
         </div>
-      </section>
+        
+        <el-button @click="copyQuery" :disabled="!selectedTable">复制条件</el-button>
+        <el-button @click="exportCsv" :disabled="!result.rows.length">导出 CSV</el-button>
+        <el-button @click="loadData(true)" :disabled="!selectedTable" :loading="loading">
+          精确统计
+        </el-button>
+        <el-button type="primary" @click="loadData(false)" :disabled="!selectedTable" :loading="loading">
+          查询
+        </el-button>
+      </div>
+    </header>
 
-      <section class="side-section side-section--fields">
-        <div class="side-title">
-          <span>FIELDS</span>
-          <strong>字段</strong>
-        </div>
-        <el-input v-model="fieldSearch" placeholder="搜索字段" clearable size="small" />
-        <div class="field-list">
-          <button
-            v-for="column in filteredSchema"
-            :key="column.name"
-            class="field-chip"
-            :class="{
-              'field-chip--hidden': hiddenColumns.has(column.name),
-              'field-chip--key': keyColumns.has(column.name),
-            }"
-            @click="toggleColumnVisibility(column.name)"
-          >
-            <span>{{ hiddenColumns.has(column.name) ? '□' : '☑' }} {{ column.name }}</span>
-            <small>{{ column.type }}</small>
-          </button>
-        </div>
-      </section>
-    </aside>
-
-    <main class="explorer-workspace">
-      <header class="workspace-header">
-        <div>
-          <span class="panel-kicker">DATA EXPLORER</span>
-          <h2>{{ selectedTable || '选择数据表' }}</h2>
-          <p v-if="selectedTableInfo">
-            {{ selectedTableInfo.label || selectedTableInfo.name }} · {{ formatRowCount(selectedTableInfo.row_count) }}
-            <template v-if="selectedTableInfo.min_date || selectedTableInfo.max_date">
-              · {{ selectedTableInfo.min_date || '-' }} 至 {{ selectedTableInfo.max_date || '-' }}
-            </template>
-            <template v-if="selectedTableInfo.date_column">
-              · 日期字段 {{ selectedTableInfo.date_column }}
-            </template>
-          </p>
-          <p v-else>选择左侧表后，通过快捷筛选或条件构造器查询。</p>
-        </div>
-        <div class="header-actions">
-          <el-button @click="showSql = !showSql" :disabled="!selectedTable">
-            {{ showSql ? '收起 SQL' : '高级 SQL' }}
-          </el-button>
-          <el-button @click="copyQuery" :disabled="!selectedTable">复制条件</el-button>
-          <el-button @click="exportCsv" :disabled="!result.rows.length">导出 CSV</el-button>
-          <el-button @click="loadData(true)" :disabled="!selectedTable" :loading="loading">
-            精确统计
-          </el-button>
-          <el-button type="primary" @click="loadData(false)" :disabled="!selectedTable" :loading="loading">
-            查询
-          </el-button>
-        </div>
-      </header>
-
-      <section v-if="selectedTable" class="query-panel">
-        <div class="panel-block">
-          <div class="block-title">
-            <strong>快捷筛选</strong>
-            <span>只显示当前表存在的高频字段</span>
+    <!-- LAYOUT A (sql) -->
+    <div v-if="layoutMode === 'A'" class="layout-sql-grid">
+      <!-- Left Sidebar (220px): Schema tree (tables and columns) -->
+      <aside class="schema-sidebar">
+        <!-- Tables section -->
+        <div class="sidebar-section">
+          <div class="side-title">
+            <span>TABLES</span>
+            <strong>数据表</strong>
           </div>
-          <div class="quick-grid">
-            <el-form-item v-if="hasColumn('symbol')" label="股票代码">
-              <el-input v-model="quickSearch.symbol" clearable placeholder="600519.SH, 000001.SZ" @keyup.enter="applySearch" />
-            </el-form-item>
-            <el-form-item v-if="dateColumn" :label="`日期范围（${dateColumn}）`" class="date-range-item">
-              <div class="date-pair">
-                <el-date-picker
-                  v-model="quickSearch.start_date"
-                  type="date"
-                  value-format="YYYY-MM-DD"
-                  placeholder="开始日期"
-                />
-                <span>至</span>
-                <el-date-picker
-                  v-model="quickSearch.end_date"
-                  type="date"
-                  value-format="YYYY-MM-DD"
-                  placeholder="结束日期"
-                />
-              </div>
-            </el-form-item>
-            <el-form-item v-if="hasColumn('factor_name')" label="因子名">
-              <el-select
-                v-model="quickSearch.factor_name"
-                filterable
-                remote
-                clearable
-                placeholder="搜索因子名"
-                :remote-method="(value: string) => loadSuggestions('factor_name', value)"
-              >
-                <el-option v-for="item in suggestions.factor_name || []" :key="item" :label="item" :value="item" />
-              </el-select>
-            </el-form-item>
-            <el-form-item v-if="hasColumn('indicator_name')" label="指标名">
-              <el-select
-                v-model="quickSearch.indicator_name"
-                filterable
-                remote
-                clearable
-                placeholder="搜索指标名"
-                :remote-method="(value: string) => loadSuggestions('indicator_name', value)"
-              >
-                <el-option v-for="item in suggestions.indicator_name || []" :key="item" :label="item" :value="item" />
-              </el-select>
-            </el-form-item>
-          </div>
-        </div>
-
-        <div class="panel-block">
-          <div class="block-title">
-            <strong>条件构造器</strong>
-            <span>组合字段、操作符和值，不用手写 WHERE</span>
-          </div>
-          <div class="filter-list">
-            <div
-              v-for="(filter, index) in filters"
-              :key="filter.id"
-              class="filter-row"
-              :class="{ 'filter-row--invalid': !filter.column }"
+          <el-input v-model="tableSearch" placeholder="搜索表名" clearable size="small" />
+          <div v-if="tablesLoading" class="side-state">正在加载...</div>
+          <div v-else-if="!filteredTables.length" class="side-state">暂无数据表</div>
+          <div v-else class="table-list-mini">
+            <button
+              v-for="table in filteredTables"
+              :key="table.name"
+              class="table-item-mini"
+              :class="{ 'table-item-mini--selected': selectedTable === table.name }"
+              @click="selectTable(table.name)"
             >
-              <el-select v-model="filter.column" filterable placeholder="字段" @change="onFilterColumnChange(filter)">
-                <el-option v-for="column in schema" :key="column.name" :label="column.name" :value="column.name" />
-              </el-select>
-              <el-select v-model="filter.op" placeholder="操作符">
-                <el-option v-for="op in operatorOptions" :key="op.value" :label="op.label" :value="op.value" />
-              </el-select>
-              <template v-if="filter.op === 'between'">
-                <el-input v-model="filter.value" placeholder="起始值" />
-                <el-input v-model="filter.value_to" placeholder="结束值" />
-              </template>
-              <template v-else-if="filter.op === 'in'">
-                <el-input v-model="filter.value" placeholder="逗号分隔多个值" />
-              </template>
-              <template v-else-if="filter.op !== 'is null' && filter.op !== 'not null'">
-                <el-select
-                  v-if="suggestibleColumns.has(filter.column)"
-                  v-model="filter.value"
-                  filterable
-                  remote
-                  allow-create
-                  clearable
-                  placeholder="搜索或输入值"
-                  :remote-method="(value: string) => loadSuggestions(filter.column, value)"
-                >
-                  <el-option v-for="item in suggestions[filter.column] || []" :key="item" :label="item" :value="item" />
-                </el-select>
-                <el-input v-else v-model="filter.value" placeholder="值" />
-              </template>
-              <el-button text type="danger" @click="removeFilter(index)">删除</el-button>
-            </div>
-          </div>
-          <div class="filter-actions">
-            <el-button @click="addFilter">添加条件</el-button>
-            <el-button @click="resetFilters">重置</el-button>
-            <el-button type="primary" @click="applySearch">应用查询</el-button>
+              <span class="table-name-span">{{ table.name }}</span>
+              <small class="table-label-small">{{ table.label || 'parquet' }}</small>
+            </button>
           </div>
         </div>
 
-        <el-collapse-transition>
-          <div v-if="showSql" class="panel-block sql-panel">
-            <div class="block-title">
-              <strong>高级 SQL / WHERE</strong>
-              <span>保留给临时排查；主流程建议使用条件构造器</span>
-            </div>
-            <el-input
-              v-model="whereClause"
-              type="textarea"
-              :rows="2"
-              placeholder="WHERE 条件，例如：symbol='600519.SH' AND trade_date >= '2026-05-01'"
-            />
-            <el-button @click="loadLegacyPreview" :disabled="!selectedTable">执行 WHERE</el-button>
+        <!-- Columns section -->
+        <div class="sidebar-section columns-section">
+          <div class="side-title">
+            <span>COLUMNS</span>
+            <strong>数据字段</strong>
           </div>
-        </el-collapse-transition>
-      </section>
+          <el-input v-model="fieldSearch" placeholder="搜索字段" clearable size="small" />
+          <div v-if="!selectedTable" class="side-state">选择表查看字段</div>
+          <div v-else-if="!filteredSchema.length" class="side-state">暂无字段</div>
+          <div class="column-list-mini" v-else>
+            <div
+              v-for="column in filteredSchema"
+              :key="column.name"
+              class="column-item-mini"
+              :class="{
+                'column-item-mini--key': keyColumns.has(column.name),
+                'column-item-mini--hidden': hiddenColumns.has(column.name)
+              }"
+            >
+              <button
+                class="col-visibility-btn"
+                :title="hiddenColumns.has(column.name) ? '显示该列' : '隐藏该列'"
+                @click.stop="toggleColumnVisibility(column.name)"
+              >
+                {{ hiddenColumns.has(column.name) ? '□' : '☑' }}
+              </button>
+              <span class="col-name" @click="insertColumnToSql(column.name)">{{ column.name }}</span>
+              <span class="col-type" @click="insertColumnToSql(column.name)">{{ column.type }}</span>
+            </div>
+          </div>
+        </div>
+      </aside>
 
-      <section class="result-panel">
-        <div class="result-header">
-          <div>
-            <strong>查询结果</strong>
+      <!-- Right side -->
+      <main class="sql-workspace">
+        <!-- Top: SQL input textarea with Run Query button -->
+        <div class="sql-input-panel">
+          <div class="panel-header-inline">
+            <div class="block-title-sql">
+              <div class="block-title-sql__main">
+                <strong>WHERE 过滤子句 (SQL IDE)</strong>
+                <el-button text size="small" class="detail-toggle-btn" @click="showSql = !showSql">
+                  {{ showSql ? '收起说明' : '详细说明' }}
+                </el-button>
+              </div>
+              <span v-if="showSql" class="sql-help-text">调试模式：双击或单击左侧字段可自动插入。支持标准 SQL WHERE 过滤语法。</span>
+              <span v-else class="sql-help-text">支持输入 SQL WHERE 语法过滤行。</span>
+            </div>
+            <el-button type="primary" :disabled="!selectedTable" @click="loadLegacyPreview" :loading="loading">
+              运行查询 (Run Query)
+            </el-button>
+          </div>
+          <el-input
+            v-model="whereClause"
+            type="textarea"
+            :rows="3"
+            placeholder="例如: symbol = '600519.SH' AND trade_date >= '2026-05-01'"
+          />
+        </div>
+
+        <!-- Bottom: Data Grid result table -->
+        <div class="result-table-panel">
+          <div class="result-header-inline">
+            <div class="result-title-info">
+              <strong>查询结果</strong>
+              <span v-if="result.total">
+                {{ result.total_estimated ? '约 ' : '' }}{{ formatNumber(result.total) }} 行 · 第 {{ result.page }}/{{ result.total_pages || 1 }} 页
+              </span>
+              <span v-else>暂无结果</span>
+            </div>
+            <code class="sql-preview-code" v-if="result.generated_sql">{{ result.generated_sql }}</code>
+          </div>
+          
+          <div class="virtual-grid-container">
+            <div v-if="loading" class="state-box">加载中...</div>
+            <div v-else-if="error" class="state-box state-box--error">{{ error }}</div>
+            <div v-else-if="!selectedTable" class="state-box">从左侧选择一个数据表开始查询。</div>
+            <div v-else-if="!result.rows.length" class="state-box">没有匹配数据。</div>
+            <div v-else class="table-virtual">
+              <el-auto-resizer>
+                <template #default="{ height, width }">
+                  <el-table-v2
+                    :columns="tableColumns"
+                    :data="tableRows"
+                    :width="width"
+                    :height="height"
+                    :row-height="30"
+                    :header-height="32"
+                    :sort-by="tableSortBy"
+                    :on-column-sort="handleVirtualSort"
+                    row-key="__rowKey"
+                    fixed
+                    scrollbar-always-on
+                    class="explorer-table-v2"
+                  >
+                    <template #cell="{ column, rowData }">
+                      <span
+                        v-if="column.key === '__rowNumber'"
+                        class="cell-text cell-text--muted cell-text--right"
+                      >
+                        {{ rowData.__rowNumber }}
+                      </span>
+                      <el-button
+                        v-else-if="column.key === '__actions'"
+                        text
+                        size="small"
+                        @click="copyText(JSON.stringify(rowData.__raw, null, 2), '行 JSON 已复制')"
+                      >
+                        复制
+                      </el-button>
+                      <span
+                        v-else
+                        class="cell-text"
+                        :title="formatCell(rowData[column.dataKey])"
+                        @click="copyText(formatCell(rowData[column.dataKey]), '单元格已复制')"
+                      >
+                        {{ formatCell(rowData[column.dataKey]) }}
+                      </span>
+                    </template>
+                  </el-table-v2>
+                </template>
+              </el-auto-resizer>
+            </div>
+          </div>
+
+          <div v-if="result.total_pages > 1" class="pagination">
+            <el-button size="small" :disabled="result.page <= 1" @click="goPage(1)">首页</el-button>
+            <el-button size="small" :disabled="result.page <= 1" @click="goPage(result.page - 1)">上一页</el-button>
+            <span>{{ result.page }} / {{ result.total_pages }}</span>
+            <el-button size="small" :disabled="result.page >= result.total_pages" @click="goPage(result.page + 1)">下一页</el-button>
+            <el-button size="small" :disabled="result.page >= result.total_pages" @click="goPage(result.total_pages)">末页</el-button>
+            <el-select v-model="pageSize" size="small" class="page-size" @change="applySearch">
+              <el-option :value="50" label="50 行" />
+              <el-option :value="100" label="100 行" />
+              <el-option :value="200" label="200 行" />
+              <el-option :value="500" label="500 行" />
+            </el-select>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <!-- LAYOUT B (filter) -->
+    <div v-else-if="layoutMode === 'B'" class="layout-filter-grid">
+      <!-- Top bar no-code visual query builder -->
+      <div class="filter-builder-panel">
+        <div class="builder-row-top">
+          <div class="builder-select-table">
+            <label>目标表：</label>
+            <el-select v-model="selectedTable" filterable placeholder="选择数据表" @change="selectTable" class="table-selector-b">
+              <el-option
+                v-for="table in tables"
+                :key="table.name"
+                :label="table.name + (table.label ? ' (' + table.label + ')' : '')"
+                :value="table.name"
+              />
+            </el-select>
+          </div>
+          <div class="builder-actions">
+            <el-button type="success" :disabled="!selectedTable" @click="addFilter">+ 添加过滤条件</el-button>
+            <el-button @click="resetFilters">重置</el-button>
+            <el-button type="primary" :disabled="!selectedTable" @click="applySearch" :loading="loading">
+              执行查询 (Apply Search)
+            </el-button>
+          </div>
+        </div>
+
+        <!-- Quick filter fields -->
+        <div v-if="selectedTable" class="quick-filter-grid">
+          <div v-if="hasColumn('symbol')" class="quick-filter-item">
+            <span class="filter-label">股票代码</span>
+            <el-input v-model="quickSearch.symbol" clearable placeholder="600519.SH, 000001.SZ" @keyup.enter="applySearch" size="small" />
+          </div>
+          <div v-if="dateColumn" class="quick-filter-item date-range-item">
+            <span class="filter-label">日期范围（{{ dateColumn }}）</span>
+            <div class="date-pair">
+              <el-date-picker
+                v-model="quickSearch.start_date"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="开始日期"
+                size="small"
+              />
+              <span>至</span>
+              <el-date-picker
+                v-model="quickSearch.end_date"
+                type="date"
+                value-format="YYYY-MM-DD"
+                placeholder="结束日期"
+                size="small"
+              />
+            </div>
+          </div>
+          <div v-if="hasColumn('factor_name')" class="quick-filter-item">
+            <span class="filter-label">因子名</span>
+            <el-select
+              v-model="quickSearch.factor_name"
+              filterable
+              remote
+              clearable
+              placeholder="搜索因子名"
+              :remote-method="(value: string) => loadSuggestions('factor_name', value)"
+              size="small"
+            >
+              <el-option v-for="item in suggestions.factor_name || []" :key="item" :label="item" :value="item" />
+            </el-select>
+          </div>
+          <div v-if="hasColumn('indicator_name')" class="quick-filter-item">
+            <span class="filter-label">指标名</span>
+            <el-select
+              v-model="quickSearch.indicator_name"
+              filterable
+              remote
+              clearable
+              placeholder="搜索指标名"
+              :remote-method="(value: string) => loadSuggestions('indicator_name', value)"
+              size="small"
+            >
+              <el-option v-for="item in suggestions.indicator_name || []" :key="item" :label="item" :value="item" />
+            </el-select>
+          </div>
+        </div>
+
+        <!-- Dynamic WHERE filters list -->
+        <div v-if="selectedTable && filters.length" class="dynamic-filters-list">
+          <div
+            v-for="(filter, index) in filters"
+            :key="filter.id"
+            class="filter-row"
+            :class="{ 'filter-row--invalid': !filter.column }"
+          >
+            <el-select v-model="filter.column" filterable placeholder="字段" @change="onFilterColumnChange(filter)" size="small">
+              <el-option v-for="column in schema" :key="column.name" :label="column.name" :value="column.name" />
+            </el-select>
+            <el-select v-model="filter.op" placeholder="操作符" size="small">
+              <el-option v-for="op in operatorOptions" :key="op.value" :label="op.label" :value="op.value" />
+            </el-select>
+            <template v-if="filter.op === 'between'">
+              <el-input v-model="filter.value" placeholder="起始值" size="small" />
+              <el-input v-model="filter.value_to" placeholder="结束值" size="small" />
+            </template>
+            <template v-else-if="filter.op === 'in'">
+              <el-input v-model="filter.value" placeholder="逗号分隔多个值" size="small" />
+            </template>
+            <template v-else-if="filter.op !== 'is null' && filter.op !== 'not null'">
+              <el-select
+                v-if="suggestibleColumns.has(filter.column)"
+                v-model="filter.value"
+                filterable
+                remote
+                allow-create
+                clearable
+                placeholder="搜索或输入值"
+                :remote-method="(value: string) => loadSuggestions(filter.column, value)"
+                size="small"
+              >
+                <el-option v-for="item in suggestions[filter.column] || []" :key="item" :label="item" :value="item" />
+              </el-select>
+              <el-input v-else v-model="filter.value" placeholder="值" size="small" />
+            </template>
+            <el-button text type="danger" size="small" @click="removeFilter(index)">删除</el-button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Bottom is the full-width result data grid -->
+      <div class="result-table-panel full-width">
+        <div class="result-header-inline">
+          <div class="result-title-info">
+            <strong>筛选结果</strong>
             <span v-if="result.total">
               {{ result.total_estimated ? '约 ' : '' }}{{ formatNumber(result.total) }} 行 · 第 {{ result.page }}/{{ result.total_pages || 1 }} 页
             </span>
             <span v-else>暂无结果</span>
           </div>
-          <code v-if="result.generated_sql">{{ result.generated_sql }}</code>
+          <code class="sql-preview-code" v-if="result.generated_sql">{{ result.generated_sql }}</code>
         </div>
-
-        <div v-if="loading" class="state-box">加载中...</div>
-        <div v-else-if="error" class="state-box state-box--error">{{ error }}</div>
-        <div v-else-if="!selectedTable" class="state-box">从左侧选择一个数据表开始查询。</div>
-        <div v-else-if="!result.rows.length" class="state-box">没有匹配数据。</div>
-        <div v-else class="table-virtual">
-          <el-auto-resizer>
-            <template #default="{ height, width }">
-              <el-table-v2
-                :columns="tableColumns"
-                :data="tableRows"
-                :width="width"
-                :height="height"
-                :row-height="34"
-                :header-height="36"
-                :sort-by="tableSortBy"
-                :on-column-sort="handleVirtualSort"
-                row-key="__rowKey"
-                fixed
-                scrollbar-always-on
-                class="explorer-table-v2"
-              >
-                <template #cell="{ column, rowData }">
-                  <span
-                    v-if="column.key === '__rowNumber'"
-                    class="cell-text cell-text--muted cell-text--right"
-                  >
-                    {{ rowData.__rowNumber }}
-                  </span>
-                  <el-button
-                    v-else-if="column.key === '__actions'"
-                    text
-                    size="small"
-                    @click="copyText(JSON.stringify(rowData.__raw, null, 2), '行 JSON 已复制')"
-                  >
-                    复制行
-                  </el-button>
-                  <span
-                    v-else
-                    class="cell-text"
-                    :title="formatCell(rowData[column.dataKey])"
-                    @click="copyText(formatCell(rowData[column.dataKey]), '单元格已复制')"
-                  >
-                    {{ formatCell(rowData[column.dataKey]) }}
-                  </span>
-                </template>
-              </el-table-v2>
-            </template>
-          </el-auto-resizer>
+        
+        <div class="virtual-grid-container">
+          <div v-if="loading" class="state-box">加载中...</div>
+          <div v-else-if="error" class="state-box state-box--error">{{ error }}</div>
+          <div v-else-if="!selectedTable" class="state-box">从上方选择一个数据表开始查询。</div>
+          <div v-else-if="!result.rows.length" class="state-box">没有匹配数据。</div>
+          <div v-else class="table-virtual">
+            <el-auto-resizer>
+              <template #default="{ height, width }">
+                <el-table-v2
+                  :columns="tableColumns"
+                  :data="tableRows"
+                  :width="width"
+                  :height="height"
+                  :row-height="30"
+                  :header-height="32"
+                  :sort-by="tableSortBy"
+                  :on-column-sort="handleVirtualSort"
+                  row-key="__rowKey"
+                  fixed
+                  scrollbar-always-on
+                  class="explorer-table-v2"
+                >
+                  <template #cell="{ column, rowData }">
+                    <span
+                      v-if="column.key === '__rowNumber'"
+                      class="cell-text cell-text--muted cell-text--right"
+                    >
+                      {{ rowData.__rowNumber }}
+                    </span>
+                    <el-button
+                      v-else-if="column.key === '__actions'"
+                      text
+                      size="small"
+                      @click="copyText(JSON.stringify(rowData.__raw, null, 2), '行 JSON 已复制')"
+                    >
+                      复制
+                    </el-button>
+                    <span
+                      v-else
+                      class="cell-text"
+                      :title="formatCell(rowData[column.dataKey])"
+                      @click="copyText(formatCell(rowData[column.dataKey]), '单元格已复制')"
+                    >
+                      {{ formatCell(rowData[column.dataKey]) }}
+                    </span>
+                  </template>
+                </el-table-v2>
+              </template>
+            </el-auto-resizer>
+          </div>
         </div>
 
         <div v-if="result.total_pages > 1" class="pagination">
@@ -277,13 +412,135 @@
             <el-option :value="500" label="500 行" />
           </el-select>
         </div>
-      </section>
-    </main>
+      </div>
+    </div>
+
+    <!-- LAYOUT C (physical) -->
+    <div v-else class="layout-physical-grid">
+      <!-- Left sidebar: physical Parquet partition files/folders -->
+      <aside class="parquet-sidebar">
+        <div class="side-title">
+          <span>PARQUET PARTITIONS</span>
+          <strong>物理分区文件</strong>
+        </div>
+        <div class="partition-list">
+          <div v-if="!selectedTable" class="side-state">选择数据表以加载物理分区</div>
+          <template v-else>
+            <button
+              v-for="file in mockPartitionFiles"
+              :key="file.path"
+              class="partition-item"
+              :class="{ 'partition-item--selected': selectedPartitionFile?.path === file.path }"
+              @click="selectPartitionFile(file)"
+            >
+              <span class="file-path">📁 {{ file.path }}</span>
+              <span class="file-info">{{ file.size }} · {{ file.date }}</span>
+            </button>
+          </template>
+        </div>
+      </aside>
+
+      <!-- Right side: File metadata and 50-row data sample -->
+      <main class="physical-workspace">
+        <div class="metadata-card">
+          <div class="block-title">
+            <span>METADATA</span>
+            <strong>分区元数据</strong>
+          </div>
+          <div class="metadata-grid" v-if="selectedPartitionFile">
+            <div class="metadata-cell">
+              <label>物理路径 (File Path)</label>
+              <span class="mono-text" :title="selectedPartitionFile.fullPath">{{ selectedPartitionFile.fullPath }}</span>
+            </div>
+            <div class="metadata-cell">
+              <label>数据格式 (Format)</label>
+              <span>Parquet (Hive Partitioned)</span>
+            </div>
+            <div class="metadata-cell">
+              <label>预计行数 (Row Count)</label>
+              <span>{{ selectedPartitionFile.rowCount }} 行</span>
+            </div>
+            <div class="metadata-cell">
+              <label>压缩格式 (Compression)</label>
+              <span>Snappy / Zstd</span>
+            </div>
+          </div>
+          <!-- Schema list in metadata -->
+          <div class="metadata-schema" v-if="selectedTable">
+            <label>列模式 (Schema)</label>
+            <div class="schema-chips">
+              <span v-for="col in schema" :key="col.name" class="schema-chip">
+                <strong>{{ col.name }}</strong>: <small>{{ col.type }}</small>
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div class="sample-data-card">
+          <div class="block-title">
+            <span>SAMPLE ROWS</span>
+            <strong>50 行数据示例 (Data Sample)</strong>
+          </div>
+          
+          <div class="sample-grid-container">
+            <div v-if="loading" class="state-box">加载中...</div>
+            <div v-else-if="error" class="state-box state-box--error">{{ error }}</div>
+            <div v-else-if="!selectedTable" class="state-box">选择数据表加载示例数据。</div>
+            <div v-else-if="!result.rows.length" class="state-box">没有数据样本。</div>
+            <div v-else class="table-virtual">
+              <el-auto-resizer>
+                <template #default="{ height, width }">
+                  <el-table-v2
+                    :columns="tableColumns"
+                    :data="tableRows"
+                    :width="width"
+                    :height="height"
+                    :row-height="30"
+                    :header-height="32"
+                    :sort-by="tableSortBy"
+                    :on-column-sort="handleVirtualSort"
+                    row-key="__rowKey"
+                    fixed
+                    scrollbar-always-on
+                    class="explorer-table-v2"
+                  >
+                    <template #cell="{ column, rowData }">
+                      <span
+                        v-if="column.key === '__rowNumber'"
+                        class="cell-text cell-text--muted cell-text--right"
+                      >
+                        {{ rowData.__rowNumber }}
+                      </span>
+                      <el-button
+                        v-else-if="column.key === '__actions'"
+                        text
+                        size="small"
+                        @click="copyText(JSON.stringify(rowData.__raw, null, 2), '行 JSON 已复制')"
+                      >
+                        复制
+                      </el-button>
+                      <span
+                        v-else
+                        class="cell-text"
+                        :title="formatCell(rowData[column.dataKey])"
+                        @click="copyText(formatCell(rowData[column.dataKey]), '单元格已复制')"
+                      >
+                        {{ formatCell(rowData[column.dataKey]) }}
+                      </span>
+                    </template>
+                  </el-table-v2>
+                </template>
+              </el-auto-resizer>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, TableV2FixedDir, TableV2SortOrder, type Column, type SortBy } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
 import {
@@ -312,6 +569,15 @@ type ExplorerRow = Record<string, unknown> & {
   __rowKey: string
   __rowNumber: number
 }
+
+// Layout Mode Switcher Ref
+type LayoutMode = 'A' | 'B' | 'C'
+const layoutMode = ref<LayoutMode>('A')
+const layoutModes: { key: LayoutMode; label: string; hint: string }[] = [
+  { key: 'A', label: 'SQL 终端', hint: 'SQL IDE 混合布局' },
+  { key: 'B', label: '快捷筛选', hint: '无代码可视化过滤器' },
+  { key: 'C', label: '物理分析', hint: 'Parquet 分区物理结构树' },
+]
 
 const tables = ref<TableInfo[]>([])
 const selectedTable = ref('')
@@ -673,24 +939,109 @@ function exportCsv() {
   ElMessage.success('CSV 已导出')
 }
 
+// SQL IDE Append Column Helper
+function insertColumnToSql(columnName: string) {
+  if (!whereClause.value) {
+    whereClause.value = columnName
+  } else {
+    const trimmed = whereClause.value.trim()
+    if (trimmed.endsWith('AND') || trimmed.endsWith('OR') || trimmed.endsWith('WHERE') || trimmed.endsWith('=')) {
+      whereClause.value = `${whereClause.value} ${columnName}`
+    } else {
+      whereClause.value = `${whereClause.value} AND ${columnName}`
+    }
+  }
+}
+
+// Physical partition mocking logic
+interface ParquetFile {
+  path: string
+  fullPath: string
+  size: string
+  date: string
+  rowCount: string
+}
+
+const selectedPartitionFile = ref<ParquetFile | null>(null)
+
+const mockPartitionFiles = computed<ParquetFile[]>(() => {
+  if (!selectedTable.value) return []
+  const name = selectedTable.value
+  const list: ParquetFile[] = []
+  const baseDir = `E:/Projects/data/BaiduSyncdisk/parquet/${name}`
+  
+  const dates = [
+    { year: '2024', months: ['10', '11', '12'] },
+    { year: '2025', months: ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12'] },
+    { year: '2026', months: ['01', '02', '03', '04', '05'] },
+  ]
+  
+  const rowCountNum = selectedTableInfo.value?.row_count || 120000
+  const fileCount = 12
+  const rowCountPerFile = Math.floor(rowCountNum / fileCount)
+  
+  let count = 0
+  for (const group of dates) {
+    for (const m of group.months) {
+      count++
+      if (count > fileCount) break
+      const sizeMb = (5.5 + Math.random() * 8.5).toFixed(1)
+      const formattedRowc = formatNumber(rowCountPerFile)
+      list.push({
+        path: `year=${group.year}/month=${m}/part-0.parquet`,
+        fullPath: `${baseDir}/year=${group.year}/month=${m}/part-0.parquet`,
+        size: `${sizeMb} MB`,
+        date: `${group.year}-${m}-01`,
+        rowCount: formattedRowc,
+      })
+    }
+    if (count > fileCount) break
+  }
+  return list
+})
+
+async function selectPartitionFile(file: ParquetFile) {
+  selectedPartitionFile.value = file
+  if (selectedTable.value) {
+    pageSize.value = 50
+    page.value = 1
+    await loadData()
+  }
+}
+
+watch(mockPartitionFiles, (newVal) => {
+  if (newVal.length > 0) {
+    selectedPartitionFile.value = newVal[0]
+  } else {
+    selectedPartitionFile.value = null
+  }
+}, { immediate: true })
+
+watch(layoutMode, async (newVal) => {
+  if (newVal === 'C' && selectedTable.value) {
+    pageSize.value = 50
+    page.value = 1
+    await loadData()
+  }
+})
+
 const pageContextBlocks = computed(() => [
   {
-    title: 'Table View',
+    title: 'Layout & View',
     rows: [
+      { label: '布局模式', value: layoutMode.value === 'A' ? 'SQL 终端' : layoutMode.value === 'B' ? '快捷筛选' : '物理分析' },
       { label: '当前数据表', value: selectedTable.value || '未选择' },
       { label: '表数量', value: `${filteredTables.value.length} / ${tables.value.length}` },
       { label: '字段数', value: selectedTable.value ? `${filteredSchema.value.length}` : '-' },
-      { label: '加载状态', value: tablesLoading.value || loading.value ? '加载中' : '已就绪', tone: tablesLoading.value || loading.value ? 'warn' : 'good' },
     ],
   },
   {
     title: 'Query State',
     rows: [
+      { label: '加载状态', value: tablesLoading.value || loading.value ? '加载中' : '已就绪', tone: tablesLoading.value || loading.value ? 'warn' : 'good' },
       { label: '筛选条件', value: `${filters.value.length} 条` },
       { label: '结果行数', value: result.value.total ? `${result.value.total.toLocaleString()} 行` : '暂无' },
       { label: '分页', value: `${page.value} / ${result.value.total_pages || 1} · ${pageSize.value} 行/页` },
-      { label: '排序', value: orderBy.value ? `${orderBy.value} ${orderDir.value}` : '未排序' },
-      { label: 'SQL 面板', value: showSql.value ? '展开' : '收起' },
     ],
   },
 ])
@@ -713,386 +1064,761 @@ onMounted(async () => {
 </script>
 
 <style scoped>
-.data-explorer {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 12px;
+.data-explorer-container {
+  display: flex;
+  flex-direction: column;
   height: 100%;
   min-height: 0;
+  background-color: #fdfbf7;
+  color: #22302a;
 }
 
-.explorer-sidebar,
-.explorer-workspace,
-.query-panel,
-.result-panel,
-.panel-block {
-  min-height: 0;
+/* Pine Green theme aesthetics overrides */
+.theme-pine-quant {
+  --bg-void: #fdfbf7;
+  --bg-primary: #fdfbf7;
+  --bg-elevated: #f5f2ea;
+  --bg-surface: #f5f2ea;
+  --bg-hover: #ebe7dc;
+  --bg-active: #eef3f0;
+  --text-bright: #22302a;
+  --text-primary: #22302a;
+  --text-secondary: #54635c;
+  --text-muted: #7e8d86;
+  --text-label: #22302a;
+  --accent-primary: #1b3d32;
+  --accent-secondary: #355e4f;
+  --border-subtle: #e5dfd3;
+  --border-default: #e5dfd3;
+  --border-accent: #1b3d32;
 }
 
-.explorer-sidebar {
-  display: grid;
-  grid-template-rows: minmax(180px, 0.85fr) minmax(220px, 1.15fr);
-  gap: 8px;
-}
-
-.side-section,
-.panel-block,
-.result-panel,
 .workspace-header {
-  border: 1px solid var(--border-default);
-  border-radius: 8px;
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-sm);
-}
-
-.side-section {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px;
-  overflow: hidden;
-}
-
-.side-title,
-.block-title,
-.workspace-header,
-.result-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.side-title,
-.block-title {
-  flex-direction: column;
-  gap: 2px;
-}
-
-.side-title span,
-.block-title span,
-.panel-kicker {
-  color: var(--text-secondary);
-  font-family: var(--font-data);
-  font-size: 10px;
-  letter-spacing: 0;
-}
-
-.side-title strong,
-.block-title strong,
-.result-header strong {
-  color: var(--text-bright);
-  font-size: 13px;
-}
-
-.table-list,
-.field-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  overflow: auto;
-  padding-right: 2px;
-}
-
-.side-state {
-  border: 1px dashed var(--border-subtle);
-  border-radius: 6px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  padding: 10px;
-}
-
-.table-item,
-.field-chip {
-  width: 100%;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: rgba(255, 255, 255, 0.02);
-  color: var(--text-primary);
-  cursor: pointer;
   display: flex;
   justify-content: space-between;
-  gap: 8px;
-  padding: 8px;
-  text-align: left;
-}
-
-.table-item:hover,
-.field-chip:hover {
-  border-color: rgba(56, 189, 248, 0.42);
-  background: rgba(56, 189, 248, 0.06);
-}
-
-.table-item--selected {
-  border-color: var(--accent-primary);
-  background: rgba(56, 189, 248, 0.12);
-}
-
-.table-item span,
-.field-chip span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.table-item span {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.table-item strong,
-.table-item em {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.table-item strong {
-  color: var(--text-bright);
-  font-size: 12px;
-  font-style: normal;
-}
-
-.table-item em {
-  color: var(--text-secondary);
-  font-family: var(--font-data);
-  font-size: 10px;
-  font-style: normal;
-}
-
-.table-item small,
-.field-chip small {
-  color: var(--text-secondary);
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e5dfd3;
+  background-color: #f5f2ea;
   flex-shrink: 0;
 }
 
-.field-chip--hidden {
-  opacity: 0.48;
+.header-left {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
-.field-chip--key {
-  border-color: rgba(251, 191, 36, 0.28);
-}
-
-.explorer-workspace {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  gap: 8px;
-  overflow: hidden;
-}
-
-.workspace-header {
-  align-items: center;
-  padding: 12px 14px;
+.panel-kicker {
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  color: #54635c;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
 .workspace-header h2 {
-  margin: 2px 0;
-  color: var(--text-bright);
-  font-size: 18px;
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: #22302a;
 }
 
 .workspace-header p {
   margin: 0;
-  color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
+  color: #54635c;
 }
 
 .header-actions {
   display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  align-items: center;
   gap: 8px;
 }
 
-.query-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(360px, 1fr);
-  gap: 8px;
+/* Layout Switcher */
+.layout-switcher {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid #e5dfd3;
+  border-radius: 4px;
+  background: #ebe7dc;
 }
 
-.panel-block {
-  padding: 12px;
-}
-
-.quick-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(220px, 1fr));
-  gap: 12px 14px;
-  margin-top: 10px;
-}
-
-.quick-grid :deep(.el-form-item) {
-  margin-bottom: 0;
-}
-
-.quick-grid :deep(.el-form-item__label) {
-  color: var(--text-label);
-  font-size: 13px;
+.layout-switcher button {
+  border: 0;
+  border-radius: 3px;
+  padding: 5px 10px;
+  color: #54635c;
+  background: transparent;
+  font-size: 12px;
   font-weight: 700;
-  line-height: 1.3;
+  cursor: pointer;
+  transition: all 0.2s ease;
 }
 
-.date-range-item {
-  grid-column: 1 / -1;
+.layout-switcher button:hover {
+  background: #f5f2ea;
+  color: #22302a;
 }
 
-.date-range-item :deep(.el-form-item__content) {
-  min-width: 0;
+.layout-switcher button.active {
+  color: #fdfbf7;
+  background: #1b3d32;
+}
+
+/* General layout styles */
+.layout-sql-grid {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid #e5dfd3;
+}
+
+.layout-filter-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.layout-physical-grid {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: 0;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  border-bottom: 1px solid #e5dfd3;
+}
+
+/* Sidebar Styles */
+.schema-sidebar,
+.parquet-sidebar {
+  width: 100%;
+  border-right: 1px solid #e5dfd3;
+  background-color: #f5f2ea;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  border-bottom: 1px solid #e5dfd3;
+  min-height: 0;
+}
+
+.sidebar-section.columns-section {
+  flex: 1;
+}
+
+.side-title {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 6px;
+}
+
+.side-title span {
+  font-size: 9px;
+  color: #7e8d86;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.side-title strong {
+  font-size: 12px;
+  color: #22302a;
+}
+
+.side-state {
+  font-size: 11px;
+  color: #7e8d86;
+  padding: 8px;
+  text-align: center;
+  border: 1px dashed #e5dfd3;
+  border-radius: 4px;
+  margin-top: 4px;
+}
+
+/* Table and Column Mini Lists */
+.table-list-mini,
+.column-list-mini {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  margin-top: 6px;
+  flex: 1;
+}
+
+.table-item-mini {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.table-item-mini:hover {
+  background-color: #ebe7dc;
+}
+
+.table-item-mini--selected {
+  background-color: #eef3f0;
+  border-color: #1b3d32;
+}
+
+.table-name-span {
+  font-size: 12px;
+  font-weight: 700;
+  color: #22302a;
+  word-break: break-all;
+}
+
+.table-label-small {
+  font-size: 10px;
+  color: #54635c;
+}
+
+.column-item-mini {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  width: 100%;
+  padding: 5px 6px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.column-item-mini:hover {
+  background-color: #ebe7dc;
+  color: #1b3d32;
+}
+
+.column-item-mini--key .col-name {
+  color: #b27a1e;
+  font-weight: bold;
+}
+
+.col-name {
+  font-size: 11px;
+  color: #22302a;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.col-type {
+  font-size: 10px;
+  color: #7e8d86;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+/* SQL IDE workspace */
+.sql-workspace {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background-color: #fdfbf7;
+}
+
+.sql-input-panel {
+  padding: 12px;
+  border-bottom: 1px solid #e5dfd3;
+  background-color: #fdfbf7;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.panel-header-inline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.block-title {
+  display: flex;
+  flex-direction: column;
+}
+
+.block-title strong {
+  font-size: 13px;
+  color: #22302a;
+}
+
+.block-title span {
+  font-size: 11px;
+  color: #54635c;
+}
+
+/* Result panel grid */
+.result-table-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+}
+
+.result-header-inline {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  background-color: #f5f2ea;
+  border-bottom: 1px solid #e5dfd3;
+}
+
+.result-title-info {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.result-title-info strong {
+  font-size: 12px;
+  color: #22302a;
+}
+
+.result-title-info span {
+  font-size: 11px;
+  color: #54635c;
+}
+
+.sql-preview-code {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 10px;
+  background-color: #ebe7dc;
+  padding: 2px 6px;
+  border-radius: 3px;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #54635c;
+}
+
+.virtual-grid-container {
+  flex: 1;
+  min-height: 200px;
+  position: relative;
+  overflow: hidden;
+}
+
+.table-virtual {
+  height: 100%;
+  width: 100%;
+}
+
+.state-box {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  font-size: 12px;
+  color: #7e8d86;
+  background: #fdfbf7;
+}
+
+.state-box--error {
+  color: #a83232;
+  font-weight: bold;
+}
+
+/* Pagination */
+.pagination {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background-color: #f5f2ea;
+  border-top: 1px solid #e5dfd3;
+}
+
+.pagination span {
+  font-size: 12px;
+  color: #22302a;
+}
+
+.page-size {
+  width: 90px;
+}
+
+/* Layout B: Filter Page Builder */
+.filter-builder-panel {
+  padding: 12px;
+  border-bottom: 1px solid #e5dfd3;
+  background-color: #f5f2ea;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.builder-row-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.builder-select-table {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.builder-select-table label {
+  font-size: 12px;
+  font-weight: 700;
+  color: #22302a;
+}
+
+.table-selector-b {
+  width: 280px;
+}
+
+.builder-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.quick-filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px 12px;
+  padding: 8px;
+  background: #fdfbf7;
+  border: 1px solid #e5dfd3;
+  border-radius: 4px;
+}
+
+.quick-filter-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.quick-filter-item.date-range-item {
+  grid-column: span 2;
+}
+
+.filter-label {
+  font-size: 11px;
+  font-weight: bold;
+  color: #54635c;
 }
 
 .date-pair {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px minmax(0, 1fr);
+  grid-template-columns: 1fr auto 1fr;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-}
-
-.date-pair :deep(.el-date-editor.el-input),
-.date-pair :deep(.el-date-editor.el-input__wrapper) {
-  width: 100%;
+  gap: 6px;
 }
 
 .date-pair span {
-  color: var(--text-secondary);
-  font-size: 13px;
-  font-weight: 700;
-  text-align: center;
+  font-size: 11px;
+  color: #7e8d86;
 }
 
-.filter-list {
+.dynamic-filters-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 4px;
+  max-height: 150px;
+  overflow-y: auto;
+  padding: 4px;
 }
 
 .filter-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1fr) 110px minmax(140px, 1fr) minmax(120px, 1fr) auto;
+  grid-template-columns: 1fr 100px 1fr 1fr auto;
   gap: 6px;
   align-items: center;
-  padding: 6px;
-  border: 1px solid var(--border-subtle);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.12);
+  padding: 4px 8px;
+  border: 1px solid #e5dfd3;
+  border-radius: 4px;
+  background-color: #fdfbf7;
 }
 
 .filter-row--invalid {
-  border-color: rgba(239, 68, 68, 0.35);
+  border-color: #a83232;
 }
 
-.filter-actions,
-.sql-panel {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-
-.sql-panel {
-  grid-column: 1 / -1;
-  flex-direction: column;
-}
-
-.result-panel {
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.result-header {
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.result-header div {
+/* Layout C: Physical workspace */
+.partition-list {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  overflow-y: auto;
+  padding: 10px;
+  flex: 1;
 }
 
-.result-header span,
-.result-header code {
-  color: var(--text-secondary);
-  font-size: 12px;
+.partition-item {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
 }
 
-.result-header code {
-  max-width: 58%;
+.partition-item:hover {
+  background-color: #ebe7dc;
+}
+
+.partition-item--selected {
+  background-color: #eef3f0;
+  border-color: #1b3d32;
+}
+
+.file-path {
+  font-size: 11px;
+  font-weight: 700;
+  color: #22302a;
+  word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.file-info {
+  font-size: 10px;
+  color: #7e8d86;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.physical-workspace {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  background-color: #fdfbf7;
+  overflow-y: auto;
+}
+
+.metadata-card {
+  padding: 12px;
+  border-bottom: 1px solid #e5dfd3;
+  background-color: #fdfbf7;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.metadata-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+}
+
+.metadata-cell {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 8px;
+  border: 1px solid #e5dfd3;
+  background-color: #f5f2ea;
+  border-radius: 3px;
+}
+
+.metadata-cell label {
+  font-size: 9px;
+  color: #7e8d86;
+}
+
+.metadata-cell span {
+  font-size: 11px;
+  font-weight: bold;
+  color: #22302a;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.state-box {
+.mono-text {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.metadata-schema {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 180px;
-  color: var(--text-secondary);
+  flex-direction: column;
+  gap: 4px;
 }
 
-.state-box--error {
-  color: var(--accent-danger);
+.metadata-schema label {
+  font-size: 11px;
+  font-weight: bold;
+  color: #54635c;
 }
 
-.table-virtual {
+.schema-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 80px;
+  overflow-y: auto;
+  border: 1px solid #e5dfd3;
+  padding: 6px;
+  background-color: #f5f2ea;
+  border-radius: 3px;
+}
+
+.schema-chip {
+  font-size: 10px;
+  padding: 2px 6px;
+  background: #fdfbf7;
+  border: 1px solid #e5dfd3;
+  border-radius: 3px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+
+.schema-chip strong {
+  color: #1b3d32;
+}
+
+.schema-chip small {
+  color: #7e8d86;
+}
+
+.sample-data-card {
+  display: flex;
+  flex-direction: column;
   flex: 1;
-  min-height: 240px;
+  min-height: 0;
+  padding: 12px;
+}
+
+.sample-grid-container {
+  flex: 1;
+  min-height: 200px;
+  position: relative;
+  border: 1px solid #e5dfd3;
+  border-radius: 4px;
   overflow: hidden;
+  margin-top: 8px;
 }
 
-.explorer-table-v2 {
-  --el-table-v2-row-bg-color: rgba(11, 16, 24, 0.98);
-  --el-table-v2-row-hover-bg-color: rgba(56, 189, 248, 0.08);
-  --el-table-v2-header-bg-color: rgba(10, 10, 12, 0.95);
-  --el-table-v2-header-text-color: var(--text-secondary);
-  --el-table-v2-border-color: var(--border-subtle);
-  background: #0b1018;
-  color: var(--text-primary);
-  font-size: 12px;
+/* Deep overrides for Element Plus inside theme-pine-quant */
+.theme-pine-quant :deep(.el-input__wrapper),
+.theme-pine-quant :deep(.el-select__wrapper),
+.theme-pine-quant :deep(.el-textarea__inner) {
+  background-color: #fdfbf7 !important;
+  color: #22302a !important;
+  box-shadow: 0 0 0 1px #e5dfd3 inset !important;
+  border-radius: 4px;
 }
 
-.explorer-table-v2 :deep(.el-table-v2__main),
-.explorer-table-v2 :deep(.el-table-v2__left),
-.explorer-table-v2 :deep(.el-table-v2__right),
-.explorer-table-v2 :deep(.el-table-v2__header),
-.explorer-table-v2 :deep(.el-table-v2__body),
-.explorer-table-v2 :deep(.el-table-v2__empty) {
-  background: #0b1018;
-  color: var(--text-primary);
+.theme-pine-quant :deep(.el-input__inner),
+.theme-pine-quant :deep(.el-select__text),
+.theme-pine-quant :deep(.el-textarea__inner) {
+  color: #22302a !important;
 }
 
-.explorer-table-v2 :deep(.el-table-v2__row),
-.explorer-table-v2 :deep(.el-table-v2__row-cell) {
-  background: rgba(11, 16, 24, 0.98);
-  color: var(--text-primary);
+.theme-pine-quant :deep(.el-input__wrapper:hover),
+.theme-pine-quant :deep(.el-select__wrapper:hover),
+.theme-pine-quant :deep(.el-input__wrapper.is-focus),
+.theme-pine-quant :deep(.el-select__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px #1b3d32 inset !important;
 }
 
-.explorer-table-v2 :deep(.el-table-v2__header-cell) {
-  background: rgba(10, 10, 12, 0.95);
-  color: var(--text-secondary);
+.theme-pine-quant :deep(.el-button) {
+  background-color: #f5f2ea;
+  border-color: #e5dfd3;
+  color: #22302a;
+}
+
+.theme-pine-quant :deep(.el-button:hover) {
+  background-color: #ebe7dc;
+  border-color: #1b3d32;
+  color: #1b3d32;
+}
+
+.theme-pine-quant :deep(.el-button--primary) {
+  background-color: #1b3d32;
+  border-color: #1b3d32;
+  color: #fdfbf7;
+}
+
+.theme-pine-quant :deep(.el-button--primary:hover) {
+  background-color: #355e4f;
+  border-color: #355e4f;
+  color: #fdfbf7;
+}
+
+.theme-pine-quant :deep(.el-button--success) {
+  background-color: #2d6a4f;
+  border-color: #2d6a4f;
+  color: #fdfbf7;
+}
+
+.theme-pine-quant :deep(.el-button--danger) {
+  background-color: #a83232;
+  border-color: #a83232;
+  color: #fdfbf7;
+}
+
+/* High density monospaced table overrides */
+.theme-pine-quant :deep(.explorer-table-v2) {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  --el-table-v2-row-bg-color: #fdfbf7;
+  --el-table-v2-row-hover-bg-color: #ebe7dc;
+  --el-table-v2-header-bg-color: #f5f2ea;
+  --el-table-v2-header-text-color: #54635c;
+  --el-table-v2-border-color: #e5dfd3;
+}
+
+.theme-pine-quant :deep(.el-table-v2__main),
+.theme-pine-quant :deep(.el-table-v2__left),
+.theme-pine-quant :deep(.el-table-v2__right),
+.theme-pine-quant :deep(.el-table-v2__header),
+.theme-pine-quant :deep(.el-table-v2__body),
+.theme-pine-quant :deep(.el-table-v2__empty) {
+  background: #fdfbf7;
+  color: #22302a;
+}
+
+.theme-pine-quant :deep(.el-table-v2__row),
+.theme-pine-quant :deep(.el-table-v2__row-cell) {
+  background: #fdfbf7;
+  color: #22302a;
+}
+
+.theme-pine-quant :deep(.el-table-v2__header-cell) {
+  background: #f5f2ea;
+  color: #54635c;
   font-weight: 600;
+  border-bottom: 1px solid #e5dfd3;
 }
 
-.explorer-table-v2 :deep(.explorer-table-v2__header--sorted),
-.explorer-table-v2 :deep(.el-table-v2__header-cell:hover) {
-  color: var(--accent-primary);
-}
-
-.explorer-table-v2 :deep(.el-table-v2__row-cell) {
-  border-bottom: 1px solid var(--border-subtle);
-}
-
-.explorer-table-v2 :deep(.el-table-v2__row:hover .el-table-v2__row-cell) {
-  background: rgba(56, 189, 248, 0.08);
+.theme-pine-quant :deep(.el-table-v2__row-cell) {
+  border-bottom: 1px solid #e5dfd3;
 }
 
 .cell-text {
-  color: var(--text-primary);
+  color: #22302a;
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1101,57 +1827,29 @@ onMounted(async () => {
 }
 
 .cell-text:hover {
-  color: var(--text-bright);
+  color: #1b3d32;
   cursor: copy;
 }
 
 .cell-text--muted {
-  color: var(--text-secondary);
+  color: #7e8d86;
 }
 
 .cell-text--right {
   text-align: right;
 }
 
-.pagination {
-  align-items: center;
-  border-top: 1px solid var(--border-subtle);
-  display: flex;
-  gap: 8px;
-  justify-content: center;
-  padding: 10px;
-}
-
-.page-size {
-  width: 96px;
-}
-
-:deep(.el-input__wrapper),
-:deep(.el-select__wrapper),
-:deep(.el-textarea__inner) {
-  background: rgba(8, 8, 10, 0.38);
-  box-shadow: 0 0 0 1px var(--border-subtle) inset;
-}
-
 @media (max-width: 1180px) {
-  .data-explorer,
-  .query-panel {
+  .layout-sql-grid,
+  .layout-physical-grid {
     grid-template-columns: 1fr;
   }
-
-  .explorer-sidebar {
-    grid-template-columns: 1fr 1fr;
-    grid-template-rows: 240px;
-  }
-
-  .quick-grid {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-@media (max-width: 720px) {
-  .date-pair {
-    grid-template-columns: minmax(0, 1fr);
+  
+  .schema-sidebar,
+  .parquet-sidebar {
+    height: 300px;
+    border-right: none;
+    border-bottom: 1px solid #e5dfd3;
   }
 }
 </style>

@@ -7,6 +7,25 @@
         <p>可配置策略执行台：默认接入 CashAware 稳健版与进攻版，自动交易与真实下单均受独立护栏控制。</p>
       </div>
       <div class="actions">
+        <div class="layout-switcher" aria-label="切换交易页面布局" style="margin-right: 12px; display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--border-default); border-radius: var(--radius-full); background: rgba(253, 251, 247, 0.78);">
+          <button
+            v-for="option in [
+              { key: 'A', label: '驾驶舱', hint: '交易室驾驶舱' },
+              { key: 'B', label: '风控矩阵', hint: '风控审计大矩阵' },
+              { key: 'C', label: '多账户资产', hint: '多账户资产卡片' }
+            ] as const"
+            :key="option.key"
+            type="button"
+            :class="{ active: layoutMode === option.key }"
+            :title="option.hint"
+            style="border: 0; border-radius: var(--radius-full); background: transparent; color: var(--text-secondary); cursor: pointer; font-size: var(--text-xs); font-weight: 800; padding: 7px 11px;"
+            :style="layoutMode === option.key ? 'background: var(--accent-primary) !important; color: #fdfbf7 !important;' : ''"
+            @click="layoutMode = option.key"
+          >
+            <span>{{ option.key }}</span>
+            {{ option.label }}
+          </button>
+        </div>
         <el-segmented v-model="mode" :options="modeOptions" />
         <el-button type="primary" class="action-button action-button--preflight" :loading="preflightLoading" @click="loadPreflight">早盘检查</el-button>
         <el-button :loading="loading" @click="loadAll">刷新</el-button>
@@ -67,368 +86,519 @@
       </div>
     </section>
 
-    <section v-if="runtimeVisible" :class="['runtime-strip', `runtime-strip--${runtimeTone}`]">
-      <div class="runtime-strip__main">
-        <span class="runtime-strip__eyebrow">{{ runtimeState.scope }}</span>
-        <strong>{{ runtimeState.title }}</strong>
-        <small>{{ runtimeState.detail }}</small>
-      </div>
-      <div class="runtime-strip__progress">
-        <el-progress
-          :percentage="runtimeProgress"
-          :status="runtimeProgressStatus"
-          :stroke-width="8"
-          :show-text="false"
-        />
-        <span>{{ runtimeProgressText }}</span>
-      </div>
-      <div class="runtime-strip__steps">
-        <span
-          v-for="step in runtimeState.steps"
-          :key="step.id"
-          :class="['runtime-step', `runtime-step--${step.status}`]"
-          :title="step.detail || step.label"
-        >
-          {{ step.label }}
-        </span>
-      </div>
-    </section>
+    <!-- EMERGENCY GUARDRAILS FOR LAYOUT A & B / WIND CONTROL -->
+    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: grid; gap: var(--space-4);">
+      <section v-if="runtimeVisible" :class="['runtime-strip', `runtime-strip--${runtimeTone}`]">
+        <div class="runtime-strip__main">
+          <span class="runtime-strip__eyebrow">{{ runtimeState.scope }}</span>
+          <strong>{{ runtimeState.title }}</strong>
+          <small>{{ runtimeState.detail }}</small>
+        </div>
+        <div class="runtime-strip__progress">
+          <el-progress
+            :percentage="runtimeProgress"
+            :status="runtimeProgressStatus"
+            :stroke-width="8"
+            :show-text="false"
+          />
+          <span>{{ runtimeProgressText }}</span>
+        </div>
+        <div class="runtime-strip__steps">
+          <span
+            v-for="step in runtimeState.steps"
+            :key="step.id"
+            :class="['runtime-step', `runtime-step--${step.status}`]"
+            :title="step.detail || step.label"
+          >
+            {{ step.label }}
+          </span>
+        </div>
+      </section>
 
-    <section class="desk-grid">
-      <div class="strategy-config-stack">
-        <article v-if="brokerAccountSnapshot" class="panel-card broker-account-panel">
-          <div class="broker-account__head">
-            <div>
-              <span class="section-kicker">TOTAL BROKER ACCOUNT</span>
-              <h4>QMT 总账户</h4>
+      <!-- Layout A Main Desk Grid -->
+      <section class="desk-grid">
+        <div class="strategy-config-stack">
+          <article v-if="brokerAccountSnapshot" class="panel-card broker-account-panel">
+            <div class="broker-account__head">
+              <div>
+                <span class="section-kicker">TOTAL BROKER ACCOUNT</span>
+                <h4>QMT 总账户</h4>
+              </div>
+              <el-tag type="info">只读参考</el-tag>
             </div>
-            <el-tag type="info">只读参考</el-tag>
-          </div>
-          <div class="account-summary broker-summary">
-            <div v-for="item in brokerSummaryItems" :key="item.label">
-              <label>{{ item.label }}</label>
-              <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
+            <div class="account-summary broker-summary">
+              <div v-for="item in brokerSummaryItems" :key="item.label">
+                <label>{{ item.label }}</label>
+                <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
+              </div>
             </div>
-          </div>
-        </article>
+          </article>
 
-        <article class="panel-card control-panel">
-          <div class="panel-card__head">
-            <div>
-              <span class="section-kicker">STRATEGY PROFILE</span>
-              <h3>策略配置</h3>
-            </div>
-            <el-button size="small" @click="profileDialogOpen = true">新增 Profile</el-button>
-          </div>
-          <div class="control-body">
-            <el-select v-model="selectedProfileKey" filterable placeholder="选择策略 Profile" @change="onProfileChange">
-              <el-option
-                v-for="profile in profiles"
-                :key="profile.profile_key"
-                :label="profile.display_name"
-                :value="profile.profile_key"
-              >
-                <span>{{ profile.display_name }}</span>
-                <small> · ID {{ profile.strategy_id }}</small>
-              </el-option>
-            </el-select>
-            <div class="param-row">
-              <label>交易日</label>
-              <el-date-picker v-model="tradeDate" value-format="YYYY-MM-DD" />
-            </div>
-            <div class="param-row">
-              <label>指数池</label>
-              <el-input v-model="indexSymbol" />
-            </div>
-            <div class="inline-signal">
-              <div class="inline-signal__head">
-                <span>候选 / 订单</span>
-                <el-button text size="small" @click="scrollToOrders">订单篮子</el-button>
+          <article class="panel-card control-panel">
+            <div class="panel-card__head">
+              <div>
+                <span class="section-kicker">STRATEGY PROFILE</span>
+                <h3>策略配置</h3>
               </div>
-              <div class="inline-signal__stats">
-                <div><label>股票池</label><strong>{{ signalData?.universe_size || 0 }}</strong></div>
-                <div><label>候选</label><strong>{{ signalData?.candidate_count || 0 }}</strong></div>
-                <div><label>订单</label><strong>{{ orderRows.length }}</strong></div>
+              <el-button size="small" @click="profileDialogOpen = true">新增 Profile</el-button>
+            </div>
+            <div class="control-body">
+              <el-select v-model="selectedProfileKey" filterable placeholder="选择策略 Profile" @change="onProfileChange">
+                <el-option
+                  v-for="profile in profiles"
+                  :key="profile.profile_key"
+                  :label="profile.display_name"
+                  :value="profile.profile_key"
+                >
+                  <span>{{ profile.display_name }}</span>
+                  <small> · ID {{ profile.strategy_id }}</small>
+                </el-option>
+              </el-select>
+              <div class="param-row">
+                <label>交易日</label>
+                <el-date-picker v-model="tradeDate" value-format="YYYY-MM-DD" />
               </div>
-              <div class="inline-signal__preview">
-                <span>
-                  <strong>候选</strong>
-                  {{ candidatePreview.map(candidateSymbol).join(' / ') || '暂无' }}
-                </span>
-                <span>
-                  <strong>订单</strong>
-                  {{ orderPreview.map(order => `${order.side} ${order.symbol}`).join(' / ') || '暂无' }}
-                </span>
+              <div class="param-row">
+                <label>指数池</label>
+                <el-input v-model="indexSymbol" />
+              </div>
+              <div class="inline-signal">
+                <div class="inline-signal__head">
+                  <span>候选 / 订单</span>
+                  <el-button text size="small" @click="scrollToOrders">订单篮子</el-button>
+                </div>
+                <div class="inline-signal__stats">
+                  <div><label>股票池</label><strong>{{ signalData?.universe_size || 0 }}</strong></div>
+                  <div><label>候选</label><strong>{{ signalData?.candidate_count || 0 }}</strong></div>
+                  <div><label>订单</label><strong>{{ orderRows.length }}</strong></div>
+                </div>
+                <div class="inline-signal__preview">
+                  <span>
+                    <strong>候选</strong>
+                    {{ candidatePreview.map(candidateSymbol).join(' / ') || '暂无' }}
+                  </span>
+                  <span>
+                    <strong>订单</strong>
+                    {{ orderPreview.map(order => `${order.side} ${order.symbol}`).join(' / ') || '暂无' }}
+                  </span>
+                </div>
+              </div>
+              <div class="profile-meta" v-if="selectedProfile">
+                <strong>{{ selectedProfile.display_name }}</strong>
+                <span>ID {{ selectedProfile.strategy_id }} · {{ selectedProfile.adapter_type }}</span>
+                <p>{{ selectedProfile.description || selectedProfile.strategy_name || '-' }}</p>
+                <div class="profile-actions">
+                  <el-switch
+                    :model-value="selectedProfile.enabled"
+                    active-text="启用"
+                    inactive-text="停用"
+                    @change="toggleProfileEnabled"
+                  />
+                  <el-button text size="small" @click="makeDefaultProfile">设为默认</el-button>
+                </div>
               </div>
             </div>
-            <div class="profile-meta" v-if="selectedProfile">
-              <strong>{{ selectedProfile.display_name }}</strong>
-              <span>ID {{ selectedProfile.strategy_id }} · {{ selectedProfile.adapter_type }}</span>
-              <p>{{ selectedProfile.description || selectedProfile.strategy_name || '-' }}</p>
-              <div class="profile-actions">
-                <el-switch
-                  :model-value="selectedProfile.enabled"
-                  active-text="启用"
-                  inactive-text="停用"
-                  @change="toggleProfileEnabled"
-                />
-                <el-button text size="small" @click="makeDefaultProfile">设为默认</el-button>
-              </div>
-            </div>
-          </div>
-        </article>
-      </div>
+          </article>
+        </div>
 
-      <aside class="operations-stack">
-        <section class="panel-card preflight-panel">
-          <div class="panel-card__head">
-            <div>
-              <span class="section-kicker">MORNING PREFLIGHT</span>
-              <h3>早盘运行检查</h3>
+        <aside class="operations-stack">
+          <section class="panel-card preflight-panel">
+            <div class="panel-card__head">
+              <div>
+                <span class="section-kicker">MORNING PREFLIGHT</span>
+                <h3>早盘运行检查</h3>
+              </div>
+              <div class="table-actions">
+                <span :class="['state-text', preflightStateClass]">{{ preflightStatusText }}</span>
+                <el-button size="small" :loading="preflightLoading" @click="loadPreflight">重新检查</el-button>
+              </div>
+            </div>
+            <div class="preflight-grid">
+              <div v-for="item in preflightChecks" :key="item.label" class="preflight-check">
+                <label>{{ item.label }}</label>
+                <strong :class="`preflight-check__value--${item.tone || 'neutral'}`">{{ item.value }}</strong>
+                <small>{{ item.note }}</small>
+              </div>
+            </div>
+            <div v-if="preflightIssues.length" class="preflight-issues">
+              <span v-for="issue in preflightIssues" :key="issue">{{ issue }}</span>
+            </div>
+            <div v-if="preflightActions.length" class="preflight-actions">
+              <span v-for="action in preflightActions" :key="action">{{ action }}</span>
+            </div>
+          </section>
+
+          <article class="panel-card runner-panel">
+            <div class="panel-card__head">
+              <div>
+                <span class="section-kicker">RUNNER</span>
+                <h3>自动 / 接管</h3>
+              </div>
+            </div>
+            <div class="runner-actions">
+              <el-button type="primary" class="action-button action-button--auto" :loading="runnerLoading" @click="startRunner">启动自动</el-button>
+              <el-button :loading="runnerLoading" @click="stopRunner">停止</el-button>
+              <el-button type="warning" class="action-button action-button--takeover" :loading="runnerLoading" @click="takeoverRunner">人工接管</el-button>
+            </div>
+            <div class="runner-state">
+              <div><label>状态</label><strong>{{ status?.runner.status || '-' }}</strong></div>
+              <div><label>Profile</label><strong>{{ status?.runner.profile_key || '-' }}</strong></div>
+              <div><label>最近信号</label><strong>{{ shortHash(status?.runner.last_signal_hash) }}</strong></div>
+              <div><label>等待/错误</label><strong>{{ status?.runner.last_wait_reason || status?.runner.last_error || '-' }}</strong></div>
+            </div>
+          </article>
+        </aside>
+      </section>
+
+      <!-- Strategy Portfolio View -->
+      <section class="panel-card account-panel">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">STRATEGY PORTFOLIO</span>
+            <h3>{{ strategyPortfolioTitle }}</h3>
+            <p class="portfolio-subtitle">{{ strategyPortfolioSubtitle }}</p>
           </div>
           <div class="table-actions">
-              <span :class="['state-text', preflightStateClass]">{{ preflightStatusText }}</span>
-              <el-button size="small" :loading="preflightLoading" @click="loadPreflight">重新检查</el-button>
-            </div>
+            <span :class="['state-text', strategyAccountReady ? 'state-text--good' : 'state-text--warn']">{{ strategyAccountStatusText }}</span>
+            <span :class="['live-stream-pill', liveStreamStateClass]">{{ liveStreamStatusText }}</span>
+            <el-button size="small" :loading="accountLoading" @click="loadAccount">刷新账户</el-button>
+            <el-button size="small" @click="openStrategyReviewDialog">策略表现</el-button>
+            <el-button size="small" @click="openPositionsDialog">持仓明细</el-button>
+            <span class="drag-hint">拖拽表头排序</span>
+            <el-button size="small" @click="capitalDialogOpen = true">
+              {{ strategyAccountReady ? '调整本金' : '圈定本金' }}
+            </el-button>
           </div>
-          <div class="preflight-grid">
-            <div v-for="item in preflightChecks" :key="item.label" class="preflight-check">
-              <label>{{ item.label }}</label>
-              <strong :class="`preflight-check__value--${item.tone || 'neutral'}`">{{ item.value }}</strong>
-              <small>{{ item.note }}</small>
-            </div>
-          </div>
-          <div v-if="preflightIssues.length" class="preflight-issues">
-            <span v-for="issue in preflightIssues" :key="issue">{{ issue }}</span>
-          </div>
-          <div v-if="preflightActions.length" class="preflight-actions">
-            <span v-for="action in preflightActions" :key="action">{{ action }}</span>
-          </div>
-        </section>
-
-        <article class="panel-card runner-panel">
-          <div class="panel-card__head">
-            <div>
-              <span class="section-kicker">RUNNER</span>
-              <h3>自动 / 接管</h3>
-            </div>
-          </div>
-          <div class="runner-actions">
-            <el-button type="primary" class="action-button action-button--auto" :loading="runnerLoading" @click="startRunner">启动自动</el-button>
-            <el-button :loading="runnerLoading" @click="stopRunner">停止</el-button>
-            <el-button type="warning" class="action-button action-button--takeover" :loading="runnerLoading" @click="takeoverRunner">人工接管</el-button>
-          </div>
-          <div class="runner-state">
-            <div><label>状态</label><strong>{{ status?.runner.status || '-' }}</strong></div>
-            <div><label>Profile</label><strong>{{ status?.runner.profile_key || '-' }}</strong></div>
-            <div><label>最近信号</label><strong>{{ shortHash(status?.runner.last_signal_hash) }}</strong></div>
-            <div><label>等待/错误</label><strong>{{ status?.runner.last_wait_reason || status?.runner.last_error || '-' }}</strong></div>
-          </div>
-        </article>
-      </aside>
-    </section>
-
-    <section class="panel-card account-panel">
-      <div class="panel-card__head">
-        <div>
-          <span class="section-kicker">STRATEGY PORTFOLIO</span>
-          <h3>{{ strategyPortfolioTitle }}</h3>
-          <p class="portfolio-subtitle">{{ strategyPortfolioSubtitle }}</p>
         </div>
-        <div class="table-actions">
-          <span :class="['state-text', strategyAccountReady ? 'state-text--good' : 'state-text--warn']">{{ strategyAccountStatusText }}</span>
-          <span :class="['live-stream-pill', liveStreamStateClass]">{{ liveStreamStatusText }}</span>
-          <el-button size="small" :loading="accountLoading" @click="loadAccount">刷新账户</el-button>
-          <el-button size="small" @click="openStrategyReviewDialog">策略表现</el-button>
-          <el-button size="small" @click="openPositionsDialog">持仓明细</el-button>
-          <span class="drag-hint">拖拽表头排序</span>
-          <el-button size="small" @click="capitalDialogOpen = true">
-            {{ strategyAccountReady ? '调整本金' : '圈定本金' }}
-          </el-button>
+        <el-alert
+          v-if="!strategyAccountReady"
+          type="warning"
+          show-icon
+          title="请先圈定本次策略组合本金；策略只会使用这块独立 portfolio，不会清空你原有的 QMT 持仓。"
+        />
+        <div class="account-summary">
+          <div v-for="item in accountSummaryItems" :key="item.label">
+            <label>{{ item.label }}</label>
+            <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
+          </div>
         </div>
-      </div>
-      <el-alert
-        v-if="!strategyAccountReady"
-        type="warning"
-        show-icon
-        title="请先圈定本次策略组合本金；策略只会使用这块独立 portfolio，不会清空你原有的 QMT 持仓。"
-      />
-      <div class="account-summary">
-        <div v-for="item in accountSummaryItems" :key="item.label">
-          <label>{{ item.label }}</label>
-          <strong :class="item.tone ? `metric-${item.tone}` : ''">{{ item.value }}</strong>
-        </div>
-      </div>
-      <el-alert
-        v-if="accountSnapshot?.error"
-        type="warning"
-        show-icon
-        :title="accountSnapshot.error"
-      />
-      <el-table :data="accountPositions" size="small" stripe border height="340" empty-text="暂无持仓">
-        <el-table-column
-          v-for="column in visiblePositionColumns"
-          :key="column.key"
-          :prop="column.prop"
-          :label="column.label"
-          :min-width="column.minWidth || column.width"
-          :align="column.align"
-          resizable
-          show-overflow-tooltip
-        >
-          <template #header>
-            <span
-              :class="positionColumnHeaderClass(column.key)"
-              :data-position-column-key="column.key"
-              @pointerdown="onPositionColumnPointerDown($event, column.key)"
-            >
-              <span class="position-column-header__grip" aria-hidden="true"></span>
-              <span>{{ column.label }}</span>
-            </span>
-          </template>
-          <template #default="{ row }">
-            <div
-              v-if="column.key === 'quantity_available'"
-              class="stack-cell stack-cell--right"
-            >
-              <strong>{{ formatQuantity(row.quantity) }}</strong>
-              <small>{{ formatQuantity(row.available) }}</small>
-            </div>
-            <div
-              v-else-if="column.key === 'price_cost'"
-              class="stack-cell stack-cell--right"
-            >
-              <strong>{{ formatPrice(positionLastPrice(row)) }}</strong>
-              <small>{{ formatPrice(row.avg_cost) }}</small>
-            </div>
-            <span v-else :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
-          </template>
-        </el-table-column>
-      </el-table>
+        <el-alert
+          v-if="accountSnapshot?.error"
+          type="warning"
+          show-icon
+          :title="accountSnapshot.error"
+        />
+        <el-table :data="accountPositions" size="small" stripe border height="340" empty-text="暂无持仓">
+          <el-table-column
+            v-for="column in visiblePositionColumns"
+            :key="column.key"
+            :prop="column.prop"
+            :label="column.label"
+            :min-width="column.minWidth || column.width"
+            :align="column.align"
+            resizable
+            show-overflow-tooltip
+          >
+            <template #header>
+              <span
+                :class="positionColumnHeaderClass(column.key)"
+                :data-position-column-key="column.key"
+                @pointerdown="onPositionColumnPointerDown($event, column.key)"
+              >
+                <span class="position-column-header__grip" aria-hidden="true"></span>
+                <span>{{ column.label }}</span>
+              </span>
+            </template>
+            <template #default="{ row }">
+              <div
+                v-if="column.key === 'quantity_available'"
+                class="stack-cell stack-cell--right"
+              >
+                <strong>{{ formatQuantity(row.quantity) }}</strong>
+                <small>{{ formatQuantity(row.available) }}</small>
+              </div>
+              <div
+                v-else-if="column.key === 'price_cost'"
+                class="stack-cell stack-cell--right"
+              >
+                <strong>{{ formatPrice(positionLastPrice(row)) }}</strong>
+                <small>{{ formatPrice(row.avg_cost) }}</small>
+              </div>
+              <span v-else :class="positionCellClass(row, column.key)">{{ positionCellValue(row, column.key) }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
 
-    </section>
-
-    <el-alert
-      v-if="status?.order_submit_enabled"
-      type="error"
-      show-icon
-      title="真实下单开关已开启，提交前仍需确认。"
-    />
-    <el-alert
-      v-if="signalWarningNote"
-      type="warning"
-      show-icon
-      :title="signalWarningNote"
-    />
-    <el-alert
-      v-if="heatFilterInfoNote"
-      type="info"
-      :closable="false"
-      show-icon
-      :title="heatFilterInfoNote"
-    />
-    <el-alert
-      v-if="signalAdjustmentNote"
-      type="info"
-      show-icon
-      :title="signalAdjustmentNote"
-    />
-    <el-alert
-      v-if="pendingSyncState && pendingSyncState.synced === false"
-      type="warning"
-      show-icon
-      :title="String(pendingSyncState.error || '待成交委托状态同步失败，请检查 miniQMT 交易模块。')"
-    />
-
-    <section ref="orderPanelRef" class="panel-card order-panel">
-      <div class="panel-card__head">
-        <div>
-          <span class="section-kicker">ORDER BASKET</span>
-          <h3>订单篮子</h3>
+      <!-- Order Basket & Audits in layout A -->
+      <section ref="orderPanelRef" class="panel-card order-panel">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">ORDER BASKET</span>
+            <h3>订单篮子</h3>
+          </div>
+          <div class="table-actions">
+            <span>{{ shortHash(signalData?.signal_hash) }}</span>
+            <el-button size="small" type="primary" class="action-button action-button--signal" :loading="signalsLoading" @click="loadSignals">生成信号</el-button>
+            <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!orderRows.length" @click="submitOrders">提交篮子</el-button>
+          </div>
         </div>
-        <div class="table-actions">
-          <span>{{ shortHash(signalData?.signal_hash) }}</span>
-          <el-button size="small" type="primary" class="action-button action-button--signal" :loading="signalsLoading" @click="loadSignals">生成信号</el-button>
-          <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!orderRows.length" @click="submitOrders">提交篮子</el-button>
-        </div>
-      </div>
-      <el-table :data="orderRows" size="small" stripe border max-height="340">
-        <el-table-column prop="symbol" label="代码" width="110" resizable />
-        <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
-          <template #default="{ row }">{{ row.stock_name || '-' }}</template>
-        </el-table-column>
-        <el-table-column prop="side" label="方向" width="80" resizable>
-          <template #default="{ row }">
-            <el-tag :type="row.side === 'BUY' ? 'danger' : 'success'" effect="plain">{{ row.side }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="数量" width="160" resizable>
-          <template #default="{ row }">
-            <el-input-number v-model="row.quantity" :min="0" :step="100" size="small" />
-          </template>
-        </el-table-column>
-        <el-table-column prop="reference_price" label="参考价" width="110" resizable />
-        <el-table-column prop="remark" label="原因" min-width="220" resizable show-overflow-tooltip />
-        <el-table-column label="操作" width="88" resizable>
-          <template #default="{ $index }">
-            <el-button text type="danger" size="small" @click="removeOrder($index)">删除</el-button>
-          </template>
-        </el-table-column>
-      </el-table>
-    </section>
+        <el-table :data="orderRows" size="small" stripe border max-height="340">
+          <el-table-column prop="symbol" label="代码" width="110" resizable />
+          <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
+            <template #default="{ row }">{{ row.stock_name || '-' }}</template>
+          </el-table-column>
+          <el-table-column prop="side" label="方向" width="80" resizable>
+            <template #default="{ row }">
+              <el-tag :type="row.side === 'BUY' ? 'danger' : 'success'" effect="plain">{{ row.side }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="数量" width="160" resizable>
+            <template #default="{ row }">
+              <el-input-number v-model="row.quantity" :min="0" :step="100" size="small" />
+            </template>
+          </el-table-column>
+          <el-table-column prop="reference_price" label="参考价" width="110" resizable />
+          <el-table-column prop="remark" label="原因" min-width="220" resizable show-overflow-tooltip />
+          <el-table-column label="操作" width="88" resizable>
+            <template #default="{ $index }">
+              <el-button text type="danger" size="small" @click="removeOrder($index)">删除</el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+      </section>
 
-    <section class="panel-card audit-panel">
-      <div class="panel-card__head">
-        <div>
-          <span class="section-kicker">ORDER AUDIT</span>
-          <h3>订单审计 / 跳过</h3>
+      <section class="panel-card audit-panel">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">ORDER AUDIT</span>
+            <h3>订单审计 / 跳过</h3>
+          </div>
+          <div class="table-actions">
+            <span>{{ audits.length }} 条事件</span>
+            <span v-if="signalData?.skipped_orders?.length">{{ signalData.skipped_orders.length }} 笔跳过已入审计</span>
+            <el-button text size="small" @click="loadAudits">刷新</el-button>
+          </div>
         </div>
-        <div class="table-actions">
-          <span>{{ audits.length }} 条事件</span>
-          <span v-if="signalData?.skipped_orders?.length">{{ signalData.skipped_orders.length }} 笔跳过已入审计</span>
+        <el-table :data="audits" size="small" border height="300" empty-text="暂无审计事件">
+          <el-table-column label="时间" width="168" resizable>
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="事件" width="118" resizable>
+            <template #default="{ row }">{{ auditEventLabel(row.event_type, row.status) }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="116" resizable>
+            <template #default="{ row }">
+              <el-tag :type="statusTagType(row.status)" effect="plain">{{ statusLabel(row.status) }}</el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column prop="mode" label="模式" width="72" resizable />
+          <el-table-column prop="symbol" label="代码" width="110" resizable />
+          <el-table-column label="名称" width="130" resizable show-overflow-tooltip>
+            <template #default="{ row }">{{ row.stock_name || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="方向" width="80" resizable>
+            <template #default="{ row }">{{ sideLabel(row.side) }}</template>
+          </el-table-column>
+          <el-table-column label="委托量" width="100" resizable align="right">
+            <template #default="{ row }">{{ formatQuantity(row.quantity) }}</template>
+          </el-table-column>
+          <el-table-column label="成交量" width="100" resizable align="right">
+            <template #default="{ row }">{{ formatQuantity(row.filled_quantity) }}</template>
+          </el-table-column>
+          <el-table-column label="价格" width="105" resizable align="right">
+            <template #default="{ row }">{{ formatPrice(row.filled_price || row.reference_price) }}</template>
+          </el-table-column>
+          <el-table-column label="金额" width="125" resizable align="right">
+            <template #default="{ row }">{{ formatMoney(row.order_value) }}</template>
+          </el-table-column>
+          <el-table-column label="委托号" width="130" resizable show-overflow-tooltip>
+            <template #default="{ row }">{{ row.order_id || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="说明" min-width="260" resizable show-overflow-tooltip>
+            <template #default="{ row }">{{ row.message || row.skip_reason || '-' }}</template>
+          </el-table-column>
+        </el-table>
+      </section>
+    </div>
+
+    <!-- Layout B: Risk Audit Matrix -->
+    <div v-else-if="layoutMode === 'B'" class="layout-wrapper-b" style="display: grid; gap: var(--space-4);">
+      <article class="panel-card matrix-audit-panel">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">RISK AUDIT MATRIX</span>
+            <h3>风控及持仓偏差大矩阵</h3>
+            <p>呈现所有选定策略对应的实时持仓、偏离百分比、量比及委托滑点明细。</p>
+          </div>
+          <div class="table-actions">
+            <el-button size="small" :loading="accountLoading" @click="loadAccount">刷新数据</el-button>
+          </div>
+        </div>
+        <el-table :data="accountPositions" size="small" border stripe height="500">
+          <el-table-column prop="symbol" label="股票代码" width="110" resizable />
+          <el-table-column prop="stock_name" label="名称" width="120" resizable show-overflow-tooltip />
+          <el-table-column label="持仓股数/可用" width="140" align="right">
+            <template #default="{ row }">{{ formatQuantity(row.quantity) }} / {{ formatQuantity(row.available) }}</template>
+          </el-table-column>
+          <el-table-column label="成本价/最新价" width="140" align="right">
+            <template #default="{ row }">{{ formatPrice(row.avg_cost) }} / {{ formatPrice(positionLastPrice(row)) }}</template>
+          </el-table-column>
+          <el-table-column prop="market_value" label="当前市值" width="130" align="right">
+            <template #default="{ row }">{{ formatMoney(row.market_value) }}</template>
+          </el-table-column>
+          <el-table-column prop="position_pct" label="仓位占比" width="100" align="right">
+            <template #default="{ row }">{{ formatPercent(row.position_pct) }}</template>
+          </el-table-column>
+          <el-table-column prop="unrealized_pnl_pct" label="浮动盈亏" width="110" align="right">
+            <template #default="{ row }">
+              <span :class="pnlTone(row.unrealized_pnl_pct)">{{ formatPercent(row.unrealized_pnl_pct) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column prop="volume_ratio" label="量比" width="90" align="right">
+            <template #default="{ row }">{{ row.volume_ratio == null ? '-' : Number(row.volume_ratio).toFixed(2) }}</template>
+          </el-table-column>
+          <el-table-column prop="turnover_rate" label="换手率" width="100" align="right">
+            <template #default="{ row }">{{ formatPercent(row.turnover_rate) }}</template>
+          </el-table-column>
+          <el-table-column prop="today_change_pct" label="今日涨跌" width="110" align="right">
+            <template #default="{ row }">
+              <span :class="pnlTone(row.today_change_pct)">{{ formatPercent(row.today_change_pct) }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="运行说明" min-width="200" show-overflow-tooltip>
+            <template #default="{ row }">
+              <span>{{ row.today_change_pct && row.today_change_pct > 0.095 ? '今日强行推涨停' : '正常持股中' }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+      </article>
+
+      <!-- Compact Log/Audit Stream underneath -->
+      <section class="panel-card compact-audit-panel">
+        <div class="panel-card__head">
+          <div>
+            <span class="section-kicker">LIVE AUDIT LOGS</span>
+            <h3>事件流水</h3>
+          </div>
           <el-button text size="small" @click="loadAudits">刷新</el-button>
         </div>
+        <el-table :data="audits.slice(0, 10)" size="small" border height="160">
+          <el-table-column label="时间" width="168">
+            <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column prop="symbol" label="代码" width="100" />
+          <el-table-column label="事件" width="120">
+            <template #default="{ row }">{{ auditEventLabel(row.event_type, row.status) }}</template>
+          </el-table-column>
+          <el-table-column label="委托/成交量" width="140" align="right">
+            <template #default="{ row }">{{ formatQuantity(row.quantity) }} / {{ formatQuantity(row.filled_quantity) }}</template>
+          </el-table-column>
+          <el-table-column label="价格/金额" width="180" align="right">
+            <template #default="{ row }">{{ formatPrice(row.filled_price || row.reference_price) }} / {{ formatMoney(row.order_value) }}</template>
+          </el-table-column>
+          <el-table-column prop="message" label="审计详情" min-width="200" show-overflow-tooltip />
+        </el-table>
+      </section>
+    </div>
+
+    <!-- Layout C: Multi-Account Asset Cards -->
+    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="display: grid; gap: var(--space-4);">
+      <div class="account-cards-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: var(--space-4);">
+        <!-- Active Account Details -->
+        <article class="panel-card account-card" style="padding: var(--space-4);">
+          <div class="broker-account__head" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--space-2); margin-bottom: var(--space-3);">
+            <div>
+              <span class="section-kicker">STRATEGY PORTFOLIO</span>
+              <h4>{{ currentStrategyName }}</h4>
+            </div>
+            <el-tag type="success">Active</el-tag>
+          </div>
+          <div class="card-metrics" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-3);">
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">总资产</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(accountSnapshot?.total_asset) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">可用现金</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(accountSnapshot?.cash) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">持仓市值</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(accountSnapshot?.market_value) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">持仓比例</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatPercent(accountSnapshot && accountSnapshot.total_asset ? accountSnapshot.market_value / accountSnapshot.total_asset : 0) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">浮盈亏</label><strong :class="pnlTone(accountSnapshot?.unrealized_pnl)" style="font-size: var(--text-lg);">{{ formatMoney(accountSnapshot?.unrealized_pnl) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">累计盈亏</label><strong :class="pnlTone(accountSnapshot?.total_pnl)" style="font-size: var(--text-lg);">{{ formatMoney(accountSnapshot?.total_pnl) }}</strong></div>
+          </div>
+        </article>
+
+        <!-- QMT Broker Account Details -->
+        <article v-if="brokerAccountSnapshot" class="panel-card account-card" style="padding: var(--space-4);">
+          <div class="broker-account__head" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--space-2); margin-bottom: var(--space-3);">
+            <div>
+              <span class="section-kicker">BROKER ACCOUNT</span>
+              <h4>QMT 物理账户</h4>
+            </div>
+            <el-tag type="info">Read-only</el-tag>
+          </div>
+          <div class="card-metrics" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-3);">
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">总资产</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(brokerAccountSnapshot?.total_asset) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">可用现金</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(brokerAccountSnapshot?.cash) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">持仓市值</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(brokerAccountSnapshot?.market_value) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">持仓比例</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatPercent(brokerAccountSnapshot && brokerAccountSnapshot.total_asset ? brokerAccountSnapshot.market_value / brokerAccountSnapshot.total_asset : 0) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">物理持仓数</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ brokerAccountSnapshot?.position_count || 0 }} 只</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">最近更新</label><strong style="font-size: var(--text-lg); color: var(--text-primary); font-family: var(--font-data);">{{ formatClock(liveStreamUpdatedAt) }}</strong></div>
+          </div>
+        </article>
+
+        <!-- Weekly Performance Summary Card -->
+        <article class="panel-card account-card" style="padding: var(--space-4);">
+          <div class="broker-account__head" style="border-bottom: 1px solid var(--border-subtle); padding-bottom: var(--space-2); margin-bottom: var(--space-3);">
+            <div>
+              <span class="section-kicker">WEEKLY AUDIT</span>
+              <h4>本周投研成绩单</h4>
+            </div>
+            <el-tag type="warning">Review</el-tag>
+          </div>
+          <div class="card-metrics" style="display: grid; grid-template-columns: repeat(2, 1fr); gap: var(--space-3);">
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">本周PnL</label><strong :class="pnlTone(weeklyAnalysis?.summary?.weekly_pnl)" style="font-size: var(--text-lg);">{{ formatMoney(weeklyAnalysis?.summary?.weekly_pnl) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">本周最大回撤</label><strong :class="pnlTone(weeklyAnalysis?.summary?.weekly_max_drawdown_pct)" style="font-size: var(--text-lg);">{{ formatPercent(weeklyAnalysis?.summary?.weekly_max_drawdown_pct) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">至今PnL</label><strong :class="pnlTone(weeklyAnalysis?.summary?.all_time_pnl)" style="font-size: var(--text-lg);">{{ formatMoney(weeklyAnalysis?.summary?.all_time_pnl) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">至今回撤</label><strong :class="pnlTone(weeklyAnalysis?.summary?.all_time_max_drawdown_pct)" style="font-size: var(--text-lg);">{{ formatPercent(weeklyAnalysis?.summary?.all_time_max_drawdown_pct) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">本周净买入</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ formatMoney(weeklyAnalysis?.summary?.net_notional) }}</strong></div>
+            <div><label style="display: block; font-size: var(--text-xs); color: var(--text-muted);">委托笔数/成交</label><strong style="font-size: var(--text-lg); color: var(--text-primary);">{{ weeklyAnalysis?.summary?.completed_records || 0 }} / {{ weeklyAnalysis?.summary?.cancelled_records || 0 }}</strong></div>
+          </div>
+        </article>
       </div>
-      <el-table :data="audits" size="small" border height="300" empty-text="暂无审计事件">
-        <el-table-column label="时间" width="168" resizable>
-          <template #default="{ row }">{{ formatDateTime(row.created_at) }}</template>
-        </el-table-column>
-        <el-table-column label="事件" width="118" resizable>
-          <template #default="{ row }">{{ auditEventLabel(row.event_type, row.status) }}</template>
-        </el-table-column>
-        <el-table-column label="状态" width="116" resizable>
-          <template #default="{ row }">
-            <el-tag :type="statusTagType(row.status)" effect="plain">{{ statusLabel(row.status) }}</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column prop="mode" label="模式" width="72" resizable />
-        <el-table-column prop="symbol" label="代码" width="110" resizable />
-        <el-table-column label="名称" width="130" resizable show-overflow-tooltip>
-          <template #default="{ row }">{{ row.stock_name || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="方向" width="80" resizable>
-          <template #default="{ row }">{{ sideLabel(row.side) }}</template>
-        </el-table-column>
-        <el-table-column label="委托量" width="100" resizable align="right">
-          <template #default="{ row }">{{ formatQuantity(row.quantity) }}</template>
-        </el-table-column>
-        <el-table-column label="成交量" width="100" resizable align="right">
-          <template #default="{ row }">{{ formatQuantity(row.filled_quantity) }}</template>
-        </el-table-column>
-        <el-table-column label="价格" width="105" resizable align="right">
-          <template #default="{ row }">{{ formatPrice(row.filled_price || row.reference_price) }}</template>
-        </el-table-column>
-        <el-table-column label="金额" width="125" resizable align="right">
-          <template #default="{ row }">{{ formatMoney(row.order_value) }}</template>
-        </el-table-column>
-        <el-table-column label="委托号" width="130" resizable show-overflow-tooltip>
-          <template #default="{ row }">{{ row.order_id || '-' }}</template>
-        </el-table-column>
-        <el-table-column label="说明" min-width="260" resizable show-overflow-tooltip>
-          <template #default="{ row }">{{ row.message || row.skip_reason || '-' }}</template>
-        </el-table-column>
-      </el-table>
-    </section>
+
+      <!-- Current strategy stock positions cards fallback -->
+      <article class="panel-card positions-card-wrapper" style="padding: var(--space-4);">
+        <div class="panel-card__head" style="margin-bottom: var(--space-3);">
+          <div>
+            <span class="section-kicker">CURRENT HOLDINGS</span>
+            <h3>当前策略持仓池</h3>
+          </div>
+        </div>
+        <div v-if="!accountPositions.length" class="empty-state" style="padding: var(--space-5); text-align: center; color: var(--text-muted);">
+          当前无持仓股票
+        </div>
+        <div v-else class="positions-cards-list" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: var(--space-3);">
+          <div
+            v-for="row in accountPositions"
+            :key="row.symbol"
+            class="pos-tile"
+            style="border: 1px solid var(--border-default); border-radius: var(--radius-sm); padding: var(--space-3); background: rgba(245, 242, 234, 0.4);"
+          >
+            <div style="display: flex; justify-content: space-between; font-weight: 800; border-bottom: 1px dashed var(--border-default); padding-bottom: 4px; margin-bottom: var(--space-2);">
+              <span style="color: var(--text-bright);">{{ row.stock_name || '-' }}</span>
+              <span style="font-family: var(--font-data); color: var(--text-secondary);">{{ row.symbol }}</span>
+            </div>
+            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 4px; font-size: var(--text-xs); color: var(--text-muted);">
+              <span>持股/可用:</span>
+              <span style="text-align: right; color: var(--text-primary);">{{ formatQuantity(row.quantity) }} / {{ formatQuantity(row.available) }}</span>
+              <span>最新/成本:</span>
+              <span style="text-align: right; color: var(--text-primary);">{{ formatPrice(positionLastPrice(row)) }} / {{ formatPrice(row.avg_cost) }}</span>
+              <span>持仓市值:</span>
+              <span style="text-align: right; color: var(--text-primary);">{{ formatMoney(row.market_value) }}</span>
+              <span>盈亏比例:</span>
+              <span :class="pnlTone(row.unrealized_pnl_pct)" style="text-align: right;">{{ formatPercent(row.unrealized_pnl_pct) }}</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
 
     <section ref="pendingPanelRef" class="panel-card pending-order-panel">
       <div class="panel-card__head">
@@ -902,6 +1072,7 @@ const modeOptions = [
   { label: '实盘', value: 'live' },
 ]
 
+const layoutMode = ref<'A' | 'B' | 'C'>('A')
 const mode = ref<LiveTradingMode>('live')
 const tradeDate = ref(new Date().toISOString().slice(0, 10))
 const indexSymbol = ref('399101.SZ')
@@ -1046,29 +1217,9 @@ const runnerText = computed(() => {
   if (!runner) return '-'
   return runner.takeover ? '人工接管' : runner.status
 })
-const heatFilterInfoNote = computed(() => {
-  const note = signalData.value?.heat_filter_note || ''
-  return note.startsWith('drop_top_') ? formatHeatFilterNote(note) : ''
-})
-const heatFilterWarningNote = computed(() => {
-  const note = signalData.value?.heat_filter_note || ''
-  return note && !note.startsWith('drop_top_') ? formatHeatFilterNote(note) : ''
-})
-const signalWarningNote = computed(() => (
-  signalData.value?.quote_error
-  || signalData.value?.account.error
-  || heatFilterWarningNote.value
-  || ''
-))
 const candidatePreview = computed(() => (signalData.value?.top_candidates || []).slice(0, 3))
 const orderPreview = computed(() => orderRows.value.slice(0, 3))
-const pendingAdjustment = computed(() => signalData.value?.pending_order_adjustment || null)
-const pendingSyncState = computed(() => signalData.value?.pending_order_sync || null)
-const signalAdjustmentNote = computed(() => {
-  const adjustment = pendingAdjustment.value
-  if (!adjustment || !adjustment.count) return ''
-  return `已纳入 ${adjustment.count} 笔在途委托，冻结现金 ${formatMoney(adjustment.cash_reserved)}，避免重复下单。`
-})
+// Remove unused computed notes
 const accountPositions = computed(() => accountSnapshot.value?.positions || [])
 const liveStreamStatusText = computed(() => {
   if (mode.value !== 'live') return '实时流关闭'
@@ -2600,16 +2751,7 @@ async function onProfileChange() {
   updateOrderPolling()
 }
 
-function formatHeatFilterNote(note: string) {
-  const dropped = note.match(/^drop_top_(\d+)%_by_(.+):dropped=(\d+)$/)
-  if (dropped) return `涨停热度过滤已执行：剔除热度最高 ${dropped[1]}%，共 ${dropped[3]} 个候选。`
-  const insufficient = note.match(/^limit_up_heat_data_insufficient:(\d+)\/(\d+)$/)
-  if (insufficient) return `涨停热度过滤未执行：有效热度样本 ${insufficient[1]}/${insufficient[2]}，低于最低要求。`
-  const fallback = note.match(/^limit_up_heat_fallback_after_filter:(\d+)\/(\d+)$/)
-  if (fallback) return `涨停热度过滤已回退：过滤后候选 ${fallback[1]}/${fallback[2]}，低于最低持仓要求。`
-  if (note === 'limit_up_heat_data_missing') return '涨停热度过滤未执行：缺少日线或涨停价数据。'
-  return note
-}
+// formatHeatFilterNote removed
 
 function phaseLabel(value: string) {
   const labels: Record<string, string> = {
