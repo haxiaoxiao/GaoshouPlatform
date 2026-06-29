@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     app_version: str = "0.1.0"
     debug: bool = True
     gaoshou_data_dir: str = str(_DATA_DIR)
+    blocking_thread_pool_workers: int = 32
 
     # 数据库配置
     database_url: str = f"sqlite+aiosqlite:///{_DB_PATH.as_posix()}"

@@ -1,8 +1,8 @@
 <template>
-  <div class="home-workbench" :class="`home-mode-${layoutMode.toLowerCase()}`">
+  <div class="home-workbench">
     <header class="workbench-header">
-      <div class="header-brand">
-        <div class="eyebrow">INVESTMENT DECISION DESK</div>
+      <div class="header-copy">
+        <span class="section-kicker">INVESTMENT DECISION DESK</span>
         <div class="title-row">
           <h2>今日投研工作台</h2>
           <span class="decision-pill" :class="`pill--${decisionTone}`">
@@ -13,19 +13,6 @@
       </div>
 
       <div class="header-actions">
-        <div class="layout-switcher" aria-label="布局预览切换">
-          <button
-            v-for="option in layoutOptions"
-            :key="option.mode"
-            :class="{ active: layoutMode === option.mode }"
-            :title="option.hint"
-            :aria-pressed="layoutMode === option.mode"
-            @click="layoutMode = option.mode"
-          >
-            <span>{{ option.mode }}</span>
-            {{ option.label }}
-          </button>
-        </div>
         <el-button size="small" :icon="Refresh" :loading="loading" @click="loadWorkbench">刷新判断</el-button>
         <el-button size="small" type="primary" class="btn-pine" @click="router.push(primaryAction.path)">
           {{ primaryAction.label }}
@@ -33,11 +20,33 @@
       </div>
     </header>
 
-    <div v-if="layoutMode === 'A'" class="layout-a split-pane">
-      <aside class="split-rail">
-        <div class="panel-kicker">PIPELINE</div>
+    <section class="decision-grid">
+      <article class="readiness-card" :class="`tone-${decisionTone}`">
+        <div>
+          <span class="section-kicker">READINESS</span>
+          <strong>{{ readinessScore }}</strong>
+        </div>
+        <p>{{ decisionSummary }}</p>
+      </article>
+
+      <article v-for="card in focusCards" :key="card.key" class="focus-card" :class="`tone-${card.tone}`">
+        <span class="status-dot"></span>
+        <div>
+          <small>{{ card.label }}</small>
+          <strong>{{ card.value }}</strong>
+          <em>{{ card.hint }}</em>
+        </div>
+      </article>
+    </section>
+
+    <section class="workbench-grid">
+      <aside class="pipeline-panel panel-block">
+        <div class="panel-heading">
+          <span class="section-kicker">PIPELINE</span>
+          <strong>Quant Trading Pipeline</strong>
+        </div>
         <nav class="pipeline-nav">
-          <button v-for="stage in pipelineStages" :key="stage.path" class="pipeline-step" @click="router.push(stage.path)">
+          <button v-for="stage in pipelineStages" :key="stage.path" class="pipeline-step" type="button" @click="router.push(stage.path)">
             <span class="step-index">{{ stage.kicker.split(' ')[0] }}</span>
             <span class="step-copy">
               <strong>{{ stage.title }}</strong>
@@ -47,20 +56,16 @@
         </nav>
       </aside>
 
-      <main class="split-work">
-        <section class="readiness-strip" :class="`strip--${decisionTone}`">
-          <div>
-            <span class="panel-kicker">READINESS</span>
-            <strong>{{ readinessScore }}</strong>
+      <main class="primary-panel">
+        <section class="panel-block action-panel">
+          <div class="panel-heading">
+            <div>
+              <span class="section-kicker">TODAY'S CALLS</span>
+              <strong>今日行动建议</strong>
+            </div>
+            <button class="text-action" type="button" @click="router.push('/research')">进入研究实验室</button>
           </div>
-          <p>{{ decisionSummary }}</p>
-        </section>
 
-        <section class="pane-section">
-          <div class="section-heading">
-            <span>今日行动建议</span>
-            <small>TODAY'S CALLS</small>
-          </div>
           <div class="table-wrap">
             <table class="quant-table">
               <thead>
@@ -86,7 +91,7 @@
                       <span>{{ action.description }}</span>
                     </div>
                   </td>
-                  <td class="text-right action-link">{{ action.cta }} →</td>
+                  <td class="text-right action-link">{{ action.cta }} -></td>
                 </tr>
               </tbody>
             </table>
@@ -94,22 +99,14 @@
         </section>
       </main>
 
-      <aside class="split-aside">
-        <section class="pane-section">
-          <div class="panel-kicker">FOCUS</div>
-          <div class="status-stack">
-            <div v-for="card in focusCards" :key="card.key" class="status-row" :class="`row--${card.tone}`">
-              <span class="status-dot"></span>
-              <span class="status-name" :title="card.hint">{{ card.label }}</span>
-              <strong>{{ card.value }}</strong>
-            </div>
+      <aside class="telemetry-panel">
+        <section class="panel-block">
+          <div class="panel-heading">
+            <span class="section-kicker">RESEARCH INPUTS</span>
+            <button class="text-action" type="button" @click="router.push('/data')">查看详情</button>
           </div>
-        </section>
-
-        <section class="pane-section">
-          <div class="panel-kicker">INPUTS</div>
           <div class="status-stack">
-            <div v-for="row in researchInputRows" :key="row.label" class="status-row" :class="`row--${row.tone}`">
+            <div v-for="row in researchInputRows" :key="row.label" class="status-row" :class="`tone-${row.tone}`">
               <span class="status-dot"></span>
               <span class="status-name">{{ row.label }}</span>
               <strong>{{ row.value }}</strong>
@@ -117,9 +114,12 @@
           </div>
         </section>
 
-        <section class="pane-section">
-          <div class="panel-kicker">HANDOFF</div>
-          <div class="event-stack">
+        <section class="panel-block">
+          <div class="panel-heading">
+            <span class="section-kicker">HANDOFF TAPE</span>
+            <button class="text-action" type="button" @click="router.push('/monitor')">运维排障</button>
+          </div>
+          <div v-if="handoffRows.length" class="event-stack">
             <button v-for="row in handoffRows" :key="row.key" class="event-row" type="button">
               <span class="event-meta">
                 <span>{{ row.subtitle }}</span>
@@ -128,159 +128,10 @@
               <strong>{{ row.title }}</strong>
             </button>
           </div>
+          <p v-else class="empty-copy">暂无影响投研决策的近期事件。</p>
         </section>
       </aside>
-    </div>
-
-    <div v-else-if="layoutMode === 'B'" class="layout-b matrix-sheet">
-      <section class="matrix-summary">
-        <div>
-          <span>就绪评分</span>
-          <strong :class="`text--${decisionTone}`">{{ readinessScore }}</strong>
-        </div>
-        <div>
-          <span>同步写入</span>
-          <strong :class="hasBlockingSync ? 'text--warn' : 'text--good'">
-            {{ hasBlockingSync ? '进行中' : '无阻塞' }}
-          </strong>
-        </div>
-        <div>
-          <span>交易护栏</span>
-          <strong :class="tradeRiskOpen ? 'text--bad' : 'text--good'">
-            {{ tradeRiskOpen ? '真实下单开启' : '仅信号' }}
-          </strong>
-        </div>
-        <div>
-          <span>最近回测</span>
-          <strong>{{ latestBacktestText }}</strong>
-        </div>
-      </section>
-
-      <section class="matrix-table-section">
-        <div class="section-heading">
-          <span>矩阵审计表</span>
-          <small>DIAGNOSTIC MATRIX</small>
-        </div>
-        <div class="table-wrap">
-          <table class="quant-table matrix-table">
-            <thead>
-              <tr>
-                <th>模块</th>
-                <th>时间 / 状态</th>
-                <th>诊断</th>
-                <th>建议动作</th>
-                <th>关联页面</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in researchInputRows" :key="row.label">
-                <td class="text-strong">{{ row.label }}</td>
-                <td class="font-mono muted">{{ row.value }}</td>
-                <td>
-                  <span class="tone-chip" :class="`tone-chip--${row.tone}`">
-                    {{ row.tone === 'good' ? 'READY' : 'GAP' }}
-                  </span>
-                </td>
-                <td>{{ row.hint }}</td>
-                <td class="font-mono muted">/data</td>
-              </tr>
-              <tr
-                v-for="action in actionRows"
-                :key="action.key"
-                class="clickable-row action-audit-row"
-                @click="router.push(action.path)"
-              >
-                <td class="text-strong">{{ action.kicker }}</td>
-                <td class="font-mono muted">待执行</td>
-                <td><span class="tone-chip" :class="`tone-chip--${action.tone}`">{{ action.tone.toUpperCase() }}</span></td>
-                <td>
-                  <strong class="action-link">{{ action.title }}</strong>
-                  <span class="audit-desc">{{ action.description }}</span>
-                </td>
-                <td class="font-mono muted">{{ action.path }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      <section class="matrix-tape">
-        <span class="panel-kicker">HANDOFF TAPE</span>
-        <div class="tape-scroll">
-          <div v-for="row in handoffRows" :key="row.key" class="tape-item">
-            <span class="font-mono">[{{ row.subtitle.slice(-5) }}]</span>
-            <strong>{{ row.title }}</strong>
-            <em :class="`badge--${row.tone}`">{{ row.status }}</em>
-          </div>
-        </div>
-      </section>
-    </div>
-
-    <div v-else class="layout-c console-dashboard">
-      <section class="console-panel">
-        <div class="console-title">ACTIVE WORKFLOW TERMINAL</div>
-        <div class="console-window">
-          <div class="console-line">
-            <span class="prompt">$</span>
-            <span>select.step --active</span>
-          </div>
-          <div class="console-output">
-            <span class="console-muted">CURRENT WORKFLOW STATE</span>
-            <div class="console-pills">
-              <button v-for="stage in pipelineStages" :key="stage.path" type="button" @click="router.push(stage.path)">
-                {{ stage.kicker.split(' ')[0] }} {{ stage.title }}
-              </button>
-            </div>
-          </div>
-
-          <div class="console-line spaced">
-            <span class="prompt">$</span>
-            <span>suggest.actions --target=ready</span>
-          </div>
-          <div class="console-output">
-            <button
-              v-for="action in actionRows"
-              :key="action.key"
-              class="console-action"
-              type="button"
-              @click="router.push(action.path)"
-            >
-              <span :class="`console-tone--${action.tone}`">[{{ action.kicker }}]</span>
-              <strong>{{ action.title }}</strong>
-              <em>{{ action.description }}</em>
-            </button>
-          </div>
-        </div>
-      </section>
-
-      <section class="console-panel">
-        <div class="console-title">CONSOLE METERS</div>
-        <div class="console-window">
-          <div class="meter-block">
-            <span>READINESS METER: {{ readinessScore }}</span>
-            <strong>[{{ consoleBar }}]</strong>
-          </div>
-
-          <div class="terminal-list">
-            <div class="terminal-heading">SYSTEM STATE</div>
-            <div v-for="row in consoleStatusRows" :key="row.label" class="terminal-row">
-              <span>{{ row.label }}</span>
-              <i></i>
-              <strong :class="`console-tone--${row.tone}`">[{{ row.value }}]</strong>
-            </div>
-          </div>
-
-          <div class="terminal-list">
-            <div class="terminal-heading">DATA INGESTION</div>
-            <div v-for="row in researchInputRows" :key="row.label" class="terminal-row">
-              <span>{{ row.label }}</span>
-              <i></i>
-              <strong :class="`console-tone--${row.tone}`">[{{ row.value.split(' ')[0] || 'EMPTY' }}]</strong>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
+    </section>
   </div>
 </template>
 
@@ -296,13 +147,6 @@ import { backtestApi, type Backtest } from '@/api/backtest'
 import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral'
-type LayoutMode = 'A' | 'B' | 'C'
-
-interface LayoutOption {
-  mode: LayoutMode
-  label: string
-  hint: string
-}
 
 interface FocusCard {
   key: string
@@ -330,8 +174,6 @@ interface HandoffRow {
   tone: Tone
 }
 
-const layoutMode = ref<LayoutMode>('A')
-
 const router = useRouter()
 const loading = ref(false)
 const systemStatus = ref<SystemStatus | null>(null)
@@ -342,19 +184,12 @@ const runtimeTasks = ref<RuntimeTask[]>([])
 const latestBacktests = ref<Backtest[]>([])
 const liveStatus = ref<LiveTradingStatus | null>(null)
 
-const layoutOptions: LayoutOption[] = [
-  { mode: 'A', label: 'Split Pane', hint: '分栏终端' },
-  { mode: 'B', label: 'Matrix Audit Sheet', hint: '矩阵审计表' },
-  { mode: 'C', label: 'Console Dashboard', hint: '极客命令行' },
-]
-
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
 const latestBacktest = computed(() => latestBacktests.value[0] || null)
 const dataReadyCount = computed(() => researchInputRows.value.filter(row => row.tone === 'good').length)
 const hasBlockingSync = computed(() => ['queued', 'running'].includes(syncStatus.value?.status || ''))
 const tradeRiskOpen = computed(() => liveStatus.value?.order_submit_enabled === true)
-const latestBacktestText = computed(() => latestBacktest.value ? backtestStatusLabel(latestBacktest.value.status) : '未运行')
 
 const readinessScore = computed(() => {
   let score = 40
@@ -380,37 +215,8 @@ const decisionSummary = computed(() => {
   if (hasBlockingSync.value) return `同步任务正在${syncStatus.value?.status === 'queued' ? '排队' : '运行'}，先等数据口径稳定`
   if (!latestFor('market_daily')) return '缺少日线最新口径，先补数据'
   if (!latestBacktest.value) return '数据已可看，建议先跑一轮基准回测'
-  return '可以进入因子评估或策略迭代'
+  return '可以进入因子研究或策略迭代'
 })
-
-const readinessPercent = computed(() => Number(readinessScore.value.replace('%', '')))
-const consoleBar = computed(() => {
-  const completed = Math.round(readinessPercent.value / 4)
-  return `${'='.repeat(completed)}>${'.'.repeat(Math.max(0, 25 - completed))}`
-})
-
-const consoleStatusRows = computed(() => [
-  {
-    label: 'SYSTEM HEALTH',
-    value: systemStatus.value?.status === 'healthy' || systemStatus.value?.status === 'ok' ? 'OK' : 'CHECK',
-    tone: systemStatus.value?.status === 'healthy' || systemStatus.value?.status === 'ok' ? 'good' as Tone : 'warn' as Tone,
-  },
-  {
-    label: 'MUTATING SYNC',
-    value: hasBlockingSync.value ? 'ACTIVE' : 'NONE',
-    tone: hasBlockingSync.value ? 'warn' as Tone : 'good' as Tone,
-  },
-  {
-    label: 'LAST BACKTEST',
-    value: latestBacktest.value ? latestBacktest.value.status.toUpperCase() : 'NONE',
-    tone: latestBacktest.value?.status === 'failed' ? 'bad' as Tone : latestBacktest.value ? 'good' as Tone : 'neutral' as Tone,
-  },
-  {
-    label: 'REAL ORDER ROUTE',
-    value: tradeRiskOpen.value ? 'ACTIVE' : 'SIGNAL',
-    tone: tradeRiskOpen.value ? 'bad' as Tone : 'good' as Tone,
-  },
-])
 
 const primaryAction = computed(() => {
   const firstAction = actionRows.value[0]
@@ -455,7 +261,7 @@ const researchInputRows = computed(() => [
   inputRow('分钟行情', 'market_minute', '日内策略和固定 timer 回测输入'),
   inputRow('基础股票', 'stocks', '行业、市值、状态过滤'),
   inputRow('财务报表', 'financial', '质量/成长/估值因子输入'),
-  inputRow('因子缓存', 'factor_values', '因子评估只消费缓存'),
+  inputRow('因子缓存', 'factor_values', '研究评估只消费缓存'),
   inputRow('新闻舆情', 'sentiment', '研究假设和事件验证输入'),
 ])
 
@@ -551,11 +357,9 @@ const handoffRows = computed<HandoffRow[]>(() => {
 
 const pipelineStages = [
   { kicker: '01 DATA', title: '数据查看', path: '/data', description: '确认日线、分钟线、基础信息、舆情和指标的最新口径。' },
-  { kicker: '02 IDEA', title: '研究实验室', path: '/research', description: '沉淀假设、证据链接、实验记录和失败复盘。' },
-  { kicker: '03 ALPHA', title: '因子定义', path: '/factor', description: '管理因子目录、覆盖率、参数版本和预计算。' },
-  { kicker: '04 EVAL', title: '因子评估', path: '/factor/evaluation', description: '检查 IC、多空收益、回撤、换手和已计算组合。' },
-  { kicker: '05 RUN', title: '策略回测', path: '/backtest', description: '编辑策略代码，配置股票池、引擎、基准并查看报告。' },
-  { kicker: '06 GUARD', title: '模拟 / 实盘', path: '/trade', description: '先看信号和账户护栏，再决定是否开启真实下单。' },
+  { kicker: '02 FACTOR', title: '因子研究', path: '/factor', description: '管理因子目录、缓存预计算、IC、多空收益和研究评估。' },
+  { kicker: '03 RUN', title: '策略回测', path: '/backtest', description: '编辑策略代码，配置股票池、引擎、基准并查看报告。' },
+  { kicker: '04 GUARD', title: '模拟 / 实盘', path: '/trade', description: '先看信号和账户护栏，再决定是否开启真实下单。' },
 ]
 
 async function loadWorkbench() {
@@ -676,819 +480,539 @@ onMounted(loadWorkbench)
 </script>
 
 <style scoped>
-/* ─── 象牙暖白松风 Theme (Quant Compact Style) ─── */
-.theme-pine-quant {
-  --bg-page: #fdfbf7;         /* Warm Ivory White (象牙白) */
-  --bg-card: #f5f2ea;         /* Slightly darker warm tone for elements */
-  --bg-hover: #ebe7dc;        /* Hover transition tone */
-  --border-color: #e5dfd3;    /* Precise, hair-thin lines */
-  --text-main: #22302a;       /* Deep Pine Black / Dark Ink */
-  --text-sub: #54635c;        /* Moss Green Muted */
-  --text-light: #7e8d86;      /* Lighter Moss Gray */
-  
-  /* Brand Accent Colors */
-  --pine-primary: #1b3d32;    /* Deep Pine Green (松风绿) */
-  --pine-secondary: #355e4f;  /* Medium Pine Green */
-  --pine-bg-light: #eef3f0;   /* Muted Pine background tint */
-
-  /* Quant Semantics (Muted Traditional Chinese Tones) */
-  --color-good: #2d6a4f;      /* Soft Jade Green */
-  --color-good-bg: #eaf5f0;
-  --color-warn: #b27a1e;      /* Soft Ochre Yellow */
-  --color-warn-bg: #fdf6e6;
-  --color-bad: #a83232;       /* Soft Madder Red */
-  --color-bad-bg: #fbf1f1;
-  --color-neutral: #5c6863;
-  --color-neutral-bg: #f2f2ef;
-
-  background-color: var(--bg-page);
-  color: var(--text-main);
-  min-height: 100vh;
-  box-sizing: border-box;
-  padding: 16px 20px;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-  letter-spacing: -0.01em;
-}
-
-/* Common Kicker Style */
-.section-kicker {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--pine-secondary);
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
-/* Header Section */
-.workbench-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid var(--border-color);
-  padding-bottom: 12px;
-  margin-bottom: 16px;
-}
-
-.header-brand {
+.home-workbench {
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: var(--space-4);
+  overflow: auto;
+  color: var(--text-primary);
+  background:
+    linear-gradient(180deg, rgba(253, 251, 247, 0.92), rgba(245, 242, 234, 0.5)),
+    var(--bg-primary);
 }
 
-.title-group {
+.workbench-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-4);
+  padding: var(--space-4) 0 var(--space-3);
+  border-bottom: 1px solid var(--border-default);
+}
+
+.header-copy {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.title-row {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
-.title-group h2 {
+.title-row h2 {
   margin: 0;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--pine-primary);
+  color: var(--accent-primary);
+  font-size: var(--text-2xl);
+  line-height: 1.15;
 }
-
-.decision-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 3px 8px;
-  border-radius: 4px;
-  border: 1px solid transparent;
-}
-
-.decision-pill .dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  display: inline-block;
-}
-
-.pill--good {
-  background: var(--color-good-bg);
-  color: var(--color-good);
-  border-color: rgba(45, 106, 79, 0.2);
-}
-.pill--good .dot { background-color: var(--color-good); }
-
-.pill--warn {
-  background: var(--color-warn-bg);
-  color: var(--color-warn);
-  border-color: rgba(178, 122, 30, 0.2);
-}
-.pill--warn .dot { background-color: var(--color-warn); }
-
-.pill--bad {
-  background: var(--color-bad-bg);
-  color: var(--color-bad);
-  border-color: rgba(168, 50, 50, 0.2);
-}
-.pill--bad .dot { background-color: var(--color-bad); }
 
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
 }
 
-/* Segmented Control Switcher */
-.layout-switcher {
-  display: flex;
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  padding: 2px;
-  border-radius: 4px;
+.section-kicker {
+  color: var(--accent-secondary);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  letter-spacing: var(--tracking-wider);
+  text-transform: uppercase;
 }
 
-.layout-switcher button {
-  background: transparent;
-  border: none;
+.decision-pill,
+.tone-chip,
+.event-row em {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-data);
   font-size: 11px;
-  font-weight: 600;
-  color: var(--text-sub);
-  padding: 4px 8px;
-  cursor: pointer;
-  border-radius: 3px;
-  transition: all 0.15s ease;
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0;
 }
 
-.layout-switcher button.active {
-  background-color: var(--pine-primary);
-  color: #ffffff;
-}
-
-/* Button overrides for element-plus */
-:deep(.el-button) {
-  border-radius: 4px;
-  border-color: var(--border-color);
-  background-color: var(--bg-card);
-  color: var(--text-main);
-  font-weight: 500;
-}
-:deep(.el-button:hover) {
-  background-color: var(--bg-hover);
-  border-color: var(--text-light);
-  color: var(--pine-primary);
-}
-
-:deep(.el-button--primary.btn-pine) {
-  background-color: var(--pine-primary) !important;
-  border-color: var(--pine-primary) !important;
-  color: #ffffff !important;
-}
-:deep(.el-button--primary.btn-pine:hover) {
-  background-color: var(--pine-secondary) !important;
-  border-color: var(--pine-secondary) !important;
-}
-
-/* ========================================== */
-/* MODE 1: SPLIT PANE STYLES                  */
-/* ========================================== */
-.layout-split {
-  display: grid;
-  grid-template-columns: 200px minmax(0, 1fr) 280px;
-  gap: 1px;
-  background-color: var(--border-color);
-  border: 1px solid var(--border-color);
-  margin-top: 16px;
-}
-
-.layout-split > div {
-  background-color: var(--bg-page);
-  padding: 16px;
-  box-sizing: border-box;
-}
-
-.split-sidebar {
-  border-right: 1px solid var(--border-color);
-}
-
-.sidebar-title {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 10px;
+.decision-pill {
+  gap: 7px;
+  max-width: min(680px, 100%);
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
   font-weight: 700;
-  color: var(--text-light);
-  letter-spacing: 0.1em;
-  margin-bottom: 12px;
+  white-space: normal;
+}
+
+.status-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: var(--radius-full);
+  background: currentColor;
+}
+
+.pill--good,
+.tone-good .status-dot,
+.tone-chip--good,
+.badge--good {
+  color: var(--accent-success);
+}
+
+.pill--warn,
+.tone-warn .status-dot,
+.tone-chip--warn,
+.badge--warn {
+  color: var(--accent-warning);
+}
+
+.pill--bad,
+.tone-bad .status-dot,
+.tone-chip--bad,
+.badge--bad {
+  color: var(--accent-danger);
+}
+
+.pill--neutral,
+.tone-neutral .status-dot,
+.tone-chip--neutral,
+.badge--neutral {
+  color: var(--color-neutral);
+}
+
+.pill--good,
+.tone-chip--good,
+.badge--good {
+  background: var(--status-ready-bg);
+  border: 1px solid rgba(45, 106, 79, 0.2);
+}
+
+.pill--warn,
+.tone-chip--warn,
+.badge--warn {
+  background: var(--status-warning-bg);
+  border: 1px solid rgba(178, 122, 30, 0.22);
+}
+
+.pill--bad,
+.tone-chip--bad,
+.badge--bad {
+  background: var(--status-critical-bg);
+  border: 1px solid rgba(168, 50, 50, 0.22);
+}
+
+.pill--neutral,
+.tone-chip--neutral,
+.badge--neutral {
+  background: var(--status-neutral-bg);
+  border: 1px solid rgba(92, 104, 99, 0.22);
+}
+
+.decision-grid {
+  display: grid;
+  grid-template-columns: minmax(240px, 1.2fr) repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+.readiness-card,
+.focus-card,
+.panel-block {
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-lg);
+  background: rgba(245, 242, 234, 0.76);
+  box-shadow: var(--shadow-card);
+}
+
+.readiness-card {
+  min-height: 126px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  border-left: 5px solid currentColor;
+}
+
+.readiness-card strong {
+  display: block;
+  margin-top: var(--space-2);
+  color: var(--text-bright);
+  font-family: var(--font-data);
+  font-size: 34px;
+  line-height: 1;
+}
+
+.readiness-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-weight: 700;
+}
+
+.readiness-card.tone-good { color: var(--accent-success); }
+.readiness-card.tone-warn { color: var(--accent-warning); }
+.readiness-card.tone-bad { color: var(--accent-danger); }
+.readiness-card.tone-neutral { color: var(--color-neutral); }
+
+.focus-card {
+  min-height: 126px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-3);
+  align-items: start;
+  padding: var(--space-4);
+}
+
+.focus-card small,
+.focus-card em {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-style: normal;
+}
+
+.focus-card strong {
+  display: block;
+  margin: var(--space-1) 0;
+  color: var(--text-bright);
+  font-family: var(--font-data);
+  font-size: var(--text-lg);
+  line-height: 1.2;
+}
+
+.workbench-grid {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(180px, 0.55fr) minmax(420px, 1.45fr) minmax(280px, 0.8fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.primary-panel,
+.telemetry-panel {
+  min-width: 0;
+  display: grid;
+  gap: var(--space-4);
+}
+
+.panel-block {
+  overflow: hidden;
+}
+
+.panel-heading {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(253, 251, 247, 0.56);
+}
+
+.panel-heading strong {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-bright);
+  font-size: var(--text-sm);
+}
+
+.text-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent-secondary);
+  cursor: pointer;
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.text-action:hover {
+  color: var(--accent-primary);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .pipeline-nav {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
 
-.pipeline-nav-btn {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  background: transparent;
-  border: none;
+.pipeline-step {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: var(--space-2);
   width: 100%;
-  text-align: left;
-  padding: 6px;
-  border-radius: 4px;
+  padding: 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-primary);
   cursor: pointer;
-  transition: all 0.2s ease;
+  text-align: left;
 }
 
-.pipeline-nav-btn:hover {
-  background-color: var(--bg-card);
+.pipeline-step:hover {
+  border-color: var(--border-default);
+  background: var(--bg-hover);
 }
 
-.nav-num {
-  font-family: "Consolas", Monaco, monospace;
+.step-index {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-accent);
+  border-radius: var(--radius-sm);
+  color: var(--accent-primary);
+  font-family: var(--font-data);
   font-size: 11px;
-  font-weight: 700;
-  color: var(--pine-secondary);
+  font-weight: 900;
 }
 
-.nav-body {
-  display: flex;
-  flex-direction: column;
+.step-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
 }
 
-.nav-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-main);
+.step-copy strong {
+  color: var(--text-bright);
+  font-size: var(--text-sm);
 }
 
-.nav-desc {
-  font-size: 10px;
-  color: var(--text-light);
-  margin-top: 2px;
-  line-height: 1.3;
+.step-copy small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
-.readiness-banner {
-  padding: 12px;
-  border-radius: 4px;
-  margin-bottom: 16px;
-  border-left: 4px solid transparent;
+.table-wrap {
+  overflow: auto;
 }
 
-.readiness-banner--good {
-  background-color: var(--color-good-bg);
-  border-left-color: var(--color-good);
-}
-.readiness-banner--warn {
-  background-color: var(--color-warn-bg);
-  border-left-color: var(--color-warn);
-}
-.readiness-banner--bad {
-  background-color: var(--color-bad-bg);
-  border-left-color: var(--color-bad);
-}
-
-.banner-title {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 9px;
-  font-weight: 700;
-  color: var(--text-sub);
-  letter-spacing: 0.08em;
-}
-
-.banner-core {
-  display: flex;
-  align-items: baseline;
-  gap: 12px;
-  margin-top: 4px;
-}
-
-.banner-score {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--text-main);
-}
-
-.banner-hint {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-/* Shared Tables */
 .quant-table {
   width: 100%;
+  min-width: 640px;
   border-collapse: collapse;
-  margin-top: 8px;
 }
 
-.quant-table th {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 10px;
-  color: var(--text-light);
-  text-align: left;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--border-color);
-  font-weight: 600;
-}
-
+.quant-table th,
 .quant-table td {
-  padding: 8px;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 12px;
-  color: var(--text-main);
+  border-bottom: 1px solid var(--border-subtle);
+  padding: 10px 12px;
+  text-align: left;
   vertical-align: middle;
 }
 
-.quant-table tr.clickable-row {
+.quant-table th {
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.quant-table td {
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.clickable-row {
   cursor: pointer;
 }
 
-.quant-table tr.clickable-row:hover {
-  background-color: var(--bg-hover);
+.clickable-row:hover {
+  background: var(--bg-hover);
 }
 
 .text-right {
   text-align: right !important;
 }
 
-.text-bold {
-  font-weight: 600;
+.text-strong {
+  color: var(--text-bright) !important;
+  font-family: var(--font-data);
+  font-weight: 800;
 }
 
-.text-secondary {
-  color: var(--text-sub) !important;
-}
-
-.font-mono {
-  font-family: "Consolas", Monaco, monospace;
-}
-
-.text-link {
-  color: var(--pine-secondary);
-  font-weight: 600;
-}
-
-.table-kicker {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 9px;
-  font-weight: 700;
-  padding: 2px 4px;
-  border-radius: 2px;
-}
-
-.table-kicker.kicker--good {
-  background-color: var(--color-good-bg);
-  color: var(--color-good);
-}
-.table-kicker.kicker--warn {
-  background-color: var(--color-warn-bg);
-  color: var(--color-warn);
-}
-.table-kicker.kicker--bad {
-  background-color: var(--color-bad-bg);
-  color: var(--color-bad);
-}
-.table-kicker.kicker--neutral {
-  background-color: var(--color-neutral-bg);
-  color: var(--color-neutral);
-}
-
-.task-title-wrap {
-  display: flex;
-  flex-direction: column;
-}
-
-.task-main-title {
-  font-weight: 600;
-  color: var(--text-main);
-}
-
-.task-sub-title {
-  font-size: 10px;
-  color: var(--text-light);
-  margin-top: 1px;
-}
-
-.dense-status-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.dense-status-item {
-  display: flex;
-  align-items: center;
-  padding: 6px 8px;
-  background-color: var(--bg-card);
-  border-radius: 4px;
-  font-size: 11px;
-}
-
-.dense-status-item .status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  margin-right: 8px;
-}
-
-.item-tone--good .status-dot { background-color: var(--color-good); }
-.item-tone--warn .status-dot { background-color: var(--color-warn); }
-.item-tone--bad .status-dot { background-color: var(--color-bad); }
-
-.status-label {
-  font-weight: 600;
-  flex-grow: 1;
-}
-
-.status-value {
-  font-family: "Consolas", Monaco, monospace;
-  color: var(--text-sub);
-}
-
-.compact-feed {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.feed-node {
-  border-bottom: 1px dashed var(--border-color);
-  padding-bottom: 6px;
-}
-.feed-node:last-child {
-  border-bottom: none;
-}
-
-.node-meta {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-}
-
-.node-time {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 9px;
-  color: var(--text-light);
-}
-
-.node-badge {
-  font-size: 9px;
-  font-weight: 600;
-  padding: 1px 4px;
-  border-radius: 2px;
-}
-
-.badge-tone--good {
-  background-color: var(--color-good-bg);
-  color: var(--color-good);
-}
-.badge-tone--warn {
-  background-color: var(--color-warn-bg);
-  color: var(--color-warn);
-}
-.badge-tone--bad {
-  background-color: var(--color-bad-bg);
-  color: var(--color-bad);
-}
-.badge-tone--neutral {
-  background-color: var(--color-neutral-bg);
-  color: var(--color-neutral);
-}
-
-.node-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-main);
-  margin-top: 2px;
-}
-
-.margin-top-lg {
-  margin-top: 24px;
-}
-
-.section-title {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--pine-secondary);
-  letter-spacing: 0.08em;
-  margin-bottom: 8px;
-}
-
-/* ========================================== */
-/* MODE 2: MATRIX AUDIT SHEET STYLES          */
-/* ========================================== */
-.layout-matrix {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin-top: 16px;
-}
-
-.matrix-summary-row {
+.task-copy {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-card);
-  border-radius: 4px;
+  gap: 3px;
 }
 
-.summary-item {
-  display: flex;
-  flex-direction: column;
-  padding: 10px 16px;
-  border-right: 1px solid var(--border-color);
-}
-.summary-item:last-child {
-  border-right: none;
+.task-copy strong {
+  color: var(--text-bright);
+  font-size: var(--text-sm);
 }
 
-.summary-item .label {
-  font-size: 10px;
-  color: var(--text-light);
-  text-transform: uppercase;
+.task-copy span {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  line-height: 1.45;
 }
 
-.summary-item .val {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--text-main);
-  margin-top: 4px;
-}
-
-.summary-item .val.score {
-  font-size: 20px;
-}
-
-.color--good { color: var(--color-good) !important; }
-.color--warn { color: var(--color-warn) !important; }
-.color--bad { color: var(--color-bad) !important; }
-
-.status-badge-flat {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  padding: 2px 6px;
-  border-radius: 2px;
-}
-
-.text-light-desc {
-  color: var(--text-sub);
-}
-
-.matrix-action-tr td {
-  background-color: var(--color-warn-bg);
-}
-
-.text-warn-color {
-  color: var(--color-warn);
-}
-
-.action-desc-small {
-  font-size: 10px;
-  font-weight: normal;
-  color: var(--text-light);
-}
-
-.matrix-log-tape {
-  border: 1px solid var(--border-color);
-  background-color: var(--bg-card);
-  padding: 8px 12px;
-  border-radius: 4px;
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.tape-title {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 10px;
-  font-weight: 700;
-  color: var(--text-light);
+.action-link {
+  color: var(--accent-secondary) !important;
+  font-weight: 800;
   white-space: nowrap;
 }
 
-.tape-scroll {
-  display: flex;
-  gap: 18px;
-  overflow-x: auto;
-  flex-grow: 1;
+.tone-chip,
+.event-row em {
+  padding: 3px 7px;
 }
 
-.tape-log-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.tape-log-item .time {
-  font-family: "Consolas", Monaco, monospace;
-  color: var(--text-light);
-}
-
-.tape-log-item .title {
-  color: var(--text-main);
-}
-
-.tape-log-item .badge {
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 4px;
-  border-radius: 2px;
-}
-
-/* ========================================== */
-/* MODE 3: CONSOLE STYLES                     */
-/* ========================================== */
-.layout-console {
+.status-stack,
+.event-stack {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-top: 16px;
+  gap: var(--space-2);
+  padding: var(--space-3);
 }
 
-.console-title {
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--pine-secondary);
-  margin-bottom: 8px;
-}
-
-.cli-pane {
-  background-color: #1a2420; /* Ultra-dark moss green console */
-  border: 1px solid #2f3e38;
-  border-radius: 6px;
-  padding: 16px;
-  color: #c9d6d0; /* Muted ivory-green code text */
-  font-family: "Consolas", Monaco, monospace;
-  font-size: 12px;
-  min-height: 280px;
-  box-sizing: border-box;
-}
-
-.cli-line {
-  display: flex;
-  gap: 8px;
-}
-
-.cli-prompt {
-  color: #639c80; /* Pine terminal prompt symbol */
-}
-
-.cli-command {
-  color: #f7f9f8;
-}
-
-.cli-response {
-  margin-left: 16px;
-  margin-top: 4px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.response-lead {
-  color: #7b9388;
-  font-size: 11px;
-}
-
-.workflow-cli-nodes {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 4px;
-}
-
-.cli-node-pill {
-  background-color: #273730;
-  border: 1px solid #374b42;
-  color: #e6ede8;
-  padding: 2px 8px;
-  border-radius: 4px;
-  cursor: pointer;
-  font-size: 11px;
-  transition: all 0.2s ease;
-}
-
-.cli-node-pill:hover {
-  background-color: var(--pine-primary);
-  border-color: var(--pine-secondary);
-}
-
-.margin-top-md {
-  margin-top: 16px;
-}
-
-.suggest-cli-actions {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.cli-action-row {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  cursor: pointer;
-  padding: 4px;
-  border-radius: 3px;
-}
-.cli-action-row:hover {
-  background-color: #25332d;
-}
-
-.cli-action-row .tag {
-  font-weight: 700;
-  font-size: 10px;
-}
-
-.tag-tone--good { color: #5bc295; }
-.tag-tone--warn { color: #d09d43; }
-.tag-tone--bad { color: #d96262; }
-.tag-tone--neutral { color: #8ea097; }
-
-.command-link {
-  color: #ffffff;
-  text-decoration: underline;
-}
-
-.cli-action-row .desc {
-  color: #7b9388;
-  font-size: 11px;
-}
-
-.meter-widget {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.meter-label {
-  font-weight: 700;
-  color: #7b9388;
-}
-
-.ascii-bar {
-  font-size: 14px;
-  letter-spacing: 0.1em;
-  color: #5bc295;
-  font-weight: bold;
-}
-
-.cli-checklist {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.checklist-header {
-  font-weight: 700;
-  color: #639c80;
-  font-size: 11px;
-  border-bottom: 1px dashed #2f3e38;
-  padding-bottom: 2px;
-  margin-bottom: 4px;
-}
-
-.checklist-item {
-  display: flex;
-  justify-content: space-between;
+.status-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--space-2);
   align-items: center;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(253, 251, 247, 0.52);
 }
 
-.checklist-item .label {
-  color: #e6ede8;
-}
-
-.checklist-item .dots {
-  flex-grow: 1;
-  color: #31443c;
+.status-name {
+  min-width: 0;
   overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status-row strong {
+  color: var(--text-bright);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.event-row {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  padding: 10px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: rgba(253, 251, 247, 0.52);
+  cursor: default;
+  text-align: left;
+}
+
+.event-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: 11px;
+}
+
+.event-row strong {
+  color: var(--text-bright);
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.empty-copy {
+  margin: var(--space-3);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  padding: var(--space-4);
   text-align: center;
 }
 
-.checklist-item .status-text {
-  font-weight: 700;
+:deep(.el-button.btn-pine) {
+  background: var(--accent-primary) !important;
+  border-color: var(--accent-primary) !important;
+  color: #fff !important;
+  box-shadow: 0 8px 18px rgba(27, 61, 50, 0.14);
 }
 
-.color-good { color: #5bc295 !important; }
-.color-warn { color: #d09d43 !important; }
-.color-bad { color: #d96262 !important; }
+:deep(.el-button.btn-pine:hover) {
+  background: var(--accent-secondary) !important;
+  border-color: var(--accent-secondary) !important;
+  color: #fff !important;
+}
 
-/* Responsive adjustments for layouts */
-@media (max-width: 1200px) {
-  .layout-split {
+@media (max-width: 1480px) {
+  .decision-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .workbench-grid {
+    grid-template-columns: minmax(180px, 0.52fr) minmax(0, 1.48fr);
+  }
+
+  .telemetry-panel {
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 980px) {
+  .workbench-header,
+  .workbench-grid,
+  .telemetry-panel {
     grid-template-columns: 1fr;
   }
-  .split-sidebar, .split-right {
-    border-right: none;
-    border-bottom: 1px solid var(--border-color);
+
+  .decision-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .layout-console {
+
+  .header-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 640px) {
+  .decision-grid {
     grid-template-columns: 1fr;
+  }
+
+  .title-row h2 {
+    font-size: var(--text-xl);
+  }
+
+  .readiness-card strong {
+    font-size: 30px;
   }
 }
 </style>

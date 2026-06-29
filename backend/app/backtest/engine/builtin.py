@@ -1,6 +1,7 @@
 """内置回测引擎 — 包装现有 BacktestRunner"""
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from app.backtest.config import BacktestConfig, BacktestResult
@@ -29,7 +30,20 @@ class BuiltinEngine(IBacktestEngine):
         task_store: dict[str, Any] = {"status": "running", "progress": 0, "live": None}
 
         runner = BacktestRunner()
-        result = await runner.run(config, task_store=task_store)
+        runner_task = asyncio.create_task(runner.run(config, task_store=task_store))
+        if progress_callback:
+            last_progress = -1.0
+            last_event_count = -1
+            while not runner_task.done():
+                await asyncio.sleep(0.8)
+                progress = float(task_store.get("progress") or 0.0)
+                live = task_store.get("live")
+                event_count = len((live or {}).get("events") or [])
+                if live and (progress != last_progress or event_count != last_event_count):
+                    progress_callback(progress, live)
+                    last_progress = progress
+                    last_event_count = event_count
+        result = await runner_task
         if config.benchmark_symbol and config.start_date and config.end_date:
             benchmark_returns = None
             benchmark_warning = None
@@ -47,7 +61,29 @@ class BuiltinEngine(IBacktestEngine):
             )
 
         if progress_callback:
-            progress_callback(1.0, task_store.get("live"))
+            live = task_store.get("live")
+            if isinstance(live, dict):
+                live = {
+                    **live,
+                    "trades": result.trades[-120:],
+                    "orders": result.orders[-120:],
+                    "equity_curve": result.nav_series[-600:],
+                    "metrics_snapshot": {
+                        **(live.get("metrics_snapshot") or {}),
+                        "total_return": result.total_return,
+                        "max_drawdown": result.max_drawdown,
+                        "sharpe": result.sharpe_ratio,
+                        "cash": result.final_capital,
+                        "total_value": result.final_capital,
+                        "n_trades": result.total_trades,
+                    },
+                    "metadata": {
+                        **(live.get("metadata") or {}),
+                        "phase": "completed",
+                        "progress_message": "内置回测完成",
+                    },
+                }
+            progress_callback(1.0, live)
 
         return result
 

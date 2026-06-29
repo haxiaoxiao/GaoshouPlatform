@@ -20,12 +20,13 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from time import perf_counter
-from typing import Any, AsyncIterator, Sequence
+from typing import Any, AsyncIterator, Callable, Sequence
 
 import pandas as pd
 from loguru import logger
 from sqlalchemy import delete, select, update
 
+from app.core.blocking import run_blocking
 from app.core.config import settings
 from app.db.models.live_trading import (
     LiveEquitySnapshot,
@@ -760,6 +761,7 @@ class LiveTradingService:
                 trigger_source=trigger_source,
                 run_id=run_id,
                 write_audit=write_audit,
+                log_stage=log_stage,
             )
             log_stage(
                 "intraday_prepare.done",
@@ -828,7 +830,7 @@ class LiveTradingService:
 
         pipeline = FactorPipeline()
         log_stage("pipeline.start", symbol_count=len(symbols), factor_count=len(factor_configs), filter_count=len(filters))
-        result = await asyncio.to_thread(
+        result = await run_blocking(
             pipeline.build_cross_section,
             factor_specs=factor_configs,
             trade_date=trade_date,
@@ -911,6 +913,7 @@ class LiveTradingService:
             params=normalized,
             portfolio_value=portfolio_value,
             bundle=bundle,
+            ranked_symbols=target_symbols,
         )
         await self._attach_stock_names([*orders, *skipped_orders])
         signal_hash = self._signal_hash(bundle.profile.profile_key, bundle.profile.strategy_id, trade_date, orders)
@@ -979,7 +982,7 @@ class LiveTradingService:
         trigger_source: str = "manual",
         run_id: str | None = None,
     ) -> dict[str, Any]:
-        order_list = [dict(order) for order in orders]
+        order_list = self._submission_order_sort([dict(order) for order in orders])
         if not order_list:
             return {"submitted": False, "message": "没有可提交的订单", "results": []}
         if mode not in {"paper", "live"}:
@@ -2370,7 +2373,7 @@ class LiveTradingService:
                 for effective_date, grouped_requirements in prepare_groups:
                     prepare_params = self._prepare_params_for_requirements(params, grouped_requirements)
                     prepared_parts.append(
-                        await asyncio.to_thread(
+                        await run_blocking(
                             build_precompute_prepare,
                             mode="single",
                             factor_names=sorted({str(item["name"]) for item in grouped_requirements}),
@@ -2393,7 +2396,7 @@ class LiveTradingService:
 
         factor_coverage: list[dict[str, Any]] = []
         if include_factor_coverage and requirements and symbols:
-            factor_coverage = await asyncio.to_thread(
+            factor_coverage = await run_blocking(
                 self._factor_coverage_snapshot,
                 requirements,
                 trade_date,
@@ -2404,7 +2407,7 @@ class LiveTradingService:
         pipeline_probe: dict[str, Any] | None = None
         if evaluate_pipeline and factor_configs and symbols:
             try:
-                pipeline_probe = await asyncio.to_thread(
+                pipeline_probe = await run_blocking(
                     self._pipeline_probe,
                     factor_configs,
                     filters,
@@ -2864,7 +2867,30 @@ class LiveTradingService:
         trigger_source: str,
         run_id: str | None,
         write_audit: bool,
+        log_stage: Callable[..., None] | None = None,
     ) -> dict[str, Any]:
+        def report(stage: str, **details: Any) -> None:
+            if log_stage is not None:
+                log_stage(stage, **details)
+
+        def progress_logger(prefix: str, timer_text: str, factor_names: list[str]) -> Callable[[float, str, dict[str, Any]], None]:
+            last_reported = -1.0
+
+            def report_progress(progress: float, stage: str, meta: dict[str, Any]) -> None:
+                nonlocal last_reported
+                if progress >= 1.0 or last_reported < 0 or progress - last_reported >= 0.2:
+                    last_reported = progress
+                    report(
+                        f"intraday_prepare.{prefix}.progress",
+                        timer_time=timer_text,
+                        factor_names=factor_names,
+                        progress=round(progress, 2),
+                        precompute_stage=stage,
+                        meta=meta,
+                    )
+
+            return report_progress
+
         phase = preflight.get("market_phase") or self._market_phase(trade_date=trade_date, params=params)
         if not bool(phase.get("same_day")):
             return {"attempted": False, "status": "skipped", "reason": "not_same_day"}
@@ -2942,22 +2968,48 @@ class LiveTradingService:
             high_volume_names = sorted(names & LIVE_HIGH_VOLUME_FACTORS)
             if status_names:
                 try:
-                    result = await asyncio.to_thread(
+                    report(
+                        "intraday_prepare.status_precompute.start",
+                        timer_time=timer_text,
+                        factor_names=status_names,
+                        symbol_count=len(symbols),
+                    )
+                    result = await run_blocking(
                         precompute_live_timer_status_features,
                         start_date=trade_date,
                         end_date=trade_date,
                         symbols=symbols,
                         timer_time=timer_text,
                         factor_names=status_names,
+                        progress_callback=progress_logger("status_precompute", timer_text, status_names),
+                    )
+                    report(
+                        "intraday_prepare.status_precompute.done",
+                        timer_time=timer_text,
+                        factor_names=status_names,
+                        rows_written=result.get("rows_written"),
+                        rows=result.get("rows"),
                     )
                     results.append({"timer_time": timer_text, "factor_names": status_names, "status": "completed", "result": result})
                 except Exception as exc:
                     message = f"{timer_text} 状态因子准备失败: {type(exc).__name__}: {exc}"
+                    report(
+                        "intraday_prepare.status_precompute.failed",
+                        timer_time=timer_text,
+                        factor_names=status_names,
+                        error=message,
+                    )
                     errors.append(message)
                     results.append({"timer_time": timer_text, "factor_names": status_names, "status": "failed", "error": message})
             if high_volume_names:
                 try:
-                    result = await asyncio.to_thread(
+                    report(
+                        "intraday_prepare.high_volume_precompute.start",
+                        timer_time=timer_text,
+                        factor_names=high_volume_names,
+                        symbol_count=len(symbols),
+                    )
+                    result = await run_blocking(
                         precompute_high_volume_features,
                         start_date=trade_date,
                         end_date=trade_date,
@@ -2966,10 +3018,24 @@ class LiveTradingService:
                         window=int(params.get("high_volume_window") or params.get("window") or 120),
                         threshold=float(params.get("high_volume_threshold") or params.get("threshold") or 0.9),
                         daily_volume_to_share_multiplier=float(params.get("daily_volume_to_share_multiplier") or 100.0),
+                        progress_callback=progress_logger("high_volume_precompute", timer_text, high_volume_names),
+                    )
+                    report(
+                        "intraday_prepare.high_volume_precompute.done",
+                        timer_time=timer_text,
+                        factor_names=high_volume_names,
+                        rows_written=result.get("rows_written"),
+                        rows=result.get("rows"),
                     )
                     results.append({"timer_time": timer_text, "factor_names": high_volume_names, "status": "completed", "result": result})
                 except Exception as exc:
                     message = f"{timer_text} 放量因子准备失败: {type(exc).__name__}: {exc}"
+                    report(
+                        "intraday_prepare.high_volume_precompute.failed",
+                        timer_time=timer_text,
+                        factor_names=high_volume_names,
+                        error=message,
+                    )
                     errors.append(message)
                     results.append({"timer_time": timer_text, "factor_names": high_volume_names, "status": "failed", "error": message})
 
@@ -4066,23 +4132,32 @@ class LiveTradingService:
         params: dict[str, Any],
         portfolio_value: float,
         bundle: StrategyProfileBundle,
+        ranked_symbols: Sequence[str] | None = None,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         lot_size = int(params.get("lot_size", 100) or 100)
         tolerance = float(params.get("rebalance_tolerance_pct", 0.01) or 0.01)
         execution_reserve = float(params.get("cash_execution_reserve_pct", params.get("cash_buffer_pct", 0.08)) or 0.0)
         buy_fee_buffer = float(params.get("cash_aware_buy_fee_buffer_pct", 0.003) or 0.0)
         require_current = bool(params.get("require_current_market_data_for_orders", True))
+        rank_map = {symbol: index + 1 for index, symbol in enumerate(ranked_symbols or [])}
         sell_orders: list[dict[str, Any]] = []
         buy_candidates: list[dict[str, Any]] = []
         skipped: list[dict[str, Any]] = []
 
-        def skip(symbol: str, side: str, reason: str, quantity: int = 0) -> None:
+        def skip(
+            symbol: str,
+            side: str,
+            reason: str,
+            quantity: int = 0,
+            attribution: dict[str, Any] | None = None,
+        ) -> None:
             skipped.append(
                 {
                     "symbol": symbol,
                     "side": side,
                     "quantity": quantity,
                     "reason": reason,
+                    "attribution": attribution or {"summary": reason},
                     "profile_key": bundle.profile.profile_key,
                     "strategy_id": bundle.profile.strategy_id,
                 }
@@ -4094,7 +4169,12 @@ class LiveTradingService:
                 continue
             price = float(price_map.get(symbol, 0.0) or 0.0)
             if require_current and price <= 0:
-                skip(symbol, "SELL", "current_market_data_missing")
+                skip(symbol, "SELL", "current_market_data_missing", attribution={
+                    "action": "SELL",
+                    "summary": "缺少提交所需的实时行情，卖出跳过。",
+                    "trigger": "current_market_data_missing",
+                    "current_quantity": current_qty,
+                })
                 continue
             target_weight = float(target_weights.get(symbol, 0.0) or 0.0)
             target_qty = self._round_lot((portfolio_value * target_weight) / price, lot_size) if price > 0 and target_weight > 0 else 0
@@ -4105,14 +4185,52 @@ class LiveTradingService:
                 available = float(account.positions.get(symbol, {}).get("available", current_qty) or current_qty)
                 sell_qty = self._round_lot(min(-delta if symbol in target_weights else current_qty, available), lot_size)
                 if sell_qty > 0:
-                    sell_orders.append(self._order(bundle, symbol, "SELL", sell_qty, price, "CashAware sell/reduce first"))
+                    if symbol in target_weights:
+                        summary = (
+                            f"目标仓位降至 {target_qty:.0f} 股，当前 {current_qty:.0f} 股，"
+                            f"卖出 {sell_qty:.0f} 股用于回到目标仓位并释放现金。"
+                        )
+                        trigger = "reduce_to_target"
+                    else:
+                        summary = f"该股票不在本轮信号目标池，卖出 {sell_qty:.0f} 股退出持仓并释放现金。"
+                        trigger = "exit_not_in_target"
+                    sell_orders.append(self._order(
+                        bundle,
+                        symbol,
+                        "SELL",
+                        sell_qty,
+                        price,
+                        summary,
+                        attribution={
+                            "action": "SELL",
+                            "trigger": trigger,
+                            "summary": summary,
+                            "rank": rank_map.get(symbol),
+                            "current_quantity": current_qty,
+                            "target_quantity": target_qty,
+                            "delta_quantity": delta,
+                            "order_quantity": sell_qty,
+                            "available_quantity": available,
+                            "target_weight": target_weight,
+                            "reference_price": price,
+                            "notional": round(sell_qty * price, 2),
+                            "portfolio_value": round(float(portfolio_value or 0.0), 2),
+                            "cash_effect": round(sell_qty * price, 2),
+                        },
+                    ))
 
         projected_cash = account.cash + sum(float(order["quantity"]) * float(order["reference_price"]) for order in sell_orders)
         available_cash = max(0.0, projected_cash * (1.0 - execution_reserve))
         for symbol, weight in target_weights.items():
             price = float(price_map.get(symbol, 0.0) or 0.0)
             if require_current and price <= 0:
-                skip(symbol, "BUY", "current_market_data_missing")
+                skip(symbol, "BUY", "current_market_data_missing", attribution={
+                    "action": "BUY",
+                    "summary": "缺少提交所需的实时行情，买入跳过。",
+                    "trigger": "current_market_data_missing",
+                    "rank": rank_map.get(symbol),
+                    "target_weight": float(weight or 0.0),
+                })
                 continue
             if price <= 0:
                 continue
@@ -4125,11 +4243,58 @@ class LiveTradingService:
             buy_value = buy_qty * price * (1.0 + buy_fee_buffer)
             if buy_qty <= 0:
                 continue
-            buy_candidates.append(self._order(bundle, symbol, "BUY", buy_qty, price, "CashAware target buy/add"))
+            available_before = available_cash
+            summary = (
+                f"目标排名第 {rank_map.get(symbol, '-') }，目标仓位 {target_qty:.0f} 股，"
+                f"当前 {current_qty:.0f} 股，买入 {buy_qty:.0f} 股补足目标仓位。"
+            )
+            buy_candidates.append(self._order(
+                bundle,
+                symbol,
+                "BUY",
+                buy_qty,
+                price,
+                summary,
+                attribution={
+                    "action": "BUY",
+                    "trigger": "enter_or_add_to_target",
+                    "summary": summary,
+                    "rank": rank_map.get(symbol),
+                    "current_quantity": current_qty,
+                    "target_quantity": target_qty,
+                    "delta_quantity": delta,
+                    "order_quantity": buy_qty,
+                    "target_weight": float(weight or 0.0),
+                    "reference_price": price,
+                    "notional": round(buy_qty * price, 2),
+                    "buy_value_with_fee_buffer": round(buy_value, 2),
+                    "cash_available_before": round(available_before, 2),
+                    "cash_reserve_pct": execution_reserve,
+                    "buy_fee_buffer_pct": buy_fee_buffer,
+                    "portfolio_value": round(float(portfolio_value or 0.0), 2),
+                    "cash_effect": -round(buy_value, 2),
+                },
+            ))
             if buy_value <= available_cash:
                 available_cash -= buy_value
             else:
-                skip(symbol, "BUY", "cash_aware_deferred_insufficient_cash", buy_qty)
+                skip(symbol, "BUY", "cash_aware_deferred_insufficient_cash", buy_qty, attribution={
+                    "action": "BUY",
+                    "trigger": "cash_aware_deferred_insufficient_cash",
+                    "summary": (
+                        f"现金不足，需约 {buy_value:.2f}，可用约 {available_before:.2f}，"
+                        "本轮延后买入。"
+                    ),
+                    "rank": rank_map.get(symbol),
+                    "current_quantity": current_qty,
+                    "target_quantity": target_qty,
+                    "order_quantity": buy_qty,
+                    "target_weight": float(weight or 0.0),
+                    "reference_price": price,
+                    "buy_value_with_fee_buffer": round(buy_value, 2),
+                    "cash_available_before": round(available_before, 2),
+                    "cash_shortfall": round(max(0.0, buy_value - available_before), 2),
+                })
                 buy_candidates.pop()
         return [*sell_orders, *buy_candidates], skipped
 
@@ -5280,7 +5445,17 @@ class LiveTradingService:
             nvda_defensive_ret=float(params.get("us_overnight_nvda_defensive_ret", -0.04) or -0.04),
         )
 
-    def _order(self, bundle: StrategyProfileBundle, symbol: str, side: str, quantity: int, price: float, remark: str) -> dict[str, Any]:
+    def _order(
+        self,
+        bundle: StrategyProfileBundle,
+        symbol: str,
+        side: str,
+        quantity: int,
+        price: float,
+        remark: str,
+        *,
+        attribution: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         return {
             "profile_key": bundle.profile.profile_key,
             "strategy_id": bundle.profile.strategy_id,
@@ -5291,7 +5466,19 @@ class LiveTradingService:
             "price_type": "latest_reference",
             "reference_price": round(float(price or 0.0), 4),
             "remark": remark,
+            "attribution": attribution or {"summary": remark},
         }
+
+    @staticmethod
+    def _submission_order_sort(orders: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+        side_rank = {"SELL": 0, "BUY": 1}
+        return sorted(
+            [dict(order) for order in orders],
+            key=lambda order: (
+                side_rank.get(str(order.get("side") or "").upper(), 9),
+                str(order.get("symbol") or ""),
+            ),
+        )
 
     async def _empty_signal_response(
         self,

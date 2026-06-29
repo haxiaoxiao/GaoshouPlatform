@@ -119,6 +119,19 @@ export interface WatchlistStock {
   symbol: string
   stock_name: string | null
   added_at: string
+  industry?: string | null
+  industry2?: string | null
+  industry3?: string | null
+  sector?: string | null
+  concept?: string | null
+  ths_concepts?: string[]
+  total_mv?: number | null
+  circ_mv?: number | null
+  pe_ttm?: number | null
+  pb?: number | null
+  roe?: number | null
+  change_pct?: number | null
+  latest_trade_date?: string | null
 }
 
 export interface CreateGroupParams {

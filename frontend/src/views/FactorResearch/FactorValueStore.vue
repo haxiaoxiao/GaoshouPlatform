@@ -1,18 +1,6 @@
 <template>
   <div class="factor-value-store">
     <section class="toolbar">
-      <div class="toolbar-header">
-        <div class="store-title">
-          <span class="panel-kicker">FACTOR DEFINITION / PRECOMPUTE</span>
-          <strong>因子定义与预计算</strong>
-          <span>管理因子目录、缓存覆盖、截面预览和预计算；表达式只在创建或编辑时打开。</span>
-        </div>
-        <div class="toolbar-meta">
-          <span>{{ selectedDefinition?.frequency || '频率未知' }}</span>
-          <strong>查询 {{ form.startDate }} 至 {{ form.endDate }}</strong>
-          <small v-if="coverage">实际 {{ actualCoverageRange }}</small>
-        </div>
-      </div>
       <el-form :inline="true" :model="form" label-width="76px" class="control-form">
         <el-form-item label="分组" class="group-form-item">
           <el-select-v2
@@ -50,7 +38,7 @@
             </template>
           </el-select-v2>
         </el-form-item>
-        <el-form-item label="股票池">
+        <el-form-item label="股票池" class="pool-form-item">
           <el-select-v2
             v-model="form.indexSymbol"
             :options="indexOptions"
@@ -59,7 +47,7 @@
             class="factor-select"
           />
         </el-form-item>
-        <el-form-item label="查询日期">
+        <el-form-item label="查询日期" class="date-form-item">
           <div class="date-control">
             <div class="date-control__row">
               <el-date-picker
@@ -128,12 +116,12 @@
             预览
           </el-button>
         </el-form-item>
+        <div class="toolbar-meta">
+          <span>{{ selectedDefinition?.frequency || '频率未知' }}</span>
+          <strong>{{ form.startDate }} - {{ form.endDate }}</strong>
+          <small v-if="coverage">实际 {{ actualCoverageRange }}</small>
+        </div>
       </el-form>
-      <div class="action-help">
-        <span>覆盖率：只检查当前因子在缓存里的实际日期、股票数和行数，不会重新计算。</span>
-        <span>预览：读取实际最新可用日期的截面样本，展示最高和最低的因子值。</span>
-        <span>预计算：真正生成并写入因子缓存。</span>
-      </div>
     </section>
 
     <el-alert
@@ -1352,7 +1340,7 @@ onBeforeUnmount(() => {
 .factor-value-store {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-height: 0;
   --factor-surface: rgba(19, 19, 24, 0.96);
   --factor-surface-strong: rgba(14, 15, 20, 0.98);
@@ -1367,9 +1355,9 @@ onBeforeUnmount(() => {
   position: sticky;
   top: 0;
   z-index: 12;
-  padding: 13px 14px;
+  padding: 10px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 6px;
   background:
     linear-gradient(135deg, rgba(56, 189, 248, 0.07), transparent 32%),
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
@@ -1378,51 +1366,26 @@ onBeforeUnmount(() => {
   backdrop-filter: blur(12px);
 }
 
-.toolbar-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 12px;
-}
-
-.store-title {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  font-size: 12px;
-  color: var(--el-text-color-secondary);
-}
-
-.panel-kicker {
-  font-family: var(--font-data);
-  font-size: 10px;
-  color: var(--accent-primary);
-}
-
-.store-title strong {
-  font-size: 15px;
-  color: var(--text-bright);
-}
-
 .toolbar-meta {
+  grid-area: meta;
+  justify-self: end;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 4px;
-  padding: 7px 10px;
+  align-items: center;
+  gap: 8px;
+  min-height: 30px;
+  padding: 4px 8px;
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
   background: rgba(10, 10, 12, 0.38);
   color: var(--text-muted);
-  font-size: 11px;
+  font-size: 10px;
   white-space: nowrap;
 }
 
 .toolbar-meta strong {
   font-family: var(--font-data);
   color: var(--text-bright);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 500;
 }
 
@@ -1433,20 +1396,28 @@ onBeforeUnmount(() => {
 
 .control-form {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
-  gap: 2px 10px;
-  align-items: start;
+  grid-template-columns: minmax(190px, 1.1fr) minmax(230px, 1.3fr) minmax(150px, 0.8fr) minmax(180px, 1fr);
+  grid-template-areas:
+    "group factor pool meta"
+    "date date actions actions";
+  gap: 8px 10px;
+  align-items: center;
 }
 
 .control-form :deep(.el-form-item) {
   margin-right: 0;
-  margin-bottom: 10px;
+  margin-bottom: 0;
   min-width: 0;
 }
 
 .control-form :deep(.el-form-item__label) {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
+  line-height: 30px;
+}
+
+.control-form :deep(.el-form-item__content) {
+  min-height: 30px;
 }
 
 .factor-select {
@@ -1454,7 +1425,7 @@ onBeforeUnmount(() => {
 }
 
 .group-form-item {
-  grid-column: span 2;
+  grid-area: group;
 }
 
 .factor-select--group {
@@ -1462,7 +1433,7 @@ onBeforeUnmount(() => {
 }
 
 .factor-form-item--wide {
-  grid-column: span 2;
+  grid-area: factor;
 }
 
 .factor-select--wide {
@@ -1480,17 +1451,24 @@ onBeforeUnmount(() => {
 .date-control {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 4px;
 }
 
 .date-control__row,
 .date-shortcuts {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
+  min-width: 0;
+}
+
+.date-control__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
 }
 
 .date-shortcut {
+  height: 20px;
   cursor: pointer;
   user-select: none;
   border-color: rgba(56, 189, 248, 0.24);
@@ -1516,30 +1494,48 @@ onBeforeUnmount(() => {
 }
 
 .action-item {
-  grid-column: 1 / -1;
+  grid-area: actions;
+  align-self: start;
   margin-left: 0;
 }
 
-.action-help {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-  padding-top: 2px;
-  color: var(--text-secondary);
-  font-size: 12px;
-  line-height: 1.5;
+.action-item :deep(.el-form-item__content) {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+}
+
+.action-item :deep(.el-button + .el-button) {
+  margin-left: 0;
+}
+
+.action-item :deep(.el-button) {
+  width: 100%;
+  min-width: 0;
+  padding-inline: 7px;
+}
+
+.date-form-item {
+  grid-area: date;
+  align-self: start;
+}
+
+.pool-form-item {
+  grid-area: pool;
 }
 
 .summary {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 6px;
 }
 
 .summary > div {
-  padding: 11px 12px;
+  padding: 7px 9px;
   border: 1px solid var(--border-default);
-  border-radius: 8px;
+  border-radius: 6px;
   background:
     linear-gradient(180deg, rgba(56, 189, 248, 0.045), transparent),
     var(--bg-elevated);
@@ -1548,14 +1544,14 @@ onBeforeUnmount(() => {
 
 .summary .label {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
   color: var(--el-text-color-secondary);
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .summary strong {
   font-family: var(--font-data);
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
   color: var(--text-bright);
 }
@@ -1571,8 +1567,8 @@ onBeforeUnmount(() => {
 
 .group-result {
   display: grid;
-  gap: 10px;
-  padding: 12px 14px;
+  gap: 8px;
+  padding: 9px 10px;
   border: 1px solid rgba(56, 189, 248, 0.2);
   border-radius: 8px;
   background: var(--bg-elevated);
@@ -1605,7 +1601,7 @@ onBeforeUnmount(() => {
 }
 
 .precompute-progress {
-  padding: 12px 14px;
+  padding: 9px 10px;
   border: 1px solid rgba(56, 189, 248, 0.26);
   border-radius: 8px;
   background:
@@ -1617,7 +1613,7 @@ onBeforeUnmount(() => {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .precompute-progress__header div {
@@ -1641,7 +1637,7 @@ onBeforeUnmount(() => {
 
 .precompute-progress__bars {
   display: grid;
-  gap: 8px;
+  gap: 6px;
 }
 
 .precompute-progress__stage-bar {
@@ -1654,8 +1650,8 @@ onBeforeUnmount(() => {
 .precompute-progress__grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-  gap: 8px;
-  margin-top: 8px;
+  gap: 6px;
+  margin-top: 6px;
 }
 
 .precompute-progress__metric {
@@ -1731,8 +1727,8 @@ onBeforeUnmount(() => {
 .coverage-warning {
   display: grid;
   grid-template-columns: minmax(220px, 360px) 1fr;
-  gap: 12px;
-  padding: 11px 12px;
+  gap: 10px;
+  padding: 8px 10px;
   border: 1px solid rgba(251, 191, 36, 0.28);
   border-radius: 8px;
   background:
@@ -1761,8 +1757,8 @@ onBeforeUnmount(() => {
 .group-panel {
   display: grid;
   grid-template-columns: minmax(220px, 340px) 1fr;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background:
@@ -1789,11 +1785,11 @@ onBeforeUnmount(() => {
 .preview-dual {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 8px;
 }
 
 .preview-col {
-  padding: 11px;
+  padding: 8px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background:
@@ -1807,7 +1803,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-bottom: 7px;
+  margin-bottom: 5px;
 }
 
 .preview-title h5 {
@@ -1836,7 +1832,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   min-height: 0;
-  height: min(58vh, 720px);
+  height: min(62vh, 760px);
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background: var(--bg-elevated);
@@ -1847,7 +1843,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
+  padding: 7px 9px;
   border-bottom: 1px solid var(--border-subtle);
   background: rgba(10, 10, 12, 0.42);
 }
@@ -1855,12 +1851,12 @@ onBeforeUnmount(() => {
 .table-panel__header div {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 
 .table-panel__header strong {
   color: var(--text-bright);
-  font-size: 14px;
+  font-size: 13px;
 }
 
 .table-panel__header span {
@@ -1901,10 +1897,31 @@ onBeforeUnmount(() => {
   color: var(--text-secondary);
   font-size: 12px;
   font-weight: 600;
+  padding: 5px 0;
 }
 
 :deep(.el-table td.el-table__cell) {
   border-bottom-color: var(--border-subtle);
+  padding: 5px 0;
+}
+
+:deep(.el-button) {
+  min-height: 26px;
+  padding: 5px 9px;
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-select__wrapper) {
+  min-height: 26px;
+}
+
+:deep(.el-date-editor.el-input) {
+  height: 26px;
+}
+
+:deep(.el-tag) {
+  height: 22px;
+  padding: 0 6px;
 }
 
 :deep(.el-table__inner-wrapper::before) {
@@ -1997,12 +2014,10 @@ onBeforeUnmount(() => {
 
 :global(.factor-select-dropdown--wide) {
   min-width: min(720px, calc(100vw - 32px)) !important;
-  border: 1px solid rgba(96, 165, 250, 0.22) !important;
+  border: 1px solid rgba(27, 61, 50, 0.2) !important;
   border-radius: 8px !important;
-  background:
-    linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(12, 15, 22, 0.98)),
-    #0c0f16 !important;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(148, 163, 184, 0.08) inset !important;
+  background: #fbf8ef !important;
+  box-shadow: 0 18px 42px rgba(27, 35, 29, 0.18), 0 0 0 1px rgba(253, 251, 247, 0.82) inset !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown),
@@ -2015,7 +2030,7 @@ onBeforeUnmount(() => {
 :global(.factor-select-dropdown--wide .el-vl__list),
 :global(.factor-select-dropdown--wide ul[role="listbox"]) {
   width: 100% !important;
-  background: transparent !important;
+  background: #fbf8ef !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown) {
@@ -2024,12 +2039,12 @@ onBeforeUnmount(() => {
 
 :global(.factor-select-dropdown--wide .el-vl__window) {
   width: 100% !important;
-  scrollbar-color: rgba(96, 165, 250, 0.32) rgba(15, 23, 42, 0.6);
+  scrollbar-color: rgba(27, 61, 50, 0.28) rgba(235, 229, 216, 0.82);
 }
 
 :global(.factor-select-dropdown--wide .el-popper__arrow::before) {
-  border-color: rgba(96, 165, 250, 0.22) !important;
-  background: #151b26 !important;
+  border-color: rgba(27, 61, 50, 0.2) !important;
+  background: #fbf8ef !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown__item) {
@@ -2037,24 +2052,24 @@ onBeforeUnmount(() => {
   width: 100% !important;
   line-height: normal;
   padding: 6px 12px;
-  color: #dbe7f5 !important;
+  color: #1d2c26 !important;
   background: transparent !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown__item:hover),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.hover) {
-  color: #f8fbff !important;
-  background: linear-gradient(90deg, rgba(56, 189, 248, 0.16), rgba(99, 102, 241, 0.08)) !important;
+  color: #10251d !important;
+  background: rgba(27, 61, 50, 0.08) !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.selected) {
-  color: #ffffff !important;
-  background: linear-gradient(90deg, rgba(14, 165, 233, 0.28), rgba(37, 99, 235, 0.16)) !important;
+  color: #fdfbf7 !important;
+  background: var(--accent-primary) !important;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.is-disabled) {
-  color: rgba(148, 163, 184, 0.45) !important;
+  color: rgba(96, 107, 98, 0.48) !important;
   background: transparent !important;
 }
 
@@ -2068,16 +2083,16 @@ onBeforeUnmount(() => {
 
 :global(.factor-option__label) {
   overflow: hidden;
-  color: #e8f1fb;
+  color: #1d2c26;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 :global(.factor-option__meta) {
   overflow: hidden;
-  color: #9fb2c7;
+  color: #68766e;
   font-family: var(--font-data);
   font-size: 11px;
   text-overflow: ellipsis;
@@ -2087,23 +2102,22 @@ onBeforeUnmount(() => {
 :global(.factor-select-dropdown--wide .el-select-dropdown__item:hover .factor-option__label),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.hover .factor-option__label),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected .factor-option__label) {
-  color: #ffffff;
+  color: inherit;
 }
 
 :global(.factor-select-dropdown--wide .el-select-dropdown__item:hover .factor-option__meta),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.hover .factor-option__meta),
 :global(.factor-select-dropdown--wide .el-select-dropdown__item.is-selected .factor-option__meta) {
-  color: #bfdbfe;
+  color: currentColor;
+  opacity: 0.72;
 }
 
 :global(.factor-select-dropdown--group) {
   min-width: min(640px, calc(100vw - 32px)) !important;
-  border: 1px solid rgba(96, 165, 250, 0.22) !important;
+  border: 1px solid rgba(27, 61, 50, 0.2) !important;
   border-radius: 8px !important;
-  background:
-    linear-gradient(180deg, rgba(30, 41, 59, 0.96), rgba(12, 15, 22, 0.98)),
-    #0c0f16 !important;
-  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.48), 0 0 0 1px rgba(148, 163, 184, 0.08) inset !important;
+  background: #fbf8ef !important;
+  box-shadow: 0 18px 42px rgba(27, 35, 29, 0.18), 0 0 0 1px rgba(253, 251, 247, 0.82) inset !important;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown),
@@ -2116,7 +2130,7 @@ onBeforeUnmount(() => {
 :global(.factor-select-dropdown--group .el-vl__list),
 :global(.factor-select-dropdown--group ul[role="listbox"]) {
   width: 100% !important;
-  background: transparent !important;
+  background: #fbf8ef !important;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown__item) {
@@ -2124,32 +2138,33 @@ onBeforeUnmount(() => {
   width: 100% !important;
   line-height: normal;
   padding: 6px 12px;
-  color: #dbe7f5 !important;
+  color: #1d2c26 !important;
   background: transparent !important;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown__item:hover),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.hover) {
-  color: #f8fbff !important;
-  background: linear-gradient(90deg, rgba(56, 189, 248, 0.16), rgba(99, 102, 241, 0.08)) !important;
+  color: #10251d !important;
+  background: rgba(27, 61, 50, 0.08) !important;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.selected) {
-  color: #ffffff !important;
-  background: linear-gradient(90deg, rgba(14, 165, 233, 0.28), rgba(37, 99, 235, 0.16)) !important;
+  color: #fdfbf7 !important;
+  background: var(--accent-primary) !important;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown__item:hover .factor-option__label),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.hover .factor-option__label),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected .factor-option__label) {
-  color: #ffffff;
+  color: inherit;
 }
 
 :global(.factor-select-dropdown--group .el-select-dropdown__item:hover .factor-option__meta),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.hover .factor-option__meta),
 :global(.factor-select-dropdown--group .el-select-dropdown__item.is-selected .factor-option__meta) {
-  color: #bfdbfe;
+  color: currentColor;
+  opacity: 0.72;
 }
 
 @media (max-width: 1100px) {

@@ -38,8 +38,10 @@ export interface Backtest {
 
 export interface BacktestTrade {
   trade_date?: string
+  date?: string
   symbol?: string
   direction?: string
+  action?: string
   price?: number
   display_price?: number
   entry_price?: number
@@ -139,6 +141,18 @@ export interface LiveData {
     market_value: number
     unrealized_pnl: number
   }>
+  trades?: BacktestTrade[]
+  orders?: Array<{
+    order_id?: string
+    symbol?: string
+    direction?: string
+    price?: number
+    quantity?: number
+    status?: string
+    filled_quantity?: number
+    message?: string
+  }>
+  equity_curve?: Array<{ date: string; nav: number; value?: number }>
   metrics_snapshot: {
     total_return?: number
     max_drawdown?: number
@@ -152,12 +166,15 @@ export interface LiveData {
   }
   metadata?: {
     phase?: string
+    progress_message?: string
     chunk_index?: number
     chunk_total?: number
     chunk_start?: string
     chunk_end?: string
     symbol_count?: number
     bar_type?: string
+    engine?: string
+    [key: string]: string | number | boolean | null | undefined
   }
 }
 

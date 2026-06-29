@@ -276,6 +276,9 @@ class AkquantEngine(IBacktestEngine):
                     "total_value": result.final_capital,
                     "n_trades": result.total_trades,
                 },
+                "trades": result.trades[-120:],
+                "orders": result.orders[-120:],
+                "equity_curve": result.nav_series[-600:],
                 "metadata": {
                     "phase": "completed",
                     "progress_message": "AKQuant 回测完成",

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.data_stores import get_market_data_store
 from app.db.models import (
     Stock,
+    StockConceptMembership,
     WatchlistGroup,
     WatchlistStock,
 )
@@ -92,6 +93,17 @@ class WatchlistStockInfo:
     symbol: str
     stock_name: str | None
     added_at: datetime
+    industry: str | None = None
+    industry2: str | None = None
+    industry3: str | None = None
+    sector: str | None = None
+    concept: str | None = None
+    ths_concepts: list[str] | None = None
+    total_mv: float | None = None
+    circ_mv: float | None = None
+    pe_ttm: float | None = None
+    pb: float | None = None
+    roe: float | None = None
 
 
 class DataService:
@@ -347,7 +359,20 @@ class DataService:
             list[WatchlistStockInfo]: 股票列表
         """
         query = (
-            select(WatchlistStock, Stock.name.label("stock_name"))
+            select(
+                WatchlistStock,
+                Stock.name.label("stock_name"),
+                Stock.industry,
+                Stock.industry2,
+                Stock.industry3,
+                Stock.sector,
+                Stock.concept,
+                Stock.total_mv,
+                Stock.circ_mv,
+                Stock.pe_ttm,
+                Stock.pb,
+                Stock.roe,
+            )
             .outerjoin(Stock, WatchlistStock.symbol == Stock.symbol)
             .where(WatchlistStock.group_id == group_id)
             .order_by(WatchlistStock.added_at.desc())
@@ -355,6 +380,35 @@ class DataService:
 
         result = await self.session.execute(query)
         rows = result.all()
+        symbols = [row.WatchlistStock.symbol for row in rows]
+        ths_concepts_by_symbol: dict[str, list[str]] = {}
+        if symbols:
+            latest_snapshot_query = select(
+                func.max(StockConceptMembership.snapshot_date)
+            ).where(StockConceptMembership.symbol.in_(symbols))
+            latest_snapshot_result = await self.session.execute(latest_snapshot_query)
+            latest_snapshot = latest_snapshot_result.scalar_one_or_none()
+            if latest_snapshot:
+                concepts_query = (
+                    select(
+                        StockConceptMembership.symbol,
+                        StockConceptMembership.concept_name,
+                    )
+                    .where(
+                        StockConceptMembership.symbol.in_(symbols),
+                        StockConceptMembership.snapshot_date == latest_snapshot,
+                    )
+                    .order_by(
+                        StockConceptMembership.symbol,
+                        StockConceptMembership.concept_name,
+                    )
+                )
+                concepts_result = await self.session.execute(concepts_query)
+                for symbol, concept_name in concepts_result.all():
+                    if concept_name:
+                        bucket = ths_concepts_by_symbol.setdefault(symbol, [])
+                        if concept_name not in bucket and len(bucket) < 12:
+                            bucket.append(concept_name)
 
         return [
             WatchlistStockInfo(
@@ -363,6 +417,17 @@ class DataService:
                 symbol=row.WatchlistStock.symbol,
                 stock_name=row.stock_name,
                 added_at=row.WatchlistStock.added_at,
+                industry=row.industry,
+                industry2=row.industry2,
+                industry3=row.industry3,
+                sector=row.sector,
+                concept=row.concept,
+                ths_concepts=ths_concepts_by_symbol.get(row.WatchlistStock.symbol, []),
+                total_mv=row.total_mv,
+                circ_mv=row.circ_mv,
+                pe_ttm=row.pe_ttm,
+                pb=row.pb,
+                roe=row.roe,
             )
             for row in rows
         ]

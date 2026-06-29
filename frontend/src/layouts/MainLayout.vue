@@ -89,19 +89,6 @@
         </label>
 
         <div class="topbar__right">
-          <el-select
-            v-model="currentTheme"
-            class="theme-switcher"
-            size="small"
-            placeholder="选择主题"
-            aria-label="选择主题"
-            @change="changeTheme"
-          >
-            <el-option label="Terminal Light (航天终端灰)" value="theme-terminal-light" />
-            <el-option label="Cyber Chalk (霓虹数码白)" value="theme-cyber-chalk" />
-            <el-option label="Ivory & Pine (象牙暖白松风)" value="theme-ivory-forest" />
-            <el-option label="Swiss Minimalist (瑞士网格纯白)" value="theme-swiss-minimalist" />
-          </el-select>
           <div class="notification-wrapper">
             <button class="action-btn" title="通知" type="button" @click="toggleNotificationPanel">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -198,33 +185,16 @@ type ThemeClassName = typeof THEME_CLASS_NAMES[number]
 
 const DEFAULT_THEME: ThemeClassName = 'theme-ivory-forest'
 
-function resolveInitialTheme(): ThemeClassName {
-  const storedTheme = localStorage.getItem('gs-theme')
-  return THEME_CLASS_NAMES.includes(storedTheme as ThemeClassName)
-    ? (storedTheme as ThemeClassName)
-    : DEFAULT_THEME
-}
-
 function applyTheme(theme: ThemeClassName) {
   document.documentElement.classList.remove(...THEME_CLASS_NAMES)
   document.documentElement.classList.add(theme)
 }
 
-const currentTheme = ref<ThemeClassName>(resolveInitialTheme())
-
-function changeTheme(val: string) {
-  const nextTheme = THEME_CLASS_NAMES.includes(val as ThemeClassName)
-    ? (val as ThemeClassName)
-    : DEFAULT_THEME
-  currentTheme.value = nextTheme
-  localStorage.setItem('gs-theme', nextTheme)
-  applyTheme(nextTheme)
-}
-
 onMounted(() => {
   document.addEventListener('click', closeNotificationPanel)
   notificationStore.startTaskPolling()
-  applyTheme(currentTheme.value)
+  localStorage.setItem('gs-theme', DEFAULT_THEME)
+  applyTheme(DEFAULT_THEME)
 })
 
 onUnmounted(() => {
@@ -635,11 +605,6 @@ onUnmounted(() => {
   gap: var(--space-2);
 }
 
-.theme-switcher {
-  width: 168px;
-  flex: 0 0 168px;
-}
-
 .action-btn {
   position: relative;
   min-width: 36px;
@@ -772,11 +737,6 @@ onUnmounted(() => {
   .page-copy {
     justify-content: flex-start;
     flex-wrap: wrap;
-  }
-
-  .theme-switcher {
-    width: min(100%, 220px);
-    flex: 1 1 180px;
   }
 
   .page-title,

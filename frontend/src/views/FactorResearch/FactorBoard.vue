@@ -9,52 +9,59 @@
           </div>
           <span class="filter-count">{{ activeFilterSummary }}</span>
         </div>
-        <div class="filter-row">
-          <span class="filter-label">因子:</span>
-          <el-input
-            v-model="filters.factor_keyword"
-            clearable
-            size="small"
-            placeholder="搜索名称 / 来源 / 分组"
-            class="keyword-input"
-          />
+        <div class="filter-grid">
+          <div class="filter-cluster filter-cluster--wide">
+            <div class="filter-field filter-field--keyword">
+              <span class="filter-label">因子</span>
+              <el-input
+                v-model="filters.factor_keyword"
+                clearable
+                size="small"
+                placeholder="搜索名称 / 来源 / 分组"
+                class="keyword-input"
+              />
+            </div>
 
-          <span class="filter-label filter-label--spaced">分类:</span>
-          <el-select
-            v-model="filters.categories"
-            multiple
-            collapse-tags
-            collapse-tags-tooltip
-            clearable
-            size="small"
-            placeholder="全部分类"
-            class="filter-select"
-          >
-            <el-option v-for="cat in categoryOptions" :key="cat.value" :label="cat.label" :value="cat.value" />
-          </el-select>
+            <div class="filter-field">
+              <span class="filter-label">分类</span>
+              <el-select
+                v-model="filters.categories"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                size="small"
+                placeholder="全部分类"
+                class="filter-select"
+              >
+                <el-option v-for="cat in categoryOptions" :key="cat.value" :label="cat.label" :value="cat.value" />
+              </el-select>
+            </div>
 
-          <span class="filter-label filter-label--spaced">因子组:</span>
-          <el-select
-            v-model="filters.factor_groups"
-            multiple
-            collapse-tags
-            collapse-tags-tooltip
-            clearable
-            size="small"
-            placeholder="全部因子组"
-            class="filter-select filter-select--wide"
-            @visible-change="refreshFactorGroupsWhenOpen"
-          >
-            <el-option
-              v-for="group in factorGroups"
-              :key="group.name"
-              :label="group.display_name"
-              :value="group.name"
-            />
-          </el-select>
-        </div>
+            <div class="filter-field filter-field--wide">
+              <span class="filter-label">因子组</span>
+              <el-select
+                v-model="filters.factor_groups"
+                multiple
+                collapse-tags
+                collapse-tags-tooltip
+                clearable
+                size="small"
+                placeholder="全部因子组"
+                class="filter-select filter-select--wide"
+                @visible-change="refreshFactorGroupsWhenOpen"
+              >
+                <el-option
+                  v-for="group in factorGroups"
+                  :key="group.name"
+                  :label="group.display_name"
+                  :value="group.name"
+                />
+              </el-select>
+            </div>
+          </div>
 
-        <div v-if="hasCombinationContext" class="param-hash-panel combo-panel">
+        <div v-if="hasCombinationContext" class="param-hash-panel combo-panel filter-cluster--wide">
           <div class="param-hash-panel__head">
             <strong>已计算组合</strong>
             <span>从成功因子研究记录中筛选；点击参数逐步收窄，点击组合行会回填看板设置。</span>
@@ -101,114 +108,131 @@
           </div>
         </div>
 
-        <div class="filter-row">
-          <span class="filter-label">股票池:</span>
-          <el-select v-model="filters.stock_pool" size="small" style="width:210px" filterable>
-            <el-option-group label="指数股票池">
-              <el-option
-                v-for="item in poolEnabledIndexes"
-                :key="item.symbol"
-                :label="`${item.display_name} ${item.symbol}`"
-                :value="item.stock_pool_alias || item.symbol"
-              />
-            </el-option-group>
-            <el-option-group v-if="watchlistGroups.length" label="自选股分组">
-              <el-option
-                v-for="g in watchlistGroups"
-                :key="'wl_'+g.id"
-                :label="g.name"
-                :value="'watchlist_'+g.id"
-              />
-            </el-option-group>
-          </el-select>
+          <div class="filter-cluster">
+            <div class="filter-field">
+              <span class="filter-label">股票池</span>
+              <el-select v-model="filters.stock_pool" size="small" class="filter-select filter-select--pool" filterable>
+                <el-option-group label="指数股票池">
+                  <el-option
+                    v-for="item in poolEnabledIndexes"
+                    :key="item.symbol"
+                    :label="`${item.display_name} ${item.symbol}`"
+                    :value="item.stock_pool_alias || item.symbol"
+                  />
+                </el-option-group>
+                <el-option-group v-if="watchlistGroups.length" label="自选股分组">
+                  <el-option
+                    v-for="g in watchlistGroups"
+                    :key="'wl_'+g.id"
+                    :label="g.name"
+                    :value="'watchlist_'+g.id"
+                  />
+                </el-option-group>
+              </el-select>
+            </div>
 
-          <span class="filter-label filter-label--spaced">回测周期:</span>
-          <el-radio-group v-model="filters.period" size="small" @change="clearExplicitDateRange">
-            <el-radio-button value="3m">近3个月</el-radio-button>
-            <el-radio-button value="1y">近1年</el-radio-button>
-            <el-radio-button value="3y">近3年</el-radio-button>
-            <el-radio-button value="10y">近10年</el-radio-button>
-          </el-radio-group>
-          <span v-if="filters.start_date && filters.end_date" class="combo-date-range">
-            已计算区间 {{ filters.start_date }} ~ {{ filters.end_date }}
-          </span>
-        </div>
-
-        <div class="filter-row">
-          <span class="filter-label">成分口径:</span>
-          <el-select v-model="filters.pool_membership_mode" size="small" style="width:180px">
-            <el-option label="Static latest" value="static_latest" />
-            <el-option label="Point-in-time" value="point_in_time" />
-            <el-option label="Union" value="union" />
-          </el-select>
-
-          <span class="filter-label filter-label--spaced">分组:</span>
-          <el-input-number v-model="filters.group_count" :min="2" :max="20" size="small" controls-position="right" class="group-count-input" />
-
-          <span class="filter-label filter-label--spaced">方向:</span>
-          <el-select v-model="filters.direction" size="small" style="width:110px">
-            <el-option label="降序" value="desc" />
-            <el-option label="升序" value="asc" />
-          </el-select>
-        </div>
-
-        <div class="filter-row">
-          <span class="filter-label help-label">
-            组合构建
-            <el-tooltip placement="top" effect="dark">
-              <template #content>
-                <div class="tooltip-content">
-                  纯多头组合：只买入目标分位股票。<br />
-                  多空组合 I：最高分位做多、最低分位做空。<br />
-                  多空组合 II：最高分位相对基准增强，最低分位作为对冲腿。
-                </div>
-              </template>
-              <el-icon><QuestionFilled /></el-icon>
-            </el-tooltip>
-            :
-          </span>
-          <el-radio-group v-model="filters.portfolio_type" size="small">
-            <el-radio-button value="long_only">纯多头组合</el-radio-button>
-            <el-radio-button value="long_short_i">多空组合 I</el-radio-button>
-            <el-radio-button value="long_short_ii">多空组合 II</el-radio-button>
-          </el-radio-group>
-
-          <span class="filter-label filter-label--spaced">手续费:</span>
-          <div class="fee-toggle-group">
-            <el-checkbox v-model="filters.use_commission_stamp" size="small">佣金+印花税</el-checkbox>
-            <el-checkbox v-model="filters.use_slippage" size="small">滑点</el-checkbox>
-          </div>
-          <el-radio-group v-if="false" v-model="filters.fee_config" size="small" class="legacy-fee-config">
-            <el-radio-button value="none">无</el-radio-button>
-            <el-radio-button value="commission_stamp">3‰佣金+1‰印花税</el-radio-button>
-            <el-radio-button value="commission_stamp_slippage">+1‰滑点</el-radio-button>
-          </el-radio-group>
-          <div v-if="false" class="cost-controls cost-controls--compact">
-            <span>佣金</span>
-            <el-input-number v-model="filters.fee_rate" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
-            <span>印花税</span>
-            <el-input-number v-model="filters.stamp_tax_rate" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
-            <span>过户费</span>
-            <el-input-number v-model="filters.transfer_fee_rate" :min="0" :max="0.01" :step="0.00001" :precision="5" size="small" controls-position="right" />
-            <span>滑点</span>
-            <el-input-number v-model="filters.slippage" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
+            <div class="filter-field filter-field--period">
+              <span class="filter-label">回测周期</span>
+              <el-radio-group v-model="filters.period" size="small" @change="clearExplicitDateRange">
+                <el-radio-button value="3m">近3个月</el-radio-button>
+                <el-radio-button value="1y">近1年</el-radio-button>
+                <el-radio-button value="3y">近3年</el-radio-button>
+                <el-radio-button value="10y">近10年</el-radio-button>
+              </el-radio-group>
+              <span v-if="filters.start_date && filters.end_date" class="combo-date-range">
+                {{ filters.start_date }} ~ {{ filters.end_date }}
+              </span>
+            </div>
           </div>
 
-          <span class="filter-label filter-label--spaced">过滤涨停:</span>
-          <el-switch v-model="filters.filter_limit_up" size="small" />
+          <div class="filter-cluster">
+            <div class="filter-field">
+              <span class="filter-label">成分口径</span>
+              <el-select v-model="filters.pool_membership_mode" size="small" class="filter-select filter-select--membership">
+                <el-option label="Static latest" value="static_latest" />
+                <el-option label="Point-in-time" value="point_in_time" />
+                <el-option label="Union" value="union" />
+              </el-select>
+            </div>
 
-          <span class="filter-label filter-label--spaced">过滤跌停:</span>
-          <el-switch v-model="filters.filter_limit_down" size="small" />
-        </div>
+            <div class="filter-field filter-field--compact">
+              <span class="filter-label">分组</span>
+              <el-input-number v-model="filters.group_count" :min="2" :max="20" size="small" controls-position="right" class="group-count-input" />
+            </div>
 
-        <div class="filter-row">
-          <span class="filter-label">因子预处理:</span>
-          <el-select v-model="filters.outlier_handling" size="small" style="width:126px">
-            <el-option label="不去极值" value="none" />
-            <el-option label="Winsor 2.5%" value="winsorize" />
-          </el-select>
-          <el-checkbox v-model="filters.industry_neutralization" size="small">行业中性化</el-checkbox>
-          <el-checkbox v-model="filters.standardize" size="small">标准化</el-checkbox>
+            <div class="filter-field filter-field--compact">
+              <span class="filter-label">方向</span>
+              <el-select v-model="filters.direction" size="small" class="filter-select filter-select--direction">
+                <el-option label="降序" value="desc" />
+                <el-option label="升序" value="asc" />
+              </el-select>
+            </div>
+          </div>
+
+          <div class="filter-cluster">
+            <div class="filter-field filter-field--portfolio">
+              <span class="filter-label help-label">
+                组合构建
+                <el-tooltip placement="top" effect="dark">
+                  <template #content>
+                    <div class="tooltip-content">
+                      纯多头组合：只买入目标分位股票。<br />
+                      多空组合 I：最高分位做多、最低分位做空。<br />
+                      多空组合 II：最高分位相对基准增强，最低分位作为对冲腿。
+                    </div>
+                  </template>
+                  <el-icon><QuestionFilled /></el-icon>
+                </el-tooltip>
+              </span>
+              <el-radio-group v-model="filters.portfolio_type" size="small">
+                <el-radio-button value="long_only">纯多头组合</el-radio-button>
+                <el-radio-button value="long_short_i">多空组合 I</el-radio-button>
+                <el-radio-button value="long_short_ii">多空组合 II</el-radio-button>
+              </el-radio-group>
+            </div>
+
+            <div class="filter-field filter-field--checks">
+              <span class="filter-label">成本 / 过滤</span>
+              <div class="fee-toggle-group">
+                <el-checkbox v-model="filters.use_commission_stamp" size="small">佣金+印花税</el-checkbox>
+                <el-checkbox v-model="filters.use_slippage" size="small">滑点</el-checkbox>
+                <el-switch v-model="filters.filter_limit_up" size="small" active-text="涨停" />
+                <el-switch v-model="filters.filter_limit_down" size="small" active-text="跌停" />
+              </div>
+            </div>
+            <el-radio-group v-if="false" v-model="filters.fee_config" size="small" class="legacy-fee-config">
+              <el-radio-button value="none">无</el-radio-button>
+              <el-radio-button value="commission_stamp">3‰佣金+1‰印花税</el-radio-button>
+              <el-radio-button value="commission_stamp_slippage">+1‰滑点</el-radio-button>
+            </el-radio-group>
+            <div v-if="false" class="cost-controls cost-controls--compact">
+              <span>佣金</span>
+              <el-input-number v-model="filters.fee_rate" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
+              <span>印花税</span>
+              <el-input-number v-model="filters.stamp_tax_rate" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
+              <span>过户费</span>
+              <el-input-number v-model="filters.transfer_fee_rate" :min="0" :max="0.01" :step="0.00001" :precision="5" size="small" controls-position="right" />
+              <span>滑点</span>
+              <el-input-number v-model="filters.slippage" :min="0" :max="0.05" :step="0.0005" :precision="4" size="small" controls-position="right" />
+            </div>
+          </div>
+
+          <div class="filter-cluster">
+            <div class="filter-field">
+              <span class="filter-label">因子预处理</span>
+              <el-select v-model="filters.outlier_handling" size="small" class="filter-select filter-select--preprocess">
+                <el-option label="不去极值" value="none" />
+                <el-option label="Winsor 2.5%" value="winsorize" />
+              </el-select>
+            </div>
+            <div class="filter-field filter-field--checks">
+              <span class="filter-label">标准化</span>
+              <div class="fee-toggle-group">
+                <el-checkbox v-model="filters.industry_neutralization" size="small">行业中性化</el-checkbox>
+                <el-checkbox v-model="filters.standardize" size="small">标准化</el-checkbox>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
       <div class="toolbar">
@@ -1239,46 +1263,46 @@ onMounted(() => {
 .factor-board {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 8px;
   min-height: 0;
-  --factor-board-surface: rgba(19, 19, 24, 0.96);
-  --factor-board-surface-soft: rgba(36, 39, 51, 0.72);
-  --factor-board-border: rgba(108, 117, 137, 0.22);
-  --factor-board-border-strong: rgba(96, 165, 250, 0.24);
-  --factor-board-row-striped: rgba(255, 255, 255, 0.025);
-  --factor-board-row-hover: rgba(56, 189, 248, 0.06);
+  --factor-board-surface: rgba(253, 251, 247, 0.94);
+  --factor-board-surface-soft: rgba(245, 242, 234, 0.78);
+  --factor-board-border: rgba(34, 48, 42, 0.12);
+  --factor-board-border-strong: rgba(27, 61, 50, 0.26);
+  --factor-board-row-striped: rgba(245, 242, 234, 0.55);
+  --factor-board-row-hover: rgba(238, 243, 240, 0.92);
 }
 .board-sticky {
   position: sticky;
   top: 0;
   z-index: 12;
   display: grid;
-  gap: 12px;
+  gap: 8px;
   padding-bottom: 2px;
-  background: linear-gradient(180deg, rgba(15, 15, 19, 0.96) 0%, rgba(15, 15, 19, 0.88) 82%, rgba(15, 15, 19, 0) 100%);
+  background: linear-gradient(180deg, rgba(253, 251, 247, 0.98) 0%, rgba(253, 251, 247, 0.92) 82%, rgba(253, 251, 247, 0) 100%);
   backdrop-filter: blur(12px);
 }
 .filter-bar {
   background:
-    linear-gradient(135deg, rgba(251, 191, 36, 0.055), transparent 30%),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01)),
+    linear-gradient(135deg, rgba(178, 122, 30, 0.08), transparent 30%),
+    linear-gradient(180deg, rgba(253, 251, 247, 0.94), rgba(245, 242, 234, 0.72)),
     var(--bg-surface);
   border: 1px solid var(--border-default);
-  border-radius: 8px;
-  padding: 13px 14px;
+  border-radius: 6px;
+  padding: 8px 10px 10px;
   box-shadow: var(--shadow-sm);
 }
 .filter-title {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: 10px;
+  margin-bottom: 7px;
 }
 .filter-title > div {
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: 2px;
 }
 .panel-kicker {
   font-family: var(--font-data);
@@ -1287,37 +1311,69 @@ onMounted(() => {
 }
 .filter-title strong {
   color: var(--text-bright);
-  font-size: 15px;
+  font-size: 14px;
 }
 .filter-count {
-  padding: 4px 8px;
-  border: 1px solid rgba(251, 191, 36, 0.22);
+  padding: 3px 7px;
+  border: 1px solid rgba(178, 122, 30, 0.24);
   border-radius: 6px;
-  background: rgba(251, 191, 36, 0.055);
+  background: rgba(178, 122, 30, 0.08);
   color: var(--accent-warning);
   font-family: var(--font-data);
   font-size: 11px;
   white-space: nowrap;
 }
-.filter-row {
-  display: flex;
-  flex-wrap: wrap;
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+.filter-cluster {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   align-items: center;
-  gap: 9px;
-  margin-bottom: 10px;
-  padding: 8px 9px;
+  gap: 6px 8px;
+  min-width: 0;
+  padding: 6px 7px;
   border: 1px solid var(--border-subtle);
   border-radius: 6px;
-  background: rgba(8, 8, 10, 0.22);
+  background: rgba(253, 251, 247, 0.52);
 }
-.filter-row:last-child { margin-bottom: 0; }
+.filter-cluster--wide {
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(180px, 0.6fr) minmax(220px, 1fr);
+}
+.filter-field {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.filter-field--keyword {
+  grid-template-columns: 32px minmax(0, 1fr);
+}
+.filter-field--compact {
+  grid-template-columns: auto minmax(80px, 1fr);
+}
+.filter-field--period {
+  grid-template-columns: auto minmax(0, max-content) auto;
+}
+.filter-field--portfolio {
+  grid-template-columns: auto minmax(0, max-content);
+}
+.filter-field--checks {
+  grid-template-columns: auto minmax(0, 1fr);
+}
 .filter-label {
-  font-size: 12px;
   color: var(--text-secondary);
+  font-size: var(--gs-font-label);
+  font-weight: 700;
+  line-height: 1;
   white-space: nowrap;
 }
 .filter-label--spaced {
-  margin-left: 16px;
+  margin-left: 0;
 }
 .help-label,
 .toolbar-actions,
@@ -1325,16 +1381,17 @@ onMounted(() => {
 .batch-result-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 .fee-toggle-group {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 12px;
-  min-height: 24px;
+  gap: 6px 9px;
+  min-height: var(--gs-control-height-xs);
 }
 .group-count-input {
-  width: 92px;
+  width: 82px;
 }
 .preprocess-controls {
   display: flex;
@@ -1342,11 +1399,12 @@ onMounted(() => {
   align-items: center;
   gap: 12px;
 }
-.fee-toggle-group :deep(.el-checkbox) {
-  margin-right: 0;
-}
+.fee-toggle-group :deep(.el-checkbox),
 .preprocess-controls :deep(.el-checkbox) {
   margin-right: 0;
+}
+.fee-toggle-group :deep(.el-switch__label) {
+  font-size: var(--gs-font-label);
 }
 .batch-result-metric {
   font-variant-numeric: tabular-nums;
@@ -1354,20 +1412,21 @@ onMounted(() => {
 }
 .combo-date-range {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-family: var(--font-data);
+  font-size: 11px;
   white-space: nowrap;
 }
 .param-hash-panel {
   display: grid;
-  gap: 10px;
-  max-height: 220px;
+  gap: 7px;
+  max-height: 190px;
   overflow: auto;
-  padding: 10px 12px;
-  border: 1px solid rgba(56, 189, 248, 0.22);
+  padding: 8px 9px;
+  border: 1px solid rgba(27, 61, 50, 0.2);
   border-radius: 8px;
   background:
-    linear-gradient(90deg, rgba(56, 189, 248, 0.075), transparent 30%),
-    rgba(9, 12, 18, 0.78);
+    linear-gradient(90deg, rgba(27, 61, 50, 0.07), transparent 30%),
+    rgba(253, 251, 247, 0.74);
 }
 .param-hash-panel--dialog {
   max-height: 180px;
@@ -1380,7 +1439,7 @@ onMounted(() => {
   overflow: auto;
 }
 .filter-bar > .combo-panel {
-  margin-bottom: 10px;
+  margin-bottom: 7px;
 }
 .param-hash-panel--dialog.combo-panel {
   max-height: 260px;
@@ -1389,9 +1448,9 @@ onMounted(() => {
 .param-hash-panel__head {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 8px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: 11px;
 }
 .param-hash-panel__head > span {
   flex: 1 1 auto;
@@ -1440,11 +1499,11 @@ onMounted(() => {
   display: inline-grid;
   gap: 2px;
   min-width: 116px;
-  padding: 6px 8px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  padding: 4px 7px;
+  border: 1px solid rgba(34, 48, 42, 0.14);
   border-radius: 6px;
   color: var(--text-secondary);
-  background: rgba(15, 23, 42, 0.58);
+  background: rgba(245, 242, 234, 0.72);
   text-align: left;
   cursor: pointer;
 }
@@ -1461,9 +1520,9 @@ onMounted(() => {
   border-color: rgba(251, 191, 36, 0.32);
 }
 .param-hash-chip.is-active {
-  border-color: rgba(56, 189, 248, 0.72);
-  background: linear-gradient(180deg, rgba(14, 165, 233, 0.2), rgba(14, 165, 233, 0.08));
-  box-shadow: 0 0 0 1px rgba(56, 189, 248, 0.16) inset;
+  border-color: rgba(27, 61, 50, 0.42);
+  background: var(--bg-active);
+  box-shadow: 0 0 0 1px rgba(27, 61, 50, 0.12) inset;
 }
 .param-hash-empty {
   color: var(--text-muted);
@@ -1486,9 +1545,9 @@ onMounted(() => {
   cursor: pointer;
 }
 .combo-apply-best {
-  border: 1px solid rgba(56, 189, 248, 0.42);
+  border: 1px solid rgba(27, 61, 50, 0.32);
   color: var(--text-bright);
-  background: rgba(14, 165, 233, 0.12);
+  background: var(--bg-active);
 }
 .combo-reset {
   margin-left: auto;
@@ -1538,11 +1597,11 @@ onMounted(() => {
 .combo-group-card {
   display: grid;
   gap: 4px;
-  padding: 8px 10px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  padding: 6px 8px;
+  border: 1px solid rgba(34, 48, 42, 0.14);
   border-radius: 6px;
   color: var(--text-secondary);
-  background: rgba(15, 23, 42, 0.5);
+  background: rgba(253, 251, 247, 0.68);
   text-align: left;
   cursor: pointer;
 }
@@ -1555,8 +1614,8 @@ onMounted(() => {
   font-size: 11px;
 }
 .combo-group-card.is-active {
-  border-color: rgba(56, 189, 248, 0.72);
-  background: linear-gradient(180deg, rgba(14, 165, 233, 0.18), rgba(14, 165, 233, 0.06));
+  border-color: rgba(27, 61, 50, 0.42);
+  background: var(--bg-active);
 }
 .param-hash-empty {
   grid-column: 1 / -1;
@@ -1565,20 +1624,32 @@ onMounted(() => {
   line-height: 1.7;
 }
 .filter-select {
-  width: 190px;
+  width: 100%;
 }
 .filter-select--wide {
-  width: 230px;
+  width: 100%;
+}
+.filter-select--pool {
+  min-width: 190px;
+}
+.filter-select--membership {
+  min-width: 150px;
+}
+.filter-select--direction {
+  min-width: 88px;
+}
+.filter-select--preprocess {
+  min-width: 118px;
 }
 .keyword-input {
-  width: 220px;
+  width: 100%;
 }
 .toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 11px 12px;
+  gap: 10px;
+  padding: 8px 10px;
   border: 1px solid var(--border-default);
   border-radius: 8px;
   background:
@@ -1586,10 +1657,10 @@ onMounted(() => {
     var(--bg-elevated);
 }
 .board-title { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-secondary); }
-.board-title strong { font-size: 15px; color: var(--text-bright); }
+.board-title strong { font-size: 14px; color: var(--text-bright); }
 .board-table-shell {
-  min-height: 420px;
-  height: min(56vh, 680px);
+  min-height: 440px;
+  height: min(62vh, 760px);
 }
 .board-pagination {
   margin-top: 4px;
@@ -1616,13 +1687,13 @@ onMounted(() => {
 .factor-name-cell,
 .coverage-cell {
   display: grid;
-  gap: 3px;
+  gap: 2px;
   min-width: 0;
 }
 .factor-name-cell strong {
   overflow: hidden;
   color: var(--text-bright);
-  font-size: 13px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -1641,14 +1712,14 @@ onMounted(() => {
 .positive { color: var(--market-up); }
 .negative { color: var(--market-down); }
 .detail-action {
-  color: #eaf6ff;
-  border-color: rgba(56, 189, 248, 0.55);
-  background: rgba(56, 189, 248, 0.22);
+  color: #fdfbf7;
+  border-color: rgba(27, 61, 50, 0.55);
+  background: var(--accent-primary);
 }
 .detail-action:hover {
   color: #ffffff;
-  border-color: rgba(56, 189, 248, 0.86);
-  background: rgba(56, 189, 248, 0.34);
+  border-color: rgba(27, 61, 50, 0.86);
+  background: var(--accent-secondary);
 }
 
 :deep(.el-table) {
@@ -1656,7 +1727,7 @@ onMounted(() => {
   --el-table-tr-bg-color: transparent;
   --el-table-row-hover-bg-color: var(--factor-board-row-hover);
   --el-table-border-color: var(--factor-board-border);
-  --el-table-header-bg-color: rgba(10, 10, 12, 0.72);
+  --el-table-header-bg-color: var(--bg-elevated);
   --el-table-text-color: var(--text-primary);
   --el-table-header-text-color: var(--text-secondary);
   border: 1px solid var(--border-default);
@@ -1681,14 +1752,16 @@ onMounted(() => {
 }
 
 :deep(.el-table th.el-table__cell) {
-  background: rgba(10, 10, 12, 0.72);
+  background: var(--bg-elevated);
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--gs-font-table);
   font-weight: 600;
+  padding: 5px 0;
 }
 
 :deep(.el-table td.el-table__cell) {
   border-bottom-color: var(--border-subtle);
+  padding: 5px 0;
 }
 
 :deep(.el-table__inner-wrapper::before) {
@@ -1701,12 +1774,33 @@ onMounted(() => {
 
 :deep(.el-checkbox__label),
 :deep(.el-radio-button__inner) {
-  font-size: 12px;
+  font-size: var(--gs-font-label);
 }
 
 :deep(.el-radio-button__inner),
 :deep(.el-button) {
   border-radius: 6px;
+}
+
+:deep(.el-radio-button__inner) {
+  height: var(--gs-control-height-xs);
+  padding: 5px 8px;
+}
+
+:deep(.el-button) {
+  min-height: var(--gs-control-height-xs);
+  padding: 5px 9px;
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-select__wrapper),
+:deep(.el-input-number .el-input__wrapper) {
+  min-height: var(--gs-control-height-xs);
+}
+
+:deep(.el-tag) {
+  height: 22px;
+  padding: 0 6px;
 }
 
 :deep(.el-button:not(.el-button--primary)) {
@@ -1771,6 +1865,20 @@ onMounted(() => {
     gap: 10px;
   }
 
+  .filter-grid,
+  .filter-cluster,
+  .filter-cluster--wide {
+    grid-template-columns: 1fr;
+  }
+
+  .filter-field,
+  .filter-field--keyword,
+  .filter-field--period,
+  .filter-field--portfolio,
+  .filter-field--checks {
+    grid-template-columns: minmax(72px, auto) minmax(0, 1fr);
+  }
+
   .filter-label--spaced {
     margin-left: 0;
   }
@@ -1807,7 +1915,7 @@ onMounted(() => {
     padding: 10px;
   }
 
-  .filter-row {
+  .filter-cluster {
     gap: 8px;
     padding: 8px;
   }

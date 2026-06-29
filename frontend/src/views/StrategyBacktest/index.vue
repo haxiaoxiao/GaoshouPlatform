@@ -3,38 +3,13 @@
     class="page-frame page-container backtest-page"
     :class="`backtest-page--layout-${layoutMode.toLowerCase()}`"
   >
-    <div class="backtest-hero panel-card" :class="`backtest-hero--layout-${layoutMode.toLowerCase()}`">
-      <div class="backtest-hero__copy">
-        <span class="section-kicker">BACKTEST COCKPIT</span>
-        <h2>策略回测</h2>
-        <p>{{ activeLayoutDescription }}</p>
-        <div class="backtest-hero__meta">
-          <span>策略：{{ activeStrategy?.name || '未选择' }}</span>
-          <span>引擎：{{ btEngine }}</span>
-          <span>K线：{{ btBarType }}</span>
-          <span>状态：{{ btRunning ? '运行中' : btTaskId ? '有结果' : '待运行' }}</span>
-          <span>布局：{{ activeLayoutLabel }}</span>
-        </div>
-      </div>
-      <div class="page-header-actions">
-        <div class="layout-switcher" aria-label="切换策略回测布局">
-          <button
-            v-for="option in backtestLayoutOptions"
-            :key="option.key"
-            type="button"
-            :class="{ active: layoutMode === option.key }"
-            :title="option.hint"
-            @click="layoutMode = option.key"
-          >
-            <span>{{ option.key }}</span>
-            {{ option.label }}
-          </button>
-        </div>
+    <div class="strategy-tabs-frame">
+      <div class="page-header-actions backtest-action-strip">
         <el-button link type="primary" @click="openDocs">
           <el-icon><Document /></el-icon>
           使用手册
         </el-button>
-        <el-dropdown @command="handleCreate" style="margin-left:8px">
+        <el-dropdown @command="handleCreate">
           <el-button type="primary">
             <el-icon><Plus /></el-icon>
             新建策略
@@ -51,49 +26,74 @@
           上传研报
         </el-button>
       </div>
-    </div>
-    <section class="backtest-layout-strip">
-      <article v-for="item in backtestLayoutNotes" :key="item.title">
-        <span>{{ item.kicker }}</span>
-        <strong>{{ item.title }}</strong>
-        <small>{{ item.description }}</small>
-      </article>
-    </section>
-    <el-tabs v-model="activeTab" class="strategy-tabs">
-      <el-tab-pane label="策略列表" name="strategyList">
-        <div class="tab-content">
-          <el-table v-loading="loading" :data="strategyList" stripe style="width: 100%">
-            <el-table-column prop="id" label="ID" width="80" />
-            <el-table-column prop="name" label="策略名称" width="200" />
-            <el-table-column prop="description" label="描述" min-width="250">
-              <template #default="{ row }">
-                {{ row.description || '-' }}
-              </template>
-            </el-table-column>
-            <el-table-column prop="created_at" label="创建时间" width="180">
-              <template #default="{ row }">
-                {{ formatDateTime(row.created_at) }}
-              </template>
-            </el-table-column>
-            <el-table-column label="操作" width="200" fixed="right">
-              <template #default="{ row }">
-                <el-button type="primary" link @click="handleBacktest(row)">回测</el-button>
-                <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
-              </template>
-            </el-table-column>
-          </el-table>
+      <el-tabs v-model="activeTab" class="strategy-tabs">
+        <el-tab-pane label="策略列表" name="strategyList">
+        <div class="strategy-console">
+          <section class="strategy-table-panel">
+            <div class="console-toolbar">
+              <div>
+                <strong>策略库</strong>
+                <span>{{ total }} 条策略 · {{ btEngine }} · {{ btBarType }}</span>
+              </div>
+              <el-input v-model="strategySearch" size="small" clearable placeholder="搜索策略" class="strategy-search" />
+            </div>
+            <el-table v-loading="loading" :data="filteredStrategyList" stripe style="width: 100%">
+              <el-table-column prop="id" label="ID" width="72" />
+              <el-table-column prop="name" label="策略名称" min-width="210" show-overflow-tooltip />
+              <el-table-column prop="description" label="描述" min-width="260" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ row.description || '-' }}
+                </template>
+              </el-table-column>
+              <el-table-column prop="created_at" label="创建时间" width="160">
+                <template #default="{ row }">
+                  {{ formatDateTime(row.created_at) }}
+                </template>
+              </el-table-column>
+              <el-table-column label="操作" width="168" fixed="right">
+                <template #default="{ row }">
+                  <el-button type="primary" link @click="handleBacktest(row)">回测</el-button>
+                  <el-button type="danger" link @click="handleDelete(row)">删除</el-button>
+                </template>
+              </el-table-column>
+            </el-table>
 
-          <div class="pagination-container">
-            <el-pagination
-              v-model:current-page="currentPage"
-              v-model:page-size="pageSize"
-              :page-sizes="[10, 20, 50]"
-              :total="total"
-              layout="total, sizes, prev, pager, next, jumper"
-              @size-change="handleSizeChange"
-              @current-change="handlePageChange"
-            />
-          </div>
+            <div class="pagination-container">
+              <el-pagination
+                v-model:current-page="currentPage"
+                v-model:page-size="pageSize"
+                :page-sizes="[10, 20, 50]"
+                :total="total"
+                layout="total, sizes, prev, pager, next, jumper"
+                @size-change="handleSizeChange"
+                @current-change="handlePageChange"
+              />
+            </div>
+          </section>
+
+          <aside class="ops-side-panel">
+            <div class="ops-side-panel__head">
+              <span>RUN SNAPSHOT</span>
+              <strong>{{ activeRunStatus }}</strong>
+            </div>
+            <div class="ops-metric-grid">
+              <div v-for="item in operationsMetrics" :key="item.label" class="ops-metric">
+                <span>{{ item.label }}</span>
+                <strong>{{ item.value }}</strong>
+              </div>
+            </div>
+            <div class="ops-log-tail">
+              <span>LOG TAIL</span>
+              <small v-for="(log, index) in runnerRailLogs" :key="`${log}-${index}`">{{ log }}</small>
+              <small v-if="!runnerRailLogs.length">暂无执行日志</small>
+            </div>
+            <div class="ops-actions">
+              <el-button type="primary" size="small" :disabled="!activeStrategy" @click="activeTab = 'backtestRunner'">
+                打开运行台
+              </el-button>
+              <el-button size="small" @click="loadStrategies" :loading="loading">刷新策略</el-button>
+            </div>
+          </aside>
         </div>
 
         <!-- 上传研报对话框 -->
@@ -310,6 +310,26 @@
                 placeholder='{"top_n":20,"us_overnight_entry_filter":"combined_downside"}'
               />
             </div>
+            <section v-if="btFullResult" class="performance-desk">
+              <div class="performance-desk__head">
+                <div>
+                  <span>PERFORMANCE REVIEW</span>
+                  <strong>{{ activeStrategy?.name || '回测结果' }}</strong>
+                </div>
+                <el-button size="small" type="primary" plain @click="showReport = true">完整报告</el-button>
+              </div>
+              <div class="performance-metrics">
+                <div v-for="item in resultSummaryMetrics" :key="item.label" class="performance-metric">
+                  <span>{{ item.label }}</span>
+                  <strong :style="{ color: item.color }">{{ item.value }}</strong>
+                </div>
+              </div>
+              <div class="performance-meta">
+                <span>{{ btFullResult.start_date || btStartDate }} ~ {{ btFullResult.end_date || btEndDate }}</span>
+                <span>{{ btFullResult.trades?.length || 0 }} trades</span>
+                <span v-if="btFullResult.benchmark_symbol">Benchmark {{ btFullResult.benchmark_symbol }}</span>
+              </div>
+            </section>
             <div class="bt-run-progress" v-if="btRunning || btTaskId">
               <div class="bt-run-progress__head">
                 <strong>{{ backtestProgressTitle }}</strong>
@@ -481,6 +501,7 @@
         </div>
       </el-tab-pane>
     </el-tabs>
+    </div>
   </div>
 </template>
 
@@ -590,9 +611,6 @@ def compute_daily_signal(context, symbol, today):
 
 `
 
-// State
-type BacktestLayoutMode = 'A' | 'B' | 'C'
-
 const activeTab = ref('strategyList')
 const loading = ref(false)
 const strategyList = ref<Strategy[]>([])
@@ -600,42 +618,25 @@ const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const saving = ref(false)
-
-const layoutMode = ref<BacktestLayoutMode>('A')
-const backtestLayoutOptions: { key: BacktestLayoutMode; label: string; hint: string }[] = [
-  { key: 'A', label: 'IDE 分屏', hint: '代码运行器与绩效诊断双栏' },
-  { key: 'B', label: '三栏终端', hint: '历史轨道、策略编辑、委托诊断三栏' },
-  { key: 'C', label: '绩效报告', hint: '报告和运行结果优先，代码区收敛' },
-]
-const activeLayoutOption = computed(() =>
-  backtestLayoutOptions.find(option => option.key === layoutMode.value) || backtestLayoutOptions[0]
-)
-const activeLayoutLabel = computed(() => activeLayoutOption.value.label)
-const activeLayoutDescription = computed(() => {
-  if (layoutMode.value === 'B') return '三栏终端面板：左侧追踪运行树，中间保留策略编辑，右侧聚焦委托、日志和回放诊断。'
-  if (layoutMode.value === 'C') return '纯绩效报告优先：压缩代码区，把回测结果、优化表和执行日志放到首屏阅读。'
-  return 'IDE 与报告双栏分屏：左侧策略编写与运行控制，右侧诊断、净值、订单流水和执行日志同步刷新。'
+const strategySearch = ref('')
+type BacktestLayoutMode = 'A' | 'B' | 'C'
+const layoutMode = computed<BacktestLayoutMode>(() => {
+  if (activeTab.value !== 'backtestRunner') return 'A'
+  if (btFullResult.value && !btRunning.value) return 'C'
+  if (btRunning.value || btTaskId.value) return 'B'
+  return 'A'
 })
-const backtestLayoutNotes = computed(() => {
-  if (layoutMode.value === 'B') {
-    return [
-      { kicker: 'HISTORY', title: '运行历史树', description: '把任务号、策略、引擎和日志尾部放到左侧轨道，便于连续调参。' },
-      { kicker: 'EDITOR', title: '策略终端', description: '代码区仍保留原保存、编译运行、LLM 生成和表达式入口。' },
-      { kicker: 'DETAILS', title: '委托诊断', description: '右侧继续承载数据检查、股票池、优化和 RunningPanel。' },
-    ]
-  }
-  if (layoutMode.value === 'C') {
-    return [
-      { kicker: 'REPORT', title: '绩效优先', description: '运行结果区域扩大，适合复盘收益、回撤、持仓和日志。' },
-      { kicker: 'CODE', title: '代码收敛', description: '策略编辑仍可用，但不抢占主要阅读空间。' },
-      { kicker: 'EXPORT', title: '完整报告', description: '沿用现有 ReportOverlay 与优化报告入口，不改变打开方式。' },
-    ]
-  }
-  return [
-    { kicker: 'RUNNER', title: '策略写作台', description: '代码、表达式和 LLM 生成保持在左侧主工作区。' },
-    { kicker: 'DIAG', title: '诊断报告', description: '参数、股票池、进度和实时事件集中在右侧。' },
-    { kicker: 'SAFE', title: '业务不变', description: '切换布局只影响视觉密度，不改变回测请求和参数语义。' },
-  ]
+const backtestWorkspaceLabel = computed(() => {
+  if (layoutMode.value === 'C') return '绩效复盘'
+  if (layoutMode.value === 'B') return '运行诊断'
+  return activeTab.value === 'strategyList' ? '策略控制台' : '策略编辑'
+})
+const filteredStrategyList = computed(() => {
+  const q = strategySearch.value.trim().toLowerCase()
+  if (!q) return strategyList.value
+  return strategyList.value.filter(item =>
+    `${item.id} ${item.name || ''} ${item.description || ''}`.toLowerCase().includes(q)
+  )
 })
 
 
@@ -689,7 +690,6 @@ const handleCreate = async (type: string) => {
     btCode.value = result.code || ''
     btExpression.value = SAMPLE_EXPRESSION
     btBarType.value = 'daily'
-    btMetrics.value = []
     btLogs.value = []
     btErrors.value = []
     activeTab.value = 'backtestRunner'
@@ -1061,7 +1061,6 @@ const btLiveData = ref<LiveData | null>(null)
 const btFullResult = ref<BacktestResultData | null>(null)
 const btTaskId = ref<string | null>(null)
 const showReport = ref(false)
-const btMetrics = ref<{ label: string; value: string; color?: string }[]>([])
 const btLogs = ref<string[]>([])
 const btErrors = ref<string[]>([])
 const coverageChecking = ref(false)
@@ -1073,6 +1072,51 @@ const backtestProgressTitle = computed(() => {
 const backtestProgressMessage = computed(() => {
   const metadata = (btLiveData.value as any)?.metadata || {}
   return metadata.progress_message || (btTaskId.value ? '正在轮询回测任务状态' : '等待任务号返回')
+})
+const activeRunStatus = computed(() => {
+  if (btRunning.value) return `RUNNING ${Math.round(btProgress.value * 100)}%`
+  if (btFullResult.value) return 'COMPLETED'
+  if (btErrors.value.length) return 'FAILED'
+  return 'IDLE'
+})
+const formatCompactMoney = (value?: number | null) => {
+  if (value == null || Number.isNaN(Number(value))) return '-'
+  const n = Number(value)
+  if (Math.abs(n) >= 10000) return `${(n / 10000).toFixed(1)}万`
+  return n.toLocaleString('zh-CN', { maximumFractionDigits: 0 })
+}
+const formatCompactPercent = (value?: number | null) =>
+  value == null || Number.isNaN(Number(value)) ? '-' : `${(Number(value) * 100).toFixed(2)}%`
+const formatCompactNumber = (value?: number | null, digits = 2) =>
+  value == null || Number.isNaN(Number(value)) ? '-' : Number(value).toFixed(digits)
+const valueTone = (value?: number | null) => {
+  if (value == null) return 'var(--bt-text, #22302a)'
+  if (value > 0) return 'var(--market-up, #d93026)'
+  if (value < 0) return 'var(--market-down, #137333)'
+  return 'var(--bt-text, #22302a)'
+}
+const operationsMetrics = computed(() => {
+  const snapshot = btLiveData.value?.metrics_snapshot || {}
+  return [
+    { label: '策略数', value: String(total.value || strategyList.value.length) },
+    { label: '股票池', value: poolSource.value?.count ? `${poolSource.value.count}只` : `${effectiveSymbols.value.length}只` },
+    { label: '当前日期', value: btLiveData.value?.current_date || '-' },
+    { label: '成交', value: `${snapshot.n_trades ?? btLiveData.value?.trades?.length ?? 0}` },
+    { label: '净值点', value: `${btLiveData.value?.equity_curve?.length || btFullResult.value?.nav_series?.length || 0}` },
+    { label: '任务号', value: btTaskId.value || '-' },
+  ]
+})
+const resultSummaryMetrics = computed(() => {
+  const r = btFullResult.value
+  if (!r) return []
+  return [
+    { label: '累计收益', value: formatCompactPercent(r.total_return), color: valueTone(r.total_return) },
+    { label: '年化收益', value: formatCompactPercent(r.annual_return), color: valueTone(r.annual_return) },
+    { label: 'Sharpe', value: formatCompactNumber(r.sharpe_ratio ?? r.sharpe, 2), color: 'var(--bt-text, #22302a)' },
+    { label: '最大回撤', value: formatCompactPercent(r.max_drawdown), color: 'var(--status-attention, #ef4444)' },
+    { label: '胜率', value: formatCompactPercent(r.win_rate), color: valueTone((r.win_rate || 0) - 0.5) },
+    { label: '期末资金', value: formatCompactMoney(r.final_capital), color: 'var(--bt-text, #22302a)' },
+  ]
 })
 let lastLiveLogKey = ''
 const optParamGridText = ref('{"param_name":[1,2,3]}')
@@ -1114,7 +1158,7 @@ const pageContextBlocks = computed(() => [
     title: 'Backtest Run',
     rows: [
       { label: '当前标签', value: activeTab.value },
-      { label: '布局模式', value: activeLayoutLabel.value },
+      { label: '工作台状态', value: backtestWorkspaceLabel.value },
       { label: '策略数量', value: `${strategyList.value.length}` },
       { label: '当前策略', value: activeStrategy.value?.name || '未选择' },
       { label: '引擎 / K线', value: `${btEngine.value} / ${btBarType.value}` },
@@ -1245,6 +1289,40 @@ const appendBtLog = (message: string) => {
   const line = `[${new Date().toLocaleTimeString('zh-CN', { hour12: false })}] ${message}`
   if (btLogs.value[btLogs.value.length - 1] === line) return
   btLogs.value = [...btLogs.value.slice(-199), line]
+}
+
+const mergeResultIntoLive = (result: BacktestResultData | null, live: LiveData | null = btLiveData.value): LiveData | null => {
+  if (!result) return live
+  return {
+    current_date: result.end_date || live?.current_date || null,
+    events: [
+      ...(live?.events || []),
+      {
+        type: 'backtest_done',
+        timestamp: new Date().toISOString(),
+        message: '回测完成，交易簿与净值曲线已生成',
+      },
+    ].slice(-200),
+    positions: live?.positions || {},
+    metrics_snapshot: {
+      ...(live?.metrics_snapshot || {}),
+      total_return: result.total_return,
+      max_drawdown: result.max_drawdown,
+      sharpe: result.sharpe_ratio ?? result.sharpe,
+      cash: result.final_capital,
+      total_value: result.final_capital,
+      n_trades: result.total_trades ?? result.trades?.length,
+    },
+    trades: result.trades || live?.trades || [],
+    orders: live?.orders || [],
+    equity_curve: result.nav_series || live?.equity_curve || [],
+    metadata: {
+      ...(live?.metadata || {}),
+      phase: 'completed',
+      progress_message: '回测完成',
+      bar_type: btBarType.value,
+    },
+  }
 }
 
 const syncLiveLogs = (live: LiveData | null, progress = 0) => {
@@ -1445,6 +1523,7 @@ const pollBacktestTask = async (request: any, taskId: string, label = 'Backtest'
           appendBtLog(`${label} completed, ${data.count ?? data.rows.length} results`)
         } else {
           appendBtLog(`${label}完成`)
+          btLiveData.value = mergeResultIntoLive(data as BacktestResultData, btLiveData.value)
         }
         if (isOptimization) {
           optimizationProgress.value = 1
@@ -1514,6 +1593,7 @@ const loadBacktestTaskResult = async (taskId: string) => {
         btErrors.value = [data?.error || (statusData?.status === 'cancelled' ? '任务已停止' : '任务失败')]
       } else if (data) {
         btFullResult.value = data as BacktestResultData
+        btLiveData.value = mergeResultIntoLive(btFullResult.value, btLiveData.value)
       }
       activeTab.value = 'backtestRunner'
     }
@@ -1597,7 +1677,6 @@ const handleBacktest = async (row: Strategy) => {
     btFullResult.value = null
     optimizationBacktestId.value = null
     optimizationRows.value = []
-    btMetrics.value = []
     btLogs.value = []
     btErrors.value = []
     await nextTick()
@@ -1637,7 +1716,6 @@ const runBacktestTask = async () => {
   btFullResult.value = null
   optimizationBacktestId.value = null
   optimizationRows.value = []
-  btMetrics.value = []
   btLogs.value = []
   btErrors.value = []
   btProgress.value = 0
@@ -1660,6 +1738,7 @@ const runBacktestTask = async () => {
     if (!taskId) {
       if (res) {
         btFullResult.value = res as BacktestResultData
+        btLiveData.value = mergeResultIntoLive(btFullResult.value, btLiveData.value)
         appendBtLog('回测完成')
         saveBtSettings()
       }
@@ -1693,7 +1772,6 @@ const runOptimizationTask = async (type: 'grid' | 'walk_forward') => {
   btFullResult.value = null
   optimizationBacktestId.value = null
   optimizationRows.value = []
-  btMetrics.value = []
   btLogs.value = []
   btErrors.value = []
   btProgress.value = 0
@@ -1977,72 +2055,6 @@ onMounted(async () => {
   background-size: 56px 56px, 56px 56px, auto, auto;
 }
 
-.backtest-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: var(--space-4);
-  padding: 18px 20px;
-  flex-shrink: 0;
-  border-color: var(--bt-border);
-  border-radius: 18px;
-  background:
-    linear-gradient(135deg, rgba(238, 243, 240, 0.92), transparent 46%),
-    linear-gradient(180deg, rgba(253, 251, 247, 0.88), rgba(245, 242, 234, 0.72)),
-    var(--bt-card);
-  box-shadow: 0 18px 42px rgba(27, 61, 50, 0.09);
-  position: relative;
-}
-
-.backtest-hero::after {
-  content: '';
-  position: absolute;
-  right: 20px;
-  bottom: 0;
-  left: 20px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(27, 61, 50, 0.32), transparent);
-}
-
-.backtest-hero__copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.backtest-hero h2 {
-  margin: 0;
-  color: var(--bt-text);
-  font-size: var(--text-2xl);
-  line-height: 1.1;
-  letter-spacing: 0;
-}
-
-.backtest-hero p {
-  max-width: 860px;
-  margin: 0;
-  color: var(--bt-secondary);
-  font-size: var(--text-sm);
-  line-height: 1.55;
-}
-
-.backtest-hero__meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-}
-
-.backtest-hero__meta span {
-  padding: 6px 9px;
-  border: 1px solid var(--bt-border);
-  border-radius: var(--radius-full);
-  color: var(--bt-secondary);
-  background: rgba(253, 251, 247, 0.72);
-  font-family: var(--font-data);
-  font-size: var(--text-xs);
-}
-
 .page-header-actions {
   display: flex;
   align-items: center;
@@ -2051,82 +2063,18 @@ onMounted(async () => {
   justify-content: flex-end;
 }
 
-.layout-switcher {
-  display: inline-flex;
-  gap: 4px;
-  padding: 4px;
-  border: 1px solid var(--bt-border);
-  border-radius: var(--radius-full);
-  background: rgba(253, 251, 247, 0.78);
-}
-
-.layout-switcher button {
-  border: 0;
-  border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--bt-secondary);
-  cursor: pointer;
-  font-size: var(--text-xs);
-  font-weight: 800;
-  padding: 7px 11px;
-  transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
-}
-
-.layout-switcher button:hover {
-  color: var(--bt-text);
-  background: rgba(238, 243, 240, 0.72);
-}
-
-.layout-switcher button.active {
-  background: var(--bt-pine);
-  color: var(--bt-ivory);
-  transform: translateY(-1px);
-}
-
-.layout-switcher button span {
-  margin-right: 4px;
-  font-family: var(--font-data);
-}
-
-.backtest-layout-strip {
+.backtest-action-strip {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 2;
+  min-height: 32px;
   flex-shrink: 0;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  padding: 0;
 }
 
-.backtest-layout-strip article {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-  padding: 12px 14px;
-  border: 1px solid var(--bt-border);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(238, 243, 240, 0.68), rgba(253, 251, 247, 0.42)),
-    rgba(253, 251, 247, 0.78);
-}
-
-.backtest-layout-strip span {
-  color: var(--bt-pine);
-  font-family: var(--font-data);
-  font-size: var(--text-xs);
-  font-weight: 900;
-  letter-spacing: 0.08em;
-}
-
-.backtest-layout-strip strong {
-  color: var(--bt-text);
-  font-size: var(--text-base);
-}
-
-.backtest-layout-strip small {
-  color: var(--bt-secondary);
-  font-size: var(--text-xs);
-  line-height: 1.45;
-}
-
-.strategy-tabs {
+.strategy-tabs-frame {
+  position: relative;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -2139,28 +2087,60 @@ onMounted(async () => {
   box-shadow: 0 18px 42px rgba(27, 61, 50, 0.08);
 }
 
+.strategy-tabs {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+}
+
 .strategy-tabs :deep(.el-tabs__header) {
   margin: 0;
-  padding: 8px 10px 0;
+  padding: 8px 390px 8px 10px;
   background: rgba(245, 242, 234, 0.72);
 }
 
+.strategy-tabs :deep(.el-tabs__nav-scroll) {
+  display: flex;
+}
+
+.strategy-tabs :deep(.el-tabs__nav) {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border: 1px solid rgba(27, 61, 50, 0.16);
+  border-radius: 8px;
+  background: rgba(253, 251, 247, 0.78);
+}
+
 .strategy-tabs :deep(.el-tabs__nav-wrap::after) {
-  height: 1px;
-  background: var(--bt-border);
+  display: none;
 }
 
 .strategy-tabs :deep(.el-tabs__item) {
+  height: 30px;
+  padding: 0 15px;
+  border-radius: 6px;
   color: var(--bt-secondary);
-  font-weight: 700;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 30px;
+  transition: background 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.strategy-tabs :deep(.el-tabs__item:hover) {
+  color: var(--bt-text);
+  background: rgba(238, 243, 240, 0.72);
 }
 
 .strategy-tabs :deep(.el-tabs__item.is-active) {
-  color: var(--bt-pine);
+  color: var(--bt-ivory);
+  background: var(--bt-pine);
+  box-shadow: 0 4px 12px rgba(27, 61, 50, 0.18);
 }
 
 .strategy-tabs :deep(.el-tabs__active-bar) {
-  background-color: var(--bt-pine);
+  display: none;
 }
 
 .strategy-tabs :deep(.el-tabs__content) {
@@ -2236,9 +2216,165 @@ onMounted(async () => {
   gap: 16px;
 }
 
+.strategy-console {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 320px);
+  gap: 12px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.strategy-table-panel,
+.ops-side-panel {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--bt-border);
+  border-radius: 8px;
+  background: rgba(253, 251, 247, 0.74);
+}
+
+.strategy-table-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.strategy-table-panel :deep(.el-table) {
+  flex: 1;
+  min-height: 0;
+}
+
+.strategy-table-panel :deep(.el-table__body-wrapper) {
+  overflow-y: auto;
+}
+
+.console-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--bt-border);
+  background: rgba(245, 242, 234, 0.82);
+}
+
+.console-toolbar > div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+}
+
+.console-toolbar strong {
+  color: var(--bt-text);
+  font-size: var(--text-sm);
+}
+
+.console-toolbar span {
+  color: var(--bt-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  white-space: nowrap;
+}
+
+.strategy-search {
+  width: 180px;
+  flex-shrink: 0;
+}
+
+.ops-side-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.ops-side-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--bt-border);
+}
+
+.ops-side-panel__head span,
+.ops-log-tail > span {
+  color: var(--bt-muted);
+  font-family: var(--font-data);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.ops-side-panel__head strong {
+  color: var(--bt-pine);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
+.ops-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ops-metric {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 7px 8px;
+  border: 1px solid rgba(27, 61, 50, 0.11);
+  border-radius: 6px;
+  background: rgba(245, 242, 234, 0.72);
+}
+
+.ops-metric span {
+  color: var(--bt-muted);
+  font-size: 10px;
+}
+
+.ops-metric strong {
+  overflow: hidden;
+  color: var(--bt-text);
+  font-family: var(--font-data);
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-log-tail {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+  padding: 8px;
+  border: 1px solid rgba(27, 61, 50, 0.1);
+  border-radius: 6px;
+  background: rgba(253, 251, 247, 0.66);
+}
+
+.ops-log-tail small {
+  color: var(--bt-secondary);
+  font-family: var(--font-data);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.ops-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .pagination-container {
   display: flex;
   justify-content: flex-end;
+  padding: 8px 0 0;
 }
 
 .split-layout {
@@ -2798,17 +2934,27 @@ onMounted(async () => {
 }
 
 @media (max-width: 900px) {
-  .backtest-hero {
-    grid-template-columns: 1fr;
-  }
-
   .page-header-actions {
     justify-content: flex-start;
     flex-wrap: wrap;
   }
 
-  .backtest-layout-strip {
-    grid-template-columns: 1fr;
+  .backtest-action-strip {
+    position: static;
+    order: 0;
+    padding: 8px 10px 0;
+  }
+
+  .strategy-tabs {
+    order: 1;
+  }
+
+  .strategy-tabs-frame {
+    gap: 8px;
+  }
+
+  .strategy-tabs :deep(.el-tabs__header) {
+    padding: 0 10px 8px;
   }
 
   .editor-toolbar {

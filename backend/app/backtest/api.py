@@ -162,6 +162,49 @@ def _sanitize_json(obj: object) -> object:
     return obj
 
 
+def _live_snapshot_from_result(
+    result: dict,
+    config: BacktestConfig,
+    live: dict | None = None,
+) -> dict:
+    """Merge final result fields into the pollable live snapshot."""
+    live = dict(live or {})
+    metrics = dict(live.get("metrics_snapshot") or {})
+    metrics.update({
+        "total_return": result.get("total_return", metrics.get("total_return")),
+        "max_drawdown": result.get("max_drawdown", metrics.get("max_drawdown")),
+        "sharpe": result.get("sharpe") or result.get("sharpe_ratio") or metrics.get("sharpe"),
+        "cash": result.get("final_capital", metrics.get("cash")),
+        "total_value": result.get("final_capital", metrics.get("total_value")),
+        "n_trades": result.get("total_trades", metrics.get("n_trades")),
+    })
+    metadata = dict(live.get("metadata") or {})
+    metadata.update({
+        "phase": "completed",
+        "progress_message": "回测完成",
+        "bar_type": config.bar_type,
+        "engine": config.engine,
+        "symbol_count": len(config.symbols or []),
+    })
+    events = list(live.get("events") or [])
+    events.append({
+        "type": "backtest_done",
+        "timestamp": time.time(),
+        "message": "回测完成，交易簿与净值曲线已生成",
+    })
+    current_date = result.get("end_date") or (str(config.end_date) if config.end_date else None) or live.get("current_date")
+    return {
+        "current_date": current_date,
+        "events": events[-200:],
+        "positions": live.get("positions") or {},
+        "metrics_snapshot": metrics,
+        "trades": list(result.get("trades") or [])[-120:],
+        "orders": list(result.get("orders") or [])[-120:],
+        "equity_curve": list(result.get("nav_series") or [])[-600:],
+        "metadata": metadata,
+    }
+
+
 def _validate_backtest_request(req: "RunBacktestRequest", start: date, end: date) -> str | None:
     if end < start:
         return "end_date must be greater than or equal to start_date"
@@ -658,7 +701,7 @@ async def run_backtest(req: RunBacktestRequest):
             task_store["status"] = "done"
             task_store["progress"] = 1.0
             task_store["result"] = result_dict
-            task_store["live"] = task_store.get("live")
+            task_store["live"] = _live_snapshot_from_result(result_dict, config, task_store.get("live"))
             task_store["finished_at"] = time.time()
             update_task(task_id, status="done", progress=1.0, result_ref=f"/backtest?task_id={task_id}")
             await _save_backtest_result(task_id, config, result_dict, success=True)

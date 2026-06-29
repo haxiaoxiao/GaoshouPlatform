@@ -5,6 +5,7 @@ from fastapi import FastAPI
 from loguru import logger
 
 from app.api.sync import router as sync_router
+from app.core.blocking import install_default_executor, shutdown_default_executor
 from app.core.config import settings
 from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 from app.core.logging import setup_logging
@@ -30,6 +31,7 @@ async def _mark_stale_sync_runs_after_startup() -> None:
 async def lifespan(app: FastAPI):
     logger.info("Starting sync service...")
     apply_dev_data_mode_to_settings()
+    install_default_executor()
     await init_db()
     logger.info("Sync service database initialized")
     asyncio.create_task(_mark_stale_sync_runs_after_startup())
@@ -45,6 +47,7 @@ async def lifespan(app: FastAPI):
 
     logger.info("Stopping sync service...")
     stop_scheduler()
+    shutdown_default_executor()
     logger.info("Sync service stopped")
 
 

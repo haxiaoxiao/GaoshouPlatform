@@ -1,4 +1,4 @@
-export type NavSectionKey = 'research' | 'operations'
+export type NavSectionKey = 'research' | 'operations' | 'research-lab'
 export type ContextTone = 'good' | 'warn' | 'bad' | 'neutral'
 
 export interface ContextRow {
@@ -47,8 +47,9 @@ const icons = {
 }
 
 export const NAV_SECTIONS: NavSection[] = [
-  { key: 'research', label: 'Research Pipeline' },
+  { key: 'research', label: 'Quant Trading Pipeline' },
   { key: 'operations', label: 'Operations' },
+  { key: 'research-lab', label: 'Research' },
 ]
 
 export const APP_NAV_ITEMS: AppNavItem[] = [
@@ -141,10 +142,10 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
   {
     key: 'explorer',
     path: '/explorer',
-    section: 'research',
+    section: 'operations',
     label: '数据浏览器',
     hint: 'Query',
-    subtitle: '本地行情、因子缓存和派生数据的快速预览，精确统计按需执行。',
+    subtitle: '直接查询本地行情、因子缓存和派生数据；精确统计按需执行。',
     kicker: 'DATA EXPLORER',
     icon: icons.explorer,
     context: [
@@ -188,56 +189,28 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
   {
     key: 'factor',
     path: '/factor',
-    activePatterns: ['/factor/detail/*'],
+    activePatterns: ['/factor/evaluation', '/factor/analysis-new/*', '/factor/detail/*'],
     section: 'research',
-    label: '因子定义',
-    hint: 'Define',
-    subtitle: '管理因子目录、覆盖率、参数版本和预计算；表达式只在新建或编辑时打开。',
-    kicker: 'FACTOR DEFINITION',
+    label: '因子研究',
+    hint: 'Factor',
+    subtitle: '统一管理因子目录、缓存预计算和研究评估结果。',
+    kicker: 'FACTOR RESEARCH',
     badge: 'Alpha',
     icon: icons.factor,
     context: [
       {
-        title: '定义上下文',
+        title: '研究上下文',
         rows: [
-          { label: 'Catalog', value: '因子定义目录' },
+          { label: 'Catalog', value: '因子目录' },
           { label: 'Coverage', value: '缓存覆盖率' },
-          { label: 'Precompute', value: '落盘入口', tone: 'good' },
-        ],
-      },
-      {
-        title: '使用边界',
-        rows: [
-          { label: 'Expression', value: '创建/编辑时打开' },
-          { label: '依赖数据', value: '缺口显式提示', tone: 'warn' },
-        ],
-      },
-    ],
-  },
-  {
-    key: 'factor-evaluation',
-    path: '/factor/evaluation',
-    activePatterns: ['/factor/analysis-new/*'],
-    section: 'research',
-    label: '因子评估',
-    hint: 'Eval',
-    subtitle: '查看 IC、ICIR、多空收益、回撤、换手和已计算组合；只消费已预计算的因子缓存。',
-    kicker: 'FACTOR EVALUATION',
-    icon: icons.factor,
-    context: [
-      {
-        title: '评估指标',
-        rows: [
-          { label: 'IC', value: '滚动窗口' },
-          { label: 'Long-short', value: '多空收益' },
-          { label: 'Drawdown', value: '最大回撤', tone: 'warn' },
+          { label: 'Evaluation', value: '研究评估', tone: 'good' },
         ],
       },
       {
         title: '计算前置',
         rows: [
           { label: 'Cache', value: '先预计算', tone: 'good' },
-          { label: 'OOS', value: '必须验证', tone: 'warn' },
+          { label: 'OOS', value: '评估验证', tone: 'warn' },
         ],
       },
     ],
@@ -245,11 +218,11 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
   {
     key: 'research',
     path: '/research',
-    section: 'research',
+    section: 'research-lab',
     label: '研究实验室',
     hint: 'Idea',
-    subtitle: '从研究假设到实验记录再到策略转化，保留证据链和失败复盘。',
-    kicker: 'RESEARCH LAB',
+    subtitle: '把 Obsidian 研究假设接到本地数据、因子预计算、研究评估和策略回测。',
+    kicker: 'RESEARCH COMMAND',
     icon: icons.research,
     context: [
       {
@@ -269,7 +242,7 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
     section: 'research',
     label: '策略回测',
     hint: 'Run',
-    subtitle: '把策略编辑、参数配置、运行日志、报告预览和交易回放并排呈现。',
+    subtitle: '',
     kicker: 'BACKTEST COCKPIT',
     badge: 'Run',
     icon: icons.backtest,

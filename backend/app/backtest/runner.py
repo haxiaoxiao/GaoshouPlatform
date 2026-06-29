@@ -152,6 +152,27 @@ class BacktestRunner:
                     "total_value": round(portfolio.total_value, 2),
                     "n_trades": len(trade_collector.trades),
                 },
+                "trades": trade_collector.to_dicts()[-120:],
+                "orders": [
+                    {
+                        "order_id": order.order_id,
+                        "symbol": order.symbol,
+                        "direction": order.direction,
+                        "price": order.price,
+                        "quantity": order.quantity,
+                        "status": order.status,
+                        "filled_quantity": order.filled_quantity,
+                        "message": order.message,
+                    }
+                    for order in order_collector.orders[-120:]
+                ],
+                "equity_curve": portfolio.nav_series[-600:],
+                "metadata": {
+                    "phase": "running",
+                    "progress_message": "内置事件驱动回测运行中",
+                    "bar_type": config.bar_type,
+                    "symbol_count": len(config.symbols or []),
+                },
             }
 
         event_bus.add_listener(EventType.AFTER_TRADING, on_after_trading_snapshot, system=True)

@@ -1,9 +1,10 @@
 <template>
   <section class="sync-workbench">
-    <div class="sync-head">
-      <div>
-        <div class="eyebrow">DATA SYNC</div>
-        <h2>数据同步任务</h2>
+    <header class="sync-cockpit-head">
+      <div class="sync-cockpit-title">
+        <span class="section-kicker">DATA SYNC / OPERATIONS COCKPIT</span>
+        <h2>数据同步运营台</h2>
+        <p>按数据资产健康度、执行队列和同步审计管理每日多类别数据任务。</p>
       </div>
       <div class="sync-actions">
         <span class="queue-summary" :class="{ active: queue.length > 0 || queuePendingCount > 0 || isRunning }">
@@ -24,44 +25,21 @@
           执行队列
         </el-button>
       </div>
-    </div>
+    </header>
 
-    <div class="status-strip">
-      <div class="status-card">
-        <span>当前状态</span>
-        <strong>{{ statusLabel(syncStatus.status) }}</strong>
-      </div>
-      <div class="status-card">
-        <span>当前任务</span>
-        <strong>{{ syncStatus.sync_type ? syncTypeLabel(syncStatus.sync_type) : '-' }}</strong>
-      </div>
-      <div class="status-card status-card--wide">
-        <span>当前数据</span>
-        <strong>{{ currentWorkLabel }}</strong>
-        <small v-if="currentCursorLabel !== '-'">{{ currentCursorLabel }}</small>
-      </div>
-      <div class="status-card">
-        <span>执行单元</span>
-        <strong>{{ unitProgressLabel }}</strong>
-        <small>{{ remainingUnitLabel }}</small>
-      </div>
-      <div class="status-card">
-        <span>成功 / 失败</span>
-        <strong>{{ syncStatus.success_count }} / {{ syncStatus.failed_count }}</strong>
-        <small>{{ datasetProgressLabel }}</small>
-      </div>
-      <div class="status-card relay-state" :class="{ missing: catalog && !catalog.relay.configured }">
-        <span>Relay Key</span>
-        <strong>{{ catalog?.relay.configured ? '已配置' : '未配置' }}</strong>
-        <small>{{ rowsWrittenLabel }}</small>
-      </div>
-    </div>
+    <section class="service-strip" aria-label="数据健康与同步服务状态">
+      <article v-for="card in topMetricCards" :key="card.label" class="service-card" :class="`tone-${card.tone}`">
+        <span>{{ card.label }}</span>
+        <strong>{{ card.value }}</strong>
+        <small>{{ card.hint }}</small>
+      </article>
+    </section>
 
     <el-progress
       class="sync-progress"
       :percentage="Math.min(100, Math.max(0, syncStatus.progress_percent || 0))"
       :status="syncStatus.status === 'failed' ? 'exception' : syncStatus.status === 'completed' ? 'success' : undefined"
-      :stroke-width="10"
+      :stroke-width="8"
     />
 
     <el-alert
@@ -73,294 +51,442 @@
       <template #title>{{ syncUnavailableReason }}</template>
     </el-alert>
 
-    <div class="layout-grid">
-      <section class="panel presets-panel">
-        <div class="panel-title">
-          <h3>预设方案</h3>
-          <span>{{ catalog?.presets.length || 0 }} 个</span>
-        </div>
-        <div class="preset-list">
-          <button
-            v-for="preset in catalog?.presets || []"
-            :key="preset.name"
-            class="preset"
-            :class="{ noisy: preset.name === 'relay_text', active: isPresetQueued(preset) }"
-            type="button"
-            @click="addPreset(preset)"
-          >
-            <span class="preset-title-row">
-              <span>{{ preset.display_name }}</span>
-              <strong v-if="presetQueueCount(preset) > 0">{{ presetQueueCount(preset) }}/{{ presetItemCount(preset) }} 已加入</strong>
-              <strong v-else>{{ presetItemCount(preset) }} 项</strong>
-            </span>
-            <small>{{ preset.description }}</small>
-          </button>
+    <nav class="cockpit-tabs" aria-label="数据同步业务视图">
+      <button
+        v-for="tab in cockpitTabs"
+        :key="tab.key"
+        type="button"
+        class="cockpit-tab"
+        :class="{ active: activeTab === tab.key }"
+        @click="activeTab = tab.key"
+      >
+        <span>{{ tab.label }}</span>
+        <small>{{ tab.hint }}</small>
+      </button>
+    </nav>
+
+    <main class="cockpit-scroll">
+      <section v-show="activeTab === 'overview'" class="tab-panel">
+        <div class="overview-grid">
+          <section class="active-run-panel" :class="{ idle: !isRunning }" aria-live="polite">
+            <div class="active-run-head">
+              <span class="run-pulse" :class="{ active: isRunning }"></span>
+              <div>
+                <span class="section-kicker">LIVE RUN</span>
+                <h3>{{ isRunning ? activeTaskLabel : '暂无运行任务' }}</h3>
+              </div>
+            </div>
+            <strong>{{ currentWorkLabel }}</strong>
+            <small v-if="currentCursorLabel !== '-'">{{ currentCursorLabel }}</small>
+            <div class="run-metrics">
+              <span>{{ unitProgressLabel }}</span>
+              <span>{{ datasetProgressLabel }}</span>
+              <span>{{ rowsWrittenLabel }}</span>
+            </div>
+          </section>
+
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">RUNBOOK</span>
+                <h3>今日建议执行方案</h3>
+              </div>
+              <span class="panel-count">{{ recommendedRunbook.length }}</span>
+            </div>
+            <div class="runbook-list">
+              <article v-for="item in recommendedRunbook" :key="item.key" class="runbook-item" :class="`tone-${item.tone}`">
+                <div>
+                  <strong>{{ item.title }}</strong>
+                  <span>{{ item.description }}</span>
+                  <small>{{ item.meta }}</small>
+                </div>
+                <div class="runbook-actions">
+                  <el-tag size="small" effect="plain">{{ item.badge }}</el-tag>
+                  <el-button size="small" :disabled="item.disabled" @click="addPreset(item.preset)">加入队列</el-button>
+                </div>
+              </article>
+              <p v-if="!recommendedRunbook.length" class="empty-copy">暂无预设方案，先刷新同步目录。</p>
+            </div>
+          </section>
+
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">FRESHNESS SLA</span>
+                <h3>优先处理的数据</h3>
+              </div>
+              <el-button link type="primary" @click="activeTab = 'catalog'">查看目录</el-button>
+            </div>
+            <div class="priority-list">
+              <article v-for="item in priorityDatasets" :key="item.name" class="priority-row" :class="`tone-${datasetFreshness(item)}`">
+                <div>
+                  <strong>{{ item.display_name }}</strong>
+                  <span>{{ item.name }} · {{ categoryLabel(item.category) }}</span>
+                </div>
+                <small>{{ freshnessHint(item) }}</small>
+              </article>
+              <p v-if="!priorityDatasets.length" class="empty-copy">今日关键数据暂无明显滞后。</p>
+            </div>
+          </section>
         </div>
       </section>
 
-      <section class="panel controls-panel">
-        <div class="panel-title">
-          <h3>执行参数</h3>
-          <el-tag size="small" effect="dark">1 req/s 默认</el-tag>
-        </div>
-        <div class="control-grid">
-          <label>
-            <span>同步模式</span>
-            <el-segmented v-model="syncMode" :options="syncModeOptions" />
-          </label>
-          <label>
-            <span>{{ syncMode === 'incremental' ? '截止日期' : '日期范围' }}</span>
-            <el-date-picker
-              v-if="syncMode === 'incremental'"
-              v-model="incrementalEndDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              placeholder="截止日期"
-            />
-            <el-date-picker
-              v-else
-              v-model="dateRange"
-              type="daterange"
-              value-format="YYYY-MM-DD"
-              start-placeholder="开始日期"
-              end-placeholder="结束日期"
-              unlink-panels
-            />
-          </label>
-          <label>
-            <span>股票范围</span>
-            <el-segmented v-model="stockScope" :options="stockScopeOptions" />
-          </label>
-          <label class="wide">
-            <span>自定义股票</span>
-            <el-input
-              v-model="symbolText"
-              type="textarea"
-              :rows="2"
-              placeholder="000001.SZ, 600000.SH"
-              :disabled="stockScope === 'all'"
-            />
-          </label>
-          <label>
-            <span>失败策略</span>
-            <el-select v-model="failureStrategy">
-              <el-option label="跳过失败项" value="skip" />
-              <el-option label="失败即停止" value="stop" />
-              <el-option label="重试后跳过" value="retry" />
-            </el-select>
-          </label>
-          <label>
-            <span>Relay 每日限量</span>
-            <el-input-number v-model="relayDailyLimit" :min="1" :max="500" :step="20" controls-position="right" />
-          </label>
-          <label>
-            <span>盈利预测 limit</span>
-            <el-input-number v-model="reportRcLimit" :min="1" :max="500" :step="20" controls-position="right" />
-          </label>
-          <label>
-            <span>分析师下钻数</span>
-            <el-input-number v-model="analystLimit" :min="1" :max="500" :step="10" controls-position="right" />
-          </label>
-          <label>
-            <span>THS 成分上限</span>
-            <el-input-number v-model="thsMemberLimit" :min="1" :max="500" :step="10" controls-position="right" />
-          </label>
-          <label>
-            <span>板块资金流 limit</span>
-            <el-input-number v-model="blockLimit" :min="1" :max="100" controls-position="right" />
-          </label>
-          <label>
-            <span>港股通持股 limit</span>
-            <el-input-number v-model="hsgtHoldLimit" :min="100" :max="10000" :step="500" controls-position="right" />
-          </label>
-          <label>
-            <span>基金持仓 limit</span>
-            <el-input-number v-model="fundPortfolioLimit" :min="100" :max="10000" :step="500" controls-position="right" />
-          </label>
-          <label>
-            <span>基金报告期数</span>
-            <el-input-number v-model="fundPeriodLimit" :min="1" :max="40" :step="1" controls-position="right" />
-          </label>
-          <label>
-            <span>三表财务 limit</span>
-            <el-input-number v-model="statementLimit" :min="100" :max="10000" :step="500" controls-position="right" />
-          </label>
-        </div>
-      </section>
-    </div>
-
-    <section class="panel">
-      <div class="panel-title">
-        <h3>待执行队列</h3>
-        <div class="queue-metrics">
-          <span>运行中 {{ isRunning ? 1 : 0 }} 项</span>
-          <span>后端排队 {{ queuePendingCount }} 项</span>
-          <span>草稿 {{ queue.length }} 项</span>
-        </div>
-        <div class="panel-tools">
-          <el-button size="small" :icon="Delete" :disabled="queue.length === 0" @click="clearQueue">清空草稿</el-button>
-        </div>
-      </div>
-      <el-empty v-if="queuePipelineItems.length === 0" description="队列为空" :image-size="80" />
-      <div v-else class="queue-lanes">
-        <div v-if="queuePipeline.running" class="queue-lane">
-          <div class="queue-lane-head">
-            <span>运行中</span>
-            <em>后端正在执行，当前任务会自动前移</em>
-          </div>
-            <div class="queue-card queue-card--running">
-              <div class="queue-step">
-              <span class="queue-step-pulse"></span>
-              </div>
-            <div class="queue-copy">
-              <strong>{{ queuePipeline.running.display_name }}</strong>
-              <span>{{ queuePipeline.running.subtitle }}</span>
-              <small v-if="queuePipeline.running.detail">{{ queuePipeline.running.detail }}</small>
+      <section v-show="activeTab === 'catalog'" class="tab-panel">
+        <section class="cockpit-panel">
+          <div class="panel-title catalog-title">
+            <div>
+              <span class="section-kicker">ASSET CATALOG</span>
+              <h3>数据任务目录</h3>
             </div>
-            <el-tag size="small" effect="dark" type="info">运行中</el-tag>
-          </div>
-        </div>
-
-        <div v-if="queuePipeline.pending.length" class="queue-lane">
-          <div class="queue-lane-head">
-            <span>后端排队</span>
-            <em>{{ queuePipeline.pending.length }} 项</em>
-          </div>
-          <div class="queue-stack">
-            <div
-              v-for="item in queuePipeline.pending"
-              :key="item.id"
-              class="queue-card queue-card--pending"
-            >
-              <div class="queue-step">
-                <span>{{ item.order }}</span>
-              </div>
-              <div class="queue-copy">
-                <strong>{{ item.display_name }}</strong>
-                <span>{{ item.subtitle }}</span>
-                <small v-if="item.detail">{{ item.detail }}</small>
-              </div>
-              <div class="queue-status-group">
-                <el-tag size="small" effect="dark" type="warning">排队中</el-tag>
-              </div>
+            <div class="panel-tools">
+              <el-input v-model="keyword" clearable placeholder="搜索数据集 / 来源 / 描述" />
+              <el-select v-model="categoryFilter" placeholder="分类">
+                <el-option label="全部" value="all" />
+                <el-option label="核心" value="core" />
+                <el-option label="行情" value="market" />
+                <el-option label="概念" value="concept" />
+                <el-option label="Relay 结构化" value="relay_structured" />
+                <el-option label="分析师研报" value="relay_analyst" />
+                <el-option label="北向基金" value="relay_institution" />
+                <el-option label="三表财务" value="relay_financial_statement" />
+                <el-option label="新闻公告" value="relay_text" />
+              </el-select>
+              <el-select v-model="freshnessFilter" placeholder="新鲜度">
+                <el-option label="全部" value="all" />
+                <el-option label="新鲜" value="fresh" />
+                <el-option label="滞后" value="stale" />
+                <el-option label="失败" value="failed" />
+                <el-option label="受阻" value="blocked" />
+              </el-select>
+              <el-select v-model="dependencyFilter" placeholder="依赖">
+                <el-option label="全部" value="all" />
+                <el-option label="QMT" value="qmt" />
+                <el-option label="Relay" value="relay" />
+                <el-option label="无外部依赖" value="none" />
+              </el-select>
+              <el-select v-model="riskFilter" placeholder="风险">
+                <el-option label="全部" value="all" />
+                <el-option label="低风险" value="low" />
+                <el-option label="中风险" value="medium" />
+                <el-option label="高噪声" value="high" />
+              </el-select>
             </div>
           </div>
-        </div>
 
-        <div v-if="queuePipeline.draft.length" class="queue-lane">
-          <div class="queue-lane-head">
-            <span>本地草稿</span>
-            <em>尚未提交后端</em>
-          </div>
-          <div class="queue-stack">
-            <div
-              v-for="item in queuePipeline.draft"
-              :key="item.id"
-              class="queue-card queue-card--draft"
-            >
-              <div class="queue-step">
-                <span>{{ item.order }}</span>
-              </div>
-              <div class="queue-copy">
-                <strong>{{ item.display_name }}</strong>
-                <span>{{ item.subtitle }}</span>
-                <small v-if="item.detail">{{ item.detail }}</small>
-              </div>
-              <div class="queue-status-group">
-                <el-tag size="small" effect="dark" :type="riskType(item.risk_level)" class="risk-tag" :class="`risk-tag--${item.risk_level}`">
-                  {{ riskLabel(item.risk_level) }}
+          <el-table :data="filteredDatasets" height="560" class="operation-table" row-key="name">
+            <el-table-column label="任务" min-width="240" fixed>
+              <template #default="{ row }">
+                <div class="dataset-name">
+                  <strong>{{ row.display_name }}</strong>
+                  <span>{{ row.name }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="健康" width="116">
+              <template #default="{ row }">
+                <el-tag size="small" effect="plain" :class="`freshness-tag freshness-tag--${datasetFreshness(row)}`">
+                  {{ freshnessLabel(row) }}
                 </el-tag>
-                <el-button text :icon="Delete" @click="removeQueueItem(item.id)" />
+              </template>
+            </el-table-column>
+            <el-table-column prop="source" label="来源" width="150" show-overflow-tooltip />
+            <el-table-column label="覆盖度" min-width="190">
+              <template #default="{ row }">
+                <div class="coverage-cell">
+                  <strong v-if="hasCoverageRows(row.coverage)">{{ formatNumber(coverageRows(row.coverage)) }} 行</strong>
+                  <strong v-else>-</strong>
+                  <span>{{ freshnessHint(row) }}</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="频率" width="100">
+              <template #default="{ row }">{{ frequencyLabel(row.recommended_frequency) }}</template>
+            </el-table-column>
+            <el-table-column label="依赖" width="142">
+              <template #default="{ row }">
+                <div class="tag-row">
+                  <el-tag v-if="row.requires_qmt" size="small" effect="plain">QMT</el-tag>
+                  <el-tag v-if="row.requires_relay_key" size="small" effect="plain" type="success">Relay</el-tag>
+                  <span v-if="!row.requires_qmt && !row.requires_relay_key" class="muted">无</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column label="风险" width="112">
+              <template #default="{ row }">
+                <el-tag :type="riskType(row.risk_level)" effect="plain" size="small" class="risk-tag" :class="`risk-tag--${row.risk_level}`">
+                  {{ riskLabel(row.risk_level) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="" width="104" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" :icon="Plus" :disabled="isDatasetBlocked(row)" @click="addTask(row)">加入</el-button>
+              </template>
+            </el-table-column>
+            <el-table-column prop="description" label="说明" min-width="260" show-overflow-tooltip />
+          </el-table>
+        </section>
+      </section>
+
+      <section v-show="activeTab === 'queue'" class="tab-panel">
+        <div class="queue-workspace">
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">PARAMETERS</span>
+                <h3>执行参数</h3>
               </div>
+              <el-tag size="small" effect="plain">Relay {{ catalog?.relay.rps || 1 }} req/s</el-tag>
+            </div>
+            <div class="control-grid">
+              <label>
+                <span>同步模式</span>
+                <el-segmented v-model="syncMode" :options="syncModeOptions" />
+              </label>
+              <label>
+                <span>{{ syncMode === 'incremental' ? '截止日期' : '日期范围' }}</span>
+                <el-date-picker
+                  v-if="syncMode === 'incremental'"
+                  v-model="incrementalEndDate"
+                  type="date"
+                  value-format="YYYY-MM-DD"
+                  placeholder="截止日期"
+                />
+                <el-date-picker
+                  v-else
+                  v-model="dateRange"
+                  type="daterange"
+                  value-format="YYYY-MM-DD"
+                  start-placeholder="开始日期"
+                  end-placeholder="结束日期"
+                  unlink-panels
+                />
+              </label>
+              <label>
+                <span>股票范围</span>
+                <el-segmented v-model="stockScope" :options="stockScopeOptions" />
+              </label>
+              <label class="wide">
+                <span>自定义股票</span>
+                <el-input
+                  v-model="symbolText"
+                  type="textarea"
+                  :rows="2"
+                  placeholder="000001.SZ, 600000.SH"
+                  :disabled="stockScope === 'all'"
+                />
+              </label>
+              <label>
+                <span>失败策略</span>
+                <el-select v-model="failureStrategy">
+                  <el-option label="跳过失败项" value="skip" />
+                  <el-option label="失败即停止" value="stop" />
+                  <el-option label="重试后跳过" value="retry" />
+                </el-select>
+              </label>
+              <label>
+                <span>Relay 每日限量</span>
+                <el-input-number v-model="relayDailyLimit" :min="1" :max="500" :step="20" controls-position="right" />
+              </label>
+              <label>
+                <span>盈利预测 limit</span>
+                <el-input-number v-model="reportRcLimit" :min="1" :max="500" :step="20" controls-position="right" />
+              </label>
+              <label>
+                <span>分析师下钻数</span>
+                <el-input-number v-model="analystLimit" :min="1" :max="500" :step="10" controls-position="right" />
+              </label>
+              <label>
+                <span>THS 成分上限</span>
+                <el-input-number v-model="thsMemberLimit" :min="1" :max="500" :step="10" controls-position="right" />
+              </label>
+              <label>
+                <span>板块资金流 limit</span>
+                <el-input-number v-model="blockLimit" :min="1" :max="100" controls-position="right" />
+              </label>
+              <label>
+                <span>港股通持股 limit</span>
+                <el-input-number v-model="hsgtHoldLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+              </label>
+              <label>
+                <span>基金持仓 limit</span>
+                <el-input-number v-model="fundPortfolioLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+              </label>
+              <label>
+                <span>基金报告期数</span>
+                <el-input-number v-model="fundPeriodLimit" :min="1" :max="40" :step="1" controls-position="right" />
+              </label>
+              <label>
+                <span>三表财务 limit</span>
+                <el-input-number v-model="statementLimit" :min="100" :max="10000" :step="500" controls-position="right" />
+              </label>
+            </div>
+          </section>
+
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">QUEUE PIPELINE</span>
+                <h3>执行队列</h3>
+              </div>
+              <div class="queue-metrics">
+                <span>运行 {{ isRunning ? 1 : 0 }}</span>
+                <span>后端 {{ queuePendingCount }}</span>
+                <span>草稿 {{ queue.length }}</span>
+              </div>
+              <el-button size="small" :icon="Delete" :disabled="queue.length === 0" @click="clearQueue">清空草稿</el-button>
+            </div>
+            <el-empty v-if="queuePipelineItems.length === 0" description="队列为空" :image-size="80" />
+            <div v-else class="queue-lanes">
+              <section class="queue-lane">
+                <div class="queue-lane-head">
+                  <span>运行中</span>
+                  <em>{{ queuePipeline.running ? 1 : 0 }} 项</em>
+                </div>
+                <div v-if="queuePipeline.running" class="queue-card queue-card--running">
+                  <span class="queue-step-pulse"></span>
+                  <div class="queue-copy">
+                    <strong>{{ queuePipeline.running.display_name }}</strong>
+                    <span>{{ queuePipeline.running.subtitle }}</span>
+                    <small v-if="queuePipeline.running.detail">{{ queuePipeline.running.detail }}</small>
+                  </div>
+                  <el-tag size="small" effect="plain">运行中</el-tag>
+                </div>
+                <p v-else class="empty-copy compact">暂无运行任务</p>
+              </section>
+
+              <section class="queue-lane">
+                <div class="queue-lane-head">
+                  <span>后端排队</span>
+                  <em>{{ queuePipeline.pending.length }} 项</em>
+                </div>
+                <div class="queue-stack">
+                  <div v-for="item in queuePipeline.pending" :key="item.id" class="queue-card queue-card--pending">
+                    <span class="queue-step">{{ item.order }}</span>
+                    <div class="queue-copy">
+                      <strong>{{ item.display_name }}</strong>
+                      <span>{{ item.subtitle }}</span>
+                      <small v-if="item.detail">{{ item.detail }}</small>
+                    </div>
+                    <el-tag size="small" effect="plain" type="warning">排队中</el-tag>
+                  </div>
+                  <p v-if="!queuePipeline.pending.length" class="empty-copy compact">后端队列为空</p>
+                </div>
+              </section>
+
+              <section class="queue-lane">
+                <div class="queue-lane-head">
+                  <span>本地草稿</span>
+                  <em>{{ queuePipeline.draft.length }} 项</em>
+                </div>
+                <div class="queue-stack">
+                  <div v-for="item in queuePipeline.draft" :key="item.id" class="queue-card queue-card--draft">
+                    <span class="queue-step">{{ item.order }}</span>
+                    <div class="queue-copy">
+                      <strong>{{ item.display_name }}</strong>
+                      <span>{{ item.subtitle }}</span>
+                      <small v-if="item.detail">{{ item.detail }}</small>
+                    </div>
+                    <div class="queue-status-group">
+                      <el-tag size="small" effect="plain" :type="riskType(item.risk_level)" class="risk-tag" :class="`risk-tag--${item.risk_level}`">
+                        {{ riskLabel(item.risk_level) }}
+                      </el-tag>
+                      <el-button text :icon="Delete" @click="removeQueueItem(item.id)" />
+                    </div>
+                  </div>
+                  <p v-if="!queuePipeline.draft.length" class="empty-copy compact">先从总览或目录加入任务</p>
+                </div>
+              </section>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <section v-show="activeTab === 'history'" class="tab-panel">
+        <section class="cockpit-panel">
+          <div class="panel-title">
+            <div>
+              <span class="section-kicker">RUN MATRIX</span>
+              <h3>近 7 日同步状态矩阵</h3>
+            </div>
+            <el-button size="small" :icon="Refresh" @click="loadLogs">刷新记录</el-button>
+          </div>
+          <div class="matrix">
+            <div class="matrix-row matrix-row--head">
+              <span></span>
+              <span v-for="day in matrixDays" :key="day.key">{{ day.label }}</span>
+            </div>
+            <div v-for="row in matrixRows" :key="row.key" class="matrix-row">
+              <strong>{{ row.label }}</strong>
+              <button
+                v-for="cell in row.cells"
+                :key="cell.key"
+                type="button"
+                class="matrix-cell"
+                :class="`matrix-cell--${cell.tone}`"
+                :title="cell.title"
+              >
+                {{ cell.symbol }}
+              </button>
             </div>
           </div>
-        </div>
-      </div>
-    </section>
+        </section>
 
-    <section class="panel catalog-panel">
-      <div class="panel-title">
-        <h3>数据任务目录</h3>
-        <div class="panel-tools">
-          <el-input v-model="keyword" clearable placeholder="搜索数据集" />
-          <el-select v-model="categoryFilter" placeholder="分类">
-            <el-option label="全部" value="all" />
-            <el-option label="核心" value="core" />
-            <el-option label="行情" value="market" />
-            <el-option label="概念" value="concept" />
-            <el-option label="Relay 结构化" value="relay_structured" />
-            <el-option label="分析师研报" value="relay_analyst" />
-            <el-option label="北向基金" value="relay_institution" />
-            <el-option label="三表财务" value="relay_financial_statement" />
-            <el-option label="新闻公告" value="relay_text" />
-          </el-select>
-        </div>
-      </div>
-
-      <el-table :data="filteredDatasets" height="420" class="dark-table" row-key="name">
-        <el-table-column label="任务" min-width="220">
-          <template #default="{ row }">
-            <div class="dataset-name">
-              <strong>{{ row.display_name }}</strong>
-              <span>{{ row.name }}</span>
+        <div class="history-grid">
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">RUN HISTORY</span>
+                <h3>最近记录</h3>
+              </div>
             </div>
-          </template>
-        </el-table-column>
-        <el-table-column prop="source" label="来源" width="150" show-overflow-tooltip />
-        <el-table-column label="覆盖度" min-width="170">
-          <template #default="{ row }">
-            <span v-if="hasCoverageRows(row.coverage)">
-              {{ formatNumber(coverageRows(row.coverage)) }} 行
-              <small>{{ row.coverage.max_date || '-' }}</small>
-            </span>
-            <span v-else-if="row.coverage?.max_date">
-              <small>{{ row.coverage.max_date }}{{ row.coverage.estimated ? ' · 快速估算' : '' }}</small>
-            </span>
-            <span v-else>-</span>
-          </template>
-        </el-table-column>
-        <el-table-column label="频率" width="100">
-          <template #default="{ row }">{{ frequencyLabel(row.recommended_frequency) }}</template>
-        </el-table-column>
-        <el-table-column label="依赖" width="120">
-          <template #default="{ row }">
-            <el-tag v-if="row.requires_qmt" size="small" effect="dark">QMT</el-tag>
-            <el-tag v-if="row.requires_relay_key" size="small" effect="dark" type="success">Relay</el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="风险" width="132">
-          <template #default="{ row }">
-            <el-tag :type="riskType(row.risk_level)" effect="dark" size="small" class="risk-tag" :class="`risk-tag--${row.risk_level}`">
-              {{ riskLabel(row.risk_level) }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="" width="96">
-          <template #default="{ row }">
-            <el-button size="small" :icon="Plus" @click="addTask(row)">加入</el-button>
-          </template>
-        </el-table-column>
-        <el-table-column prop="description" label="说明" min-width="240" show-overflow-tooltip />
-      </el-table>
-    </section>
+            <el-table :data="logs" class="operation-table" height="320" highlight-current-row @row-click="selectLog">
+              <el-table-column label="类型" min-width="150">
+                <template #default="{ row }">{{ syncTypeLabel(row.sync_type) }}</template>
+              </el-table-column>
+              <el-table-column label="状态" width="110">
+                <template #default="{ row }">
+                  <el-tag size="small" effect="plain" :class="`status-tag status-tag--${logStatusTone(row.status)}`">
+                    {{ statusLabel(row.status) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="成功/失败" width="130">
+                <template #default="{ row }">{{ row.success_count ?? 0 }} / {{ row.failed_count ?? 0 }}</template>
+              </el-table-column>
+              <el-table-column label="开始时间" width="170">
+                <template #default="{ row }">{{ formatDateTime(row.start_time) }}</template>
+              </el-table-column>
+              <el-table-column prop="error_message" label="错误" min-width="220" show-overflow-tooltip />
+            </el-table>
+          </section>
 
-    <section class="panel">
-      <div class="panel-title">
-        <h3>最近记录</h3>
-        <el-button size="small" :icon="Refresh" @click="loadLogs">刷新</el-button>
-      </div>
-      <el-table :data="logs" class="dark-table" height="220">
-        <el-table-column label="类型" width="150">
-          <template #default="{ row }">{{ syncTypeLabel(row.sync_type) }}</template>
-        </el-table-column>
-        <el-table-column prop="status" label="状态" width="110" />
-        <el-table-column label="成功/失败" width="130">
-          <template #default="{ row }">{{ row.success_count ?? 0 }} / {{ row.failed_count ?? 0 }}</template>
-        </el-table-column>
-        <el-table-column prop="start_time" label="开始时间" width="190" />
-        <el-table-column prop="error_message" label="错误" show-overflow-tooltip />
-      </el-table>
-    </section>
+          <section class="cockpit-panel">
+            <div class="panel-title">
+              <div>
+                <span class="section-kicker">DIAGNOSTICS</span>
+                <h3>故障与日志检查</h3>
+              </div>
+              <el-tag v-if="selectedLog" size="small" effect="plain">#{{ selectedLog.id }}</el-tag>
+            </div>
+            <div v-if="selectedLog" class="diagnostic-panel">
+              <div class="diagnostic-summary" :class="`tone-${logStatusTone(selectedLog.status)}`">
+                <strong>{{ syncTypeLabel(selectedLog.sync_type) }}</strong>
+                <span>{{ statusLabel(selectedLog.status) }} · {{ formatDateTime(selectedLog.start_time) }}</span>
+              </div>
+              <div class="diagnostic-grid">
+                <span>成功</span><strong>{{ selectedLog.success_count ?? 0 }}</strong>
+                <span>失败</span><strong>{{ selectedLog.failed_count ?? 0 }}</strong>
+                <span>总量</span><strong>{{ selectedLog.total_count ?? 0 }}</strong>
+                <span>结束</span><strong>{{ formatDateTime(selectedLog.end_time) }}</strong>
+              </div>
+              <pre class="log-inspector">{{ selectedLog.error_message || formatLogDetails(selectedLog.details) || '暂无错误信息，选择失败记录可查看诊断。' }}</pre>
+            </div>
+            <p v-else class="empty-copy">暂无同步记录。</p>
+          </section>
+        </div>
+      </section>
+    </main>
 
     <el-alert
       v-if="catalog && !catalog.relay.configured"
@@ -404,6 +530,8 @@ interface QueuePipelineItem {
   order: number
 }
 
+type FreshnessState = 'fresh' | 'stale' | 'failed' | 'blocked'
+
 const today = new Date()
 const weekAgo = new Date(today)
 weekAgo.setDate(today.getDate() - 7)
@@ -412,7 +540,12 @@ const catalog = ref<SyncCatalog | null>(null)
 const logs = ref<SyncLog[]>([])
 const queue = ref<QueueItem[]>([])
 const keyword = ref('')
+const activeTab = ref<'overview' | 'catalog' | 'queue' | 'history'>('overview')
 const categoryFilter = ref('all')
+const freshnessFilter = ref('all')
+const dependencyFilter = ref('all')
+const riskFilter = ref('all')
+const selectedLogId = ref<number | null>(null)
 const catalogLoading = ref(false)
 const executing = ref(false)
 const stoppingAll = ref(false)
@@ -446,6 +579,13 @@ const LOG_REFRESH_INTERVAL_MS = 15 * 1000
 let catalogCache: { value: SyncCatalog; expiresAt: number } | null = null
 let pollTimer: number | undefined
 let lastLogRefreshAt = 0
+
+const cockpitTabs = [
+  { key: 'overview' as const, label: '今日总览', hint: '健康 / 建议' },
+  { key: 'catalog' as const, label: '任务目录', hint: '资产 / 依赖' },
+  { key: 'queue' as const, label: '执行与队列', hint: '参数 / 编排' },
+  { key: 'history' as const, label: '历史与诊断', hint: '矩阵 / 日志' },
+]
 
 const isRunning = computed(() => ['queued', 'running'].includes(syncStatus.value.status))
 const queuePendingCount = computed(() => Number(syncStatus.value.details?.queue_pending_count || 0))
@@ -502,11 +642,24 @@ const filteredDatasets = computed(() => {
   const term = keyword.value.trim().toLowerCase()
   return (catalog.value?.datasets || []).filter((item) => {
     const matchesCategory = categoryFilter.value === 'all' || item.category === categoryFilter.value
-    const text = `${item.name} ${item.display_name} ${item.description}`.toLowerCase()
-    return matchesCategory && (!term || text.includes(term))
+    const matchesFreshness = freshnessFilter.value === 'all' || datasetFreshness(item) === freshnessFilter.value
+    const matchesDependency =
+      dependencyFilter.value === 'all'
+      || (dependencyFilter.value === 'qmt' && item.requires_qmt)
+      || (dependencyFilter.value === 'relay' && item.requires_relay_key)
+      || (dependencyFilter.value === 'none' && !item.requires_qmt && !item.requires_relay_key)
+    const matchesRisk = riskFilter.value === 'all' || item.risk_level === riskFilter.value
+    const text = `${item.name} ${item.display_name} ${item.description} ${item.source}`.toLowerCase()
+    return matchesCategory && matchesFreshness && matchesDependency && matchesRisk && (!term || text.includes(term))
   })
 })
 const catalogDatasetMap = computed(() => new Map((catalog.value?.datasets || []).map((item) => [item.name, item])))
+const latestFailedTypes = computed(() => new Set(
+  logs.value
+    .filter((log) => log.status === 'failed')
+    .slice(0, 20)
+    .map((log) => log.sync_type)
+))
 const syncDetails = computed(() => syncStatus.value.details || {})
 const backendQueueActiveTask = computed(() => recordValue(syncDetails.value.queue_active_task))
 const backendQueuePendingTasks = computed(() => recordList(syncDetails.value.queue_pending_tasks))
@@ -671,6 +824,118 @@ const rowsWrittenCount = computed(() => {
 const rowsWrittenLabel = computed(() => (
   rowsWrittenCount.value !== null ? `写入 ${formatNumber(rowsWrittenCount.value)} 行` : '写入行数待回传'
 ))
+const healthCounts = computed(() => {
+  const counts = { fresh: 0, stale: 0, failed: 0, blocked: 0 }
+  for (const item of catalog.value?.datasets || []) {
+    counts[datasetFreshness(item)] += 1
+  }
+  return counts
+})
+const healthCards = computed(() => [
+  { key: 'fresh', label: '今日已刷新', value: healthCounts.value.fresh, hint: 'Fresh assets', tone: 'good' },
+  { key: 'stale', label: '数据落后', value: healthCounts.value.stale, hint: '超过推荐同步频率', tone: 'warn' },
+  { key: 'failed', label: '最近失败', value: healthCounts.value.failed, hint: '最近日志出现失败', tone: 'bad' },
+  { key: 'blocked', label: '依赖受阻', value: healthCounts.value.blocked, hint: 'Relay/QMT 等依赖不可用', tone: 'neutral' },
+])
+const serviceCards = computed(() => [
+  {
+    label: '本地同步服务',
+    value: serviceReady.value ? '可用' : '不可用',
+    hint: serviceReady.value ? submissionStateLabel.value : syncUnavailableReason.value,
+    tone: serviceReady.value ? 'good' : 'bad',
+  },
+  {
+    label: '当前任务',
+    value: activeTaskLabel.value,
+    hint: currentWorkLabel.value,
+    tone: isRunning.value ? 'warn' : 'neutral',
+  },
+  {
+    label: '执行游标',
+    value: unitProgressLabel.value,
+    hint: currentCursorLabel.value !== '-' ? currentCursorLabel.value : remainingUnitLabel.value,
+    tone: syncStatus.value.status === 'failed' ? 'bad' : isRunning.value ? 'warn' : 'neutral',
+  },
+  {
+    label: '写入行数',
+    value: rowsWrittenCount.value !== null ? formatNumber(rowsWrittenCount.value) : '-',
+    hint: queuePipelineItems.value.length ? queuedPreview.value : datasetProgressLabel.value,
+    tone: queuePipelineItems.value.length ? 'warn' : 'neutral',
+  },
+])
+const topMetricCards = computed(() => [...healthCards.value, ...serviceCards.value])
+const recommendedRunbook = computed(() => {
+  const presets = catalog.value?.presets || []
+  const fallback = presets.slice(0, 4)
+  const preferred = [
+    ...presets.filter((preset) => preset.include_by_default),
+    ...presets.filter((preset) => preset.name.includes('daily') || preset.name.includes('core')),
+    ...presets.filter((preset) => preset.name.includes('relay')),
+  ]
+  const deduped = new Map<string, SyncPreset>()
+  for (const preset of [...preferred, ...fallback]) deduped.set(preset.name, preset)
+  return Array.from(deduped.values()).slice(0, 4).map((preset) => {
+    const relayCount = preset.relay_datasets.length
+    const syncCount = preset.sync_types.length
+    const requiresRelay = relayCount > 0
+    return {
+      key: preset.name,
+      title: preset.display_name,
+      description: preset.description,
+      meta: `${syncCount + relayCount} 项 · ${requiresRelay ? 'Relay 额度任务' : '本地/核心任务'}`,
+      badge: isPresetQueued(preset) ? '已加入' : requiresRelay ? '额度敏感' : '推荐执行',
+      tone: requiresRelay ? 'warn' : 'good',
+      disabled: requiresRelay && catalog.value?.relay.configured === false,
+      preset,
+    }
+  })
+})
+const priorityDatasets = computed(() => (
+  [...(catalog.value?.datasets || [])]
+    .sort((a, b) => freshnessPriority(datasetFreshness(a)) - freshnessPriority(datasetFreshness(b)))
+    .slice(0, 6)
+))
+const selectedLog = computed(() => logs.value.find((log) => log.id === selectedLogId.value) || logs.value[0] || null)
+const matrixDays = computed(() => {
+  const days: { key: string; label: string }[] = []
+  const todayDate = new Date()
+  for (let i = 6; i >= 0; i -= 1) {
+    const day = new Date(todayDate)
+    day.setDate(todayDate.getDate() - i)
+    days.push({ key: formatDate(day), label: `${day.getMonth() + 1}/${day.getDate()}` })
+  }
+  return days
+})
+const matrixRows = computed(() => {
+  const groups = [
+    { key: 'core', label: '核心数据', matcher: (type: string) => ['datasync', 'stock_info', 'stock_full', 'realtime_mv'].includes(type) },
+    { key: 'market', label: '行情/K线', matcher: (type: string) => ['kline_daily', 'kline_minute', 'index_daily'].includes(type) },
+    { key: 'financial', label: '财务/分红', matcher: (type: string) => ['financial_data', 'dividends'].includes(type) },
+    { key: 'relay', label: 'Relay/概念', matcher: (type: string) => ['tushare_relay', 'ths_concept'].includes(type) },
+    { key: 'sentiment', label: '情绪/事件', matcher: (type: string) => type.startsWith('sentiment_') },
+    { key: 'factor', label: '因子依赖', matcher: (type: string) => type === 'factor_dependency' },
+  ]
+  return groups.map((group) => ({
+    key: group.key,
+    label: group.label,
+    cells: matrixDays.value.map((day) => {
+      const dayLogs = logs.value.filter((log) => {
+        const time = log.end_time || log.start_time || log.created_at
+        return time?.slice(0, 10) === day.key && group.matcher(log.sync_type)
+      })
+      const failed = dayLogs.some((log) => log.status === 'failed')
+      const running = dayLogs.some((log) => ['queued', 'running'].includes(log.status))
+      const completed = dayLogs.some((log) => log.status === 'completed')
+      const tone = failed ? 'bad' : running ? 'warn' : completed ? 'good' : 'empty'
+      return {
+        key: `${group.key}:${day.key}`,
+        tone,
+        symbol: failed ? 'x' : running ? '!' : completed ? 'v' : '-',
+        title: dayLogs.length ? `${group.label} ${day.label}: ${dayLogs.map((log) => statusLabel(log.status)).join(' / ')}` : `${group.label} ${day.label}: 无记录`,
+      }
+    }),
+  }))
+})
 const queuedPreview = computed(() => {
   const items = queuePipelineItems.value
   if (!items.length) return '队列为空'
@@ -828,6 +1093,7 @@ function normalizeStatusAvailability(status: SyncStatus): SyncStatus {
 
 async function loadLogs() {
   logs.value = await syncApi.getLogs({ limit: 20 })
+  if (!selectedLogId.value && logs.value.length) selectedLogId.value = logs.value[0].id
   lastLogRefreshAt = Date.now()
 }
 
@@ -837,6 +1103,64 @@ function hasCoverageRows(coverage: SyncCatalogItem['coverage']) {
 
 function coverageRows(coverage: SyncCatalogItem['coverage']) {
   return typeof coverage?.row_count === 'number' ? coverage.row_count : 0
+}
+
+function datasetFreshness(item: SyncCatalogItem): FreshnessState {
+  if (isDatasetBlocked(item)) return 'blocked'
+  if (latestFailedTypes.value.has(item.name)) return 'failed'
+  const maxDate = item.coverage?.max_date
+  if (!maxDate) return item.default_enabled ? 'stale' : 'fresh'
+  const latest = new Date(maxDate)
+  if (Number.isNaN(latest.getTime())) return 'fresh'
+  const ageDays = Math.floor((startOfDay(new Date()).getTime() - startOfDay(latest).getTime()) / 86_400_000)
+  const staleAfter = freshnessThresholdDays(item.recommended_frequency)
+  return ageDays > staleAfter ? 'stale' : 'fresh'
+}
+
+function freshnessThresholdDays(value: string) {
+  const map: Record<string, number> = {
+    daily: 1,
+    weekly: 8,
+    manual: 45,
+    on_demand: 45,
+  }
+  return map[value] ?? 8
+}
+
+function freshnessPriority(value: FreshnessState) {
+  const map: Record<FreshnessState, number> = {
+    failed: 0,
+    blocked: 1,
+    stale: 2,
+    fresh: 3,
+  }
+  return map[value]
+}
+
+function freshnessLabel(item: SyncCatalogItem) {
+  const map: Record<FreshnessState, string> = {
+    fresh: '新鲜',
+    stale: '滞后',
+    failed: '失败',
+    blocked: '受阻',
+  }
+  return map[datasetFreshness(item)]
+}
+
+function freshnessHint(item: SyncCatalogItem) {
+  if (isDatasetBlocked(item)) return item.requires_relay_key ? 'Relay Key 未配置' : '外部依赖不可用'
+  if (latestFailedTypes.value.has(item.name)) return '最近执行失败'
+  const maxDate = item.coverage?.max_date
+  if (!maxDate) return item.coverage?.error || '暂无覆盖日期'
+  return `${maxDate}${item.coverage?.estimated ? ' · 快速估算' : ''}`
+}
+
+function isDatasetBlocked(item: SyncCatalogItem) {
+  return item.requires_relay_key && catalog.value?.relay.configured === false
+}
+
+function startOfDay(value: Date) {
+  return new Date(value.getFullYear(), value.getMonth(), value.getDate())
 }
 
 function recordValue(value: unknown): Record<string, unknown> {
@@ -1152,6 +1476,41 @@ function queueStateLabel(value: QueuePipelineItem['state']) {
   return map[value]
 }
 
+function categoryLabel(value: string) {
+  const map: Record<string, string> = {
+    core: '核心',
+    market: '行情',
+    concept: '概念',
+    relay_structured: 'Relay 结构化',
+    relay_analyst: '分析师研报',
+    relay_institution: '北向基金',
+    relay_financial_statement: '三表财务',
+    relay_text: '新闻公告',
+  }
+  return map[value] || value
+}
+
+function logStatusTone(status: string) {
+  if (status === 'failed') return 'bad'
+  if (status === 'queued' || status === 'running' || status === 'pending') return 'warn'
+  if (status === 'completed') return 'good'
+  return 'neutral'
+}
+
+function selectLog(log: SyncLog) {
+  selectedLogId.value = log.id
+}
+
+function formatLogDetails(details: SyncLog['details']) {
+  if (!details || Object.keys(details).length === 0) return ''
+  return JSON.stringify(details, null, 2)
+}
+
+function formatDateTime(value?: string | null) {
+  if (!value) return '-'
+  return value.replace('T', ' ').slice(0, value.includes(':') ? 16 : 10)
+}
+
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
 }
@@ -1183,416 +1542,431 @@ function idleStatus(): SyncStatus {
 
 <style scoped>
 .sync-workbench {
+  height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  color: var(--el-text-color-primary);
+  gap: 12px;
+  overflow: hidden;
+  color: var(--text-primary);
 }
 
-.sync-head,
+.sync-cockpit-head,
 .panel-title,
-.status-strip,
-.queue-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.eyebrow {
-  color: #22c7f4;
-  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
-  font-size: 12px;
-  letter-spacing: 0;
-}
-
-h2,
-h3 {
-  margin: 0;
-}
-
-h2 {
-  font-size: 22px;
-}
-
-h3 {
-  font-size: 15px;
-}
-
 .sync-actions,
-.panel-tools {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.queue-summary {
-  min-width: 94px;
-  padding: 7px 10px;
-  border: 1px solid rgba(132, 154, 184, 0.34);
-  border-radius: 6px;
-  color: #b8c4d6;
-  background: rgba(7, 12, 19, 0.74);
-  font-size: 12px;
-  font-weight: 700;
-  text-align: center;
-}
-
-.queue-summary.active {
-  border-color: rgba(57, 197, 255, 0.86);
-  color: #07111c;
-  background: #44c8ff;
-  box-shadow: 0 0 18px rgba(68, 200, 255, 0.2);
-}
-
-.queue-metrics {
-  display: flex;
-  flex: 1 1 auto;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.queue-metrics span {
-  padding: 4px 8px;
-  border: 1px solid rgba(126, 151, 181, 0.32);
-  border-radius: 999px;
-  color: #aebdd0;
-  background: rgba(8, 13, 20, 0.58);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.queue-lanes {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-
-.queue-lane {
-  padding: 12px;
-  border: 1px solid rgba(94, 119, 149, 0.42);
-  border-radius: 9px;
-  background:
-    linear-gradient(135deg, rgba(18, 31, 45, 0.82), rgba(8, 13, 20, 0.92)),
-    radial-gradient(circle at top left, rgba(68, 200, 255, 0.12), transparent 34%);
-}
-
-.queue-lane-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 10px;
-}
-
-.queue-lane-head span {
-  color: #f4f8fd;
-  font-size: 13px;
-  font-weight: 900;
-}
-
-.queue-lane-head em {
-  color: #99abc1;
-  font-size: 12px;
-  font-style: normal;
-}
-
-.queue-stack {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.queue-card {
-  display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
-  min-height: 62px;
-  padding: 11px 12px;
-  border: 1px solid rgba(110, 139, 170, 0.54);
-  border-radius: 8px;
-  background: rgba(9, 16, 25, 0.9);
-}
-
-.queue-card--running {
-  border-color: rgba(68, 200, 255, 0.92);
-  background: linear-gradient(135deg, rgba(24, 68, 90, 0.94), rgba(9, 18, 29, 0.96));
-  box-shadow: inset 3px 0 0 #44c8ff, 0 0 26px rgba(68, 200, 255, 0.14);
-}
-
-.queue-card--pending {
-  border-color: rgba(255, 188, 66, 0.42);
-}
-
-.queue-card--draft {
-  border-color: rgba(126, 151, 181, 0.5);
-}
-
-.queue-step {
-  display: flex;
-  width: 30px;
-  height: 30px;
-  align-items: center;
-  justify-content: center;
-  border-radius: 999px;
-  color: #dff6ff;
-  background: rgba(17, 28, 40, 0.96);
-  font-size: 12px;
-  font-weight: 900;
-}
-
-.queue-step-pulse {
-  width: 12px;
-  height: 12px;
-  border-radius: 999px;
-  background: #44c8ff;
-  box-shadow: 0 0 0 0 rgba(68, 200, 255, 0.5);
-  animation: queuePulse 1.5s ease-out infinite;
-}
-
-.queue-copy {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.queue-copy strong {
-  overflow: hidden;
-  color: #ffffff;
-  font-size: 14px;
-  font-weight: 900;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.queue-copy span,
-.queue-copy small {
-  overflow: hidden;
-  color: #aebdd0;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.queue-copy small {
-  color: #8fa3bb;
-}
-
+.panel-tools,
+.queue-metrics,
+.tag-row,
+.runbook-actions,
+.active-run-head,
+.run-metrics,
 .queue-status-group {
   display: flex;
   align-items: center;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-@keyframes queuePulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(68, 200, 255, 0.5);
-    transform: scale(0.88);
-  }
-
-  70% {
-    box-shadow: 0 0 0 10px rgba(68, 200, 255, 0);
-    transform: scale(1);
-  }
-
-  100% {
-    box-shadow: 0 0 0 0 rgba(68, 200, 255, 0);
-    transform: scale(0.88);
-  }
-}
-
-.status-strip {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  align-items: stretch;
-}
-
-.status-card,
-.panel {
-  border: 1px solid rgba(126, 151, 181, 0.42);
-  background: linear-gradient(180deg, rgba(17, 27, 39, 0.98), rgba(8, 13, 20, 0.98));
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
-}
-
-.status-card {
-  min-height: 68px;
-  min-width: 0;
-  padding: 12px 14px;
-  border-radius: 6px;
-}
-
-.status-card--wide {
-  grid-column: span 2;
-}
-
-.status-card span,
-.queue-item span,
-.dataset-name span,
-.panel-title > span,
-.preset small,
-label > span,
-small {
-  color: var(--el-text-color-secondary);
-  font-size: 12px;
-}
-
-.status-card strong {
-  display: block;
-  margin-top: 8px;
-  color: #f3f7fb;
-  font-size: 17px;
-  line-height: 1.25;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.relay-state.missing strong {
-  color: #ffd166;
-}
-
-.status-card small {
-  display: block;
-  margin-top: 6px;
-  overflow: hidden;
-  color: #aebdd0;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.sync-progress {
-  --el-fill-color-light: rgba(255, 255, 255, 0.08);
-}
-
-:deep(.sync-progress .el-progress-bar__outer) {
-  background: #101720 !important;
-  border-color: rgba(126, 151, 181, 0.36);
-}
-
-:deep(.el-segmented) {
-  width: 100%;
-}
-
-.layout-grid {
-  display: grid;
-  grid-template-columns: 340px minmax(0, 1fr);
-  gap: 14px;
-}
-
-.panel {
-  padding: 14px;
-  border-radius: 8px;
-}
-
-.preset-list,
-.queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin-top: 12px;
-}
-
-.preset {
-  display: flex;
-  min-height: 70px;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: center;
-  gap: 6px;
-  padding: 12px;
-  border: 1px solid rgba(110, 139, 170, 0.58);
-  border-radius: 6px;
-  color: #f5f8fc;
-  background: rgba(9, 16, 25, 0.9);
-  cursor: pointer;
-  text-align: left;
-}
-
-.preset-title-row {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
   gap: 10px;
 }
 
-.preset-title-row > span {
-  color: #f7fbff;
-  font-weight: 800;
+.sync-cockpit-head {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-default);
 }
 
-.preset-title-row > strong {
-  flex: 0 0 auto;
-  padding: 2px 7px;
-  border: 1px solid rgba(132, 154, 184, 0.35);
-  border-radius: 999px;
-  color: #c7d3e4;
-  background: rgba(16, 23, 32, 0.9);
-  font-size: 11px;
-  font-weight: 800;
-}
-
-.preset:hover {
-  border-color: rgba(72, 205, 248, 0.9);
-  background: rgba(18, 43, 59, 0.92);
-}
-
-.preset.active {
-  border-color: rgba(68, 200, 255, 0.98);
-  background: linear-gradient(180deg, rgba(21, 62, 83, 0.96), rgba(10, 27, 40, 0.96));
-  box-shadow: inset 3px 0 0 #44c8ff, 0 0 20px rgba(68, 200, 255, 0.12);
-}
-
-.preset.active .preset-title-row > strong {
-  border-color: rgba(68, 200, 255, 0.95);
-  color: #07111c;
-  background: #44c8ff;
-}
-
-.preset.noisy {
-  border-color: rgba(214, 143, 47, 0.58);
-}
-
-.control-grid {
+.sync-cockpit-title {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-}
-
-label {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-width: 0;
-}
-
-label.wide {
-  grid-column: span 2;
-}
-
-.queue-item {
-  min-height: 54px;
-  padding: 10px 12px;
-  border: 1px solid rgba(110, 139, 170, 0.54);
-  border-radius: 6px;
-  background: rgba(9, 16, 25, 0.9);
-}
-
-.queue-item > div:first-child,
-.dataset-name {
-  display: flex;
-  min-width: 0;
-  flex-direction: column;
   gap: 4px;
+  min-width: 280px;
 }
 
-.catalog-panel {
-  padding-bottom: 8px;
+.sync-cockpit-title h2,
+.panel-title h3,
+.active-run-panel h3 {
+  margin: 0;
+  color: var(--text-bright);
+}
+
+.sync-cockpit-title h2 {
+  font-size: 24px;
+}
+
+.sync-cockpit-title p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--gs-font-body);
+}
+
+.sync-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.queue-summary {
+  min-height: 30px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--gs-control-radius);
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  font-family: var(--font-data);
+  font-size: var(--gs-font-control);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.queue-summary.active {
+  border-color: var(--border-accent);
+  color: var(--accent-primary);
+  background: var(--bg-active);
+}
+
+.service-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
+  gap: 10px;
+}
+
+.service-card,
+.cockpit-panel,
+.health-tile,
+.priority-row,
+.runbook-item,
+.queue-lane,
+.queue-card,
+.diagnostic-summary,
+.active-run-panel {
+  border: 1px solid var(--border-default);
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-card);
+}
+
+.service-card {
+  min-width: 0;
+  min-height: 70px;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+  padding: 9px 11px;
+  border-radius: 8px;
+  border-left-width: 3px;
+}
+
+.service-card span,
+.health-tile span,
+.panel-title .section-kicker,
+.priority-row span,
+.runbook-item span,
+.queue-copy span,
+.diagnostic-grid span,
+.coverage-cell span {
+  color: var(--text-muted);
+  font-size: var(--gs-font-label);
+  font-weight: 800;
+}
+
+.service-card strong,
+.health-tile strong,
+.priority-row strong,
+.runbook-item strong,
+.queue-copy strong,
+.diagnostic-summary strong,
+.coverage-cell strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-bright);
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-card small,
+.health-tile small,
+.priority-row small,
+.runbook-item small,
+.queue-copy small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--gs-font-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tone-good { border-left-color: var(--accent-success); }
+.tone-warn { border-left-color: var(--accent-warning); }
+.tone-bad { border-left-color: var(--accent-danger); }
+.tone-neutral { border-left-color: var(--status-neutral, #5c6863); }
+
+.sync-progress {
+  --el-fill-color-light: var(--bg-elevated);
+}
+
+:deep(.sync-progress .el-progress-bar__outer) {
+  border: 1px solid var(--border-default);
+  background: var(--bg-elevated) !important;
+}
+
+.sync-service-warning,
+.relay-warning {
+  flex-shrink: 0;
+  border-radius: 8px;
+}
+
+.cockpit-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  height: 52px;
+  min-height: 52px;
+  overflow: hidden;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  flex-shrink: 0;
+}
+
+.cockpit-tab {
+  box-sizing: border-box;
+  display: grid;
+  grid-template-rows: 18px 14px;
+  gap: 3px;
+  align-content: center;
+  min-width: 0;
+  height: 50px;
+  min-height: 50px;
+  padding: 7px 14px;
+  border: 0;
+  border-right: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  background: transparent;
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+}
+
+.cockpit-tab:last-child {
+  border-right: 0;
+}
+
+.cockpit-tab:hover {
+  background: var(--bg-hover);
+}
+
+.cockpit-tab:focus {
+  outline: none;
+}
+
+.cockpit-tab:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--border-accent);
+}
+
+.cockpit-tab.active {
+  color: var(--accent-primary);
+  background: var(--bg-primary);
+  box-shadow: inset 0 -3px 0 var(--accent-primary);
+}
+
+.cockpit-tab.active:focus-visible {
+  box-shadow:
+    inset 0 -3px 0 var(--accent-primary),
+    inset 0 0 0 2px var(--border-accent);
+}
+
+.cockpit-tab span {
+  overflow: hidden;
+  font-size: var(--gs-font-body);
+  font-weight: 900;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cockpit-tab small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--gs-font-label);
+  line-height: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cockpit-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.tab-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.overview-grid,
+.queue-workspace,
+.history-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.panel-span-2 {
+  grid-column: 1 / -1;
+}
+
+.cockpit-panel {
+  min-width: 0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.panel-title {
+  justify-content: space-between;
+  min-height: 48px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border-subtle);
+  background: var(--bg-elevated);
+}
+
+.panel-title > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.panel-title h3 {
+  font-size: var(--gs-font-title);
+}
+
+.panel-count {
+  color: var(--accent-primary);
+  font-family: var(--font-data);
+  font-weight: 900;
+}
+
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px;
+}
+
+.health-tile {
+  display: grid;
+  gap: 6px;
+  min-height: 92px;
+  padding: 14px;
+  border-radius: 8px;
+  border-left-width: 3px;
+}
+
+.health-tile strong {
+  font-family: var(--font-data);
+  font-size: 26px;
+}
+
+.active-run-panel {
+  display: grid;
+  gap: 12px;
+  align-content: start;
+  min-height: 184px;
+  padding: 16px;
+  border-radius: 8px;
+  color: #fdfbf7;
+  background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+}
+
+.active-run-panel.idle {
+  color: var(--text-primary);
+  background: var(--bg-primary);
+}
+
+.active-run-panel h3,
+.active-run-panel strong,
+.active-run-panel .section-kicker {
+  color: inherit;
+}
+
+.active-run-panel small {
+  color: currentColor;
+  opacity: 0.78;
+}
+
+.run-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--text-muted);
+}
+
+.run-pulse.active {
+  background: #86efac;
+  box-shadow: 0 0 0 0 rgba(134, 239, 172, 0.42);
+  animation: runPulse 1.5s ease-out infinite;
+}
+
+@keyframes runPulse {
+  0% { box-shadow: 0 0 0 0 rgba(134, 239, 172, 0.42); }
+  70% { box-shadow: 0 0 0 10px rgba(134, 239, 172, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(134, 239, 172, 0); }
+}
+
+.run-metrics {
+  flex-wrap: wrap;
+}
+
+.run-metrics span {
+  padding: 4px 8px;
+  border: 1px solid rgba(253, 251, 247, 0.35);
+  border-radius: 999px;
+  font-family: var(--font-data);
+  font-size: var(--gs-font-label);
+}
+
+.runbook-list,
+.priority-list,
+.queue-stack {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+}
+
+.runbook-item,
+.priority-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border-radius: 8px;
+  border-left-width: 3px;
+}
+
+.runbook-item > div:first-child,
+.priority-row > div:first-child,
+.diagnostic-summary {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.runbook-actions {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.priority-row {
+  align-items: center;
+}
+
+.catalog-title {
+  align-items: flex-end;
+}
+
+.panel-tools {
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .panel-tools .el-input {
@@ -1600,118 +1974,422 @@ label.wide {
 }
 
 .panel-tools .el-select {
-  width: 150px;
+  width: 138px;
 }
 
-.relay-warning,
-.sync-service-warning {
-  border-radius: 6px;
+.dataset-name,
+.coverage-cell {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
 }
 
-:deep(.el-table.dark-table) {
-  --el-table-bg-color: #0b1018;
-  --el-table-tr-bg-color: #0f1823;
-  --el-table-header-bg-color: #121d2a;
-  --el-table-row-hover-bg-color: #1b3142;
-  --el-table-border-color: rgba(119, 146, 176, 0.46);
-  --el-table-text-color: #edf3fa;
-  --el-table-header-text-color: #c9d5e6;
-  background: #0b1018;
-  border-radius: 6px;
-  overflow: hidden;
+.dataset-name span,
+.muted {
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--gs-font-label);
 }
 
-:deep(.el-table.dark-table .el-table__cell) {
-  color: #f2f7fd;
+.tag-row {
+  flex-wrap: wrap;
+  gap: 5px;
 }
 
-:deep(.el-table.dark-table th.el-table__cell) {
-  color: #dbe7f5;
-  background: #152130 !important;
+:deep(.operation-table) {
+  --el-table-bg-color: var(--bg-primary);
+  --el-table-tr-bg-color: var(--bg-primary);
+  --el-table-header-bg-color: var(--bg-elevated);
+  --el-table-row-hover-bg-color: var(--bg-hover);
+  --el-table-border-color: var(--border-subtle);
+  --el-table-text-color: var(--text-primary);
+  --el-table-header-text-color: var(--text-secondary);
+  border-radius: 0 0 8px 8px;
 }
 
-:deep(.el-table.dark-table .dataset-name strong) {
-  color: #ffffff;
-  font-weight: 800;
+:deep(.operation-table th.el-table__cell) {
+  color: var(--text-secondary);
+  background: var(--bg-elevated) !important;
+  font-size: var(--gs-font-table);
 }
 
-:deep(.el-table.dark-table .dataset-name span),
-:deep(.el-table.dark-table small) {
-  color: #b9c7d8;
+:deep(.operation-table td.el-table__cell) {
+  color: var(--text-primary);
+  background: var(--bg-primary);
 }
 
+.freshness-tag,
+.status-tag,
 .risk-tag {
-  min-width: 72px;
+  min-width: 64px;
   justify-content: center;
   border-radius: 4px;
   font-weight: 800;
-  letter-spacing: 0;
+}
+
+.freshness-tag--fresh,
+.status-tag--good {
+  border-color: var(--accent-success) !important;
+  color: var(--accent-success) !important;
+  background: var(--status-ready-bg) !important;
+}
+
+.freshness-tag--stale,
+.status-tag--warn {
+  border-color: var(--accent-warning) !important;
+  color: var(--accent-warning) !important;
+  background: var(--status-warning-bg) !important;
+}
+
+.freshness-tag--failed,
+.status-tag--bad {
+  border-color: var(--accent-danger) !important;
+  color: var(--accent-danger) !important;
+  background: var(--status-critical-bg) !important;
+}
+
+.freshness-tag--blocked,
+.status-tag--neutral {
+  border-color: var(--status-neutral) !important;
+  color: var(--status-neutral) !important;
+  background: var(--status-neutral-bg) !important;
 }
 
 .risk-tag--low {
-  border-color: #54d66a !important;
-  color: #e8ffec !important;
-  background: #176326 !important;
+  border-color: var(--accent-success) !important;
+  color: var(--accent-success) !important;
+  background: var(--status-ready-bg) !important;
 }
 
 .risk-tag--medium {
-  border-color: #ffbc42 !important;
-  color: #fff1c2 !important;
-  background: #8a590e !important;
+  border-color: var(--accent-warning) !important;
+  color: var(--accent-warning) !important;
+  background: var(--status-warning-bg) !important;
 }
 
 .risk-tag--high {
-  border-color: #ff6b7a !important;
-  color: #ffe6e9 !important;
-  background: #7a1f2a !important;
+  border-color: var(--accent-danger) !important;
+  color: var(--accent-danger) !important;
+  background: var(--status-critical-bg) !important;
 }
 
-:deep(.el-table__inner-wrapper::before),
-:deep(.el-table__border-left-patch) {
-  background: rgba(119, 146, 176, 0.46);
+.control-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
 }
 
-:deep(.el-empty__description p) {
-  color: var(--el-text-color-secondary);
+label {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
 }
 
-:deep(.el-input__wrapper),
-:deep(.el-textarea__inner),
-:deep(.el-select__wrapper),
-:deep(.el-input-number__decrease),
-:deep(.el-input-number__increase) {
-  background: rgba(8, 13, 20, 0.86);
-  border-color: rgba(118, 145, 176, 0.6);
-  box-shadow: 0 0 0 1px rgba(118, 145, 176, 0.6) inset;
+label > span {
+  color: var(--text-muted);
+  font-size: var(--gs-font-label);
+  font-weight: 900;
 }
 
-:deep(.el-input__inner),
-:deep(.el-textarea__inner) {
-  color: #edf3fa;
+label.wide {
+  grid-column: span 2;
 }
 
-@media (max-width: 1180px) {
-  .layout-grid,
-  .status-strip,
+:deep(.el-segmented) {
+  width: 100%;
+}
+
+.queue-lanes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.queue-lane {
+  min-width: 0;
+  min-height: 270px;
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--bg-elevated);
+  box-shadow: none;
+}
+
+.queue-lane-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-size: var(--gs-font-control);
+  font-weight: 900;
+}
+
+.queue-lane-head em {
+  color: var(--text-muted);
+  font-style: normal;
+}
+
+.queue-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-areas:
+    "step copy"
+    ". actions";
+  column-gap: 10px;
+  row-gap: 8px;
+  align-items: start;
+  min-height: 58px;
+  padding: 10px;
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.queue-card--running { border-left: 3px solid var(--accent-success); }
+.queue-card--pending { border-left: 3px solid var(--accent-warning); }
+.queue-card--draft { border-left: 3px solid var(--status-neutral); }
+
+.queue-step,
+.queue-step-pulse {
+  grid-area: step;
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--accent-primary);
+  background: var(--bg-active);
+  font-family: var(--font-data);
+  font-size: var(--gs-font-label);
+  font-weight: 900;
+}
+
+.queue-step-pulse {
+  margin-top: 7px;
+  width: 12px;
+  height: 12px;
+  background: var(--accent-success);
+  animation: runPulse 1.5s ease-out infinite;
+}
+
+.queue-copy {
+  grid-area: copy;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.queue-card > .el-tag:not(.risk-tag) {
+  grid-area: actions;
+  justify-self: start;
+  max-width: 100%;
+}
+
+.queue-status-group {
+  grid-area: actions;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 6px;
+}
+
+.queue-status-group .el-button {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+}
+
+.queue-metrics {
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.queue-metrics span {
+  padding: 4px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  background: var(--bg-primary);
+  font-family: var(--font-data);
+  font-size: var(--gs-font-label);
+  font-weight: 800;
+}
+
+.matrix {
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  overflow-x: auto;
+}
+
+.matrix-row {
+  display: grid;
+  grid-template-columns: 140px repeat(7, minmax(58px, 1fr));
+  gap: 8px;
+  align-items: center;
+  min-width: 620px;
+}
+
+.matrix-row strong,
+.matrix-row span {
+  color: var(--text-secondary);
+  font-size: var(--gs-font-control);
+  font-weight: 900;
+}
+
+.matrix-cell {
+  height: 34px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-muted);
+  cursor: pointer;
+  font-family: var(--font-data);
+  font-size: var(--gs-font-label);
+  font-weight: 900;
+}
+
+.matrix-cell--good {
+  border-color: var(--accent-success);
+  color: var(--accent-success);
+  background: var(--status-ready-bg);
+}
+
+.matrix-cell--warn {
+  border-color: var(--accent-warning);
+  color: var(--accent-warning);
+  background: var(--status-warning-bg);
+}
+
+.matrix-cell--bad {
+  border-color: var(--accent-danger);
+  color: var(--accent-danger);
+  background: var(--status-critical-bg);
+}
+
+.diagnostic-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.diagnostic-summary {
+  padding: 12px;
+  border-radius: 8px;
+  border-left-width: 3px;
+}
+
+.diagnostic-grid {
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 7px 10px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 8px;
+  background: var(--bg-elevated);
+}
+
+.diagnostic-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  font-family: var(--font-data);
+  font-size: var(--gs-font-control);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.log-inspector {
+  min-height: 132px;
+  max-height: 260px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  color: var(--text-primary);
+  background: var(--bg-elevated);
+  font-family: var(--font-data);
+  font-size: var(--gs-font-control);
+  white-space: pre-wrap;
+}
+
+.empty-copy {
+  margin: 0;
+  border: 1px dashed var(--border-default);
+  border-radius: 8px;
+  color: var(--text-muted);
+  padding: 16px;
+  text-align: center;
+}
+
+.empty-copy.compact {
+  padding: 12px;
+  font-size: var(--gs-font-control);
+}
+
+@media (max-width: 1280px) {
+  .overview-grid,
+  .queue-workspace,
+  .history-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .active-run-panel {
+    grid-column: auto;
+  }
+}
+
+@media (max-width: 900px) {
+  .sync-workbench {
+    min-height: 1100px;
+    overflow: visible;
+  }
+
+  .cockpit-scroll {
+    overflow: visible;
+  }
+
+  .service-strip,
+  .health-grid,
+  .queue-lanes,
   .control-grid {
     grid-template-columns: 1fr;
   }
 
-  .status-card--wide {
-    grid-column: auto;
+  .cockpit-tabs {
+    display: flex;
+    overflow-x: auto;
   }
 
-  .queue-card {
-    grid-template-columns: 30px minmax(0, 1fr);
+  .cockpit-tab {
+    min-width: 140px;
   }
 
-  .queue-status-group,
-  .queue-card > .el-tag {
-    grid-column: 2;
+  .panel-title,
+  .catalog-title,
+  .sync-cockpit-head,
+  .runbook-item,
+  .priority-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .sync-actions,
+  .panel-tools,
+  .runbook-actions {
     justify-content: flex-start;
   }
 
-  label.wide {
+  .panel-tools .el-input,
+  .panel-tools .el-select {
+    width: 100%;
+  }
+
+  label.wide,
+  .panel-span-2 {
     grid-column: auto;
   }
 }

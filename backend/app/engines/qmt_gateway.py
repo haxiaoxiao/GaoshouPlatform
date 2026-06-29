@@ -1,13 +1,13 @@
 import asyncio
 import os
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any
 
 import pandas as pd
 from loguru import logger
+
+from app.core.blocking import run_detached_blocking_with_timeout
 
 QMT_MINUTE_CALL_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_CALL_TIMEOUT_SECONDS", "45"))
 QMT_MINUTE_BATCH_TIMEOUT_SECONDS = int(os.getenv("QMT_MINUTE_BATCH_TIMEOUT_SECONDS", "300"))
@@ -18,17 +18,10 @@ QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS = int(os.getenv("QMT_INSTRUMENT_DETAIL_TIM
 
 
 async def _run_blocking_with_timeout(func, timeout: int | float = QMT_MINUTE_CALL_TIMEOUT_SECONDS):
-    loop = asyncio.get_running_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    future = executor.submit(func)
     try:
-        return await loop.run_in_executor(None, future.result, timeout)
-    except FutureTimeoutError as exc:
-        executor.shutdown(wait=False, cancel_futures=True)
+        return await run_detached_blocking_with_timeout(func, timeout=timeout, thread_name_prefix="qmt-timeout")
+    except asyncio.TimeoutError as exc:
         raise TimeoutError(f"QMT call timed out after {timeout}s") from exc
-    finally:
-        if future.done():
-            executor.shutdown(wait=False)
 
 
 @dataclass

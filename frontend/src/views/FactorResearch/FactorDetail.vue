@@ -1,9 +1,9 @@
 <template>
   <div class="factor-detail" v-loading="loading">
     <div class="detail-header">
-      <el-button text @click="$router.back()">返回</el-button>
+      <el-button text size="small" class="back-action" @click="$router.back()">返回</el-button>
       <div class="title-block">
-        <span class="panel-kicker">FACTOR DETAIL</span>
+        <span class="panel-kicker">FACTOR RESEARCH</span>
         <h2>{{ definition?.display_name || factorName }}</h2>
         <div class="meta-line">
           <span>{{ factorName }}</span>
@@ -18,116 +18,144 @@
     </div>
 
     <section class="info-panel">
-      <div class="info-card">
-        <span class="info-label">因子逻辑</span>
-        <p>{{ factorExplanation.logic }}</p>
+      <div class="info-card info-card--logic">
+        <div class="info-row">
+          <span class="info-label">因子逻辑</span>
+          <p>{{ factorExplanation.logic }}</p>
+        </div>
+        <div class="info-row">
+          <span class="info-label">来源 / 备注</span>
+          <p>{{ factorExplanation.source }}</p>
+        </div>
       </div>
-      <div class="info-card info-card--wide">
+      <div class="info-card info-card--formula">
         <span class="info-label">真实计算公式</span>
         <code>{{ factorExplanation.formula }}</code>
       </div>
-      <div class="info-card">
+      <div class="info-card info-card--dependencies">
         <span class="info-label">依赖项</span>
         <div class="dependency-list">
           <el-tag v-for="dep in factorExplanation.dependencies" :key="dep" size="small" effect="plain">{{ dep }}</el-tag>
           <span v-if="!factorExplanation.dependencies.length">无显式依赖</span>
         </div>
       </div>
-      <div class="info-card info-card--wide">
-        <span class="info-label">数据处理流程</span>
-        <ol>
-          <li v-for="step in factorExplanation.process" :key="step">{{ step }}</li>
-        </ol>
-      </div>
-      <div class="info-card">
-        <span class="info-label">来源 / 备注</span>
-        <p>{{ factorExplanation.source }}</p>
+      <div class="info-card info-card--process">
+        <details class="process-disclosure">
+          <summary>
+            <span class="info-label">数据处理流程</span>
+            <strong>展开</strong>
+          </summary>
+          <ol>
+            <li v-for="step in factorExplanation.process" :key="step">{{ step }}</li>
+          </ol>
+        </details>
       </div>
     </section>
 
     <section class="param-panel">
-      <el-form label-width="94px" class="param-form">
-        <el-form-item label="股票池">
-          <el-select v-model="form.stock_pool_value" filterable>
-            <el-option-group label="指数股票池">
+      <div class="panel-heading">
+        <span class="panel-kicker">RUN CONFIG</span>
+        <strong>评估参数</strong>
+      </div>
+      <el-form label-position="top" size="small" class="param-form">
+        <div class="config-cluster config-cluster--wide">
+          <el-form-item label="股票池" class="config-field config-field--main">
+            <el-select v-model="form.stock_pool_value" filterable>
+              <el-option-group label="指数股票池">
+                <el-option
+                  v-for="item in poolEnabledIndexes"
+                  :key="item.symbol"
+                  :label="`${item.display_name} ${item.symbol}`"
+                  :value="item.stock_pool_alias || item.symbol"
+                />
+              </el-option-group>
+              <el-option-group v-if="watchlistGroups.length" label="自选股分组">
+                <el-option
+                  v-for="g in watchlistGroups"
+                  :key="'detail_wl_'+g.id"
+                  :label="g.name"
+                  :value="'watchlist_'+g.id"
+                />
+              </el-option-group>
+            </el-select>
+          </el-form-item>
+          <el-form-item label="基准" class="config-field">
+            <el-select v-model="form.benchmark_symbol" filterable>
               <el-option
-                v-for="item in poolEnabledIndexes"
+                v-for="item in benchmarkOptions"
                 :key="item.symbol"
                 :label="`${item.display_name} ${item.symbol}`"
-                :value="item.stock_pool_alias || item.symbol"
+                :value="item.symbol"
               />
-            </el-option-group>
-            <el-option-group v-if="watchlistGroups.length" label="自选股分组">
-              <el-option
-                v-for="g in watchlistGroups"
-                :key="'detail_wl_'+g.id"
-                :label="g.name"
-                :value="'watchlist_'+g.id"
-              />
-            </el-option-group>
-          </el-select>
-        </el-form-item>
-        <el-form-item label="基准">
-          <el-select v-model="form.benchmark_symbol" filterable style="width:180px">
-            <el-option
-              v-for="item in benchmarkOptions"
-              :key="item.symbol"
-              :label="`${item.display_name} ${item.symbol}`"
-              :value="item.symbol"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="成分口径">
-          <el-select v-model="form.pool_membership_mode" style="width:180px">
-            <el-option label="Static latest" value="static_latest" />
-            <el-option label="Point-in-time" value="point_in_time" />
-            <el-option label="Union" value="union" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="回测区间">
-          <div class="date-range">
-            <el-date-picker v-model="form.start_date" value-format="YYYY-MM-DD" type="date" />
-            <span>至</span>
-            <el-date-picker v-model="form.end_date" value-format="YYYY-MM-DD" type="date" />
-          </div>
-        </el-form-item>
-        <el-form-item label="组合构建">
-          <el-radio-group v-model="form.portfolio_type">
-            <el-radio-button value="long_only">纯多头</el-radio-button>
-            <el-radio-button value="long_short_i">多空 I</el-radio-button>
-            <el-radio-button value="long_short_ii">多空 II</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="调仓周期">
-          <el-radio-group v-model="form.rebalance_period">
-            <el-radio-button value="daily">日</el-radio-button>
-            <el-radio-button value="weekly">周</el-radio-button>
-            <el-radio-button value="monthly">月</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <el-form-item label="参数">
-          <div class="inline-controls">
+            </el-select>
+          </el-form-item>
+          <el-form-item label="成分口径" class="config-field">
+            <el-select v-model="form.pool_membership_mode">
+              <el-option label="Static latest" value="static_latest" />
+              <el-option label="Point-in-time" value="point_in_time" />
+              <el-option label="Union" value="union" />
+            </el-select>
+          </el-form-item>
+        </div>
+
+        <div class="config-cluster config-cluster--wide">
+          <el-form-item label="回测区间" class="config-field config-field--range">
+            <div class="date-range">
+              <el-date-picker v-model="form.start_date" value-format="YYYY-MM-DD" type="date" />
+              <span>至</span>
+              <el-date-picker v-model="form.end_date" value-format="YYYY-MM-DD" type="date" />
+            </div>
+          </el-form-item>
+          <el-form-item label="组合构建" class="config-field config-field--radio">
+            <el-radio-group v-model="form.portfolio_type">
+              <el-radio-button value="long_only">纯多头</el-radio-button>
+              <el-radio-button value="long_short_i">多空 I</el-radio-button>
+              <el-radio-button value="long_short_ii">多空 II</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+          <el-form-item label="调仓周期" class="config-field config-field--radio">
+            <el-radio-group v-model="form.rebalance_period">
+              <el-radio-button value="daily">日</el-radio-button>
+              <el-radio-button value="weekly">周</el-radio-button>
+              <el-radio-button value="monthly">月</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+        </div>
+
+        <div class="config-cluster">
+          <el-form-item label="分组" class="config-field config-field--number">
             <el-input-number v-model="form.group_count" :min="2" :max="20" />
-            <el-select v-model="form.direction" style="width:110px">
+          </el-form-item>
+          <el-form-item label="方向" class="config-field">
+            <el-select v-model="form.direction">
               <el-option label="值越大越好" value="desc" />
               <el-option label="值越小越好" value="asc" />
             </el-select>
+          </el-form-item>
+          <el-form-item label="费率" class="config-field config-field--number">
             <el-input-number v-model="form.fee_rate" :min="0" :max="0.05" :step="0.0005" />
+          </el-form-item>
+          <el-form-item label="滑点" class="config-field config-field--number">
             <el-input-number v-model="form.slippage" :min="0" :max="0.05" :step="0.0005" />
-          </div>
-        </el-form-item>
-        <el-form-item label="处理选项">
-          <div class="switch-row">
-            <el-select v-model="form.outlier_handling" style="width:126px">
+          </el-form-item>
+        </div>
+
+        <div class="config-cluster">
+          <el-form-item label="去极值" class="config-field">
+            <el-select v-model="form.outlier_handling">
               <el-option label="不去极值" value="none" />
               <el-option label="Winsor 2.5%" value="winsorize" />
             </el-select>
-            <el-checkbox v-model="form.filter_limit_up">过滤涨停</el-checkbox>
-            <el-checkbox v-model="form.filter_limit_down">过滤跌停</el-checkbox>
-            <el-checkbox v-model="form.industry_neutralization">行业中性化</el-checkbox>
-            <el-checkbox v-model="form.standardize">标准化</el-checkbox>
-          </div>
-        </el-form-item>
+          </el-form-item>
+          <el-form-item label="处理选项" class="config-field config-field--checks">
+            <div class="switch-row">
+              <el-checkbox v-model="form.filter_limit_up">过滤涨停</el-checkbox>
+              <el-checkbox v-model="form.filter_limit_down">过滤跌停</el-checkbox>
+              <el-checkbox v-model="form.industry_neutralization">行业中性化</el-checkbox>
+              <el-checkbox v-model="form.standardize">标准化</el-checkbox>
+            </div>
+          </el-form-item>
+        </div>
       </el-form>
     </section>
 
@@ -147,30 +175,48 @@
 
     <section class="chart-grid">
       <div class="panel panel-wide">
-        <h3>分位组净值</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">NAV</span>
+          <h3>分位组净值</h3>
+        </div>
         <div ref="navChartRef" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>IC 时序</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">IC</span>
+          <h3>IC 时序</h3>
+        </div>
         <div ref="icChartRef" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>行业 IC</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">INDUSTRY</span>
+          <h3>行业 IC</h3>
+        </div>
         <div ref="industryChartRef" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>换手率</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">TURNOVER</span>
+          <h3>换手率</h3>
+        </div>
         <div ref="turnoverChartRef" class="chart"></div>
       </div>
       <div class="panel">
-        <h3>信号衰减</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">DECAY</span>
+          <h3>信号衰减</h3>
+        </div>
         <div ref="decayChartRef" class="chart"></div>
       </div>
     </section>
 
     <section class="stock-grid">
       <div class="panel">
-        <h3>Top 股票</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">LEADERS</span>
+          <h3>Top 股票</h3>
+        </div>
         <el-table :data="detail?.top || []" size="small" max-height="360">
           <el-table-column prop="symbol" label="代码" width="120" />
           <el-table-column prop="value" label="因子值" align="right">
@@ -179,7 +225,10 @@
         </el-table>
       </div>
       <div class="panel">
-        <h3>Bottom 股票</h3>
+        <div class="panel-heading">
+          <span class="panel-kicker">LAGGARDS</span>
+          <h3>Bottom 股票</h3>
+        </div>
         <el-table :data="detail?.bottom || []" size="small" max-height="360">
           <el-table-column prop="symbol" label="代码" width="120" />
           <el-table-column prop="value" label="因子值" align="right">
@@ -293,7 +342,7 @@ const pageContextBlocks = computed(() => [
       { label: '股票池', value: form.stock_pool_value || '-' },
       { label: '基准', value: form.benchmark_symbol || '-' },
       { label: 'IC均值', value: summaryCards.value[0]?.value || '-' },
-      { label: '覆盖率', value: summaryCards.value.find(item => item.label === '瑕嗙洊鐜?')?.value || '-' },
+      { label: '覆盖率', value: summaryCards.value.find(item => item.label === '覆盖率')?.value || '-' },
     ],
   },
 ])
@@ -552,10 +601,11 @@ function renderNavChart() {
   const hasExcess = excessSeries.some(value => value != null)
   chart.setOption({
     tooltip: { trigger: 'axis' },
-    legend: { textStyle: { color: '#9ca3af' } },
+    color: ['#1b3d32', '#5c7d6f', '#8b7a4a', '#a83232', '#2d6a4f', '#6f6258'],
+    legend: { textStyle: { color: '#54635c', fontSize: 11 } },
     grid: { left: 42, right: 20, top: 30, bottom: 28 },
-    xAxis: { type: 'category', data: dates },
-    yAxis: { type: 'value' },
+    xAxis: { type: 'category', data: dates, axisLabel: { color: '#7e8d86', fontSize: 11 }, axisLine: { lineStyle: { color: '#d8d1c4' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#7e8d86', fontSize: 11 }, splitLine: { lineStyle: { color: '#e5dfd3' } } },
     series: [
       ...Object.entries(groups).map(([name, data]) => ({
         name,
@@ -574,14 +624,14 @@ function renderNavChart() {
         name: String(detail.value.summary?.benchmark_name || 'benchmark'),
         type: 'line',
         symbol: 'none',
-        lineStyle: { color: '#f59e0b', width: 1.5 },
+        lineStyle: { color: '#b27a1e', width: 1.5 },
         data: benchmarkSeries,
       }] : []),
       ...(hasExcess ? [{
         name: 'excess_long_short',
         type: 'line',
         symbol: 'none',
-        lineStyle: { color: '#a78bfa', width: 1.8, type: 'dashed' },
+        lineStyle: { color: '#a83232', width: 1.8, type: 'dashed' },
         data: excessSeries,
       }] : []),
     ],
@@ -595,9 +645,9 @@ function renderIcChart() {
   chart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: 42, right: 16, top: 18, bottom: 28 },
-    xAxis: { type: 'category', data: detail.value.ic_series.map(item => item.date) },
-    yAxis: { type: 'value' },
-    series: [{ name: 'IC', type: 'line', symbol: 'none', data: detail.value.ic_series.map(item => item.value), color: '#60a5fa' }],
+    xAxis: { type: 'category', data: detail.value.ic_series.map(item => item.date), axisLabel: { color: '#7e8d86', fontSize: 11 }, axisLine: { lineStyle: { color: '#d8d1c4' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#7e8d86', fontSize: 11 }, splitLine: { lineStyle: { color: '#e5dfd3' } } },
+    series: [{ name: 'IC', type: 'line', symbol: 'none', data: detail.value.ic_series.map(item => item.value), color: '#1b3d32' }],
   })
   charts.push(chart)
 }
@@ -609,9 +659,9 @@ function renderIndustryChart() {
   chart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: 82, right: 12, top: 10, bottom: 20 },
-    xAxis: { type: 'value' },
-    yAxis: { type: 'category', data: data.map(item => item.industry) },
-    series: [{ type: 'bar', data: data.map(item => item.value), color: '#34d399' }],
+    xAxis: { type: 'value', axisLabel: { color: '#7e8d86', fontSize: 11 }, splitLine: { lineStyle: { color: '#e5dfd3' } } },
+    yAxis: { type: 'category', data: data.map(item => item.industry), axisLabel: { color: '#54635c', fontSize: 11 }, axisLine: { lineStyle: { color: '#d8d1c4' } } },
+    series: [{ type: 'bar', data: data.map(item => item.value), color: '#2d6a4f' }],
   })
   charts.push(chart)
 }
@@ -622,11 +672,11 @@ function renderTurnoverChart() {
   chart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: 42, right: 12, top: 18, bottom: 28 },
-    xAxis: { type: 'category', data: detail.value.turnover.map(item => item.date) },
-    yAxis: { type: 'value' },
+    xAxis: { type: 'category', data: detail.value.turnover.map(item => item.date), axisLabel: { color: '#7e8d86', fontSize: 11 }, axisLine: { lineStyle: { color: '#d8d1c4' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#7e8d86', fontSize: 11 }, splitLine: { lineStyle: { color: '#e5dfd3' } } },
     series: [
-      { name: '最低分位', type: 'scatter', data: detail.value.turnover.map(item => item.min_quantile), color: '#60a5fa' },
-      { name: '最高分位', type: 'scatter', data: detail.value.turnover.map(item => item.max_quantile), color: '#f97316' },
+      { name: '最低分位', type: 'scatter', data: detail.value.turnover.map(item => item.min_quantile), color: '#2d6a4f' },
+      { name: '最高分位', type: 'scatter', data: detail.value.turnover.map(item => item.max_quantile), color: '#a83232' },
     ],
   })
   charts.push(chart)
@@ -638,11 +688,11 @@ function renderDecayChart() {
   chart.setOption({
     tooltip: { trigger: 'axis' },
     grid: { left: 42, right: 12, top: 18, bottom: 28 },
-    xAxis: { type: 'category', data: detail.value.signal_decay.map(item => `lag${item.lag}`) },
-    yAxis: { type: 'value' },
+    xAxis: { type: 'category', data: detail.value.signal_decay.map(item => `lag${item.lag}`), axisLabel: { color: '#7e8d86', fontSize: 11 }, axisLine: { lineStyle: { color: '#d8d1c4' } } },
+    yAxis: { type: 'value', axisLabel: { color: '#7e8d86', fontSize: 11 }, splitLine: { lineStyle: { color: '#e5dfd3' } } },
     series: [
-      { name: '最低分位', type: 'bar', data: detail.value.signal_decay.map(item => item.min_quantile), color: '#a78bfa' },
-      { name: '最高分位', type: 'bar', data: detail.value.signal_decay.map(item => item.max_quantile), color: '#38bdf8' },
+      { name: '最低分位', type: 'bar', data: detail.value.signal_decay.map(item => item.min_quantile), color: '#2d6a4f' },
+      { name: '最高分位', type: 'bar', data: detail.value.signal_decay.map(item => item.max_quantile), color: '#1b3d32' },
     ],
   })
   charts.push(chart)
@@ -681,44 +731,56 @@ onUnmounted(disposeCharts)
 .factor-detail {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  --detail-surface: rgba(19, 19, 24, 0.94);
-  --detail-surface-strong: rgba(14, 15, 20, 0.98);
-  --detail-surface-soft: rgba(36, 39, 51, 0.7);
-  --detail-border: rgba(108, 117, 137, 0.22);
-  --detail-border-strong: rgba(96, 165, 250, 0.24);
-  --detail-accent-soft: rgba(56, 189, 248, 0.12);
-  --detail-warn-soft: rgba(245, 158, 11, 0.12);
+  gap: 10px;
+  color: var(--text-primary);
+  --detail-surface: rgba(253, 251, 247, 0.96);
+  --detail-surface-strong: rgba(245, 242, 234, 0.94);
+  --detail-surface-soft: rgba(245, 242, 234, 0.74);
+  --detail-border: rgba(34, 48, 42, 0.12);
+  --detail-border-strong: rgba(27, 61, 50, 0.28);
+  --detail-accent-soft: rgba(27, 61, 50, 0.1);
+  --detail-warn-soft: rgba(178, 122, 30, 0.12);
 }
+
 .detail-header,
 .param-panel,
 .panel,
 .summary-card {
   border: 1px solid var(--detail-border);
   border-radius: 8px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
-    var(--detail-surface);
+  background: var(--detail-surface);
   box-shadow: var(--shadow-sm);
 }
+
 .detail-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 14px;
+  padding: 10px 12px;
 }
+
+.back-action {
+  flex: 0 0 auto;
+}
+
 .title-block { flex: 1; min-width: 0; }
+
 .panel-kicker {
-  color: var(--accent-info);
+  color: var(--accent-secondary);
   font-family: var(--font-data);
-  font-size: 10px;
+  font-size: var(--gs-font-caption);
+  letter-spacing: 0.08em;
 }
+
 h2, h3, p { margin: 0; }
+
 h2 {
   color: var(--text-bright);
-  font-size: 20px;
+  font-size: 18px;
+  line-height: 1.25;
 }
+
 .meta-line {
   display: flex;
   flex-wrap: wrap;
@@ -726,10 +788,10 @@ h2 {
   margin-top: 4px;
   color: var(--text-secondary);
   font-family: var(--font-data);
-  font-size: 12px;
+  font-size: var(--gs-font-label);
 }
+
 .header-actions,
-.inline-controls,
 .switch-row,
 .date-range {
   display: flex;
@@ -737,205 +799,419 @@ h2 {
   gap: 8px;
   flex-wrap: wrap;
 }
+
 .info-panel {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(260px, 0.95fr) minmax(360px, 1.25fr) minmax(240px, 0.8fr);
+  gap: 10px;
 }
+
 .info-card {
   min-width: 0;
-  padding: 12px;
+  padding: 10px;
   border: 1px solid var(--detail-border);
   border-radius: 8px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0)),
-    var(--detail-surface);
+  background: var(--detail-surface-soft);
   box-shadow: var(--shadow-sm);
 }
-.info-card--wide {
-  grid-column: span 2;
+
+.info-card--process {
+  grid-column: 1 / -1;
+  padding: 8px 10px;
 }
+
+.info-row + .info-row {
+  margin-top: 8px;
+}
+
 .info-label {
   display: block;
-  margin-bottom: 5px;
+  margin-bottom: 4px;
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--gs-font-label);
 }
+
 .info-panel p,
 .info-panel li {
   color: var(--text-primary);
-  line-height: 1.6;
+  font-size: var(--gs-font-body);
+  line-height: 1.55;
 }
+
+.info-panel p {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
 .info-panel code {
   display: block;
-  padding: 9px 10px;
+  max-height: 96px;
+  overflow: auto;
+  padding: 8px 9px;
   border: 1px solid var(--detail-border-strong);
   border-radius: 6px;
   color: var(--text-bright);
-  background:
-    linear-gradient(180deg, rgba(56, 189, 248, 0.05), rgba(56, 189, 248, 0)),
-    var(--detail-surface-strong);
+  background: rgba(238, 243, 240, 0.72);
   font-family: var(--font-data);
-  font-size: 12px;
-  line-height: 1.6;
+  font-size: var(--gs-font-control);
+  line-height: 1.5;
   white-space: pre-wrap;
 }
+
 .info-panel ol {
-  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 20px;
+  margin: 6px 0 0;
   padding-left: 18px;
 }
+
+.process-disclosure summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.process-disclosure summary::-webkit-details-marker {
+  display: none;
+}
+
+.process-disclosure summary .info-label {
+  margin-bottom: 0;
+}
+
+.process-disclosure summary strong {
+  color: var(--accent-secondary);
+  font-size: var(--gs-font-label);
+  font-weight: 600;
+}
+
+.process-disclosure[open] summary strong {
+  color: var(--text-muted);
+}
+
 .dependency-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  max-height: 58px;
+  overflow: auto;
 }
+
 .param-panel {
-  padding: 12px;
+  padding: 10px;
 }
+
+.panel-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 18px;
+  margin-bottom: 8px;
+}
+
+.panel-heading strong {
+  color: var(--text-bright);
+  font-size: var(--gs-font-title);
+}
+
 .param-form {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  column-gap: 18px;
+  gap: 8px;
 }
+
+.config-cluster {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(92px, 1fr));
+  gap: 8px;
+  align-items: end;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(34, 48, 42, 0.1);
+  border-radius: 8px;
+  background: rgba(245, 242, 234, 0.56);
+}
+
+.config-cluster--wide {
+  grid-column: span 1;
+  grid-template-columns: minmax(180px, 1.3fr) repeat(2, minmax(130px, 0.85fr));
+}
+
+.config-field,
+.param-form :deep(.el-form-item) {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.config-field--main,
+.config-field--range,
+.config-field--radio,
+.config-field--checks {
+  min-width: 0;
+}
+
+.config-field--checks {
+  grid-column: span 3;
+}
+
+.config-field--number :deep(.el-input-number) {
+  width: 100%;
+}
+
+.param-form :deep(.el-form-item__label) {
+  min-height: 16px;
+  margin-bottom: 3px;
+  padding: 0;
+  color: var(--text-secondary);
+  font-size: var(--gs-font-label);
+  line-height: 16px;
+}
+
+.param-form :deep(.el-select),
+.param-form :deep(.el-date-editor.el-input),
+.param-form :deep(.el-input-number) {
+  width: 100%;
+}
+
+.date-range {
+  flex-wrap: nowrap;
+  width: 100%;
+}
+
+.date-range span {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--gs-font-label);
+}
+
+.date-range :deep(.el-date-editor.el-input) {
+  min-width: 0;
+}
+
 .summary-grid {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 10px;
+  grid-template-columns: repeat(11, minmax(78px, 1fr));
+  gap: 8px;
 }
+
 .summary-card {
   display: grid;
-  gap: 5px;
-  padding: 12px;
+  gap: 3px;
+  min-height: 58px;
+  padding: 8px 9px;
 }
+
 .summary-card span {
   color: var(--text-secondary);
-  font-size: 12px;
+  font-size: var(--gs-font-label);
 }
+
 .summary-card strong {
   color: var(--text-bright);
   font-family: var(--font-data);
-  font-size: 20px;
+  font-size: 17px;
+  line-height: 1.25;
 }
+
 .chart-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
+
 .panel {
-  padding: 12px;
+  min-width: 0;
+  padding: 10px;
 }
+
 .panel-wide {
   grid-column: 1 / -1;
 }
+
 .panel h3 {
   color: var(--text-bright);
-  font-size: 14px;
-  margin-bottom: 10px;
+  font-size: var(--gs-font-title);
+  margin: 0;
 }
+
 .factor-detail :deep(.el-button:not(.el-button--primary)) {
   color: var(--text-primary);
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)), var(--detail-surface-soft);
+  background: var(--detail-surface-soft);
   border-color: var(--detail-border);
 }
+
 .factor-detail :deep(.el-button:not(.el-button--primary):hover) {
   color: var(--text-bright);
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.08), rgba(56, 189, 248, 0)), rgba(31, 41, 55, 0.92);
+  background: var(--bg-hover);
   border-color: var(--detail-border-strong);
 }
+
 .factor-detail :deep(.el-tag) {
-  color: #93c5fd;
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.12), rgba(56, 189, 248, 0.04));
-  border-color: rgba(96, 165, 250, 0.22);
+  min-height: 22px;
+  color: #16352b;
+  background: rgba(27, 61, 50, 0.14);
+  border-color: rgba(27, 61, 50, 0.34);
+  font-weight: 650;
 }
+
+.factor-detail :deep(.dependency-list .el-tag__content) {
+  color: inherit;
+  line-height: 20px;
+}
+
 .factor-detail :deep(.el-input__wrapper),
 .factor-detail :deep(.el-select__wrapper),
 .factor-detail :deep(.el-textarea__inner),
 .factor-detail :deep(.el-date-editor .el-input__wrapper) {
-  background: var(--detail-surface-strong);
+  background: var(--bg-primary);
   box-shadow: 0 0 0 1px var(--detail-border) inset;
 }
+
 .factor-detail :deep(.el-input__wrapper:hover),
 .factor-detail :deep(.el-select__wrapper:hover),
 .factor-detail :deep(.el-date-editor .el-input__wrapper:hover) {
   box-shadow: 0 0 0 1px var(--detail-border-strong) inset;
 }
+
 .factor-detail :deep(.el-radio-button__inner),
 .factor-detail :deep(.el-checkbox__inner) {
-  background: var(--detail-surface-strong);
+  background: var(--bg-primary);
   border-color: var(--detail-border);
   color: var(--text-primary);
 }
+
 .factor-detail :deep(.el-radio-button__original-radio:checked + .el-radio-button__inner) {
-  background: linear-gradient(180deg, rgba(14, 165, 233, 0.96), rgba(2, 132, 199, 0.96));
-  border-color: rgba(56, 189, 248, 0.5);
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fdfbf7;
   box-shadow: none;
 }
+
 .factor-detail :deep(.el-checkbox__input.is-checked .el-checkbox__inner),
 .factor-detail :deep(.el-checkbox__input.is-indeterminate .el-checkbox__inner) {
-  background: #0ea5e9;
-  border-color: #0ea5e9;
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
 }
+
 .factor-detail :deep(.el-alert--warning) {
-  background: linear-gradient(180deg, rgba(245, 158, 11, 0.12), rgba(245, 158, 11, 0.05));
-  border: 1px solid rgba(245, 158, 11, 0.24);
+  background: var(--status-warning-bg);
+  border: 1px solid rgba(178, 122, 30, 0.24);
 }
+
 .factor-detail :deep(.el-alert--warning .el-alert__title),
 .factor-detail :deep(.el-alert--warning .el-alert__description),
 .factor-detail :deep(.el-alert--warning .el-alert__icon) {
-  color: #fcd34d;
+  color: var(--status-warning);
 }
+
 .factor-detail :deep(.el-table) {
-  --el-table-bg-color: transparent;
-  --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: rgba(255, 255, 255, 0.02);
+  --el-table-bg-color: var(--detail-surface);
+  --el-table-tr-bg-color: var(--detail-surface);
+  --el-table-header-bg-color: rgba(245, 242, 234, 0.82);
   --el-table-border-color: var(--detail-border);
-  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.06);
+  --el-table-row-hover-bg-color: rgba(27, 61, 50, 0.06);
   --el-table-text-color: var(--text-primary);
   --el-table-header-text-color: var(--text-secondary);
-  background: transparent;
+  background: var(--detail-surface);
 }
+
 .factor-detail :deep(.el-table__inner-wrapper::before) {
   background-color: var(--detail-border);
 }
+
 .factor-detail :deep(.el-empty) {
-  --el-empty-fill-color-0: rgba(255, 255, 255, 0.03);
-  --el-empty-fill-color-1: rgba(255, 255, 255, 0.05);
-  --el-empty-fill-color-2: rgba(56, 189, 248, 0.08);
-  --el-empty-fill-color-3: rgba(255, 255, 255, 0.08);
-  --el-empty-fill-color-4: rgba(255, 255, 255, 0.12);
-  --el-empty-fill-color-5: rgba(255, 255, 255, 0.18);
-  --el-empty-fill-color-6: rgba(255, 255, 255, 0.22);
-  --el-empty-fill-color-7: rgba(255, 255, 255, 0.1);
-  --el-empty-fill-color-8: rgba(56, 189, 248, 0.18);
-  --el-empty-fill-color-9: rgba(56, 189, 248, 0.22);
+  --el-empty-fill-color-0: rgba(245, 242, 234, 0.74);
+  --el-empty-fill-color-1: rgba(238, 243, 240, 0.8);
+  --el-empty-fill-color-2: rgba(27, 61, 50, 0.08);
+  --el-empty-fill-color-3: rgba(245, 242, 234, 0.9);
+  --el-empty-fill-color-4: rgba(229, 223, 211, 0.8);
+  --el-empty-fill-color-5: rgba(126, 141, 134, 0.18);
+  --el-empty-fill-color-6: rgba(126, 141, 134, 0.22);
+  --el-empty-fill-color-7: rgba(126, 141, 134, 0.1);
+  --el-empty-fill-color-8: rgba(27, 61, 50, 0.12);
+  --el-empty-fill-color-9: rgba(27, 61, 50, 0.18);
 }
+
 .factor-detail :deep(.el-empty__description p) {
   color: var(--text-secondary);
 }
+
 .chart {
-  height: 280px;
+  height: 220px;
   width: 100%;
 }
+
+.panel-wide .chart {
+  height: 300px;
+}
+
 .stock-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  gap: 10px;
 }
+
 .positive { color: var(--market-up) !important; }
 .negative { color: var(--market-down) !important; }
 .attention { color: var(--status-attention) !important; }
+
+@media (max-width: 1280px) {
+  .summary-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+
+  .chart-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .panel-wide .chart {
+    height: 280px;
+  }
+}
+
 @media (max-width: 1100px) {
   .detail-header,
   .info-panel,
   .param-form,
-  .chart-grid,
-  .stock-grid,
-  .summary-grid {
+  .stock-grid {
     grid-template-columns: 1fr;
   }
+
+  .info-panel ol {
+    grid-template-columns: 1fr;
+  }
+
+  .config-cluster,
+  .config-cluster--wide {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .config-field--checks {
+    grid-column: 1 / -1;
+  }
+
   .detail-header {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 720px) {
+  .summary-grid,
+  .config-cluster,
+  .config-cluster--wide {
+    grid-template-columns: 1fr;
+  }
+
+  .date-range {
+    flex-wrap: wrap;
   }
 }
 </style>

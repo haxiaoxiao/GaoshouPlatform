@@ -120,6 +120,17 @@ class WatchlistStockResponse(BaseModel):
     symbol: str = Field(description="股票代码")
     stock_name: str | None = Field(default=None, description="股票名称")
     added_at: str = Field(description="添加时间")
+    industry: str | None = Field(default=None, description="申万一级行业")
+    industry2: str | None = Field(default=None, description="申万二级行业")
+    industry3: str | None = Field(default=None, description="申万三级行业")
+    sector: str | None = Field(default=None, description="上市板块")
+    concept: str | None = Field(default=None, description="股票概念")
+    ths_concepts: list[str] = Field(default_factory=list, description="同花顺概念")
+    total_mv: float | None = Field(default=None, description="总市值(万元)")
+    circ_mv: float | None = Field(default=None, description="流通市值(万元)")
+    pe_ttm: float | None = Field(default=None, description="PE TTM")
+    pb: float | None = Field(default=None, description="PB")
+    roe: float | None = Field(default=None, description="ROE")
 
 
 class SyncRequest(BaseModel):
@@ -616,6 +627,17 @@ async def get_watchlist_stocks(
             "symbol": stock.symbol,
             "stock_name": stock.stock_name,
             "added_at": stock.added_at.isoformat(),
+            "industry": stock.industry,
+            "industry2": stock.industry2,
+            "industry3": stock.industry3,
+            "sector": stock.sector,
+            "concept": stock.concept,
+            "ths_concepts": stock.ths_concepts or [],
+            "total_mv": stock.total_mv,
+            "circ_mv": stock.circ_mv,
+            "pe_ttm": stock.pe_ttm,
+            "pb": stock.pb,
+            "roe": stock.roe,
         }
         for stock in stocks
     ]

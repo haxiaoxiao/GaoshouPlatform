@@ -55,6 +55,7 @@ export interface LiveOrder {
   price_type?: string
   reference_price?: number
   remark?: string
+  attribution?: Record<string, unknown> | null
   signal_hash?: string
 }
 
@@ -66,6 +67,7 @@ export interface LiveSkippedOrder {
   side: 'BUY' | 'SELL'
   quantity: number
   reason: string
+  attribution?: Record<string, unknown> | null
   signal_hash?: string
 }
 

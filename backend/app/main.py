@@ -6,6 +6,7 @@ from loguru import logger
 
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
+from app.core.blocking import install_default_executor, shutdown_default_executor
 from app.core.logging import setup_logging
 from app.db import init_db
 from app.core.dev_data_mode import apply_dev_data_mode_to_settings
@@ -19,6 +20,7 @@ async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     logger.info("Starting application...")
     apply_dev_data_mode_to_settings()
+    install_default_executor()
 
     # 初始化数据库
     await init_db()
@@ -49,6 +51,7 @@ async def lifespan(app: FastAPI):
         redis_client.close()
         logger.info("Redis connection closed")
 
+    shutdown_default_executor()
     logger.info("Application stopped")
 
 

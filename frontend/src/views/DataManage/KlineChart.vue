@@ -94,25 +94,32 @@ const updateSeries = () => {
 const initChart = () => {
   if (!chartRef.value || chart.value) return
   const rect = chartRef.value.getBoundingClientRect()
+  const styles = getComputedStyle(document.documentElement)
+  const bg = styles.getPropertyValue('--bg-primary').trim() || '#fdfbf7'
+  const elevated = styles.getPropertyValue('--bg-elevated').trim() || '#f5f2ea'
+  const text = styles.getPropertyValue('--text-secondary').trim() || '#54635c'
+  const border = styles.getPropertyValue('--border-default').trim() || '#e5dfd3'
+  const bull = styles.getPropertyValue('--accent-danger').trim() || '#a83232'
+  const bear = styles.getPropertyValue('--accent-success').trim() || '#2d6a4f'
   const instance = createChart(chartRef.value, {
     width: Math.max(0, Math.floor(rect.width)),
     height: Math.max(0, Math.floor(rect.height)),
     layout: {
-      background: { type: ColorType.Solid, color: '#0b0f14' },
-      textColor: '#9ca3af',
-      fontFamily: 'Inter, "Microsoft YaHei", sans-serif',
+      background: { type: ColorType.Solid, color: bg },
+      textColor: text,
+      fontFamily: 'var(--font-ui), "Microsoft YaHei", sans-serif',
     },
     grid: {
-      vertLines: { color: 'rgba(148, 163, 184, 0.08)' },
-      horzLines: { color: 'rgba(148, 163, 184, 0.08)' },
+      vertLines: { color: elevated },
+      horzLines: { color: elevated },
     },
     crosshair: { mode: CrosshairMode.Normal },
     rightPriceScale: {
-      borderColor: 'rgba(148, 163, 184, 0.18)',
+      borderColor: border,
       scaleMargins: { top: 0.08, bottom: 0.28 },
     },
     timeScale: {
-      borderColor: 'rgba(148, 163, 184, 0.18)',
+      borderColor: border,
       timeVisible: hasIntradayData.value,
       secondsVisible: false,
     },
@@ -120,12 +127,12 @@ const initChart = () => {
 
   chart.value = instance
   candleSeries.value = instance.addSeries(CandlestickSeries, {
-    upColor: '#ef4444',
-    downColor: '#10b981',
-    borderUpColor: '#ef4444',
-    borderDownColor: '#10b981',
-    wickUpColor: '#ef4444',
-    wickDownColor: '#10b981',
+    upColor: bull,
+    downColor: bear,
+    borderUpColor: bull,
+    borderDownColor: bear,
+    wickUpColor: bull,
+    wickDownColor: bear,
   })
   const volume = instance.addSeries(HistogramSeries, {
     priceFormat: { type: 'volume' },
@@ -169,9 +176,9 @@ defineExpose({
   height: 520px;
   min-height: 400px;
   overflow: hidden;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid var(--border-default);
   border-radius: 8px;
-  background: #0b0f14;
+  background: var(--bg-primary);
 }
 
 .kline-chart {
