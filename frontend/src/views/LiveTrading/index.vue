@@ -338,7 +338,7 @@
             <h3>订单篮子</h3>
           </div>
           <div class="table-actions">
-            <span>{{ shortHash(signalData?.signal_hash) }}</span>
+            <span v-if="signalData?.signal_hash" class="signal-hash-pill" :title="signalData.signal_hash">信号 {{ shortHash(signalData.signal_hash) }}</span>
             <el-button size="small" type="primary" class="action-button action-button--signal" :loading="signalsLoading" @click="loadSignals">生成信号</el-button>
             <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!orderRows.length" @click="submitOrders">提交篮子</el-button>
           </div>
@@ -3208,6 +3208,14 @@ onUnmounted(() => {
 
 <style scoped>
 .live-page {
+  --trade-card-bg: rgba(253, 251, 247, 0.88);
+  --trade-card-bg-soft: rgba(255, 255, 255, 0.72);
+  --trade-card-border: rgba(27, 61, 50, 0.16);
+  --trade-card-border-strong: rgba(27, 61, 50, 0.26);
+  --trade-good: #15803d;
+  --trade-warn: #b45309;
+  --trade-bad: #b91c1c;
+  --trade-info: #0369a1;
   overflow: auto;
 }
 
@@ -3381,15 +3389,15 @@ onUnmounted(() => {
 }
 
 .state-text--good {
-  color: #86efac;
+  color: var(--trade-good);
 }
 
 .state-text--warn {
-  color: #fde68a;
+  color: var(--trade-warn);
 }
 
 .state-text--bad {
-  color: #fca5a5;
+  color: var(--trade-bad);
 }
 
 .state-text--neutral {
@@ -3452,8 +3460,8 @@ onUnmounted(() => {
   border: 1px solid rgba(125, 211, 252, 0.24);
   border-radius: var(--radius-md);
   background:
-    linear-gradient(135deg, rgba(14, 116, 144, 0.2), rgba(15, 23, 42, 0.72)),
-    var(--bg-surface);
+    linear-gradient(135deg, rgba(224, 242, 254, 0.82), rgba(245, 242, 234, 0.7)),
+    var(--trade-card-bg);
   box-shadow: var(--shadow-card);
 }
 
@@ -3485,7 +3493,7 @@ onUnmounted(() => {
 }
 
 .runtime-strip__eyebrow {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 800;
   letter-spacing: 0;
@@ -3516,7 +3524,7 @@ onUnmounted(() => {
 }
 
 .runtime-strip__progress span {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-family: var(--font-data);
   font-size: var(--text-xs);
 }
@@ -3535,10 +3543,10 @@ onUnmounted(() => {
   max-width: 132px;
   min-height: 24px;
   padding: 0 9px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-full);
-  background: rgba(15, 23, 42, 0.5);
-  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
   font-weight: 800;
   line-height: 1;
@@ -3548,28 +3556,28 @@ onUnmounted(() => {
 }
 
 .runtime-step--running {
-  border-color: rgba(125, 211, 252, 0.48);
-  background: rgba(14, 116, 144, 0.2);
-  color: #7dd3fc;
-  box-shadow: 0 0 0 1px rgba(125, 211, 252, 0.08);
+  border-color: rgba(3, 105, 161, 0.26);
+  background: rgba(240, 249, 255, 0.92);
+  color: var(--trade-info);
+  box-shadow: 0 0 0 1px rgba(3, 105, 161, 0.08);
 }
 
 .runtime-step--done {
-  border-color: rgba(134, 239, 172, 0.34);
-  background: rgba(22, 101, 52, 0.18);
-  color: #86efac;
+  border-color: rgba(21, 128, 61, 0.24);
+  background: rgba(240, 253, 244, 0.92);
+  color: var(--trade-good);
 }
 
 .runtime-step--warn {
-  border-color: rgba(253, 230, 138, 0.38);
-  background: rgba(146, 64, 14, 0.18);
-  color: #fde68a;
+  border-color: rgba(180, 83, 9, 0.26);
+  background: rgba(255, 251, 235, 0.94);
+  color: var(--trade-warn);
 }
 
 .runtime-step--error {
-  border-color: rgba(252, 165, 165, 0.38);
-  background: rgba(127, 29, 29, 0.2);
-  color: #fca5a5;
+  border-color: rgba(185, 28, 28, 0.24);
+  background: rgba(254, 242, 242, 0.92);
+  color: var(--trade-bad);
 }
 
 .guardrail-toggle {
@@ -3624,16 +3632,19 @@ onUnmounted(() => {
 .preflight-check {
   min-width: 0;
   padding: 7px var(--space-2);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.42);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.74), rgba(245, 242, 234, 0.62)),
+    var(--trade-card-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
 .preflight-check label,
 .preflight-check small {
   display: block;
   overflow: hidden;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -3643,21 +3654,21 @@ onUnmounted(() => {
 .preflight-check strong {
   display: block;
   margin: 2px 0;
-  color: var(--text-primary);
+  color: var(--text-bright);
   font-family: var(--font-data);
   font-size: var(--text-sm);
 }
 
 .preflight-check__value--good {
-  color: #86efac !important;
+  color: var(--trade-good) !important;
 }
 
 .preflight-check__value--warn {
-  color: #fde68a !important;
+  color: var(--trade-warn) !important;
 }
 
 .preflight-check__value--bad {
-  color: #fca5a5 !important;
+  color: var(--trade-bad) !important;
 }
 
 .preflight-issues,
@@ -3685,15 +3696,15 @@ onUnmounted(() => {
 }
 
 .preflight-issues span {
-  border: 1px solid rgba(248, 113, 113, 0.28);
-  background: rgba(127, 29, 29, 0.22);
-  color: #fecaca;
+  border: 1px solid rgba(185, 28, 28, 0.24);
+  background: rgba(254, 242, 242, 0.9);
+  color: var(--trade-bad);
 }
 
 .preflight-actions span {
-  border: 1px solid rgba(56, 189, 248, 0.22);
-  background: rgba(8, 47, 73, 0.24);
-  color: #bae6fd;
+  border: 1px solid rgba(3, 105, 161, 0.22);
+  background: rgba(240, 249, 255, 0.92);
+  color: var(--trade-info);
 }
 
 .runner-panel {
@@ -3732,31 +3743,47 @@ onUnmounted(() => {
   align-items: center;
   min-height: 24px;
   padding: 0 8px;
-  border: 1px solid rgba(148, 163, 184, 0.22);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.48);
-  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
   white-space: nowrap;
 }
 
 .pending-sync-pill--syncing,
 .pending-sync-pill--watching {
-  border-color: rgba(56, 189, 248, 0.32);
-  background: rgba(8, 47, 73, 0.26);
-  color: #bae6fd;
+  border-color: rgba(3, 105, 161, 0.24);
+  background: rgba(240, 249, 255, 0.94);
+  color: var(--trade-info);
 }
 
 .pending-sync-pill--fresh {
-  border-color: rgba(34, 197, 94, 0.32);
-  background: rgba(20, 83, 45, 0.22);
-  color: #bbf7d0;
+  border-color: rgba(21, 128, 61, 0.24);
+  background: rgba(240, 253, 244, 0.94);
+  color: var(--trade-good);
 }
 
 .pending-sync-pill--error {
-  border-color: rgba(248, 113, 113, 0.34);
-  background: rgba(127, 29, 29, 0.24);
-  color: #fecaca;
+  border-color: rgba(185, 28, 28, 0.26);
+  background: rgba(254, 242, 242, 0.94);
+  color: var(--trade-bad);
+}
+
+.signal-hash-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(3, 105, 161, 0.2);
+  border-radius: var(--radius-sm);
+  background: rgba(240, 249, 255, 0.9);
+  color: var(--trade-info);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  font-weight: 800;
+  white-space: nowrap;
 }
 
 .submit-summary {
@@ -3769,20 +3796,23 @@ onUnmounted(() => {
 .submit-summary div {
   min-width: 0;
   padding: var(--space-3);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.52);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.68), rgba(245, 242, 234, 0.72)),
+    var(--trade-card-bg);
 }
 
 .submit-summary label {
   display: block;
   margin-bottom: 4px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .submit-summary strong {
-  color: var(--text-primary);
+  color: var(--text-bright);
   font-family: var(--font-data);
 }
 
@@ -3805,20 +3835,21 @@ onUnmounted(() => {
 .weekly-summary div {
   min-width: 0;
   padding: var(--space-2);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.42);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .weekly-summary label {
   display: block;
   margin-bottom: 3px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .weekly-summary strong {
-  color: var(--text-primary);
+  color: var(--text-bright);
   font-family: var(--font-data);
 }
 
@@ -3922,9 +3953,11 @@ onUnmounted(() => {
   display: grid;
   gap: var(--space-2);
   padding: var(--space-3);
-  border: 1px solid rgba(56, 189, 248, 0.22);
+  border: 1px solid rgba(3, 105, 161, 0.18);
   border-radius: var(--radius-md);
-  background: rgba(8, 47, 73, 0.22);
+  background:
+    linear-gradient(135deg, rgba(240, 249, 255, 0.9), rgba(253, 251, 247, 0.78)),
+    var(--trade-card-bg-soft);
 }
 
 .inline-signal__head {
@@ -3934,9 +3967,9 @@ onUnmounted(() => {
 }
 
 .inline-signal__head span {
-  color: var(--text-secondary);
+  color: var(--text-bright);
   font-size: var(--text-xs);
-  font-weight: 700;
+  font-weight: 800;
 }
 
 .inline-signal__stats {
@@ -3948,20 +3981,21 @@ onUnmounted(() => {
 .inline-signal__stats div {
   min-width: 0;
   padding: var(--space-2);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.42);
+  background: rgba(255, 255, 255, 0.76);
 }
 
 .inline-signal__stats label {
   display: block;
   margin-bottom: 2px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .inline-signal__stats strong {
-  color: #e0f2fe;
+  color: #0c4a6e;
   font-family: var(--font-data);
   font-size: var(--text-lg);
 }
@@ -4031,21 +4065,24 @@ onUnmounted(() => {
 .account-summary div {
   min-width: 0;
   padding: var(--space-3);
-  border: 1px solid rgba(148, 163, 184, 0.16);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.42);
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.7), rgba(245, 242, 234, 0.72)),
+    var(--trade-card-bg);
 }
 
 .account-summary label {
   display: block;
   margin-bottom: 4px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .account-summary strong,
 .metric-neutral {
-  color: var(--text-primary);
+  color: var(--text-bright);
   font-family: var(--font-data);
 }
 
@@ -4114,9 +4151,9 @@ onUnmounted(() => {
 
 .positions-dialog__summary span {
   padding: 5px 8px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.48);
+  background: rgba(255, 255, 255, 0.76);
 }
 
 .positions-dialog :deep(.el-table) {
@@ -4172,15 +4209,15 @@ onUnmounted(() => {
 }
 
 .metric-good {
-  color: #86efac !important;
+  color: var(--trade-good) !important;
 }
 
 .metric-bad {
-  color: #fca5a5 !important;
+  color: var(--trade-bad) !important;
 }
 
 .metric-warn {
-  color: #fde68a !important;
+  color: var(--trade-warn) !important;
 }
 
 .stack-cell {
@@ -4195,14 +4232,14 @@ onUnmounted(() => {
 }
 
 .stack-cell strong {
-  color: var(--text-primary);
+  color: var(--text-bright);
   font-family: var(--font-data);
   font-size: var(--text-sm);
   font-weight: 700;
 }
 
 .stack-cell small {
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-family: var(--font-data);
   font-size: var(--text-xs);
 }
@@ -4413,9 +4450,9 @@ onUnmounted(() => {
 .signal-stats div {
   min-width: 0;
   padding: var(--space-2);
-  border: 1px solid rgba(56, 189, 248, 0.2);
+  border: 1px solid rgba(3, 105, 161, 0.18);
   border-radius: var(--radius-sm);
-  background: rgba(8, 47, 73, 0.32);
+  background: rgba(240, 249, 255, 0.86);
 }
 
 .signal-stats label,
@@ -4423,12 +4460,13 @@ onUnmounted(() => {
 .order-preview label {
   display: block;
   margin-bottom: 3px;
-  color: var(--text-muted);
+  color: var(--text-secondary);
   font-size: var(--text-xs);
+  font-weight: 700;
 }
 
 .signal-stats strong {
-  color: #e0f2fe;
+  color: #0c4a6e;
   font-family: var(--font-data);
   font-size: var(--text-lg);
 }
@@ -4445,9 +4483,9 @@ onUnmounted(() => {
   gap: 2px;
   min-width: 0;
   padding: var(--space-2);
-  border: 1px solid rgba(148, 163, 184, 0.18);
+  border: 1px solid var(--trade-card-border);
   border-radius: var(--radius-sm);
-  background: rgba(15, 23, 42, 0.48);
+  background: rgba(255, 255, 255, 0.72);
   color: var(--text-secondary);
   font-size: var(--text-xs);
 }
@@ -4475,27 +4513,49 @@ onUnmounted(() => {
 }
 
 :deep(.el-table) {
-  --el-table-bg-color: transparent;
-  --el-table-tr-bg-color: transparent;
-  --el-table-header-bg-color: rgba(15, 23, 42, 0.9);
-  --el-table-header-text-color: #cbd5e1;
-  --el-table-text-color: #dbe4f0;
-  --el-table-row-hover-bg-color: rgba(56, 189, 248, 0.08);
-  --el-table-border-color: rgba(148, 163, 184, 0.16);
-  --el-table-current-row-bg-color: rgba(56, 189, 248, 0.08);
+  --el-table-bg-color: rgba(253, 251, 247, 0.98);
+  --el-table-tr-bg-color: rgba(253, 251, 247, 0.98);
+  --el-table-header-bg-color: rgba(245, 242, 234, 0.98);
+  --el-table-header-text-color: var(--text-secondary);
+  --el-table-text-color: var(--text-bright);
+  --el-table-row-hover-bg-color: rgba(224, 242, 254, 0.72);
+  --el-table-border-color: rgba(27, 61, 50, 0.12);
+  --el-table-current-row-bg-color: rgba(224, 242, 254, 0.64);
+  border: 1px solid rgba(27, 61, 50, 0.1);
+  border-radius: var(--radius-sm);
+  background: var(--el-table-bg-color);
+  color: var(--text-bright);
+  overflow: hidden;
+}
+
+:deep(.el-table__header-wrapper),
+:deep(.el-table__body-wrapper),
+:deep(.el-table__footer-wrapper) {
+  background: var(--el-table-bg-color);
 }
 
 :deep(.el-table td.el-table__cell),
 :deep(.el-table th.el-table__cell) {
-  background: rgba(15, 23, 42, 0.34);
+  background: var(--el-table-tr-bg-color);
+  color: var(--text-bright);
+}
+
+:deep(.el-table th.el-table__cell) {
+  background: var(--el-table-header-bg-color) !important;
+  color: var(--text-secondary);
+  font-weight: 800;
+}
+
+:deep(.el-table .cell) {
+  color: inherit;
 }
 
 :deep(.el-table .el-table__row--striped td.el-table__cell) {
-  background: rgba(30, 41, 59, 0.72) !important;
+  background: rgba(238, 243, 240, 0.82) !important;
 }
 
 :deep(.el-table__body tr:hover > td.el-table__cell) {
-  background: rgba(56, 189, 248, 0.1) !important;
+  background: var(--el-table-row-hover-bg-color) !important;
 }
 
 @media (max-width: 1100px) {

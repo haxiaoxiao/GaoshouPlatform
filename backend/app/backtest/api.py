@@ -46,6 +46,7 @@ from app.services.index_components import (
 )
 from app.services.optimization_result_store import save_optimization_result
 from app.services.runtime_tasks import register_task, update_task
+from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 from app.services.task_queue import QueuedTask, get_task_queue
 from app.services.timer_minute_sync import (
     find_earliest_timer_coverage_date,
@@ -208,7 +209,7 @@ def _live_snapshot_from_result(
 def _validate_backtest_request(req: "RunBacktestRequest", start: date, end: date) -> str | None:
     if end < start:
         return "end_date must be greater than or equal to start_date"
-    if not req.symbols and not req.index_symbol:
+    if not req.symbols and not req.index_symbol and not is_all_a_universe(req.universe_mode):
         return "symbols or index_symbol is required"
     return None
 
@@ -364,7 +365,17 @@ async def _prepare_backtest_config(
 ) -> tuple[BacktestConfig | None, dict | None]:
     """Build a BacktestConfig and resolve index universes / stored strategy code."""
     config = _config_from_request(req, start_date, end_date)
-    if config.index_symbol:
+    if is_all_a_universe(config.universe_mode):
+        config.universe_mode = "all_a"
+        config.index_symbol = None
+        config.symbols = load_all_a_symbols(as_of=end_date, start_date=start_date)
+        if not config.symbols:
+            return None, {
+                "code": 1,
+                "message": "No all-A-share symbols found in local stocks table",
+                "data": None,
+            }
+    elif config.index_symbol:
         config.universe_mode = "index"
         config.symbols = await load_index_symbols(config.index_symbol, start_date, end_date)
         if not config.symbols:

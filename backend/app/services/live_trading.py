@@ -56,6 +56,7 @@ from app.services.factor_value_store import (
 )
 from app.services.index_components import load_index_symbols
 from app.services.qmt_trading import QmtAccountSnapshot, qmt_trading_service
+from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 from app.services.sync_service import SyncProgress, SyncService
 from app.services.us_market import apply_entry_filter_to_target_weights, us_overnight_entry_filter_state
 
@@ -2613,12 +2614,26 @@ class LiveTradingService:
 
     def _resolve_index_symbol(self, profile: LiveStrategyProfile, params: dict[str, Any]) -> str | None:
         universe = self._json_dict(profile.universe_config)
+        if self._is_all_a_universe(universe, params):
+            return None
         value = (
             universe.get("index_symbol")
             or params.get("index_symbol")
             or ((params.get("backtest_settings") or {}).get("poolSource") or {}).get("indexSymbol")
         )
         return str(value or "399101.SZ")
+
+    def _is_all_a_universe(self, universe: dict[str, Any], params: dict[str, Any]) -> bool:
+        pool_source = self._json_dict((params.get("backtest_settings") or {}).get("poolSource"))
+        return any(
+            is_all_a_universe(value)
+            for value in (
+                universe.get("type"),
+                universe.get("universe_mode"),
+                params.get("universe_mode"),
+                pool_source.get("type"),
+            )
+        )
 
     def _factor_requirements(self, factor_configs: list[Any], filters: list[Any]) -> tuple[list[dict[str, Any]], list[str]]:
         rows: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
@@ -2837,7 +2852,7 @@ class LiveTradingService:
 
     def _phase_signal_block(self, phase: dict[str, Any]) -> str | None:
         value = str(phase.get("phase") or "")
-        if value in {"future", "non_trading_day", "before_market", "before_rebalance", "lunch_break", "after_close", "outside_window"}:
+        if value in {"future", "non_trading_day", "before_market", "before_rebalance"}:
             return str(phase.get("note") or phase.get("wait_reason") or "当前不适合生成实时交易信号")
         return None
 
@@ -3250,6 +3265,8 @@ class LiveTradingService:
         universe = self._json_dict(profile.universe_config)
         if universe.get("type") == "symbols":
             return [str(symbol) for symbol in universe.get("symbols") or [] if str(symbol).strip()]
+        if self._is_all_a_universe(universe, params):
+            return load_all_a_symbols(as_of=trade_date, include_delisted_during_range=False)
         index_symbol = (
             universe.get("index_symbol")
             or params.get("index_symbol")

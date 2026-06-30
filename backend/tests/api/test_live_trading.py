@@ -190,6 +190,13 @@ async def test_disabled_profile_blocks_signals_and_runner_and_writes_audit(monke
     assert "disabled" in audits[0]["skip_reason"]
 
 
+def test_lunch_break_blocks_runner_but_not_manual_signal_generation():
+    phase = {"phase": "lunch_break", "note": "午间休市，runner 会等待下午交易窗口。"}
+
+    assert live_trading_service._phase_signal_block(phase) is None
+    assert live_trading_service._phase_runner_block(phase) is None
+
+
 @pytest.mark.asyncio
 async def test_cashaware_parser_and_duplicate_paper_audit(monkeypatch, tmp_path):
     await _prepare_live_db(monkeypatch, tmp_path)

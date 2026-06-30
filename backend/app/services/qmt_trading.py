@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+import re
 from typing import Any, Sequence
 
 from app.core.config import settings
@@ -55,6 +57,14 @@ class QmtAccountSnapshot:
         }
 
 
+@dataclass(frozen=True)
+class QmtRuntimeConfig:
+    account_id: str
+    account_type: str
+    trader_path: str
+    source: str
+
+
 class QmtTradingService:
     """Thin async wrapper around xtquant trader and quote APIs."""
 
@@ -92,15 +102,17 @@ class QmtTradingService:
         except Exception:
             xttrader_available = False
 
-        configured = bool(settings.qmt_account_id and settings.qmt_trader_path)
+        config = self._runtime_config()
+        configured = bool(config.account_id and config.trader_path)
         return {
             "xtdata_available": xtdata_available,
             "xttrader_available": xttrader_available,
             "quote_connected": quote_connected,
             "account_configured": configured,
-            "account_id": self._mask_account(settings.qmt_account_id),
-            "account_type": settings.qmt_account_type,
-            "trader_path": settings.qmt_trader_path,
+            "account_id": self._mask_account(config.account_id),
+            "account_type": config.account_type,
+            "trader_path": config.trader_path,
+            "account_config_source": config.source,
             "data_dir": data_dir,
             "order_submit_enabled": bool(settings.live_trading_enable_order_submit),
             "error": error,
@@ -114,6 +126,8 @@ class QmtTradingService:
         if cached is not None:
             return cached
 
+        config = self._runtime_config()
+
         def _read() -> QmtAccountSnapshot:
             trader = None
             try:
@@ -122,14 +136,11 @@ class QmtTradingService:
             except Exception as exc:
                 raise RuntimeError("xtquant trader module is unavailable") from exc
 
-            if not settings.qmt_account_id:
-                raise RuntimeError("QMT_ACCOUNT_ID is not configured")
-            if not settings.qmt_trader_path:
-                raise RuntimeError("QMT_TRADER_PATH is not configured")
+            self._ensure_runtime_config(config)
 
             try:
                 trader = XtQuantTrader(
-                    settings.qmt_trader_path,
+                    config.trader_path,
                     int(datetime.now().timestamp() * 1000) % 2_000_000_000,
                 )
                 trader.start()
@@ -137,7 +148,7 @@ class QmtTradingService:
                 if connect_result not in (0, None):
                     raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
 
-                account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+                account = StockAccount(config.account_id, config.account_type)
                 try:
                     trader.subscribe(account)
                 except Exception:
@@ -234,6 +245,8 @@ class QmtTradingService:
             from xtquant.xttrader import XtQuantTrader
             from xtquant.xttype import StockAccount
             trader = None
+            config = self._runtime_config()
+            self._ensure_runtime_config(config)
 
             side = str(payload.get("side") or payload.get("action") or "").upper()
             symbol = str(payload.get("symbol") or "")
@@ -248,14 +261,14 @@ class QmtTradingService:
             price_type = getattr(xtconstant, "FIX_PRICE", 11)
             try:
                 trader = XtQuantTrader(
-                    settings.qmt_trader_path,
+                    config.trader_path,
                     int(datetime.now().timestamp() * 1000) % 2_000_000_000,
                 )
                 trader.start()
                 connect_result = trader.connect()
                 if connect_result not in (0, None):
                     raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
-                account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+                account = StockAccount(config.account_id, config.account_type)
                 try:
                     trader.subscribe(account)
                 except Exception:
@@ -299,22 +312,20 @@ class QmtTradingService:
             from xtquant.xttrader import XtQuantTrader
             from xtquant.xttype import StockAccount
 
-            if not settings.qmt_account_id:
-                raise RuntimeError("QMT_ACCOUNT_ID is not configured")
-            if not settings.qmt_trader_path:
-                raise RuntimeError("QMT_TRADER_PATH is not configured")
+            config = self._runtime_config()
+            self._ensure_runtime_config(config)
 
             trader = None
             try:
                 trader = XtQuantTrader(
-                    settings.qmt_trader_path,
+                    config.trader_path,
                     int(datetime.now().timestamp() * 1000) % 2_000_000_000,
                 )
                 trader.start()
                 connect_result = trader.connect()
                 if connect_result not in (0, None):
                     raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
-                account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+                account = StockAccount(config.account_id, config.account_type)
                 try:
                     trader.subscribe(account)
                 except Exception:
@@ -402,20 +413,18 @@ class QmtTradingService:
             from xtquant.xttrader import XtQuantTrader
             from xtquant.xttype import StockAccount
 
-            if not settings.qmt_account_id:
-                raise RuntimeError("QMT_ACCOUNT_ID is not configured")
-            if not settings.qmt_trader_path:
-                raise RuntimeError("QMT_TRADER_PATH is not configured")
+            config = self._runtime_config()
+            self._ensure_runtime_config(config)
 
             trader = XtQuantTrader(
-                settings.qmt_trader_path,
+                config.trader_path,
                 int(datetime.now().timestamp() * 1000) % 2_000_000_000,
             )
             trader.start()
             connect_result = trader.connect()
             if connect_result not in (0, None):
                 raise RuntimeError(f"miniQMT trader connect failed: {connect_result}")
-            account = StockAccount(settings.qmt_account_id, settings.qmt_account_type)
+            account = StockAccount(config.account_id, config.account_type)
             try:
                 trader.subscribe(account)
             except Exception:
@@ -437,6 +446,81 @@ class QmtTradingService:
                 "order_id": normalized_order_id,
                 "message": f"{type(exc).__name__}: {exc}",
             }
+
+    def _runtime_config(self) -> QmtRuntimeConfig:
+        account_id = str(settings.qmt_account_id or "").strip()
+        account_type = str(settings.qmt_account_type or "STOCK").strip() or "STOCK"
+        trader_path = str(settings.qmt_trader_path or "").strip()
+        sources: list[str] = []
+        if account_id:
+            sources.append("env_account")
+        if trader_path:
+            sources.append("env_trader_path")
+
+        if not trader_path:
+            trader_path = self._discover_trader_path()
+            if trader_path:
+                sources.append("auto_trader_path")
+
+        if not account_id and trader_path:
+            accounts = self._discover_account_ids(trader_path)
+            if len(accounts) == 1:
+                account_id = accounts[0]
+                sources.append("auto_account")
+
+        return QmtRuntimeConfig(
+            account_id=account_id,
+            account_type=account_type,
+            trader_path=trader_path,
+            source=",".join(sources) if sources else "unconfigured",
+        )
+
+    @staticmethod
+    def _ensure_runtime_config(config: QmtRuntimeConfig) -> None:
+        if not config.account_id:
+            raise RuntimeError("QMT_ACCOUNT_ID is not configured and no unique miniQMT account could be auto-detected")
+        if not config.trader_path:
+            raise RuntimeError("QMT_TRADER_PATH is not configured and miniQMT userdata_mini could not be auto-detected")
+
+    def _discover_trader_path(self) -> str:
+        candidates: list[Path] = []
+        try:
+            xt = qmt_gateway._get_xt()
+            data_dir = xt.get_data_dir()
+        except Exception:
+            data_dir = None
+        if data_dir:
+            path = Path(str(data_dir))
+            candidates.append(path.parent if path.name.lower() == "datadir" else path)
+        candidates.extend(
+            [
+                Path(r"E:\Program Files (x86)\huataiQMT\userdata_mini"),
+                Path(r"C:\Program Files (x86)\huataiQMT\userdata_mini"),
+                Path(r"C:\Program Files\huataiQMT\userdata_mini"),
+            ]
+        )
+        for candidate in candidates:
+            if (candidate / "users").exists():
+                return str(candidate)
+        return ""
+
+    @staticmethod
+    def _discover_account_ids(trader_path: str) -> list[str]:
+        users_dir = Path(trader_path) / "users"
+        if not users_dir.exists():
+            return []
+        accounts: set[str] = set()
+        for config_file in users_dir.glob("*/authAndConfig.xml"):
+            try:
+                text = config_file.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for key in re.findall(r'AccountAuth\s+key="([^"]+)"', text):
+                parts = [part for part in key.split("____") if part]
+                numeric_parts = [part for part in parts if part.isdigit() and len(part) >= 6]
+                if numeric_parts:
+                    accounts.add(max(numeric_parts, key=len))
+        return sorted(accounts)
 
     def _cached_account_snapshot(self, *, max_age_seconds: float) -> QmtAccountSnapshot | None:
         cached_at = self._account_snapshot_cached_at

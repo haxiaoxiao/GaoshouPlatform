@@ -5,7 +5,7 @@ import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
 
-const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:18800'
+const apiProxyTarget = process.env.VITE_API_PROXY_TARGET || 'http://127.0.0.1:8800'
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -56,7 +56,7 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 13500,
+    port: 3500,
     proxy: {
       '/api': {
         target: apiProxyTarget,

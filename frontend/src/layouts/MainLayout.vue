@@ -13,7 +13,7 @@
       <div class="sidebar__brand">
         <div class="brand-icon" aria-hidden="true">
           GS
-          <span class="brand-env-badge">dev</span>
+          <span class="brand-env-badge">{{ envLabel }}</span>
         </div>
         <div v-if="!isCollapsed" class="brand-text">
           <span class="brand-name">GAOSHOU</span>
@@ -139,6 +139,7 @@ const showNotifications = ref(false)
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
+const envLabel = (import.meta.env.VITE_APP_ENV_LABEL || 'PROD').toString()
 
 const pageTitle = computed(() => {
   const title = route.meta.title

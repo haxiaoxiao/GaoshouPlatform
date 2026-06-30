@@ -883,10 +883,16 @@ const benchmarkOptions = computed(() =>
 // 最终提交用的 symbol 列表
 const effectiveSymbols = computed(() => {
   if (poolSource.value?.type === 'index') return []
+  if (poolSource.value?.type === 'all_a') return []
   if (poolSource.value) return poolSource.value.symbols
   return btSymbols.value
 })
 const selectedIndexSymbol = computed(() => poolSource.value?.type === 'index' ? poolSource.value.indexSymbol : undefined)
+const selectedUniverseMode = computed(() => {
+  if (poolSource.value?.type === 'index') return 'index'
+  if (poolSource.value?.type === 'all_a') return 'all_a'
+  return 'symbols'
+})
 const isSmallCapStrategy = computed(() => {
   const name = String(activeStrategy.value?.name || '')
   const code = String(btCode.value || activeStrategy.value?.code || '')
@@ -988,10 +994,10 @@ const loadPoolSymbols = async (poolName: string | null) => {
         top100: '沪深Top100', top300: '沪深Top300', top500: '沪深Top500', all: '全量A股',
       }
       poolSource.value = {
-        type: 'pool',
+        type: poolName === 'all' ? 'all_a' : 'pool',
         label: labelMap[poolName] || poolName,
         count: res.symbols.length,
-        symbols: res.symbols,
+        symbols: poolName === 'all' ? [] : res.symbols,
       }
       btSymbols.value = []
       isAllStocks.value = false
@@ -1391,7 +1397,7 @@ const buildBacktestPayload = () => {
     strategy_id: activeStrategy.value?.id || undefined,
     buy_condition: !isExpression && engine === 'builtin' ? code : undefined,
     symbols: effectiveSymbols.value,
-    universe_mode: selectedIndexSymbol.value ? 'index' : 'symbols',
+    universe_mode: selectedUniverseMode.value,
     index_symbol: selectedIndexSymbol.value,
     start_date: btStartDate.value,
     end_date: btEndDate.value,
