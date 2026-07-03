@@ -131,6 +131,19 @@ class WatchlistStockResponse(BaseModel):
     pe_ttm: float | None = Field(default=None, description="PE TTM")
     pb: float | None = Field(default=None, description="PB")
     roe: float | None = Field(default=None, description="ROE")
+    latest_close: float | None = Field(default=None, description="最新收盘价")
+    latest_amount: float | None = Field(default=None, description="最新成交额")
+    change_pct: float | None = Field(default=None, description="最新涨跌幅(%)")
+    latest_trade_date: str | None = Field(default=None, description="最新交易日")
+    buy_elg_amount: float | None = Field(default=None, description="超大单买入额")
+    sell_elg_amount: float | None = Field(default=None, description="超大单卖出额")
+    buy_lg_amount: float | None = Field(default=None, description="大单买入额")
+    sell_lg_amount: float | None = Field(default=None, description="大单卖出额")
+    net_amount_xl: float | None = Field(default=None, description="超大单净流入")
+    net_amount_l: float | None = Field(default=None, description="大单净流入")
+    net_mf_amount: float | None = Field(default=None, description="主力净流入")
+    net_pct_main: float | None = Field(default=None, description="主力净流入率")
+    moneyflow_trade_date: str | None = Field(default=None, description="资金流交易日")
 
 
 class SyncRequest(BaseModel):
@@ -638,6 +651,23 @@ async def get_watchlist_stocks(
             "pe_ttm": stock.pe_ttm,
             "pb": stock.pb,
             "roe": stock.roe,
+            "latest_close": stock.latest_close,
+            "latest_amount": stock.latest_amount,
+            "change_pct": stock.change_pct,
+            "latest_trade_date": stock.latest_trade_date.isoformat()
+            if stock.latest_trade_date
+            else None,
+            "buy_elg_amount": stock.buy_elg_amount,
+            "sell_elg_amount": stock.sell_elg_amount,
+            "buy_lg_amount": stock.buy_lg_amount,
+            "sell_lg_amount": stock.sell_lg_amount,
+            "net_amount_xl": stock.net_amount_xl,
+            "net_amount_l": stock.net_amount_l,
+            "net_mf_amount": stock.net_mf_amount,
+            "net_pct_main": stock.net_pct_main,
+            "moneyflow_trade_date": stock.moneyflow_trade_date.isoformat()
+            if stock.moneyflow_trade_date
+            else None,
         }
         for stock in stocks
     ]

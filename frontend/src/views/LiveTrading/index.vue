@@ -171,6 +171,7 @@
                   <div><label>股票池</label><strong>{{ signalData?.universe_size || 0 }}</strong></div>
                   <div><label>候选</label><strong>{{ signalData?.candidate_count || 0 }}</strong></div>
                   <div><label>订单</label><strong>{{ orderRows.length }}</strong></div>
+                  <div><label>已选</label><strong>{{ selectedOrderRows.length }}</strong></div>
                 </div>
                 <div class="inline-signal__preview">
                   <span>
@@ -271,6 +272,17 @@
           </div>
         </div>
         <el-alert
+          v-if="liveHoldingProfileHintVisible"
+          type="info"
+          show-icon
+          :closable="false"
+        >
+          <template #title>
+            当前 Profile 尚未初始化；策略持仓仍在 {{ liveHoldingProfileName }}（{{ liveHoldingProfilePositionCount }} 笔）。
+          </template>
+          <el-button text type="primary" size="small" @click="switchToLiveHoldingProfile">切回持仓 Profile</el-button>
+        </el-alert>
+        <el-alert
           v-if="!strategyAccountReady"
           type="warning"
           show-icon
@@ -339,11 +351,24 @@
           </div>
           <div class="table-actions">
             <span v-if="signalData?.signal_hash" class="signal-hash-pill" :title="signalData.signal_hash">信号 {{ shortHash(signalData.signal_hash) }}</span>
+            <span v-if="orderRows.length" class="basket-selection-pill">已选 {{ selectedOrderRows.length }}/{{ orderRows.length }}</span>
+            <el-button text size="small" :disabled="!orderRows.length" @click="selectAllOrders">全选</el-button>
+            <el-button text size="small" :disabled="!selectedOrderRows.length" @click="clearSelectedOrders">清空选择</el-button>
             <el-button size="small" type="primary" class="action-button action-button--signal" :loading="signalsLoading" @click="loadSignals">生成信号</el-button>
-            <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!orderRows.length" @click="submitOrders">提交篮子</el-button>
+            <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!selectedSubmittableOrders.length" @click="submitOrders">提交已选 {{ selectedSubmittableOrders.length }}</el-button>
           </div>
         </div>
-        <el-table :data="orderRows" size="small" stripe border max-height="340">
+        <el-table
+          ref="orderBasketTableRef"
+          :data="orderRows"
+          :row-key="orderRowKey"
+          size="small"
+          stripe
+          border
+          max-height="340"
+          @selection-change="onOrderSelectionChange"
+        >
+          <el-table-column type="selection" width="44" fixed="left" />
           <el-table-column prop="symbol" label="代码" width="110" resizable />
           <el-table-column label="名称" width="120" resizable show-overflow-tooltip>
             <template #default="{ row }">{{ row.stock_name || '-' }}</template>
@@ -1067,6 +1092,11 @@ import {
   type LiveWeeklyAnalysis,
 } from '@/api/liveTrading'
 
+type OrderBasketTableRef = {
+  clearSelection: () => void
+  toggleRowSelection: (row: LiveOrder, selected?: boolean) => void
+}
+
 const modeOptions = [
   { label: '模拟', value: 'paper' },
   { label: '实盘', value: 'live' },
@@ -1088,12 +1118,15 @@ const preflightData = ref<LivePreflightResponse | null>(null)
 const signalData = ref<LiveSignalsResponse | null>(null)
 const accountSnapshot = ref<LiveAccountSnapshot | null>(null)
 const orderRows = ref<LiveOrder[]>([])
+const selectedOrderRows = ref<LiveOrder[]>([])
+const liveHoldingProfileSnapshot = ref<{ profile: LiveStrategyProfile; account: LiveAccountSnapshot } | null>(null)
 const audits = ref<LiveOrderAudit[]>([])
 const tradeRecords = ref<LiveTradeRecord[]>([])
 const pendingOrders = ref<LiveTradeRecord[]>([])
 const selectedPendingOrders = ref<LiveTradeRecord[]>([])
 const weeklyAnalysis = ref<LiveWeeklyAnalysis | null>(null)
 const orderPanelRef = ref<HTMLElement | null>(null)
+const orderBasketTableRef = ref<OrderBasketTableRef | null>(null)
 const pendingPanelRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const accountLoading = ref(false)
@@ -1219,6 +1252,9 @@ const runnerText = computed(() => {
 })
 const candidatePreview = computed(() => (signalData.value?.top_candidates || []).slice(0, 3))
 const orderPreview = computed(() => orderRows.value.slice(0, 3))
+const selectedSubmittableOrders = computed(() => (
+  selectedOrderRows.value.filter(order => Number(order.quantity || 0) > 0)
+))
 // Remove unused computed notes
 const accountPositions = computed(() => accountSnapshot.value?.positions || [])
 const liveStreamStatusText = computed(() => {
@@ -1289,6 +1325,18 @@ function stretchTrailingPositionColumn(columns: PositionColumnDef[]): PositionCo
 const visiblePositionColumns = computed(() => stretchTrailingPositionColumn(orderedPositionColumnDefs.value))
 const brokerAccountSnapshot = computed(() => accountSnapshot.value?.broker_account || null)
 const strategyAccountReady = computed(() => Boolean(accountSnapshot.value?.meta?.initialized))
+const liveHoldingProfileHintVisible = computed(() => (
+  mode.value === 'live'
+  && !strategyAccountReady.value
+  && Boolean(liveHoldingProfileSnapshot.value)
+  && liveHoldingProfileSnapshot.value?.profile.profile_key !== selectedProfileKey.value
+))
+const liveHoldingProfileName = computed(() => (
+  liveHoldingProfileSnapshot.value?.profile.display_name
+  || liveHoldingProfileSnapshot.value?.profile.profile_key
+  || '-'
+))
+const liveHoldingProfilePositionCount = computed(() => Number(liveHoldingProfileSnapshot.value?.account.position_count || 0))
 const strategyAccountStatusText = computed(() => {
   if (!accountSnapshot.value) return '未加载'
   if (strategyAccountReady.value) return mode.value === 'paper' ? '模拟资金池' : '实盘资金池'
@@ -1305,6 +1353,7 @@ const accountSummaryItems = computed(() => {
   const account = accountSnapshot.value
   const pnl = Number(account?.unrealized_pnl || 0)
   const totalPnl = Number(account?.total_pnl || 0)
+  const totalPnlPct = Number(account?.total_pnl_pct || 0)
   const meta = account?.meta || {}
   const targetCapital = Number(meta.target_capital || meta.initial_capital || 0)
   const positionCostBasis = Number(meta.position_cost_basis || 0)
@@ -1314,9 +1363,9 @@ const accountSummaryItems = computed(() => {
     { label: '可用现金', value: formatMoney(account?.cash) },
     { label: '总资产', value: formatMoney(account?.total_asset) },
     { label: '持仓市值', value: formatMoney(account?.market_value) },
-    { label: '浮盈亏', value: formatMoney(pnl), tone: pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral' },
-    { label: '总盈亏', value: formatMoney(totalPnl), tone: totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : 'neutral' },
-    { label: '总盈亏率', value: formatPercent(account?.total_pnl_pct), tone: totalPnl > 0 ? 'good' : totalPnl < 0 ? 'bad' : 'neutral' },
+    { label: '浮盈亏', value: formatMoney(pnl), tone: marketTone(pnl) },
+    { label: '总盈亏', value: formatMoney(totalPnl), tone: marketTone(totalPnl) },
+    { label: '总盈亏率', value: formatPercent(account?.total_pnl_pct), tone: marketTone(totalPnlPct) },
     { label: '持仓数', value: `${account?.position_count || 0}` },
   ]
 })
@@ -1327,7 +1376,7 @@ const brokerSummaryItems = computed(() => {
     { label: 'QMT现金', value: formatMoney(account?.cash) },
     { label: 'QMT总资产', value: formatMoney(account?.total_asset) },
     { label: 'QMT持仓市值', value: formatMoney(account?.market_value) },
-    { label: 'QMT浮盈亏', value: formatMoney(pnl), tone: pnl > 0 ? 'good' : pnl < 0 ? 'bad' : 'neutral' },
+    { label: 'QMT浮盈亏', value: formatMoney(pnl), tone: marketTone(pnl) },
     { label: 'QMT持仓数', value: `${account?.position_count || 0}` },
   ]
 })
@@ -1341,10 +1390,10 @@ const weeklySummaryItems = computed(() => {
   const weeklyPnl = Number(summary?.weekly_pnl || 0)
   const allTimePnl = Number(summary?.all_time_pnl || 0)
   return [
-    { label: '本周PnL', value: formatMoney(summary?.weekly_pnl), tone: weeklyPnl > 0 ? 'good' : weeklyPnl < 0 ? 'bad' : 'neutral' },
-    { label: '本周回撤', value: formatPercent(summary?.weekly_max_drawdown_pct), tone: Number(summary?.weekly_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
-    { label: '至今PnL', value: formatMoney(summary?.all_time_pnl), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
-    { label: '至今回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: Number(summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
+    { label: '本周PnL', value: formatMoney(summary?.weekly_pnl), tone: marketTone(weeklyPnl) },
+    { label: '本周回撤', value: formatPercent(summary?.weekly_max_drawdown_pct), tone: marketTone(Number(summary?.weekly_max_drawdown_pct || 0)) },
+    { label: '至今PnL', value: formatMoney(summary?.all_time_pnl), tone: marketTone(allTimePnl) },
+    { label: '至今回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: marketTone(Number(summary?.all_time_max_drawdown_pct || 0)) },
     { label: '净买入', value: formatMoney(summary?.net_notional) },
     { label: '已成/待成/撤单/失败', value: `${summary?.completed_records || 0}/${summary?.live_submitted_records || 0}/${summary?.cancelled_records || 0}/${summary?.failed_records || 0}` },
   ]
@@ -1357,14 +1406,15 @@ const strategyReviewMetrics = computed(() => {
   const totalAsset = Number(account?.total_asset || 0)
   const marketValue = Number(account?.market_value || 0)
   const allTimePnl = Number(summary?.all_time_pnl ?? account?.total_pnl ?? 0)
+  const allTimeReturnPct = Number(summary?.all_time_return_pct ?? account?.total_pnl_pct ?? 0)
   const exposure = totalAsset > 0 ? marketValue / totalAsset : null
   const cashRatio = totalAsset > 0 ? cash / totalAsset : null
   const deployment = targetCapital > 0 ? totalAsset / targetCapital : null
   const turnover = targetCapital > 0 ? Math.abs(Number(summary?.buy_notional || 0) + Number(summary?.sell_notional || 0)) / targetCapital : null
   return [
-    { label: '建池以来PnL', value: formatMoney(summary?.all_time_pnl ?? account?.total_pnl), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
-    { label: '建池收益率', value: formatPercent(summary?.all_time_return_pct ?? account?.total_pnl_pct), tone: allTimePnl > 0 ? 'good' : allTimePnl < 0 ? 'bad' : 'neutral' },
-    { label: '最大回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: Number(summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
+    { label: '建池以来PnL', value: formatMoney(summary?.all_time_pnl ?? account?.total_pnl), tone: marketTone(allTimePnl) },
+    { label: '建池收益率', value: formatPercent(summary?.all_time_return_pct ?? account?.total_pnl_pct), tone: marketTone(allTimeReturnPct) },
+    { label: '最大回撤', value: formatPercent(summary?.all_time_max_drawdown_pct), tone: marketTone(Number(summary?.all_time_max_drawdown_pct || 0)) },
     { label: '权益快照', value: `${summary?.all_time_equity_snapshot_points || 0} 点` },
     { label: '仓位暴露', value: formatPercent(exposure) },
     { label: '现金比例', value: formatPercent(cashRatio), tone: cashRatio != null && cashRatio < 0.05 ? 'warn' : 'neutral' },
@@ -1779,8 +1829,11 @@ async function loadAll() {
       selectedProfileKey.value = await resolveInitialProfile(nextProfiles, nextStatus)
     }
     await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
+    if (shouldSwitchFromEmptyProfile()) {
+      await findLiveHoldingProfile(nextProfiles)
+    }
     if (!resolvedInitialProfile && shouldSwitchFromEmptyProfile()) {
-      const fallbackProfile = await resolveInitialProfile(nextProfiles, nextStatus)
+      const fallbackProfile = liveHoldingProfileSnapshot.value?.profile.profile_key || await resolveInitialProfile(nextProfiles, nextStatus)
       if (fallbackProfile && fallbackProfile !== selectedProfileKey.value) {
         selectedProfileKey.value = fallbackProfile
         await Promise.all([loadAccount(), loadPreflight(), loadAudits(), loadTradeJournal(), loadPendingOrders()])
@@ -1797,6 +1850,32 @@ function shouldSwitchFromEmptyProfile() {
   const snapshot = accountSnapshot.value
   if (!snapshot) return false
   return !snapshot.meta?.initialized && Number(snapshot.position_count || 0) === 0
+}
+
+async function findLiveHoldingProfile(nextProfiles = profiles.value) {
+  if (mode.value !== 'live') {
+    liveHoldingProfileSnapshot.value = null
+    return null
+  }
+  for (const profile of nextProfiles) {
+    try {
+      const snapshot = await liveTradingApi.account('live', profile.profile_key, false)
+      if (snapshot?.meta?.initialized && Number(snapshot.position_count || 0) > 0) {
+        liveHoldingProfileSnapshot.value = { profile, account: snapshot }
+        return liveHoldingProfileSnapshot.value
+      }
+    } catch {
+      // Keep probing other profiles; this hint should never block trading page loading.
+    }
+  }
+  liveHoldingProfileSnapshot.value = null
+  return null
+}
+
+async function switchToLiveHoldingProfile() {
+  const profileKey = liveHoldingProfileSnapshot.value?.profile.profile_key
+  if (!profileKey || profileKey === selectedProfileKey.value) return
+  selectedProfileKey.value = profileKey
 }
 
 async function resolveInitialProfile(nextProfiles: LiveStrategyProfile[], nextStatus: LiveTradingStatus) {
@@ -1828,7 +1907,7 @@ async function resolveInitialProfile(nextProfiles: LiveStrategyProfile[], nextSt
 watch(mode, async () => {
   if (!selectedProfileKey.value) return
   signalData.value = null
-  orderRows.value = []
+  clearOrderBasket()
   stopOrderStatusPolling()
   orderSyncState.value = 'idle'
   startAccountRealtime()
@@ -1837,7 +1916,7 @@ watch(mode, async () => {
 
 watch(selectedProfileKey, () => {
   signalData.value = null
-  orderRows.value = []
+  clearOrderBasket()
   stopOrderStatusPolling()
   orderSyncState.value = 'idle'
   startAccountRealtime()
@@ -1853,6 +1932,9 @@ async function loadAccount() {
   accountLoading.value = true
   try {
     applyAccountSnapshot(await liveTradingApi.account(mode.value, selectedProfileKey.value || undefined))
+    if (shouldSwitchFromEmptyProfile()) {
+      void findLiveHoldingProfile()
+    }
   } finally {
     accountLoading.value = false
   }
@@ -2011,6 +2093,22 @@ async function loadPreflight() {
   }
 }
 
+function clearOrderBasket() {
+  orderRows.value = []
+  selectedOrderRows.value = []
+  orderBasketTableRef.value?.clearSelection()
+}
+
+function setOrderBasket(rows: LiveOrder[]) {
+  orderRows.value = rows
+  selectedOrderRows.value = []
+  nextTick(() => {
+    orderBasketTableRef.value?.clearSelection()
+    rows.forEach(row => orderBasketTableRef.value?.toggleRowSelection(row, true))
+    selectedOrderRows.value = [...rows]
+  })
+}
+
 async function loadSignals() {
   if (!selectedProfileKey.value) return
   startRuntimeTask(
@@ -2073,7 +2171,7 @@ async function loadSignals() {
       intradayAttempted ? '交易过滤因子已按当前分钟处理。' : '过滤因子缓存已命中。',
       82,
     )
-    orderRows.value = (signalData.value.orders || []).map(order => ({ ...order }))
+    setOrderBasket((signalData.value.orders || []).map(order => ({ ...order })))
     setRuntimeStep(
       'basket',
       reason ? 'warn' : 'done',
@@ -2417,7 +2515,7 @@ async function cancelAndResubmitPendingOrders() {
     if (result.signal_result) {
       signalData.value = result.signal_result
       preflightData.value = result.signal_result.preflight || preflightData.value
-      orderRows.value = (result.signal_result.orders || []).map(order => ({ ...order }))
+      setOrderBasket((result.signal_result.orders || []).map(order => ({ ...order })))
     }
     if (result.submit_result) {
       submitResult.value = result.submit_result
@@ -2555,14 +2653,42 @@ async function takeoverRunner() {
   }
 }
 
+function orderRowKey(row: LiveOrder) {
+  return [
+    row.signal_hash || signalData.value?.signal_hash || '',
+    row.profile_key,
+    row.strategy_id,
+    row.symbol,
+    row.side,
+    row.reference_price ?? '',
+    row.remark ?? '',
+  ].join('|')
+}
+
+function onOrderSelectionChange(rows: LiveOrder[]) {
+  selectedOrderRows.value = rows
+}
+
+function selectAllOrders() {
+  nextTick(() => {
+    orderRows.value.forEach(row => orderBasketTableRef.value?.toggleRowSelection(row, true))
+    selectedOrderRows.value = [...orderRows.value]
+  })
+}
+
+function clearSelectedOrders() {
+  orderBasketTableRef.value?.clearSelection()
+  selectedOrderRows.value = []
+}
+
 async function submitOrders() {
-  const orders = orderRows.value.filter(order => Number(order.quantity || 0) > 0)
+  const orders = selectedSubmittableOrders.value
   if (!orders.length) {
-    ElMessage.info('没有可提交的订单')
+    ElMessage.info('请先勾选需要提交且数量大于 0 的订单')
     return
   }
   const title = mode.value === 'live' ? '真实委托确认' : '模拟成交确认'
-  await ElMessageBox.confirm(`确认提交 ${orders.length} 笔订单？`, title, {
+  await ElMessageBox.confirm(`确认提交已勾选的 ${orders.length} 笔订单？`, title, {
     type: mode.value === 'live' ? 'warning' : 'info',
     confirmButtonText: '确认提交',
     cancelButtonText: '取消',
@@ -2647,7 +2773,14 @@ async function initializeCapitalPool() {
 }
 
 function removeOrder(index: number) {
+  const removed = orderRows.value[index]
+  if (removed) {
+    orderBasketTableRef.value?.toggleRowSelection(removed, false)
+  }
   orderRows.value.splice(index, 1)
+  if (removed) {
+    selectedOrderRows.value = selectedOrderRows.value.filter(row => row !== removed)
+  }
 }
 
 async function toggleProfileEnabled(value: string | number | boolean) {
@@ -2732,9 +2865,16 @@ function formatClock(value?: string | null) {
 
 function pnlTone(value?: number | null) {
   const numberValue = Number(value || 0)
-  if (numberValue > 0) return 'metric-good'
-  if (numberValue < 0) return 'metric-bad'
+  if (numberValue > 0) return 'metric-up'
+  if (numberValue < 0) return 'metric-down'
   return 'metric-neutral'
+}
+
+function marketTone(value?: number | null) {
+  const numberValue = Number(value || 0)
+  if (numberValue > 0) return 'up'
+  if (numberValue < 0) return 'down'
+  return 'neutral'
 }
 
 function candidateSymbol(candidate: Record<string, unknown>) {
@@ -2743,7 +2883,7 @@ function candidateSymbol(candidate: Record<string, unknown>) {
 
 async function onProfileChange() {
   signalData.value = null
-  orderRows.value = []
+  clearOrderBasket()
   stopOrderStatusPolling()
   orderSyncState.value = 'idle'
   startAccountRealtime()
@@ -3154,6 +3294,7 @@ const pageContextBlocks = computed(() => [
     title: 'Basket',
     rows: [
       { label: '订单', value: `${orderRows.value.length} 笔` },
+      { label: '已选', value: `${selectedOrderRows.value.length} 笔` },
       { label: '跳过', value: `${signalData.value?.skipped_orders?.length || 0} 笔` },
       { label: '待成交', value: `${pendingOrders.value.length} 笔` },
       { label: '账户', value: signalData.value?.account.source || '-' },
@@ -3173,11 +3314,9 @@ const pageContextBlocks = computed(() => [
       {
         label: '至今PnL',
         value: formatMoney(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl),
-        tone: Number(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl ?? 0) > 0
-          ? 'good'
-          : Number(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl ?? 0) < 0 ? 'bad' : 'neutral',
+        tone: marketTone(Number(weeklyAnalysis.value?.summary?.all_time_pnl ?? accountSnapshot.value?.total_pnl ?? 0)),
       },
-      { label: '至今回撤', value: formatPercent(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct), tone: Number(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct || 0) < 0 ? 'bad' : 'neutral' },
+      { label: '至今回撤', value: formatPercent(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct), tone: marketTone(Number(weeklyAnalysis.value?.summary?.all_time_max_drawdown_pct || 0)) },
       { label: '持仓', value: `${accountSnapshot.value?.position_count || 0} 只` },
     ],
   },
@@ -3916,6 +4055,19 @@ onUnmounted(() => {
   font-size: var(--text-xs);
 }
 
+.table-actions .basket-selection-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid rgba(22, 163, 74, 0.22);
+  border-radius: var(--radius-sm);
+  background: rgba(240, 253, 244, 0.92);
+  color: #166534;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
 .table-actions .state-text {
   color: var(--text-secondary);
   font-family: var(--font-ui);
@@ -3974,7 +4126,7 @@ onUnmounted(() => {
 
 .inline-signal__stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: var(--space-2);
 }
 
@@ -4214,6 +4366,14 @@ onUnmounted(() => {
 
 .metric-bad {
   color: var(--trade-bad) !important;
+}
+
+.metric-up {
+  color: var(--market-up, #d93026) !important;
+}
+
+.metric-down {
+  color: var(--market-down, #137333) !important;
 }
 
 .metric-warn {

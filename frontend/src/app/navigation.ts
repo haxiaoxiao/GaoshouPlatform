@@ -169,7 +169,7 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
   {
     key: 'watchlist',
     path: '/watchlist',
-    section: 'research',
+    section: 'operations',
     label: '自选股',
     hint: 'Pool',
     subtitle: '分组管理研究股票池，后续和策略、因子、数据覆盖联动。',

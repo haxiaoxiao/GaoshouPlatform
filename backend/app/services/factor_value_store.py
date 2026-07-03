@@ -507,27 +507,33 @@ class FactorValueStore:
     def _glob_pattern(self) -> str:
         return str(self._dataset_path() / "year=*" / "month=??" / "*.parquet").replace("\\", "/")
 
-    def _glob_patterns_for_range(self, start_date: date, end_date: date) -> list[str]:
+    def _month_partition_globs(self, start_date: date, end_date: date) -> list[str]:
         if not self._has_year_month_partitions():
             return [self._glob_pattern()]
-        root = self._dataset_path()
         start_ts = pd.Timestamp(start_date)
         end_ts = pd.Timestamp(end_date)
         current = date(int(start_ts.year), int(start_ts.month), 1)
         last = date(int(end_ts.year), int(end_ts.month), 1)
         patterns: list[str] = []
+        root = self._dataset_path()
         while current <= last:
-            patterns.append(str(root / f"year={current.year}" / f"month={current.month:02d}" / "*.parquet").replace("\\", "/"))
+            partition_dir = root / f"year={current.year}" / f"month={current.month:02d}"
+            if partition_dir.exists() and any(partition_dir.glob("*.parquet")):
+                patterns.append(str(partition_dir / "*.parquet").replace("\\", "/"))
             current = date(current.year + 1, 1, 1) if current.month == 12 else date(current.year, current.month + 1, 1)
-        return patterns or [self._glob_pattern()]
+        return patterns
 
-    def _read_parquet_expr(self, start_date: date, end_date: date) -> str:
-        patterns = self._glob_patterns_for_range(start_date, end_date)
-        if len(patterns) == 1:
-            target = _sql_literal(patterns[0])
+    def _read_parquet_expr(self, *, start_date: date | None = None, end_date: date | None = None) -> str | None:
+        if start_date is not None and end_date is not None:
+            patterns = self._month_partition_globs(start_date, end_date)
         else:
-            target = "[" + ", ".join(_sql_literal(pattern) for pattern in patterns) + "]"
-        return f"read_parquet({target}, hive_partitioning=true, union_by_name=true)"
+            patterns = [self._glob_pattern()]
+        if not patterns:
+            return None
+        source = _sql_literal(patterns[0])
+        if len(patterns) > 1:
+            source = "[" + ", ".join(_sql_literal(pattern) for pattern in patterns) + "]"
+        return f"read_parquet({source}, hive_partitioning=true, union_by_name=true)"
 
     def _metadata_cache_key(self) -> tuple[str, str]:
         return str(self._data_dir.absolute()), self.dataset
@@ -677,7 +683,13 @@ class FactorValueStore:
             part_body = self._normalize_columns(part.drop(columns=["year", "month"], errors="ignore"))
             part_body = part_body.drop_duplicates(subset=[c for c in self.key_cols if c in part_body.columns], keep="last")
             file_path = partition_dir / f"part-{uuid.uuid4().hex}.parquet"
-            pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), file_path)
+            tmp_path = partition_dir / f".tmp-{uuid.uuid4().hex}.parquet.tmp"
+            try:
+                pq.write_table(pa.Table.from_pandas(part_body, preserve_index=False), tmp_path)
+                tmp_path.replace(file_path)
+            finally:
+                if tmp_path.exists():
+                    tmp_path.unlink(missing_ok=True)
             total += len(part_body)
         if total:
             self.invalidate_metadata()
@@ -713,6 +725,9 @@ class FactorValueStore:
 
         partition_filter = self._year_month_filter(start_date, end_date)
         name_expr = self._name_expr()
+        parquet_expr = self._read_parquet_expr(start_date=start_date, end_date=end_date)
+        if parquet_expr is None:
+            return pd.DataFrame()
         sql = f"""
             WITH factor_values_normalized AS (
                 SELECT
@@ -726,7 +741,7 @@ class FactorValueStore:
                     created_at,
                     year,
                     month
-                FROM {self._read_parquet_expr(start_date, end_date)}
+                FROM {parquet_expr}
             ),
             factor_values_latest AS (
                 SELECT *
@@ -806,9 +821,11 @@ class FactorValueStore:
             conditions.append(f"params_hash = {_sql_literal(effective_params_hash)}")
 
         partition_filter = self._year_month_filter(start_date, end_date)
-        parquet_expr = self._read_parquet_expr(start_date, end_date)
         where_sql = " AND ".join(conditions)
         name_expr = self._name_expr()
+        parquet_expr = self._read_parquet_expr(start_date=start_date, end_date=end_date)
+        if parquet_expr is None:
+            return self._empty_coverage(factor_name)
         stats_sql = f"""
             WITH factor_values_normalized AS (
                 SELECT
@@ -922,7 +939,6 @@ class FactorValueStore:
         params_hash = factor_params_hash(params) if params is not None else None
         conditions = [f"factor_name IN {_list_param(names)}"]
         partition_filter = ""
-        parquet_expr = f"read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)"
         if start_date is not None:
             conditions.append(f"trade_date >= {_sql_literal(start_date)}")
         if end_date is not None:
@@ -931,7 +947,6 @@ class FactorValueStore:
             conditions.append(f"symbol IN {_list_param(symbols)}")
         if start_date is not None and end_date is not None:
             partition_filter = self._year_month_filter(start_date, end_date)
-            parquet_expr = self._read_parquet_expr(start_date, end_date)
         if as_of_time is not None:
             conditions.append(f"as_of_time = {_sql_literal(normalize_factor_time(as_of_time))}")
         if params_hash is not None:
@@ -939,6 +954,13 @@ class FactorValueStore:
 
         where_sql = " AND ".join(conditions)
         name_expr = self._name_expr()
+        parquet_expr = (
+            self._read_parquet_expr(start_date=start_date, end_date=end_date)
+            if start_date is not None and end_date is not None
+            else self._read_parquet_expr()
+        )
+        if parquet_expr is None:
+            return {name: self._empty_coverage(name) for name in names}
         sql = f"""
             WITH factor_values_normalized AS (
                 SELECT
@@ -1008,7 +1030,6 @@ class FactorValueStore:
 
         conditions = [f"factor_name IN {_list_param(names)}"]
         partition_filter = ""
-        parquet_expr = f"read_parquet('{self._glob_pattern()}', hive_partitioning=true, union_by_name=true)"
         if start_date is not None:
             conditions.append(f"trade_date >= {_sql_literal(start_date)}")
         if end_date is not None:
@@ -1017,10 +1038,16 @@ class FactorValueStore:
             conditions.append(f"symbol IN {_list_param(symbols)}")
         if start_date is not None and end_date is not None:
             partition_filter = self._year_month_filter(start_date, end_date)
-            parquet_expr = self._read_parquet_expr(start_date, end_date)
 
         where_sql = " AND ".join(conditions)
         name_expr = self._name_expr()
+        parquet_expr = (
+            self._read_parquet_expr(start_date=start_date, end_date=end_date)
+            if start_date is not None and end_date is not None
+            else self._read_parquet_expr()
+        )
+        if parquet_expr is None:
+            return []
         sql = f"""
             WITH factor_values_normalized AS (
                 SELECT
