@@ -14,6 +14,8 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
+from app.data_stores.parquet_store import _list_param, _sql_literal
+from app.db.duckdb import get_duckdb
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.backtest_redis_cache import get_backtest_cache
 from app.services.index_components import normalize_index_symbol
@@ -258,6 +260,73 @@ def _insert_rows(rows: list[dict[str, Any]]) -> None:
         logger.warning("Parquet timer minute write failed: {}", exc)
 
 
+def _sync_timer_points_from_local_minute(
+    symbols: list[str],
+    start: date,
+    end: date,
+    timer_times: tuple[time, ...],
+) -> dict[str, Any]:
+    timer_times = _bar_timer_times(timer_times)
+    if not symbols or not timer_times:
+        return {"attempted": False, "inserted": 0, "symbols": 0, "covered_symbols": []}
+
+    store = get_market_data_store()
+    exists = getattr(store, "_exists", None)
+    glob_pattern = getattr(store, "_glob_pattern", None)
+    partition_filter_fn = getattr(store, "_year_month_filter", None)
+    write_minute = getattr(store, "write_minute", None)
+    if not all(callable(fn) for fn in (exists, glob_pattern, partition_filter_fn, write_minute)):
+        return {"attempted": False, "inserted": 0, "symbols": 0, "covered_symbols": []}
+    if not exists("klines_minute"):
+        return {"attempted": False, "inserted": 0, "symbols": 0, "covered_symbols": []}
+
+    start_dt = datetime.combine(start, datetime.min.time())
+    end_dt = datetime.combine(end + timedelta(days=1), datetime.min.time())
+    timer_minutes = ", ".join(str(t.hour * 60 + t.minute) for t in timer_times)
+    partition_filter = partition_filter_fn("klines_minute", start_dt, end_dt)
+    sql = f"""
+        SELECT symbol, datetime, open, high, low, close, volume, amount
+        FROM read_parquet('{glob_pattern("klines_minute")}', hive_partitioning=true)
+        WHERE symbol IN {_list_param(symbols)}
+          AND datetime >= {_sql_literal(start_dt)}
+          AND datetime < {_sql_literal(end_dt)}
+          AND (hour(datetime) * 60 + minute(datetime)) IN ({timer_minutes})
+          {partition_filter}
+        ORDER BY symbol, datetime
+    """
+    df = get_duckdb().execute(sql).df()
+    if df.empty:
+        return {"attempted": True, "inserted": 0, "symbols": 0, "covered_symbols": []}
+
+    df["symbol"] = df["symbol"].astype(str).map(_normalize_symbol)
+    df["datetime"] = pd.to_datetime(df["datetime"]).dt.floor("min")
+    for col in ["open", "high", "low", "close", "amount"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    if "volume" in df.columns:
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype("int64")
+    df = df[
+        df["symbol"].astype(bool)
+        & (df["open"] > 0)
+        & (df["high"] > 0)
+        & (df["low"] > 0)
+        & (df["close"] > 0)
+    ]
+    df = df.drop_duplicates(subset=["symbol", "datetime"], keep="last")
+    if df.empty:
+        return {"attempted": True, "inserted": 0, "symbols": 0, "covered_symbols": []}
+
+    covered_symbols = sorted(df["symbol"].astype(str).unique().tolist())
+    inserted = int(write_minute(df, dataset="klines_minute_timer"))
+    return {
+        "attempted": True,
+        "inserted": inserted,
+        "symbols": len(covered_symbols),
+        "covered_symbols": covered_symbols,
+        "source": "klines_minute",
+    }
+
+
 async def sync_symbol_timer_minutes(
     symbol: str,
     start: date,
@@ -461,7 +530,84 @@ async def sync_timer_minute_points(
     total_fetched = 0
     failures: list[dict[str, str]] = []
     results: list[dict[str, Any]] = []
+    local_result = await asyncio.to_thread(
+        _sync_timer_points_from_local_minute,
+        all_symbols,
+        start,
+        end,
+        timer_times,
+    )
+    local_covered = set(local_result.get("covered_symbols") or [])
+    if local_result.get("attempted"):
+        total_inserted += int(local_result.get("inserted") or 0)
+        if progress_callback:
+            progress_callback(
+                {
+                    "stage": "sync_timer_minute.local",
+                    "done": len(local_covered),
+                    "total": len(all_symbols),
+                    "inserted": total_inserted,
+                    "times": [t.strftime("%H:%M") for t in timer_times],
+                    "source": local_result.get("source"),
+                }
+            )
+    if local_covered:
+        all_symbols = [symbol for symbol in all_symbols if symbol not in local_covered]
 
+    batch_size = max(1, int(os.getenv("QMT_TIMER_SYNC_BATCH_SIZE", "100")))
+    batch_failover_symbols: list[str] = []
+    if all_symbols:
+        for offset in range(0, len(all_symbols), batch_size):
+            batch_symbols = all_symbols[offset: offset + batch_size]
+            try:
+                batch_klines = await qmt_gateway.get_kline_minute_batch(
+                    batch_symbols,
+                    start,
+                    end,
+                )
+                rows: list[dict[str, Any]] = []
+                fetched = 0
+                for symbol in batch_symbols:
+                    klines = batch_klines.get(symbol, [])
+                    fetched += len(klines)
+                    rows.extend(_filter_timer_rows(klines, timer_times, set()))
+                if rows:
+                    await asyncio.to_thread(_insert_rows, rows)
+                total_fetched += fetched
+                total_inserted += len(rows)
+                results.append(
+                    {
+                        "batch_from": batch_symbols[0],
+                        "batch_to": batch_symbols[-1],
+                        "symbols": len(batch_symbols),
+                        "fetched": fetched,
+                        "inserted": len(rows),
+                        "source": "qmt_batch",
+                    }
+                )
+                if progress_callback:
+                    progress_callback(
+                        {
+                            "stage": "sync_timer_minute.qmt_batch",
+                            "done": min(offset + len(batch_symbols), len(all_symbols)),
+                            "total": len(all_symbols),
+                            "symbol": batch_symbols[-1],
+                            "inserted": total_inserted,
+                            "fetched": total_fetched,
+                            "times": [t.strftime("%H:%M") for t in timer_times],
+                        }
+                    )
+            except Exception as exc:
+                failures.append(
+                    {
+                        "batch_from": batch_symbols[0],
+                        "batch_to": batch_symbols[-1],
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+                batch_failover_symbols.extend(batch_symbols)
+
+    all_symbols = batch_failover_symbols
     total = len(all_symbols)
     if progress_callback:
         progress_callback(
@@ -513,4 +659,9 @@ async def sync_timer_minute_points(
         "inserted": total_inserted,
         "failures": failures,
         "results": results,
+        "local_source": {
+            key: value
+            for key, value in local_result.items()
+            if key != "covered_symbols"
+        },
     }

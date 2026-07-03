@@ -130,8 +130,19 @@ export interface WatchlistStock {
   pe_ttm?: number | null
   pb?: number | null
   roe?: number | null
+  latest_close?: number | null
+  latest_amount?: number | null
   change_pct?: number | null
   latest_trade_date?: string | null
+  buy_elg_amount?: number | null
+  sell_elg_amount?: number | null
+  buy_lg_amount?: number | null
+  sell_lg_amount?: number | null
+  net_amount_xl?: number | null
+  net_amount_l?: number | null
+  net_mf_amount?: number | null
+  net_pct_main?: number | null
+  moneyflow_trade_date?: string | null
 }
 
 export interface CreateGroupParams {

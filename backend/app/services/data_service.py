@@ -1,20 +1,71 @@
 # backend/app/services/data_service.py
 """数据查询服务"""
+import asyncio
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
+from loguru import logger
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.data_stores import get_market_data_store
+from app.db.duckdb import get_duckdb
 from app.db.models import (
     Stock,
     StockConceptMembership,
     WatchlistGroup,
     WatchlistStock,
 )
+
+
+def _sql_literal(value: object) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _sql_list(values: list[str]) -> str:
+    return "(" + ", ".join(_sql_literal(value) for value in values) + ")"
+
+
+def _parquet_glob(dataset: str) -> str | None:
+    root = Path(settings.parquet_data_dir) / dataset
+    if not root.exists():
+        return None
+    if any(root.glob("year=*/month=??/*.parquet")):
+        return str(root / "year=*" / "month=??" / "*.parquet").replace("\\", "/")
+    if any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
+        return str(root / "**" / "*.parquet").replace("\\", "/")
+    return None
+
+
+def _float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        if value == "":
+            return None
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _date_or_none(value: object) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    try:
+        text = str(value)
+        if len(text) == 8 and text.isdigit():
+            return datetime.strptime(text, "%Y%m%d").date()
+        return datetime.fromisoformat(text[:10]).date()
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass
@@ -104,6 +155,19 @@ class WatchlistStockInfo:
     pe_ttm: float | None = None
     pb: float | None = None
     roe: float | None = None
+    latest_close: float | None = None
+    latest_amount: float | None = None
+    change_pct: float | None = None
+    latest_trade_date: date | None = None
+    buy_elg_amount: float | None = None
+    sell_elg_amount: float | None = None
+    buy_lg_amount: float | None = None
+    sell_lg_amount: float | None = None
+    net_amount_xl: float | None = None
+    net_amount_l: float | None = None
+    net_mf_amount: float | None = None
+    net_pct_main: float | None = None
+    moneyflow_trade_date: date | None = None
 
 
 class DataService:
@@ -382,6 +446,8 @@ class DataService:
         rows = result.all()
         symbols = [row.WatchlistStock.symbol for row in rows]
         ths_concepts_by_symbol: dict[str, list[str]] = {}
+        latest_daily_by_symbol: dict[str, dict[str, Any]] = {}
+        moneyflow_by_symbol: dict[str, dict[str, Any]] = {}
         if symbols:
             latest_snapshot_query = select(
                 func.max(StockConceptMembership.snapshot_date)
@@ -410,27 +476,242 @@ class DataService:
                         if concept_name not in bucket and len(bucket) < 12:
                             bucket.append(concept_name)
 
-        return [
-            WatchlistStockInfo(
-                id=row.WatchlistStock.id,
-                group_id=row.WatchlistStock.group_id,
-                symbol=row.WatchlistStock.symbol,
-                stock_name=row.stock_name,
-                added_at=row.WatchlistStock.added_at,
-                industry=row.industry,
-                industry2=row.industry2,
-                industry3=row.industry3,
-                sector=row.sector,
-                concept=row.concept,
-                ths_concepts=ths_concepts_by_symbol.get(row.WatchlistStock.symbol, []),
-                total_mv=row.total_mv,
-                circ_mv=row.circ_mv,
-                pe_ttm=row.pe_ttm,
-                pb=row.pb,
-                roe=row.roe,
+            latest_daily_by_symbol, moneyflow_by_symbol = await asyncio.gather(
+                asyncio.to_thread(self._load_latest_daily_snapshots, symbols),
+                asyncio.to_thread(self._load_latest_moneyflow_snapshots, symbols),
             )
-            for row in rows
+
+        items: list[WatchlistStockInfo] = []
+        for row in rows:
+            symbol = row.WatchlistStock.symbol
+            daily = latest_daily_by_symbol.get(symbol, {})
+            moneyflow = moneyflow_by_symbol.get(symbol, {})
+            items.append(
+                WatchlistStockInfo(
+                    id=row.WatchlistStock.id,
+                    group_id=row.WatchlistStock.group_id,
+                    symbol=symbol,
+                    stock_name=row.stock_name,
+                    added_at=row.WatchlistStock.added_at,
+                    industry=row.industry,
+                    industry2=row.industry2,
+                    industry3=row.industry3,
+                    sector=row.sector,
+                    concept=row.concept,
+                    ths_concepts=ths_concepts_by_symbol.get(symbol, []),
+                    total_mv=row.total_mv,
+                    circ_mv=row.circ_mv,
+                    pe_ttm=row.pe_ttm,
+                    pb=row.pb,
+                    roe=row.roe,
+                    latest_close=daily.get("latest_close"),
+                    latest_amount=daily.get("latest_amount"),
+                    change_pct=daily.get("change_pct"),
+                    latest_trade_date=daily.get("latest_trade_date"),
+                    buy_elg_amount=moneyflow.get("buy_elg_amount"),
+                    sell_elg_amount=moneyflow.get("sell_elg_amount"),
+                    buy_lg_amount=moneyflow.get("buy_lg_amount"),
+                    sell_lg_amount=moneyflow.get("sell_lg_amount"),
+                    net_amount_xl=moneyflow.get("net_amount_xl"),
+                    net_amount_l=moneyflow.get("net_amount_l"),
+                    net_mf_amount=moneyflow.get("net_mf_amount"),
+                    net_pct_main=moneyflow.get("net_pct_main"),
+                    moneyflow_trade_date=moneyflow.get("moneyflow_trade_date"),
+                )
+            )
+        return items
+
+    def _load_latest_daily_snapshots(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        if not symbols:
+            return {}
+
+        end_date = date.today()
+        start_date = end_date - timedelta(days=180)
+        store = get_market_data_store()
+        df = store.load_daily(
+            symbols,
+            start_date,
+            end_date,
+            columns=["symbol", "trade_date", "close", "amount"],
+        )
+        if df.empty:
+            return {}
+
+        frame = df.reset_index()
+        if "trade_date" not in frame.columns:
+            return {}
+        frame["trade_date"] = frame["trade_date"].apply(_date_or_none)
+        frame = frame.dropna(subset=["symbol", "trade_date"]).sort_values(["symbol", "trade_date"])
+
+        snapshots: dict[str, dict[str, Any]] = {}
+        for symbol, group in frame.groupby("symbol", sort=False):
+            group = group.dropna(subset=["close"])
+            if group.empty:
+                continue
+            latest = group.iloc[-1]
+            latest_close = _float_or_none(latest.get("close"))
+            latest_amount = _float_or_none(latest.get("amount"))
+            previous_close = None
+            if len(group) >= 2:
+                previous_close = _float_or_none(group.iloc[-2].get("close"))
+
+            change_pct = None
+            if latest_close is not None and previous_close and previous_close > 0:
+                change_pct = (latest_close / previous_close - 1.0) * 100.0
+
+            snapshots[str(symbol)] = {
+                "latest_close": latest_close,
+                "latest_amount": latest_amount,
+                "change_pct": change_pct,
+                "latest_trade_date": latest.get("trade_date"),
+            }
+        return snapshots
+
+    def _load_latest_moneyflow_snapshots(self, symbols: list[str]) -> dict[str, dict[str, Any]]:
+        if not symbols:
+            return {}
+
+        snapshots = self._load_latest_moneyflow_dataset(
+            dataset="jq_money_flow_daily",
+            date_col="trade_date_1",
+            symbols=symbols,
+        )
+        missing = [symbol for symbol in symbols if symbol not in snapshots]
+        if missing:
+            snapshots.update(
+                self._load_latest_moneyflow_dataset(
+                    dataset="moneyflow",
+                    date_col="trade_date",
+                    symbols=missing,
+                )
+            )
+        return snapshots
+
+    def _load_latest_moneyflow_dataset(
+        self,
+        *,
+        dataset: str,
+        date_col: str,
+        symbols: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        pattern = _parquet_glob(dataset)
+        if not pattern:
+            return {}
+
+        db = get_duckdb()
+        try:
+            columns = set(
+                db.execute(
+                    f"SELECT * FROM read_parquet('{pattern}', hive_partitioning=true) LIMIT 0"
+                ).df().columns
+            )
+        except Exception as exc:
+            logger.warning("Failed to inspect watchlist moneyflow dataset {}: {}", dataset, exc)
+            return {}
+
+        symbol_col = "symbol" if "symbol" in columns else "ts_code" if "ts_code" in columns else None
+        if not symbol_col or date_col not in columns:
+            return {}
+
+        value_cols = [
+            "net_amount_main",
+            "net_pct_main",
+            "net_amount_xl",
+            "net_amount_l",
+            "net_mf_amount",
+            "buy_elg_amount",
+            "sell_elg_amount",
+            "buy_lg_amount",
+            "sell_lg_amount",
         ]
+        present_value_cols = [col for col in value_cols if col in columns]
+        if not present_value_cols:
+            return {}
+
+        non_null_expr = (
+            "("
+            + " OR ".join(f"TRY_CAST({col} AS DOUBLE) IS NOT NULL" for col in present_value_cols)
+            + ")"
+        )
+        try:
+            latest_row = db.execute(
+                f"""
+                SELECT max({date_col})
+                FROM read_parquet('{pattern}', hive_partitioning=true)
+                WHERE {date_col} IS NOT NULL
+                  AND {non_null_expr}
+                """
+            ).fetchone()
+        except Exception as exc:
+            logger.warning("Failed to read latest watchlist moneyflow date from {}: {}", dataset, exc)
+            return {}
+        latest_date = latest_row[0] if latest_row else None
+        if latest_date is None:
+            return {}
+
+        select_cols = [
+            f"{symbol_col} AS symbol",
+            f"{date_col} AS moneyflow_trade_date",
+        ]
+        for col in value_cols:
+            select_cols.append(col if col in columns else f"NULL AS {col}")
+
+        try:
+            rows = db.execute(
+                f"""
+                SELECT {", ".join(select_cols)}
+                FROM read_parquet('{pattern}', hive_partitioning=true)
+                WHERE {date_col} = {_sql_literal(latest_date)}
+                  AND {symbol_col} IN {_sql_list(symbols)}
+                  AND {non_null_expr}
+                """
+            ).fetchall()
+        except Exception as exc:
+            logger.warning("Failed to load latest watchlist moneyflow rows from {}: {}", dataset, exc)
+            return {}
+
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            (
+                symbol,
+                moneyflow_trade_date,
+                net_amount_main,
+                net_pct_main,
+                net_amount_xl,
+                net_amount_l,
+                net_mf_amount,
+                buy_elg_amount,
+                sell_elg_amount,
+                buy_lg_amount,
+                sell_lg_amount,
+            ) = row
+            buy_elg = _float_or_none(buy_elg_amount)
+            sell_elg = _float_or_none(sell_elg_amount)
+            buy_lg = _float_or_none(buy_lg_amount)
+            sell_lg = _float_or_none(sell_lg_amount)
+            amount_xl = _float_or_none(net_amount_xl)
+            amount_l = _float_or_none(net_amount_l)
+            if amount_xl is None and buy_elg is not None and sell_elg is not None:
+                amount_xl = buy_elg - sell_elg
+            if amount_l is None and buy_lg is not None and sell_lg is not None:
+                amount_l = buy_lg - sell_lg
+
+            main_amount = _float_or_none(net_amount_main)
+            if main_amount is None and (amount_xl is not None or amount_l is not None):
+                main_amount = (amount_xl or 0.0) + (amount_l or 0.0)
+
+            result[str(symbol)] = {
+                "buy_elg_amount": buy_elg,
+                "sell_elg_amount": sell_elg,
+                "buy_lg_amount": buy_lg,
+                "sell_lg_amount": sell_lg,
+                "net_amount_xl": amount_xl,
+                "net_amount_l": amount_l,
+                "net_mf_amount": main_amount if main_amount is not None else _float_or_none(net_mf_amount),
+                "net_pct_main": _float_or_none(net_pct_main),
+                "moneyflow_trade_date": _date_or_none(moneyflow_trade_date),
+            }
+        return result
 
     async def add_to_watchlist(self, group_id: int, symbol: str) -> WatchlistStock:
         """
