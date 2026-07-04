@@ -9,6 +9,19 @@ const instance: AxiosInstance = axios.create({
   },
 })
 
+function formatErrorMessage(detail: unknown, fallback: string): string {
+  if (Array.isArray(detail)) {
+    return detail.map(item => {
+      if (item && typeof item === 'object' && 'msg' in item) {
+        return String((item as { msg: unknown }).msg)
+      }
+      return JSON.stringify(item)
+    }).join('；')
+  }
+  if (detail) return String(detail)
+  return fallback
+}
+
 // 响应拦截器 - 解包 response.data，并解包后端的 { code, message, data } 包装
 instance.interceptors.response.use(
   (response: AxiosResponse) => {
@@ -27,7 +40,7 @@ instance.interceptors.response.use(
     return backendData
   },
   (error) => {
-    const message = error.response?.data?.detail || error.message || '请求失败'
+    const message = formatErrorMessage(error.response?.data?.detail, error.message || '请求失败')
     ElMessage.error(message)
     return Promise.reject(error)
   }

@@ -161,6 +161,78 @@
         </el-button>
       </section>
 
+      <section v-if="aiConfig" class="dock-group" :class="{ 'dock-group--warning': !aiConfig.api_key_configured || aiConfig.api_key_warning }">
+        <div class="dock-row">
+          <strong>AI Gateway</strong>
+          <el-tag :type="aiConfig.api_key_configured && !aiConfig.api_key_warning ? 'success' : 'warning'" effect="plain" size="small">
+            {{ aiConfig.api_key_configured ? (aiConfig.api_key_warning ? 'WARN' : 'READY') : 'NO KEY' }}
+          </el-tag>
+        </div>
+        <div class="ai-config-grid">
+          <label class="config-field">
+            <span>Enabled</span>
+            <el-switch v-model="aiConfigDraft.enabled" inline-prompt active-text="ON" inactive-text="OFF" />
+          </label>
+          <label class="config-field">
+            <span>Provider</span>
+            <el-input v-model="aiConfigDraft.provider" size="small" disabled />
+          </label>
+          <label class="config-field config-field--full">
+            <span>Model</span>
+            <el-input v-model="aiConfigDraft.model" size="small" placeholder="gpt-4o-mini / deepseek/deepseek-chat" />
+          </label>
+          <label class="config-field config-field--full">
+            <span>Base URL</span>
+            <el-input
+              v-model="aiConfigDraft.base_url"
+              size="small"
+              placeholder="https://api.openai.com/v1"
+            />
+          </label>
+          <label class="config-field config-field--full">
+            <span>Key Env</span>
+            <el-input v-model="aiConfigDraft.api_key_env" size="small" placeholder="OPENAI_API_KEY" />
+          </label>
+          <label class="config-field config-field--full">
+            <span>API Key</span>
+            <el-input
+              v-model="aiConfigDraft.api_key"
+              type="password"
+              show-password
+              size="small"
+              autocomplete="off"
+              placeholder="sk-... / sk-proj-..."
+            />
+          </label>
+        </div>
+        <div class="secret-line">
+          <span>{{ aiConfig.api_key_masked || '未配置' }}</span>
+          <small>{{ aiConfig.api_key_source || aiConfig.api_key_env }}</small>
+        </div>
+        <small v-if="aiConfig.api_key_warning" class="dock-warning-text">{{ aiConfig.api_key_warning }}</small>
+        <small class="dock-env">{{ aiConfig.env_file }}</small>
+        <div class="dock-actions">
+          <el-button :disabled="savingAIConfig || !aiConfigDirty" @click="resetAIConfigDraft">恢复当前</el-button>
+          <el-button
+            type="primary"
+            :loading="savingAIConfig"
+            :disabled="!aiConfigDirty"
+            @click="saveAIConfig"
+          >
+            保存 Key
+          </el-button>
+          <el-button
+            plain
+            type="warning"
+            :loading="clearingAIKey"
+            :disabled="!aiConfig.api_key_configured"
+            @click="clearAIKey"
+          >
+            清空
+          </el-button>
+        </div>
+      </section>
+
       <section v-if="liveGuardrails" class="dock-group" :class="{ 'dock-group--danger': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }">
         <div class="dock-row">
           <strong>实盘交易护栏</strong>
@@ -233,6 +305,7 @@ import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
+import { aiApi, type AIConfig } from '@/api/ai'
 import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type LiveTradingGuardrails, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
@@ -316,12 +389,23 @@ const dataSummary = ref<DataSummary | null>(null)
 const liveStatus = ref<LiveTradingStatus | null>(null)
 const devDataMode = ref<DevDataMode | null>(null)
 const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
+const aiConfig = ref<AIConfig | null>(null)
+const aiConfigDraft = ref({
+  enabled: true,
+  provider: 'litellm',
+  model: '',
+  base_url: '',
+  api_key_env: '',
+  api_key: '',
+})
 const guardrailDraft = ref({
   enable_order_submit: false,
   auto_execute_enabled: false,
 })
 const switchingDataMode = ref(false)
 const savingGuardrails = ref(false)
+const savingAIConfig = ref(false)
+const clearingAIKey = ref(false)
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
@@ -336,6 +420,17 @@ const guardrailsDirty = computed(() => Boolean(
   && (
     guardrailDraft.value.enable_order_submit !== liveGuardrails.value.enable_order_submit
     || guardrailDraft.value.auto_execute_enabled !== liveGuardrails.value.auto_execute_enabled
+  ),
+))
+const aiConfigDirty = computed(() => Boolean(
+  aiConfig.value
+  && (
+    aiConfigDraft.value.enabled !== aiConfig.value.enabled
+    || aiConfigDraft.value.provider.trim() !== aiConfig.value.provider
+    || aiConfigDraft.value.model.trim() !== aiConfig.value.model
+    || normalizedAIBaseURL(aiConfigDraft.value.base_url) !== normalizedAIBaseURL(aiConfig.value.base_url || '')
+    || aiConfigDraft.value.api_key_env.trim() !== aiConfig.value.api_key_env
+    || aiConfigDraft.value.api_key.trim().length > 0
   ),
 ))
 
@@ -447,6 +542,17 @@ const incidentRows = computed<IncidentRow[]>(() => {
       tone: 'warn',
     })
   }
+  if (aiConfig.value && !aiConfig.value.api_key_configured) {
+    rows.push({
+      key: 'ai-key',
+      scope: 'AI',
+      title: 'AI Gateway 未配置 API Key',
+      detail: `${aiConfig.value.api_key_env} 未配置，Copilot 会以工具离线模式运行`,
+      action: '配置',
+      path: '/monitor',
+      tone: 'warn',
+    })
+  }
   if (liveGuardrails.value?.enable_order_submit) {
     rows.push({
       key: 'order-open',
@@ -507,6 +613,12 @@ const controlRows = computed<ControlRow[]>(() => [
     value: `${staleDatasetCount.value} 项`,
     hint: dataSummary.value?.generated_at ? `生成于 ${formatDateTime(dataSummary.value.generated_at)}` : '等待 data-summary',
     tone: staleDatasetCount.value ? 'warn' : 'good',
+  },
+  {
+    label: 'AI Key',
+    value: aiConfig.value?.api_key_configured ? '已配置' : '未配置',
+    hint: aiConfig.value?.model || 'AI_MODEL',
+    tone: aiConfig.value?.api_key_configured ? 'good' : 'warn',
   },
   {
     label: '真实下单',
@@ -778,7 +890,7 @@ const logPreviewLines = computed(() => {
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult, aiConfigResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
@@ -787,6 +899,7 @@ async function loadOps() {
       liveTradingApi.status(),
       systemApi.getDevDataMode(),
       systemApi.getLiveTradingGuardrails(),
+      aiApi.config(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -798,6 +911,10 @@ async function loadOps() {
     if (guardrailsResult.status === 'fulfilled') {
       liveGuardrails.value = guardrailsResult.value
       resetLiveGuardrailDraft()
+    }
+    if (aiConfigResult.status === 'fulfilled') {
+      aiConfig.value = aiConfigResult.value
+      resetAIConfigDraft()
     }
   } finally {
     loading.value = false
@@ -879,6 +996,81 @@ function resetLiveGuardrailDraft() {
   guardrailDraft.value = {
     enable_order_submit: liveGuardrails.value.enable_order_submit,
     auto_execute_enabled: liveGuardrails.value.auto_execute_enabled,
+  }
+}
+
+function resetAIConfigDraft() {
+  if (!aiConfig.value) return
+  aiConfigDraft.value = {
+    enabled: aiConfig.value.enabled,
+    provider: aiConfig.value.provider,
+    model: aiConfig.value.model,
+    base_url: aiConfig.value.base_url || '',
+    api_key_env: aiConfig.value.api_key_env,
+    api_key: '',
+  }
+}
+
+async function saveAIConfig() {
+  if (!aiConfig.value || !aiConfigDirty.value || savingAIConfig.value) return
+  savingAIConfig.value = true
+  try {
+    let apiKey = aiConfigDraft.value.api_key.trim()
+    let apiKeyEnv = aiConfigDraft.value.api_key_env.trim()
+    if (!apiKey && looksLikeAISecret(apiKeyEnv)) {
+      apiKey = apiKeyEnv
+      apiKeyEnv = defaultAIKeyEnv(aiConfigDraft.value.model, aiConfigDraft.value.base_url)
+    }
+    if (!apiKeyEnv) {
+      apiKeyEnv = defaultAIKeyEnv(aiConfigDraft.value.model, aiConfigDraft.value.base_url)
+    }
+    aiConfig.value = await aiApi.updateConfig({
+      enabled: aiConfigDraft.value.enabled,
+      provider: aiConfigDraft.value.provider.trim(),
+      model: aiConfigDraft.value.model.trim(),
+      base_url: normalizedAIBaseURL(aiConfigDraft.value.base_url),
+      api_key_env: apiKeyEnv,
+      api_key: apiKey || undefined,
+    })
+    resetAIConfigDraft()
+    ElMessage.success(aiConfig.value.api_key_configured ? 'AI Gateway 配置已更新' : 'AI Gateway 已保存，Key 仍未配置')
+  } catch (error: any) {
+    const detail = requestErrorDetail(error)
+    ElMessage.error(`AI Gateway 保存失败：${detail}`)
+  } finally {
+    savingAIConfig.value = false
+  }
+}
+
+async function clearAIKey() {
+  if (!aiConfig.value || clearingAIKey.value) return
+  const confirmed = await ElMessageBox.confirm(
+    `确认清空 ${aiConfig.value.api_key_env}？`,
+    '清空 AI API Key',
+    { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning' },
+  ).catch(() => false)
+  if (!confirmed) return
+
+  clearingAIKey.value = true
+  try {
+    const apiKeyEnv = looksLikeAISecret(aiConfigDraft.value.api_key_env)
+      ? defaultAIKeyEnv(aiConfigDraft.value.model, aiConfigDraft.value.base_url)
+      : aiConfigDraft.value.api_key_env.trim() || defaultAIKeyEnv(aiConfigDraft.value.model, aiConfigDraft.value.base_url)
+    aiConfig.value = await aiApi.updateConfig({
+      enabled: aiConfigDraft.value.enabled,
+      provider: aiConfigDraft.value.provider.trim(),
+      model: aiConfigDraft.value.model.trim(),
+      base_url: normalizedAIBaseURL(aiConfigDraft.value.base_url),
+      api_key_env: apiKeyEnv,
+      clear_api_key: true,
+    })
+    resetAIConfigDraft()
+    ElMessage.success('AI API Key 已清空')
+  } catch (error: any) {
+    const detail = requestErrorDetail(error)
+    ElMessage.error(`清空失败：${detail}`)
+  } finally {
+    clearingAIKey.value = false
   }
 }
 
@@ -1021,11 +1213,36 @@ function formatDateTime(value?: string | null): string {
   return value.replace('T', ' ').slice(0, value.includes(':') ? 16 : 10)
 }
 
+function normalizedAIBaseURL(value?: string | null): string {
+  return String(value || '').trim().replace(/\/+$/, '')
+}
+
+function looksLikeAISecret(value?: string | null): boolean {
+  const text = String(value || '').trim()
+  return /^sk-[A-Za-z0-9_.-]{8,}$/.test(text) || /^[A-Za-z0-9_-]{24,}$/.test(text)
+}
+
+function defaultAIKeyEnv(model?: string | null, baseURL?: string | null): string {
+  const text = `${model || ''} ${baseURL || ''}`.toLowerCase()
+  if (text.includes('deepseek')) return 'DEEPSEEK_API_KEY'
+  return 'OPENAI_API_KEY'
+}
+
+function requestErrorDetail(error: any): string {
+  const detail = error?.response?.data?.detail
+  if (Array.isArray(detail)) {
+    return detail.map(item => item?.msg || JSON.stringify(item)).join('；')
+  }
+  if (detail) return String(detail)
+  return error?.message || String(error)
+}
+
 function incidentStation(row: IncidentRow): string {
   if (['API'].includes(row.scope)) return '接入'
   if (['SYNC', 'QUEUE'].includes(row.scope)) return '同步'
   if (row.scope === 'DATA') return '存储'
   if (row.scope === 'TASK') return '计算'
+  if (row.scope === 'AI') return '接入'
   if (row.scope === 'TRADE') return '安全'
   if (row.scope === 'CLEAR') return '安全'
   return '审计'
@@ -1536,6 +1753,67 @@ onMounted(loadOps)
   color: var(--text-bright);
   font-family: var(--font-data);
   font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-config-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.config-field {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.config-field--full {
+  grid-column: 1 / -1;
+}
+
+.config-field > span {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: 800;
+}
+
+.secret-line {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 30px;
+  padding: 6px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+}
+
+.secret-line span,
+.secret-line small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.secret-line span {
+  color: var(--text-bright);
+  font-weight: 900;
+}
+
+.secret-line small {
+  color: var(--text-muted);
+}
+
+.dock-warning-text {
+  overflow: hidden;
+  color: var(--accent-warning);
+  font-size: var(--text-xs);
+  font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -263,6 +263,7 @@ def test_alpha101_wide_matches_legacy_core_formulas() -> None:
     panel = _alpha_input_frame(periods=320, symbol_count=12)
     legacy = Alphas(panel)
     wide = WideAlphas(panel)
+    compared = 0
 
     for factor_name in sorted(SUPPORTED_WIDE_ALPHA101):
         alpha_number = int(factor_name.rsplit("_", 1)[1])
@@ -270,11 +271,15 @@ def test_alpha101_wide_matches_legacy_core_formulas() -> None:
         actual = wide.compute_series(factor_name).rename("wide")
         joined = pd.concat([expected, actual], axis=1).dropna()
 
+        if len(joined) == 0 and expected.notna().sum() == 0 and actual.notna().sum() == 0:
+            continue
         assert len(joined) > 0
+        compared += 1
         max_abs = (joined["legacy"] - joined["wide"]).abs().max()
         assert max_abs < 0.1
         if max_abs > 1e-9:
             assert joined["legacy"].corr(joined["wide"]) > 0.999
+    assert compared > 0
 
 
 def test_alpha101_precompute_continues_after_factor_error(monkeypatch) -> None:

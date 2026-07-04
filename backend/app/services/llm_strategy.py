@@ -9,10 +9,12 @@ import json
 import re
 import uuid
 
-from anthropic import Anthropic
 from loguru import logger
 
+from app.ai.gateway import get_llm_gateway
+from app.ai.schemas import AIChatMessage
 from app.cache.redis_cache import get_redis_client
+from app.core.config import settings
 
 SESSION_TTL = 3600  # 1 小时，秒
 SESSION_PREFIX = "llm:chat:"
@@ -118,17 +120,17 @@ class MyStrategy(aq.Strategy):
 """
 
 
-def _get_llm() -> Anthropic:
-    return Anthropic()
-
-
-def _extract_text(response) -> str:
-    """从 LLM response 提取文本，跳过 ThinkingBlock"""
-    parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            parts.append(block.text)
-    return "\n".join(parts)
+def _chat(system: str, messages: list[dict], *, temperature: float) -> str:
+    """Call the unified AI Native LLM gateway."""
+    return get_llm_gateway().chat(
+        system=system,
+        messages=[
+            AIChatMessage(role=str(message["role"]), content=str(message["content"]))
+            for message in messages
+        ],
+        temperature=temperature,
+        max_tokens=settings.ai_max_tokens,
+    )
 
 
 def _extract_code(content: str) -> str | None:
@@ -147,20 +149,14 @@ def _extract_code(content: str) -> str | None:
 
 def convert_to_akquant(source_code: str) -> str:
     """单次调用：将任意策略代码转为 akquant 格式"""
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
-        temperature=0.2,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
-        system=CONVERT_SYSTEM,
-        messages=[{
+    content = _chat(
+        CONVERT_SYSTEM,
+        [{
             "role": "user",
             "content": f"把以下代码按照akquant的格式转化:\n\n{source_code[:8000]}",
         }],
+        temperature=0.2,
     )
-    content = _extract_text(response)
     logger.info("LLM raw response (first 300 chars): {}", content[:300])
     code = _extract_code(content)
     if code:
@@ -190,17 +186,7 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
         {"role": "user", "content": f"我正在阅读一份研报 ({report_filename})。请理解其中的策略逻辑。\n\n研报内容:\n{report_text[:12000]}\n\n请总结研报中的选股逻辑、调仓频率和风控规则，然后询问我是否需要调整或补充。如果逻辑已经清晰，可以直接生成策略代码。"}
     ]
 
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
-        temperature=0.3,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
-        system=CHAT_SYSTEM,
-        messages=messages,
-    )
-    reply = _extract_text(response)
+    reply = _chat(CHAT_SYSTEM, messages, temperature=0.3)
 
     # 保存到 Redis
     messages.append({"role": "assistant", "content": reply})
@@ -232,17 +218,7 @@ def send_chat_message(session_id: str, message: str) -> dict:
     # 追加用户消息
     messages.append({"role": "user", "content": message})
 
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
-        temperature=0.3,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
-        system=CHAT_SYSTEM,
-        messages=messages,
-    )
-    reply = _extract_text(response)
+    reply = _chat(CHAT_SYSTEM, messages, temperature=0.3)
 
     # 更新 Redis
     messages.append({"role": "assistant", "content": reply})

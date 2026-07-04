@@ -5,8 +5,11 @@ import json
 import re
 from pathlib import Path
 
-from anthropic import Anthropic
 from loguru import logger
+
+from app.ai.gateway import get_llm_gateway
+from app.ai.schemas import AIChatMessage
+from app.core.config import settings
 
 # 平台知识库 — 数据字典 + 策略模板
 _SYSTEM_PROMPT = """你是量化策略开发专家。你精通 A 股数据分析和 Python 回测代码编写。
@@ -84,15 +87,12 @@ def parse_report(file_path: str) -> str:
 
 def generate_strategy(report_text: str) -> dict:
     """调用 LLM 生成策略"""
-    client = Anthropic()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=4096,
-        temperature=0.3,
+    content = get_llm_gateway().chat(
         system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": _build_user_prompt(report_text)}],
+        messages=[AIChatMessage(role="user", content=_build_user_prompt(report_text))],
+        temperature=0.3,
+        max_tokens=min(settings.ai_max_tokens, 8192),
     )
-    content = response.content[0].text
 
     # 提取 JSON
     json_match = re.search(r'\{[\s\S]*\}', content)

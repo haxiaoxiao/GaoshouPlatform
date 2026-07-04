@@ -22,6 +22,8 @@ dependencies = [
     "loguru>=0.7.0",
     "akquant>=0.2.40",
     "tushare>=1.4.0",
+    "litellm>=1.0.0",
+    "mcp>=1.0.0",
 ]
 
 [project.optional-dependencies]

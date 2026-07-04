@@ -12,6 +12,7 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     CodeEditor: typeof import('./src/components/CodeEditor.vue')['default']
+    CopilotDrawer: typeof import('./src/components/CopilotDrawer.vue')['default']
     ElAlert: typeof import('element-plus/es')['ElAlert']
     ElAutoResizer: typeof import('element-plus/es')['ElAutoResizer']
     ElButton: typeof import('element-plus/es')['ElButton']

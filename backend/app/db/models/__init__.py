@@ -1,6 +1,7 @@
 # backend/app/db/models/__init__.py
 """数据模型"""
 from .base import Base, TimestampMixin
+from .ai import AIArtifact
 from .factor import Factor, FactorAnalysis, FactorResearchRun, FactorResearchRunItem
 from .financial import FinancialData
 from .live_trading import (
@@ -21,6 +22,7 @@ from .watchlist import WatchlistGroup, WatchlistStock
 __all__ = [
     "Base",
     "TimestampMixin",
+    "AIArtifact",
     "Stock",
     "StockConceptMembership",
     "Strategy",

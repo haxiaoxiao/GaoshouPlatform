@@ -7,12 +7,15 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.core.config import settings
-from app.db.models.live_trading import LiveStrategyProfile, LiveTradeRecord
+from app.db.models.live_trading import LivePositionState, LiveStrategyProfile, LiveTradeRecord
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory, init_db
 from app.main import app
-from app.services.live_trading import StrategyProfileBundle, live_trading_service
-
+from app.services.live_trading import (
+    STRATEGY_ACCOUNT_SYMBOL,
+    StrategyProfileBundle,
+    live_trading_service,
+)
 
 STABLE_CODE = """
 FACTOR_CONFIGS = [{"factor_name": "pe_ttm", "weight": 1.0}]
@@ -83,6 +86,35 @@ async def _prepare_live_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
         await session.commit()
     await live_trading_service.stop_runner()
     await live_trading_service.ensure_default_profiles()
+    await _seed_strategy_account("tsmf_cashaware_stable", "paper")
+
+
+async def _seed_strategy_account(profile_key: str, mode: str, capital: float = 1_000_000) -> None:
+    async with async_session_factory() as session:
+        session.add(
+            LivePositionState(
+                profile_key=profile_key,
+                mode=mode,
+                symbol=STRATEGY_ACCOUNT_SYMBOL,
+                state={
+                    "initialized": True,
+                    "account_scope": "strategy_pool",
+                    "profile_key": profile_key,
+                    "mode": mode,
+                    "initial_capital": capital,
+                    "target_capital": capital,
+                    "cash": capital,
+                    "market_value": 0.0,
+                    "total_asset": capital,
+                    "position_cost_basis": 0.0,
+                    "principal_cash": capital,
+                    "principal_basis": "position_cost_basis_plus_cash",
+                    "fee_overdraft_limit": max(100.0, capital * 0.005),
+                    "positions_source": "strategy_owned_only",
+                },
+            )
+        )
+        await session.commit()
 
 
 @pytest.mark.asyncio
@@ -450,7 +482,12 @@ async def test_live_mode_guardrails_block_runner_and_order_submit(monkeypatch, t
     async def fake_load_profile_bundle(_profile_key):
         return fake_bundle
 
+    async def fake_validate_strategy_account_orders(**_kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr(live_trading_service, "_load_profile_bundle", fake_load_profile_bundle)
+    monkeypatch.setattr(live_trading_service, "_validate_strategy_account_orders", fake_validate_strategy_account_orders)
+    await _seed_strategy_account(fake_profile.profile_key, "live")
 
     submit_resp = await live_trading_service.submit_orders(
         [

@@ -98,6 +98,16 @@ class Settings(BaseSettings):
     indevs_tushare_rps: float = 1.0
     indevs_tushare_timeout_seconds: int = 30
 
+    # AI Native v2 配置
+    ai_enabled: bool = True
+    ai_provider: str = "litellm"
+    ai_model: str = "deepseek/deepseek-chat"
+    ai_api_key_env: str = "DEEPSEEK_API_KEY"
+    ai_base_url: str = ""
+    ai_temperature: float = 0.3
+    ai_timeout_seconds: float = 300.0
+    ai_max_tokens: int = 8192
+
     # 模拟 / 实盘交易配置
     live_trading_enable_order_submit: bool = False
     live_trading_auto_execute_enabled: bool = False

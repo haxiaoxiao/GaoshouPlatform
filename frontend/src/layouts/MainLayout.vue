@@ -13,11 +13,12 @@
       <div class="sidebar__brand">
         <div class="brand-icon" aria-hidden="true">
           GS
+          <span class="brand-ai-mark">AI</span>
           <span class="brand-env-badge">{{ envLabel }}</span>
         </div>
         <div v-if="!isCollapsed" class="brand-text">
-          <span class="brand-name">GAOSHOU</span>
-          <span class="brand-tagline">Quant Research Cockpit</span>
+          <span class="brand-name">GAOSHOU AI</span>
+          <span class="brand-tagline">AI Native Quant Cockpit</span>
         </div>
       </div>
 
@@ -89,6 +90,12 @@
         </label>
 
         <div class="topbar__right">
+          <button class="action-btn" title="Copilot" type="button" @click="toggleCopilot">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z"/>
+              <path d="M5 17l.9 2.1L8 20l-2.1.9L5 23l-.9-2.1L2 20l2.1-.9L5 17z"/>
+            </svg>
+          </button>
           <div class="notification-wrapper">
             <button class="action-btn" title="通知" type="button" @click="toggleNotificationPanel">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -113,6 +120,8 @@
 
       <StatusBar />
     </main>
+
+    <CopilotDrawer :visible="showCopilot" @close="showCopilot = false" />
   </div>
 </template>
 
@@ -126,6 +135,7 @@ import {
   type AppNavItem,
 } from '@/app/navigation'
 import { useNotificationStore } from '@/stores/notification'
+import CopilotDrawer from '@/components/CopilotDrawer.vue'
 import NotificationPanel from '@/components/NotificationPanel.vue'
 import StatusBar from '@/components/StatusBar.vue'
 
@@ -135,11 +145,12 @@ const route = useRoute()
 const isCollapsed = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
+const showCopilot = ref(false)
 const showNotifications = ref(false)
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
-const envLabel = (import.meta.env.VITE_APP_ENV_LABEL || 'PROD').toString()
+const envLabel = (import.meta.env.VITE_APP_ENV_LABEL || 'V2').toString()
 
 const pageTitle = computed(() => {
   const title = route.meta.title
@@ -162,6 +173,10 @@ function toggleSidebar() {
 
 function toggleNotificationPanel() {
   showNotifications.value = !showNotifications.value
+}
+
+function toggleCopilot() {
+  showCopilot.value = !showCopilot.value
 }
 
 function closeNotificationPanel(e: MouseEvent) {
@@ -278,14 +293,38 @@ onUnmounted(() => {
   height: 40px;
   display: grid;
   place-items: center;
-  border: 1px solid var(--border-default);
+  border: 1px solid rgba(14, 89, 75, 0.28);
   border-radius: var(--radius-md);
-  background: linear-gradient(145deg, var(--accent-primary), var(--accent-secondary));
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.16), transparent 46%),
+    linear-gradient(145deg, #0b5f4f, #243f7a 58%, #6b3fb2);
   color: #fdfbf7;
   font-family: var(--font-display);
   font-size: var(--text-sm);
   font-weight: 800;
-  box-shadow: 0 10px 22px rgba(27, 61, 50, 0.16);
+  box-shadow:
+    0 10px 22px rgba(27, 61, 50, 0.16),
+    0 0 0 4px rgba(54, 109, 189, 0.08);
+}
+
+.brand-ai-mark {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  min-width: 22px;
+  min-height: 18px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 7px;
+  background: #fdfbf7;
+  color: #243f7a;
+  font-family: var(--font-data);
+  font-size: 9px;
+  font-weight: 900;
+  line-height: 1;
+  box-shadow: 0 7px 14px rgba(36, 63, 122, 0.2);
 }
 
 .brand-env-badge {
@@ -294,10 +333,10 @@ onUnmounted(() => {
   bottom: -7px;
   min-width: 32px;
   padding: 2px 6px;
-  border: 1px solid rgba(168, 50, 50, 0.28);
+  border: 1px solid rgba(36, 63, 122, 0.24);
   border-radius: var(--radius-full);
-  background: var(--status-critical-bg);
-  color: var(--status-critical);
+  background: #eef3ff;
+  color: #243f7a;
   font-family: var(--font-data);
   font-size: 9px;
   font-weight: 900;
@@ -305,7 +344,7 @@ onUnmounted(() => {
   letter-spacing: 0;
   text-align: center;
   text-transform: uppercase;
-  box-shadow: 0 6px 14px rgba(168, 50, 50, 0.12);
+  box-shadow: 0 6px 14px rgba(36, 63, 122, 0.12);
 }
 
 .brand-text {
