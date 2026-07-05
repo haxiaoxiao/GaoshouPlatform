@@ -7,7 +7,13 @@ for %%I in ("%~dp0..") do set "SCRIPT_ROOT=%%~fI"
 if defined GAOSHOU_ROOT (set "ROOT=%GAOSHOU_ROOT%") else (set "ROOT=%SCRIPT_ROOT%")
 set "BACKEND_DIR=%ROOT%\backend"
 set "FRONTEND_DIR=%ROOT%\frontend"
-if defined GAOSHOU_ENV_FILE (set "ENV_FILE=%GAOSHOU_ENV_FILE%") else (set "ENV_FILE=%ROOT%\.env.local")
+if defined GAOSHOU_ENV_FILE (
+  set "ENV_FILE=%GAOSHOU_ENV_FILE%"
+) else if exist "%ROOT%\.env.local" (
+  set "ENV_FILE=%ROOT%\.env.local"
+) else (
+  set "ENV_FILE=%ROOT%\.env"
+)
 if defined GAOSHOU_PYTHON (set "PYTHON=%GAOSHOU_PYTHON%") else (set "PYTHON=%BACKEND_DIR%\.venv\Scripts\python.exe")
 
 if defined GAOSHOU_BACKEND_HOST (set "BACKEND_HOST=%GAOSHOU_BACKEND_HOST%") else (set "BACKEND_HOST=127.0.0.1")
@@ -25,6 +31,9 @@ if "%GAOSHOU_SKIP_OPTIONAL_CHECKS%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 if "%GAOSHOU_SKIP_DOCKER%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 
 set "MARKET_DATA_BACKEND=parquet"
+set "GAOSHOU_DATA_DIR="
+set "PARQUET_DATA_DIR="
+set "DATABASE_URL="
 set "REDIS_PORT=16379"
 set "QMT_ACCOUNT_ID="
 set "QMT_TRADER_PATH="
@@ -36,6 +45,9 @@ if exist "%ENV_FILE%" (
   for /f "usebackq tokens=1,* delims==" %%a in ("%ENV_FILE%") do (
     set "K=%%a"
     set "V=%%b"
+    if /i "!K!"=="GAOSHOU_DATA_DIR" set "GAOSHOU_DATA_DIR=!V!"
+    if /i "!K!"=="PARQUET_DATA_DIR" set "PARQUET_DATA_DIR=!V!"
+    if /i "!K!"=="DATABASE_URL" set "DATABASE_URL=!V!"
     if /i "!K!"=="MARKET_DATA_BACKEND" set "MARKET_DATA_BACKEND=!V!"
     if /i "!K!"=="REDIS_PORT" set "REDIS_PORT=!V!"
     if /i "!K!"=="QMT_ACCOUNT_ID" set "QMT_ACCOUNT_ID=!V!"
@@ -70,6 +82,9 @@ echo Backend:   http://%BACKEND_HOST%:%BACKEND_PORT%
 echo Sync:      http://%SYNC_HOST%:%SYNC_PORT%
 echo Frontend:  %FRONTEND_URL%
 echo Data mode: %MARKET_DATA_BACKEND%  storage=Parquet/DuckDB
+if defined GAOSHOU_DATA_DIR echo Data root: %GAOSHOU_DATA_DIR%
+if defined PARQUET_DATA_DIR echo Parquet:   %PARQUET_DATA_DIR%
+if defined DATABASE_URL echo SQLite:   %DATABASE_URL%
 echo miniQMT:   account %QMT_ACCOUNT_STATUS%  order_submit=%LIVE_TRADING_ENABLE_ORDER_SUBMIT%  auto_execute=%LIVE_TRADING_AUTO_EXECUTE_ENABLED%
 echo.
 
@@ -124,6 +139,18 @@ if "%SKIP_OPTIONAL_CHECKS%"=="1" (
 echo [3/7] Market data storage...
 if /i not "%MARKET_DATA_BACKEND%"=="parquet" (
   echo       WARN: MARKET_DATA_BACKEND=%MARKET_DATA_BACKEND% is ignored; Parquet/DuckDB is the only supported backend.
+)
+if not defined GAOSHOU_DATA_DIR (
+  echo       WARN: GAOSHOU_DATA_DIR is not configured in %ENV_FILE%.
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "if(-not (Test-Path -LiteralPath '%GAOSHOU_DATA_DIR%')){ exit 1 }" >nul 2>&1
+  if errorlevel 1 echo       WARN: GAOSHOU_DATA_DIR does not exist or is not reachable from this shell: %GAOSHOU_DATA_DIR%
+)
+if not defined PARQUET_DATA_DIR (
+  echo       WARN: PARQUET_DATA_DIR is not configured in %ENV_FILE%.
+) else (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "if(-not (Test-Path -LiteralPath '%PARQUET_DATA_DIR%')){ exit 1 }" >nul 2>&1
+  if errorlevel 1 echo       WARN: PARQUET_DATA_DIR does not exist or is not reachable from this shell: %PARQUET_DATA_DIR%
 )
 echo       OK: Parquet/DuckDB mode
 

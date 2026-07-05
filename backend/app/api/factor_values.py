@@ -41,6 +41,7 @@ from app.services.index_components import load_index_symbols
 from app.services.ml_score_factor_calculator import ML_SCORE_FACTOR_SPECS, precompute_ml_score_factors
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
+from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 from app.services.ta_factor_calculator import precompute_ta_factors
 from app.services.task_queue import QueuedTask, get_task_queue
 from app.services.tushare_relay_factor_calculator import precompute_relay_factors
@@ -158,6 +159,24 @@ _CATALOG_FACTORS = _ALPHA101_FACTORS | _TA_FACTORS | _RESEARCH_FACTORS | _RELAY_
 _SUPPORTED_PRECOMPUTE_FACTORS = _CORE_FACTORS | _HIGH_VOLUME_FACTORS | _CATALOG_FACTORS | _ML_SCORE_FACTORS
 
 
+async def _resolve_precompute_symbols(
+    *,
+    symbols: list[str] | None,
+    index_symbol: str | None,
+    start_date: date | None,
+    end_date: date | None,
+) -> list[str] | None:
+    if symbols:
+        return sorted({str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()})
+    if not index_symbol:
+        return None
+    if is_all_a_universe(index_symbol):
+        return await asyncio.to_thread(load_all_a_symbols, as_of=end_date, start_date=start_date)
+    if start_date is None or end_date is None:
+        return None
+    return await load_index_symbols(index_symbol, start_date, end_date)
+
+
 @router.get("/definitions")
 async def definitions() -> dict[str, Any]:
     return {"code": 0, "message": "success", "data": list_factor_definitions()}
@@ -178,9 +197,12 @@ async def param_hashes(request: FactorParamHashRequest = Body(...)) -> dict[str,
     unknown = [name for name in factor_names if get_factor_definition(name) is None]
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown factors: {unknown}")
-    symbol_list = request.symbols
-    if symbol_list is None and request.index_symbol and request.start_date and request.end_date:
-        symbol_list = await load_index_symbols(request.index_symbol, request.start_date, request.end_date)
+    symbol_list = await _resolve_precompute_symbols(
+        symbols=request.symbols,
+        index_symbol=request.index_symbol,
+        start_date=request.start_date,
+        end_date=request.end_date,
+    )
     store = get_factor_value_store()
     data = await run_in_thread(
         store.list_param_hashes,
@@ -270,9 +292,12 @@ async def coverage(
 ) -> dict[str, Any]:
     if get_factor_definition(factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Unknown factor: {factor_name}")
-    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
-    if symbol_list is None and index_symbol:
-        symbol_list = await load_index_symbols(index_symbol, start_date, end_date)
+    symbol_list = await _resolve_precompute_symbols(
+        symbols=[s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None,
+        index_symbol=index_symbol,
+        start_date=start_date,
+        end_date=end_date,
+    )
     params = _build_params(factor_name, as_of_time, window, threshold, daily_volume_to_share_multiplier)
     store = get_factor_value_store()
     effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
@@ -547,9 +572,12 @@ async def _execute_factor_bundle(
     params: dict[str, Any],
 ) -> dict[str, Any]:
     names = [str(name) for name in factor_names if str(name)]
-    symbol_list = symbols
-    if symbol_list is None and index_symbol:
-        symbol_list = await load_index_symbols(index_symbol, start_date, end_date)
+    symbol_list = await _resolve_precompute_symbols(
+        symbols=symbols,
+        index_symbol=index_symbol,
+        start_date=start_date,
+        end_date=end_date,
+    )
     if not symbol_list:
         raise ValueError("No symbols resolved for factor precompute")
 
@@ -832,9 +860,12 @@ def _safe_attach_result_coverage(
 async def query(request: FactorQueryRequest = Body(...)) -> dict[str, Any]:
     if get_factor_definition(request.factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Unknown factor: {request.factor_name}")
-    symbol_list = request.symbols
-    if symbol_list is None and request.index_symbol:
-        symbol_list = await load_index_symbols(request.index_symbol, request.trade_date, request.trade_date)
+    symbol_list = await _resolve_precompute_symbols(
+        symbols=request.symbols,
+        index_symbol=request.index_symbol,
+        start_date=request.trade_date,
+        end_date=request.trade_date,
+    )
     values = get_factor_value_store().load_cross_section(
         factor_name=request.factor_name,
         trade_date=request.trade_date,
@@ -867,9 +898,12 @@ async def preview(
 ) -> dict[str, Any]:
     if get_factor_definition(factor_name) is None:
         raise HTTPException(status_code=404, detail=f"Unknown factor: {factor_name}")
-    symbol_list = [s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None
-    if symbol_list is None and index_symbol:
-        symbol_list = await load_index_symbols(index_symbol, trade_date, trade_date)
+    symbol_list = await _resolve_precompute_symbols(
+        symbols=[s.strip().upper() for s in symbols.split(",") if s.strip()] if symbols else None,
+        index_symbol=index_symbol,
+        start_date=trade_date,
+        end_date=trade_date,
+    )
     params = _build_params(factor_name, as_of_time, window, threshold, daily_volume_to_share_multiplier)
     effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
     store = get_factor_value_store()

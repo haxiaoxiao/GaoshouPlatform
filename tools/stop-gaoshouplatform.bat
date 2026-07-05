@@ -5,7 +5,13 @@ title GaoshouPlatform Shutdown
 
 for %%I in ("%~dp0..") do set "SCRIPT_ROOT=%%~fI"
 if defined GAOSHOU_ROOT (set "ROOT=%GAOSHOU_ROOT%") else (set "ROOT=%SCRIPT_ROOT%")
-if defined GAOSHOU_ENV_FILE (set "ENV_FILE=%GAOSHOU_ENV_FILE%") else (set "ENV_FILE=%ROOT%\.env.local")
+if defined GAOSHOU_ENV_FILE (
+  set "ENV_FILE=%GAOSHOU_ENV_FILE%"
+) else if exist "%ROOT%\.env.local" (
+  set "ENV_FILE=%ROOT%\.env.local"
+) else (
+  set "ENV_FILE=%ROOT%\.env"
+)
 if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else (set "BACKEND_PORT=8800")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
 if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")

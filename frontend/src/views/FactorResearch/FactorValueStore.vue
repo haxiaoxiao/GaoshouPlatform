@@ -43,7 +43,6 @@
             v-model="form.indexSymbol"
             :options="indexOptions"
             filterable
-            clearable
             class="factor-select"
           />
         </el-form-item>
@@ -430,6 +429,7 @@ let isSyncingFactorFromGroup = false
 let isAutoQuerySuspended = true
 
 const legacyIndexOptions = [
+  { label: '沪深全A / 全市场A股', value: 'all_a' },
   { label: '中小综指 / 小市值 399101.SZ', value: '399101.SZ' },
   { label: '沪深300 000300.SH', value: '000300.SH' },
   { label: '中证500 000905.SH', value: '000905.SH' },
@@ -438,19 +438,20 @@ const legacyIndexOptions = [
   { label: '上证指数 000001.SH', value: '000001.SH' },
   { label: '深证成指 399001.SZ', value: '399001.SZ' },
   { label: '创业板指 399006.SZ', value: '399006.SZ' },
-  { label: '全部已缓存股票', value: '' },
 ]
 
 const indexCatalog = ref<IndexCatalogItem[]>([])
 void legacyIndexOptions
+const ALL_A_INDEX_SYMBOL = 'all_a'
+const allAIndexOption = { label: '沪深全A / 全市场A股', value: ALL_A_INDEX_SYMBOL }
 const indexOptions = computed(() => {
   const poolOptions = indexCatalog.value
-    .filter(item => item.pool_enabled)
+    .filter(item => item.pool_enabled && item.symbol !== ALL_A_INDEX_SYMBOL)
     .map(item => ({
       label: `${item.display_name} ${item.symbol}`,
       value: item.symbol,
     }))
-  return [...poolOptions, { label: '全部已缓存股票', value: '' }]
+  return [allAIndexOption, ...poolOptions]
 })
 
 const formatDate = (date: Date) => date.toISOString().slice(0, 10)
@@ -813,8 +814,11 @@ const loadDefinitions = async () => {
 const loadIndexCatalog = async () => {
   const items = await indexCatalogApi.list()
   indexCatalog.value = items
-  const firstPoolSymbol = items.find(item => item.pool_enabled)?.symbol || ''
-  const availableSymbols = new Set(items.filter(item => item.pool_enabled).map(item => item.symbol))
+  const firstPoolSymbol = ALL_A_INDEX_SYMBOL
+  const availableSymbols = new Set([
+    ALL_A_INDEX_SYMBOL,
+    ...items.filter(item => item.pool_enabled).map(item => item.symbol),
+  ])
   if (form.indexSymbol && !availableSymbols.has(form.indexSymbol)) {
     form.indexSymbol = firstPoolSymbol
   } else if (!form.indexSymbol && firstPoolSymbol) {
@@ -1140,7 +1144,9 @@ const runDirectGroupPrecompute = async () => {
 
 const formatGapText = (gap: FactorCoverageGap) => {
   const latest = gap.latest_date || '无数据'
-  return `${gap.label}: 当前至 ${latest}，目标至 ${gap.required_end}（${gap.reason}）`
+  const missingStart = gap.missing_start || gap.required_start
+  const missingEnd = gap.missing_end || gap.required_end
+  return `${gap.label}: 缺口 ${missingStart} 至 ${missingEnd}；本地最新 ${latest}，请求区间 ${gap.required_start} 至 ${gap.required_end}（${gap.reason}）`
 }
 
 const confirmDependencySync = async (gaps: FactorCoverageGap[]) => {
@@ -1157,10 +1163,23 @@ const confirmDependencySync = async (gaps: FactorCoverageGap[]) => {
   )
 }
 
-const waitForDependencySync = async () => {
+const syncStatusId = (status: SyncStatus | Record<string, unknown> | null | undefined) => {
+  if (!status) return ''
+  return String(status.run_id || status.task_id || '')
+}
+
+const waitForDependencySync = async (started?: SyncStatus) => {
+  const targetId = syncStatusId(started)
   for (;;) {
     const status = await syncApi.getStatus()
     dependencySyncStatus.value = status
+    const lastRun = (status.last_run || null) as Record<string, unknown> | null
+    const lastRunId = syncStatusId(lastRun)
+    const lastRunMatches = !targetId || lastRunId === targetId
+    if (lastRunMatches && lastRun?.status === 'completed') return
+    if (lastRunMatches && lastRun?.status === 'failed') {
+      throw new Error(String(lastRun.error_message || '数据同步失败'))
+    }
     if (status.status === 'completed') return
     if (status.status === 'failed') {
       throw new Error(status.error_message || '数据同步失败')
@@ -1189,7 +1208,7 @@ const prepareAndRunPrecompute = async (mode: 'single' | 'group') => {
     })
     dependencySyncStatus.value = status
     ElMessage.success(`数据同步已启动：${status.task_id || status.details?.run_id || ''}`)
-    await waitForDependencySync()
+    await waitForDependencySync(status)
     ElMessage.success('依赖数据同步完成，继续预计算')
   }
   if (isGroup) {

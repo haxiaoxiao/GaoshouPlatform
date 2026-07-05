@@ -28,6 +28,7 @@ from app.services.index_components import (
     load_index_symbols,
     normalize_index_symbol,
 )
+from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 
 CORE_FACTORS = {
     "market_cap",
@@ -127,7 +128,7 @@ def _build_coverage_gaps(
     params: dict[str, Any],
 ) -> list[dict[str, Any]]:
     checks: dict[str, dict[str, Any]] = {}
-    if index_symbol:
+    if index_symbol and not is_all_a_universe(index_symbol):
         latest_index_date = _latest_index_component_date(index_symbol)
         if not _index_components_cover_request(index_symbol, start_date, end_date):
             checks["index_components"] = {
@@ -324,7 +325,7 @@ def _build_sync_plan(
         return None
     steps: list[dict[str, Any]] = []
     sync_steps = {str(gap["sync_step"]) for gap in coverage_gaps}
-    if "index_components" in sync_steps and index_symbol:
+    if "index_components" in sync_steps and index_symbol and not is_all_a_universe(index_symbol):
         steps.append(_step("index_components", start_date, end_date, index_symbol=index_symbol))
     if "tushare_daily" in sync_steps:
         datasets = sorted({str(gap["dependency"]) for gap in coverage_gaps if gap["sync_step"] == "tushare_daily"})
@@ -481,9 +482,10 @@ async def _sync_kline_minute_step(
     if timer_times:
         from app.services.timer_minute_sync import parse_timer_times, sync_timer_minute_points
 
+        index_symbol = str(plan.get("index_symbol") or "") or None
         result = await sync_timer_minute_points(
             symbols=await _resolve_plan_symbols(plan),
-            index_symbol=str(plan.get("index_symbol") or "") or None,
+            index_symbol=None if is_all_a_universe(index_symbol) else index_symbol,
             start=date.fromisoformat(step["start_date"]),
             end=date.fromisoformat(step["end_date"]),
             timer_times=parse_timer_times(timer_times),
@@ -548,6 +550,8 @@ async def _resolve_plan_symbols(plan: dict[str, Any]) -> list[str] | None:
         return None
     start = date.fromisoformat(str(plan["start_date"]))
     end = date.fromisoformat(str(plan["end_date"]))
+    if is_all_a_universe(index_symbol):
+        return await asyncio.to_thread(load_all_a_symbols, as_of=end, start_date=start)
     return await load_index_symbols(str(index_symbol), start, end)
 
 

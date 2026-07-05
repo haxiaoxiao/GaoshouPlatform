@@ -237,7 +237,11 @@ function Wait-StartupHealthy {
 $defaults = Resolve-Defaults -Name $Environment
 if (-not $Root) { $Root = $defaults.Root }
 if (-not $Branch) { $Branch = $defaults.Branch }
-if (-not $EnvFile) { $EnvFile = Join-Path $Root ".env.local" }
+if (-not $EnvFile) {
+    $localEnvFile = Join-Path $Root ".env.local"
+    $rootEnvFile = Join-Path $Root ".env"
+    $EnvFile = if (Test-Path -LiteralPath $localEnvFile) { $localEnvFile } else { $rootEnvFile }
+}
 
 $backendPort = if ($env:GAOSHOU_BACKEND_PORT) { $env:GAOSHOU_BACKEND_PORT } else { $defaults.BackendPort }
 $syncPort = if ($env:GAOSHOU_SYNC_PORT) { $env:GAOSHOU_SYNC_PORT } else { $defaults.SyncPort }

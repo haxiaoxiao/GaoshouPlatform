@@ -5,6 +5,7 @@ import math
 from datetime import date
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 
@@ -174,18 +175,46 @@ def normalize_result(
     # akquant 的 annualized_return 在部分版本中已是小数而非百分数，不可靠；
     # 直接从回测区间 + total_return 计算，保证一致性
     annual_return = _compute_annual_return(total_return, nav_series, start_date, end_date)
+    daily_values = [
+        _safe_float(item.get("return"), default=0.0)
+        for item in daily_returns
+        if isinstance(item, dict)
+    ]
+    annual_volatility = _safe_float(getattr(metrics, "volatility", 0))
+    sharpe_ratio = _safe_float(getattr(metrics, "sharpe_ratio", 0))
+    sortino_ratio = _safe_float(getattr(metrics, "sortino_ratio", 0))
+    if daily_values:
+        ret_array = np.array(daily_values, dtype=float)
+        annual_volatility = float(np.std(ret_array) * np.sqrt(252))
+        if annual_volatility > 0:
+            sharpe_ratio = float((annual_return - 0.02) / annual_volatility)
+        downside = ret_array[ret_array < 0]
+        downside_std = float(np.std(downside) * np.sqrt(252)) if len(downside) > 0 else 0.0
+        if downside_std > 0:
+            sortino_ratio = float((annual_return - 0.02) / downside_std)
+
     max_drawdown = _safe_float(getattr(metrics, "max_drawdown_pct", 0)) / 100.0
-    win_rate_pct = _safe_float(getattr(metrics, "win_rate", 0))  # akquant 已是百分数
+    if nav_series:
+        nav_values = np.array([_safe_float(item.get("nav"), default=1.0) for item in nav_series], dtype=float)
+        running_max = np.maximum.accumulate(nav_values)
+        drawdowns = (nav_values - running_max) / np.where(running_max > 0, running_max, 1.0)
+        max_drawdown = abs(float(np.min(drawdowns))) if len(drawdowns) else max_drawdown
+    calmar_ratio = _safe_float(getattr(metrics, "calmar_ratio", 0))
+    if max_drawdown > 1e-8:
+        calmar_ratio = annual_return / max_drawdown
+    win_rate = round(win_count / total_trades, 4) if total_trades > 0 else 0.0
+    if total_trades == 0:
+        win_rate = round(_safe_float(getattr(metrics, "win_rate", 0)) / 100.0, 4)
 
     result = BacktestResult(
         total_return=round(total_return, 6),
         annual_return=round(annual_return, 6),
-        annual_volatility=round(_safe_float(getattr(metrics, "volatility", 0)), 6),
-        sharpe_ratio=round(_safe_float(getattr(metrics, "sharpe_ratio", 0)), 4),
-        sortino_ratio=round(_safe_float(getattr(metrics, "sortino_ratio", 0)), 4),
+        annual_volatility=round(annual_volatility, 6),
+        sharpe_ratio=round(sharpe_ratio, 4),
+        sortino_ratio=round(sortino_ratio, 4),
         max_drawdown=round(max_drawdown, 6),
-        calmar_ratio=round(_safe_float(getattr(metrics, "calmar_ratio", 0)), 4),
-        win_rate=round(win_rate_pct / 100.0, 4),  # 百分数→小数
+        calmar_ratio=round(calmar_ratio, 4),
+        win_rate=win_rate,
         avg_return=round(avg_return, 4),
         total_trades=total_trades,
         win_trades=win_count,

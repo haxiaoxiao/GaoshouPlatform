@@ -10,8 +10,10 @@ import shutil
 import time
 from collections import defaultdict, deque
 from datetime import date, timedelta
+from types import SimpleNamespace
 from typing import Any, Callable
 
+import pandas as pd
 from loguru import logger
 
 from app.backtest.config import BacktestConfig, BacktestResult
@@ -128,36 +130,6 @@ class AkquantEngine(IBacktestEngine):
             if config.bar_type == "minute_timer"
             else None
         )
-        adapter = MarketDataStoreFeedAdapter(
-            data_provider,
-            config.symbols,
-            start_date,
-            end_date,
-            config.bar_type,
-            timer_times=timer_times,
-            smart_candidate_top_n=int((config.strategy_params or {}).get("smart_timer_candidate_top_n", 0) or 0),
-            smart_full_universe_times=_timer_strings_from_strategy_param(
-                (config.strategy_params or {}).get("smart_timer_full_universe_times")
-            ),
-            smart_keep_index_symbols=_smart_keep_index_symbols(config),
-            timer_price_adjustment_mode=str(
-                (config.strategy_params or {}).get("timer_price_adjustment_mode", "none")
-            ),
-        )
-        await adapter.preload()
-
-        if not adapter.has_any_data:
-            self._emit_progress(
-                progress_callback,
-                1.0,
-                current_date=end_date,
-                phase="no_market_data",
-                message="没有加载到可用行情数据",
-                config=config,
-            )
-            logger.warning("AkquantEngine: no data loaded, returning empty result")
-            return BacktestResult(initial_capital=config.initial_capital)
-
         self._emit_progress(
             progress_callback,
             0.05,
@@ -201,6 +173,36 @@ class AkquantEngine(IBacktestEngine):
                 progress_callback=progress_callback,
             )
         else:
+            adapter = MarketDataStoreFeedAdapter(
+                data_provider,
+                config.symbols,
+                start_date,
+                end_date,
+                config.bar_type,
+                timer_times=timer_times,
+                smart_candidate_top_n=int((config.strategy_params or {}).get("smart_timer_candidate_top_n", 0) or 0),
+                smart_full_universe_times=_timer_strings_from_strategy_param(
+                    (config.strategy_params or {}).get("smart_timer_full_universe_times")
+                ),
+                smart_keep_index_symbols=_smart_keep_index_symbols(config),
+                timer_price_adjustment_mode=str(
+                    (config.strategy_params or {}).get("timer_price_adjustment_mode", "none")
+                ),
+            )
+            await adapter.preload()
+
+            if not adapter.has_any_data:
+                self._emit_progress(
+                    progress_callback,
+                    1.0,
+                    current_date=end_date,
+                    phase="no_market_data",
+                    message="没有加载到可用行情数据",
+                    config=config,
+                )
+                logger.warning("AkquantEngine: no data loaded, returning empty result")
+                return BacktestResult(initial_capital=config.initial_capital)
+
             aq_config = self._build_aq_config(config, start_date, end_date, history_depth)
 
             def _run_sync():
@@ -457,9 +459,9 @@ class AkquantEngine(IBacktestEngine):
         mode = options["mode"]
         if mode == "off":
             return False
-        if config.bar_type not in {"minute", "minute_timer"}:
+        if config.bar_type not in {"daily", "minute", "minute_timer"}:
             return False
-        # The current checkpoint adapter is only safe for full minute streams.
+        # Timer streams are sparse by design and should stay single-pass.
         if config.bar_type == "minute_timer":
             return False
         if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"} and mode != "always":
@@ -514,6 +516,7 @@ class AkquantEngine(IBacktestEngine):
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         checkpoint_path = checkpoint_dir / "akquant.chkpt"
         raw_result = None
+        segment_results: list[Any] = []
 
         logger.info(
             "AkquantEngine: chunked minute run, symbols={}, days={}, chunks={}, chunk_days={}",
@@ -659,6 +662,7 @@ class AkquantEngine(IBacktestEngine):
                     return result
 
                 raw_result = await loop.run_in_executor(None, _run_segment)
+                segment_results.append(raw_result)
                 segment_adapter.clear_cache()
                 del segment_adapter
                 gc.collect()
@@ -696,10 +700,63 @@ class AkquantEngine(IBacktestEngine):
 
             if raw_result is None:
                 raise RuntimeError("No AKQuant chunks were executed")
-            return raw_result
+            return self._combine_chunk_results(segment_results, initial_capital=config.initial_capital)
         finally:
             if not (warm_options["keep_checkpoints"] or keep_env):
                 shutil.rmtree(checkpoint_dir, ignore_errors=True)
+
+    @staticmethod
+    def _combine_chunk_results(segment_results: list[Any], *, initial_capital: float) -> Any:
+        if not segment_results:
+            raise RuntimeError("No AKQuant chunks were executed")
+        if len(segment_results) == 1:
+            return segment_results[0]
+
+        def _concat_series(attr: str) -> pd.Series:
+            pieces = []
+            for result in segment_results:
+                series = getattr(result, attr, None)
+                if isinstance(series, pd.Series) and not series.empty:
+                    pieces.append(series)
+            if not pieces:
+                return pd.Series(dtype="float64")
+            combined = pd.concat(pieces)
+            combined = combined[~combined.index.duplicated(keep="last")].sort_index()
+            return combined
+
+        def _concat_frames(attr: str) -> pd.DataFrame:
+            pieces = []
+            for result in segment_results:
+                frame = getattr(result, attr, None)
+                if isinstance(frame, pd.DataFrame) and not frame.empty:
+                    pieces.append(frame)
+            if not pieces:
+                return pd.DataFrame()
+            return pd.concat(pieces, ignore_index=True)
+
+        equity_curve = _concat_series("equity_curve")
+        daily_returns = _concat_series("daily_returns")
+        trades_df = _concat_frames("trades_df")
+        orders_df = _concat_frames("orders_df")
+        total_return_pct = 0.0
+        if not equity_curve.empty and initial_capital:
+            total_return_pct = (float(equity_curve.iloc[-1]) / float(initial_capital) - 1.0) * 100.0
+        metrics = SimpleNamespace(
+            total_return_pct=total_return_pct,
+            max_drawdown_pct=0.0,
+            win_rate=0.0,
+            volatility=0.0,
+            sharpe_ratio=0.0,
+            sortino_ratio=0.0,
+            calmar_ratio=0.0,
+        )
+        return SimpleNamespace(
+            metrics=metrics,
+            equity_curve=equity_curve,
+            daily_returns=daily_returns,
+            trades_df=trades_df,
+            orders_df=orders_df,
+        )
 
     def validate_config(self, config: BacktestConfig) -> list[str]:
         errors: list[str] = []
