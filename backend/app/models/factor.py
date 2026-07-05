@@ -245,7 +245,14 @@ class FactorTemplate(BaseModel):
 class FactorCreate(BaseModel):
     name: str
     expression: str
+    source_type: str = "dsl"
+    engine: str = "builtin"
     stock_pool: str = StockPool.HS300.value
+    direction: str = FactorDirection.DESC.value
+    default_stock_pool: str = StockPool.ZZ500.value
+    default_benchmark: str = "000905.SH"
+    cache_enabled: bool = True
+    default_eval_config: dict = Field(default_factory=dict)
     category: str | None = None
     description: str | None = None
     params: dict = Field(default_factory=dict)
@@ -254,7 +261,14 @@ class FactorCreate(BaseModel):
 class FactorUpdate(BaseModel):
     name: str | None = None
     expression: str | None = None
+    source_type: str | None = None
+    engine: str | None = None
     stock_pool: str | None = None
+    direction: str | None = None
+    default_stock_pool: str | None = None
+    default_benchmark: str | None = None
+    cache_enabled: bool | None = None
+    default_eval_config: dict | None = None
     category: str | None = None
     description: str | None = None
     params: dict | None = None
@@ -264,7 +278,14 @@ class FactorResponse(BaseModel):
     id: int
     name: str
     expression: str
+    source_type: str = "dsl"
+    engine: str = "builtin"
     stock_pool: str
+    direction: str = FactorDirection.DESC.value
+    default_stock_pool: str = StockPool.ZZ500.value
+    default_benchmark: str = "000905.SH"
+    cache_enabled: bool = True
+    default_eval_config: dict = Field(default_factory=dict)
     category: str | None
     description: str | None
     params: dict

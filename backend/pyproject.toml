@@ -23,6 +23,7 @@ dependencies = [
     "akquant>=0.2.40",
     "tushare>=1.4.0",
     "litellm>=1.0.0",
+    "langgraph>=1.2.0",
     "mcp>=1.0.0",
 ]
 

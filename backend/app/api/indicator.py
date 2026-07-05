@@ -98,6 +98,7 @@ async def query_indicators(
 
     target_date = trade_date or date.today().isoformat()
 
+    df = None
     try:
         from app.data_stores import get_indicator_store
 

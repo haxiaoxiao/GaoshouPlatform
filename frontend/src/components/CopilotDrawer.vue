@@ -49,6 +49,19 @@
                     <span>{{ tool.reason }}</span>
                   </div>
                   <small>{{ tool.status }} · {{ formatTraceArgs(tool.arguments) }}</small>
+                  <div v-if="tool.workflow?.nodes?.length" class="workflow-node-list">
+                    <span class="workflow-node-list__title">
+                      {{ tool.workflow.workflow_name || 'Workflow' }} · {{ tool.workflow.status || tool.status }}
+                    </span>
+                    <div
+                      v-for="node in tool.workflow.nodes"
+                      :key="`${tool.tool_name}-${node.name}-${node.status}`"
+                      class="workflow-node"
+                    >
+                      <strong>{{ node.title || node.name }}</strong>
+                      <small>{{ node.status }}<template v-if="node.detail"> · {{ node.detail }}</template></small>
+                    </div>
+                  </div>
                 </div>
               </div>
             </details>
@@ -486,6 +499,40 @@ function scrollToBottom() {
 .trace-tool div {
   display: grid;
   gap: 3px;
+}
+
+.workflow-node-list {
+  display: grid;
+  gap: 5px;
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.workflow-node-list__title {
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.workflow-node {
+  display: grid;
+  grid-template-columns: minmax(76px, 0.55fr) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.workflow-node strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-node small {
+  min-width: 0;
+  white-space: normal;
 }
 
 .action-list {

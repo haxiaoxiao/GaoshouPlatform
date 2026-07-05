@@ -30,6 +30,7 @@ apscheduler>=3.10.0
 playwright>=1.60.0
 tushare>=1.4.0
 litellm>=1.0.0
+langgraph>=1.2.0
 mcp>=1.0.0
 
 # Optional local integrations. Install manually when you need live QMT,

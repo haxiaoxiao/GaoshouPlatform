@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field, field_validator
 
 AIToolRiskLevel = Literal["read", "write", "danger"]
 AIToolStatus = Literal["ok", "error", "needs_confirmation"]
+AIWorkflowStatus = Literal["planned", "completed", "needs_confirmation", "error"]
 
 
 class AIChatMessage(BaseModel):
@@ -75,6 +76,46 @@ class AIToolExecutionResponse(BaseModel):
     artifact_id: str | None = None
     task_id: str | None = None
     result_ref: str | None = None
+    error: str | None = None
+
+
+class AIWorkflowNodeTrace(BaseModel):
+    name: str
+    title: str
+    status: str
+    detail: str | None = None
+    tool_name: str | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+
+
+class AIWorkflowDefinitionPublic(BaseModel):
+    name: str
+    title: str
+    description: str
+    category: str
+    nodes: list[AIWorkflowNodeTrace]
+    input_schema: dict[str, Any]
+
+
+class AIWorkflowRunRequest(BaseModel):
+    command: str | None = None
+    messages: list[AIChatMessage] = Field(default_factory=list)
+    page_context: dict[str, Any] | None = None
+    arguments: dict[str, Any] = Field(default_factory=dict)
+    auto_execute: bool = True
+    dry_run: bool = False
+    confirmed: bool = False
+
+
+class AIWorkflowRunResponse(BaseModel):
+    workflow_name: str
+    status: AIWorkflowStatus
+    summary: str
+    nodes: list[AIWorkflowNodeTrace] = Field(default_factory=list)
+    tool_results: list[dict[str, Any]] = Field(default_factory=list)
+    pending_tools: list[dict[str, Any]] = Field(default_factory=list)
+    result: dict[str, Any] = Field(default_factory=dict)
+    artifact_id: str | None = None
     error: str | None = None
 
 

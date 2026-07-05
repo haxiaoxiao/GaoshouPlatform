@@ -52,6 +52,7 @@ class FactorPreviewRequest(BaseModel):
     start_date: date
     end_date: date
     limit: int = Field(default=200, ge=1, le=5000)
+    params: dict[str, Any] = Field(default_factory=dict)
 
 
 class FactorPrecomputeRequest(BaseModel):

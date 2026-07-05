@@ -233,6 +233,83 @@
         </div>
       </section>
 
+      <section v-if="aiDiagnostics" class="dock-group" :class="{ 'dock-group--warning': aiDiagnostics.health.status !== 'ready' }">
+        <div class="dock-row">
+          <strong>AI 诊断</strong>
+          <el-tag :type="aiDiagStatusType" effect="plain" size="small">
+            {{ aiDiagnostics.health.status.toUpperCase() }}
+          </el-tag>
+        </div>
+        <div class="ai-diagnostics-grid">
+          <div class="dock-metric dock-metric--neutral">
+            <span>工具总数</span>
+            <strong>{{ aiDiagnostics.manifest.tool_count }}</strong>
+            <small>{{ Object.keys(aiDiagnostics.manifest.categories).length }} 类 · {{ aiDiagnostics.manifest.workflow_count }} 图</small>
+          </div>
+          <div class="dock-metric" :class="aiDiagnostics.routing.pending_confirmation_count ? 'dock-metric--warn' : 'dock-metric--good'">
+            <span>路由来源</span>
+            <strong>{{ aiDiagRouteSummary }}</strong>
+            <small>{{ aiDiagnostics.routing.pending_confirmation_count }} 个待确认</small>
+          </div>
+          <div class="dock-metric dock-metric--neutral">
+            <span>答案模式</span>
+            <strong>{{ aiDiagAnswerSummary }}</strong>
+            <small>{{ aiDiagnostics.answers.error_count }} 个答案异常</small>
+          </div>
+          <div class="dock-metric" :class="aiDiagnostics.tools.recent_failures.length ? 'dock-metric--warn' : 'dock-metric--good'">
+            <span>工具执行</span>
+            <strong>{{ aiDiagToolStatusSummary }}</strong>
+            <small>{{ aiDiagFailureSummary }}</small>
+          </div>
+        </div>
+        <div v-if="latestAIArtifact" class="ai-latest-trace">
+          <span>{{ formatDateTime(latestAIArtifact.created_at) }}</span>
+          <strong>{{ latestAIArtifact.input_summary || '最近对话无摘要' }}</strong>
+          <small>{{ latestAIArtifact.route_source }} · {{ latestAIArtifact.answer_mode }} · {{ latestAIArtifact.executed_count }}/{{ latestAIArtifact.tool_call_count }}</small>
+        </div>
+        <small v-for="warning in aiDiagWarnings" :key="warning" class="dock-warning-text">{{ warning }}</small>
+        <small class="dock-env">
+          MCP {{ aiDiagnostics.manifest.mcp_stdio.command }} {{ aiDiagnostics.manifest.mcp_stdio.args.join(' ') }}
+        </small>
+      </section>
+
+      <section v-if="aiWorkflows.length" class="dock-group">
+        <div class="dock-row">
+          <strong>AI 工作流</strong>
+          <el-tag effect="plain" size="small">{{ aiWorkflows.length }} graphs</el-tag>
+        </div>
+        <div class="workflow-list">
+          <article v-for="workflow in aiWorkflows" :key="workflow.name" class="workflow-row">
+            <div>
+              <strong>{{ workflow.title }}</strong>
+              <small>{{ workflow.name }} · {{ workflow.nodes.length }} nodes</small>
+            </div>
+            <el-button
+              size="small"
+              :loading="runningWorkflow === workflow.name"
+              :disabled="Boolean(runningWorkflow)"
+              @click="previewWorkflow(workflow.name)"
+            >
+              预演
+            </el-button>
+          </article>
+        </div>
+        <div v-if="recentWorkflowArtifacts.length" class="workflow-artifacts">
+          <button
+            v-for="artifact in recentWorkflowArtifacts"
+            :key="artifact.artifact_id"
+            type="button"
+            class="workflow-artifact"
+            @click="copyArtifactId(artifact.artifact_id)"
+          >
+            <span>{{ artifact.kind.replace('workflow:', '') }}</span>
+            <strong>{{ artifact.status }}</strong>
+            <small>{{ formatDateTime(artifact.created_at) }}</small>
+          </button>
+        </div>
+        <small v-else class="dock-env">暂无 workflow artifact</small>
+      </section>
+
       <section v-if="liveGuardrails" class="dock-group" :class="{ 'dock-group--danger': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }">
         <div class="dock-row">
           <strong>实盘交易护栏</strong>
@@ -305,7 +382,7 @@ import { useRouter } from 'vue-router'
 import { Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
-import { aiApi, type AIConfig } from '@/api/ai'
+import { aiApi, type AIArtifact, type AIConfig, type AIDiagnostics, type AIWorkflowDefinition } from '@/api/ai'
 import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type LiveTradingGuardrails, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
@@ -390,6 +467,9 @@ const liveStatus = ref<LiveTradingStatus | null>(null)
 const devDataMode = ref<DevDataMode | null>(null)
 const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
 const aiConfig = ref<AIConfig | null>(null)
+const aiDiagnostics = ref<AIDiagnostics | null>(null)
+const aiWorkflows = ref<AIWorkflowDefinition[]>([])
+const aiArtifacts = ref<AIArtifact[]>([])
 const aiConfigDraft = ref({
   enabled: true,
   provider: 'litellm',
@@ -406,6 +486,7 @@ const switchingDataMode = ref(false)
 const savingGuardrails = ref(false)
 const savingAIConfig = ref(false)
 const clearingAIKey = ref(false)
+const runningWorkflow = ref('')
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
@@ -432,6 +513,27 @@ const aiConfigDirty = computed(() => Boolean(
     || aiConfigDraft.value.api_key_env.trim() !== aiConfig.value.api_key_env
     || aiConfigDraft.value.api_key.trim().length > 0
   ),
+))
+const aiDiagStatusType = computed<'success' | 'warning' | 'danger' | 'info'>(() => {
+  const status = aiDiagnostics.value?.health.status
+  if (status === 'ready') return 'success'
+  if (status === 'degraded') return 'warning'
+  if (status === 'offline') return 'danger'
+  return 'info'
+})
+const latestAIArtifact = computed(() => aiDiagnostics.value?.artifacts.latest || null)
+const aiDiagRouteSummary = computed(() => countSummary(aiDiagnostics.value?.routing.source_counts, '暂无路由'))
+const aiDiagAnswerSummary = computed(() => countSummary(aiDiagnostics.value?.answers.mode_counts, '暂无答案'))
+const aiDiagToolStatusSummary = computed(() => countSummary(aiDiagnostics.value?.tools.status_counts, '暂无执行'))
+const aiDiagFailureSummary = computed(() => {
+  const failures = aiDiagnostics.value?.tools.recent_failures || []
+  if (!failures.length) return '无近期失败'
+  const first = failures[0]
+  return `${failures.length} 条 · ${first.tool_name}`
+})
+const aiDiagWarnings = computed(() => (aiDiagnostics.value?.health.warnings || []).slice(0, 2))
+const recentWorkflowArtifacts = computed(() => (
+  aiArtifacts.value.filter(artifact => artifact.kind.startsWith('workflow:')).slice(0, 4)
 ))
 
 const serviceNodes = computed<ServiceNode[]>(() => [
@@ -549,6 +651,17 @@ const incidentRows = computed<IncidentRow[]>(() => {
       title: 'AI Gateway 未配置 API Key',
       detail: `${aiConfig.value.api_key_env} 未配置，Copilot 会以工具离线模式运行`,
       action: '配置',
+      path: '/monitor',
+      tone: 'warn',
+    })
+  }
+  if (aiDiagnostics.value?.tools.recent_failures.length) {
+    rows.push({
+      key: 'ai-tool-failure',
+      scope: 'AI',
+      title: 'AI 工具调用存在近期失败',
+      detail: aiDiagFailureSummary.value,
+      action: '查诊断',
       path: '/monitor',
       tone: 'warn',
     })
@@ -890,7 +1003,7 @@ const logPreviewLines = computed(() => {
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult, aiConfigResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult, aiConfigResult, aiDiagnosticsResult, workflowsResult, aiArtifactsResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
@@ -900,6 +1013,9 @@ async function loadOps() {
       systemApi.getDevDataMode(),
       systemApi.getLiveTradingGuardrails(),
       aiApi.config(),
+      aiApi.diagnostics(50),
+      aiApi.workflows(),
+      aiApi.artifacts({ limit: 30 }),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -916,8 +1032,71 @@ async function loadOps() {
       aiConfig.value = aiConfigResult.value
       resetAIConfigDraft()
     }
+    if (aiDiagnosticsResult.status === 'fulfilled') aiDiagnostics.value = aiDiagnosticsResult.value
+    if (workflowsResult.status === 'fulfilled') aiWorkflows.value = workflowsResult.value
+    if (aiArtifactsResult.status === 'fulfilled') aiArtifacts.value = aiArtifactsResult.value
   } finally {
     loading.value = false
+  }
+}
+
+function workflowPreviewPayload(name: string) {
+  if (name === 'ReportStrategyGraph') {
+    return {
+      command: '预演研报策略图',
+      dry_run: true,
+      arguments: {
+        report_text: '示例研报：以估值、成长、动量和流动性条件构建股票筛选策略，控制回撤并定期调仓。',
+        report_filename: 'workflow-preview.txt',
+        convert_to_akquant: true,
+      },
+    }
+  }
+  if (name === 'QuantResearchGraph') {
+    return {
+      command: '预演量化研究图',
+      dry_run: true,
+      arguments: {
+        topic: 'AI Native 工作流预演',
+        daily_limit: 30,
+        include_factors: true,
+        include_sentiment: false,
+      },
+    }
+  }
+  return {
+    command: '查看系统状态、运行任务和 AI 诊断',
+    dry_run: true,
+    arguments: {
+      tool_calls: [
+        { tool_name: 'system.status', arguments: {} },
+        { tool_name: 'runtime.tasks', arguments: { include_finished: true } },
+        { tool_name: 'system.ai_diagnostics', arguments: { limit: 20 } },
+      ],
+    },
+  }
+}
+
+async function previewWorkflow(name: string) {
+  if (runningWorkflow.value) return
+  runningWorkflow.value = name
+  try {
+    const result = await aiApi.runWorkflow(name, workflowPreviewPayload(name))
+    ElMessage.success(`${result.workflow_name} ${result.status}：${result.summary}`)
+    await loadOps()
+  } catch (error: any) {
+    ElMessage.error(`工作流预演失败：${requestErrorDetail(error)}`)
+  } finally {
+    runningWorkflow.value = ''
+  }
+}
+
+async function copyArtifactId(artifactId: string) {
+  try {
+    await navigator.clipboard?.writeText(artifactId)
+    ElMessage.success(`已复制 ${artifactId}`)
+  } catch {
+    ElMessage.info(artifactId)
   }
 }
 
@@ -1226,6 +1405,14 @@ function defaultAIKeyEnv(model?: string | null, baseURL?: string | null): string
   const text = `${model || ''} ${baseURL || ''}`.toLowerCase()
   if (text.includes('deepseek')) return 'DEEPSEEK_API_KEY'
   return 'OPENAI_API_KEY'
+}
+
+function countSummary(counts?: Record<string, number>, emptyText = '-'): string {
+  const entries = Object.entries(counts || {})
+    .filter(([, value]) => Number(value) > 0)
+    .sort((left, right) => Number(right[1]) - Number(left[1]))
+  if (!entries.length) return emptyText
+  return entries.slice(0, 2).map(([key, value]) => `${key}:${value}`).join(' / ')
 }
 
 function requestErrorDetail(error: any): string {
@@ -1807,6 +1994,96 @@ onMounted(loadOps)
 
 .secret-line small {
   color: var(--text-muted);
+}
+
+.ai-diagnostics-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ai-latest-trace {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.ai-latest-trace span,
+.ai-latest-trace small {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-latest-trace strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-list,
+.workflow-artifacts {
+  display: grid;
+  gap: 6px;
+}
+
+.workflow-row,
+.workflow-artifact {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+}
+
+.workflow-row > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.workflow-row strong,
+.workflow-artifact strong {
+  overflow: hidden;
+  color: var(--text-bright);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-row small,
+.workflow-artifact small,
+.workflow-artifact span {
+  overflow: hidden;
+  color: var(--text-muted);
+  font-family: var(--font-data);
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-artifact {
+  width: 100%;
+  border-left: 3px solid var(--accent-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.workflow-artifact strong {
+  justify-self: end;
 }
 
 .dock-warning-text {
