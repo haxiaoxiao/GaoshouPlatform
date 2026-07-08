@@ -197,12 +197,16 @@ async def _run_sync_task(
         if incremental_dataset and request.sync_mode == "incremental" and not effective_full_sync:
             try:
                 target_end = request.end_date or date.today()
-                latest = (
-                    sync_service_module._latest_market_date_for_symbols(incremental_dataset, request.symbols)
-                    if request.symbols
-                    else sync_service_module._latest_market_date(incremental_dataset)
+                plan_start, latest, _plan_details = sync_service_module._market_incremental_sync_plan(
+                    incremental_dataset,
+                    requested_start_date=request.start_date or target_end - timedelta(days=sync_service_module.DATASYNC_INITIAL_DAILY_DAYS),
+                    end_date=target_end,
+                    initial_days=sync_service_module.DATASYNC_INITIAL_DAILY_DAYS,
+                    lookback_days=sync_service_module.DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS,
+                    symbols=request.symbols,
+                    explicit_start=request.start_date is not None,
                 )
-                if latest is not None and latest >= target_end:
+                if latest is not None and plan_start > target_end:
                     qmt_required = False
             except Exception as exc:
                 logger.debug("Unable to pre-check incremental {} coverage: {}", request.sync_type, exc)

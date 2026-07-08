@@ -27,6 +27,7 @@ class LivePreflightRequest(BaseModel):
     params: dict[str, Any] = Field(default_factory=dict)
     manual_account: dict[str, Any] | None = None
     evaluate_pipeline: bool = True
+    prepare_dependencies: bool = False
 
 
 class LiveProfileCreateRequest(BaseModel):
@@ -226,6 +227,7 @@ async def live_preflight(req: LivePreflightRequest) -> dict[str, Any]:
                 params=req.params,
                 manual_account=req.manual_account,
                 evaluate_pipeline=req.evaluate_pipeline,
+                prepare_dependencies=req.prepare_dependencies,
             )
         )
     except Exception as exc:

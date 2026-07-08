@@ -25,6 +25,27 @@ async def noop_create_sync_log(self, *args, **kwargs) -> object:
     return object()
 
 
+@pytest.fixture(autouse=True)
+def no_incremental_coverage_issues(monkeypatch):
+    def fake_coverage_details(dataset, start_date, end_date, symbols=None):
+        return {
+            "lookback_start": start_date.isoformat(),
+            "lookback_end": end_date.isoformat(),
+            "reference_date_count": 0,
+            "observed_date_count": 0,
+            "missing_dates": [],
+            "missing_ranges": [],
+            "low_coverage_dates": [],
+            "earliest_issue_date": None,
+            "expected_symbol_count": 0,
+            "symbol_threshold": None,
+            "typical_minute_bars_per_symbol": None,
+            "minute_bar_threshold": None,
+        }
+
+    monkeypatch.setattr(sync_service_module, "_market_incremental_coverage_details", fake_coverage_details)
+
+
 @pytest.mark.asyncio
 async def test_sync_sentiment_nga_tracks_flocktrader_progress(monkeypatch):
     class FakeSentimentIngestService:
@@ -66,6 +87,109 @@ async def test_sync_sentiment_nga_tracks_flocktrader_progress(monkeypatch):
     assert progress.details["scan_time_basis"] == "last_reply_time"
     assert progress.details["cache_partition"] == "last_reply_time"
     assert progress.details["result"]["upserted"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_kline_daily_incremental_backfills_middle_gap(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_get_kline_daily_batch(symbols, start_date, end_date):
+        captured["symbols"] = symbols
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return {}
+
+    def fake_coverage_details(dataset, start_date, end_date, symbols=None):
+        return {
+            "lookback_start": start_date.isoformat(),
+            "lookback_end": end_date.isoformat(),
+            "reference_date_count": 4,
+            "observed_date_count": 3,
+            "missing_dates": ["2026-06-03"],
+            "missing_ranges": [{"start": "2026-06-03", "end": "2026-06-03"}],
+            "low_coverage_dates": [],
+            "earliest_issue_date": "2026-06-03",
+            "expected_symbol_count": 1,
+            "symbol_threshold": None,
+            "typical_minute_bars_per_symbol": None,
+            "minute_bar_threshold": None,
+        }
+
+    monkeypatch.setattr(
+        sync_service_module,
+        "_latest_market_date_for_symbols",
+        lambda dataset, symbols: date(2026, 6, 6),
+    )
+    monkeypatch.setattr(sync_service_module, "_market_incremental_coverage_details", fake_coverage_details)
+    monkeypatch.setattr(sync_service_module.qmt_gateway, "get_kline_daily_batch", fake_get_kline_daily_batch)
+    monkeypatch.setattr(SyncService, "persist_sync_progress", noop_persist_sync_progress)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeSession()).sync_kline_daily(
+        symbols=["000001.SZ"],
+        end_date=date(2026, 6, 6),
+        auto_incremental=True,
+    )
+
+    assert captured["start_date"] == date(2026, 6, 3)
+    assert captured["end_date"] == date(2026, 6, 6)
+    assert progress.details["start_date"] == "2026-06-03"
+    assert progress.details["latest_local_date"] == "2026-06-06"
+    assert progress.details["incremental"]["incremental_start_reason"] == "coverage_gap_or_low_coverage"
+
+
+@pytest.mark.asyncio
+async def test_sync_kline_daily_incremental_refreshes_low_coverage_latest_date(monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_get_kline_daily_batch(symbols, start_date, end_date):
+        captured["start_date"] = start_date
+        captured["end_date"] = end_date
+        return {}
+
+    def fake_coverage_details(dataset, start_date, end_date, symbols=None):
+        return {
+            "lookback_start": start_date.isoformat(),
+            "lookback_end": end_date.isoformat(),
+            "reference_date_count": 1,
+            "observed_date_count": 1,
+            "missing_dates": [],
+            "missing_ranges": [],
+            "low_coverage_dates": [
+                {
+                    "date": "2026-06-06",
+                    "row_count": 15,
+                    "symbol_count": 15,
+                    "reasons": ["low_symbol_coverage"],
+                }
+            ],
+            "earliest_issue_date": "2026-06-06",
+            "expected_symbol_count": 5000,
+            "symbol_threshold": 4250,
+            "typical_minute_bars_per_symbol": None,
+            "minute_bar_threshold": None,
+        }
+
+    monkeypatch.setattr(
+        sync_service_module,
+        "_latest_market_date_for_symbols",
+        lambda dataset, symbols: date(2026, 6, 6),
+    )
+    monkeypatch.setattr(sync_service_module, "_market_incremental_coverage_details", fake_coverage_details)
+    monkeypatch.setattr(sync_service_module.qmt_gateway, "get_kline_daily_batch", fake_get_kline_daily_batch)
+    monkeypatch.setattr(SyncService, "persist_sync_progress", noop_persist_sync_progress)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeSession()).sync_kline_daily(
+        symbols=["000001.SZ"],
+        end_date=date(2026, 6, 6),
+        auto_incremental=True,
+    )
+
+    assert captured["start_date"] == date(2026, 6, 6)
+    assert captured["end_date"] == date(2026, 6, 6)
+    assert progress.status == "completed"
+    assert "skipped" not in progress.details
 
 
 @pytest.mark.asyncio

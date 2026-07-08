@@ -3,7 +3,7 @@
 import asyncio
 import os
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, time
 from datetime import timedelta as td
 from pathlib import Path
 from typing import Any
@@ -36,8 +36,32 @@ SYNC_STOCK_INFO_COMPUTE_INDICATORS = os.getenv("SYNC_STOCK_INFO_COMPUTE_INDICATO
 DATASYNC_INITIAL_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_DAILY_DAYS", "30"))
 DATASYNC_INITIAL_INDEX_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_INDEX_DAILY_DAYS", "30"))
 DATASYNC_INITIAL_MINUTE_DAYS = int(os.getenv("DATASYNC_INITIAL_MINUTE_DAYS", "7"))
+DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS = int(
+    os.getenv(
+        "DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS",
+        os.getenv("DATASYNC_INCREMENTAL_GAP_LOOKBACK_DAYS", "365"),
+    )
+)
+DATASYNC_INCREMENTAL_MINUTE_GAP_LOOKBACK_DAYS = int(
+    os.getenv(
+        "DATASYNC_INCREMENTAL_MINUTE_GAP_LOOKBACK_DAYS",
+        os.getenv("DATASYNC_INCREMENTAL_GAP_LOOKBACK_DAYS", "20"),
+    )
+)
+DATASYNC_INCREMENTAL_MIN_SYMBOL_RATIO = float(os.getenv("DATASYNC_INCREMENTAL_MIN_SYMBOL_RATIO", "0.85"))
+DATASYNC_INCREMENTAL_MINUTE_BAR_RATIO = float(os.getenv("DATASYNC_INCREMENTAL_MINUTE_BAR_RATIO", "0.65"))
 TUSHARE_INDEX_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_INDEX_DAILY_PAUSE_SECONDS", "0.2"))
 TUSHARE_SW_DAILY_PAUSE_SECONDS = float(os.getenv("TUSHARE_SW_DAILY_PAUSE_SECONDS", "61"))
+
+
+@dataclass(frozen=True)
+class _MarketDateCoverage:
+    trade_date: date
+    row_count: int
+    symbol_count: int
+
+
+_PARQUET_PATTERN_CACHE: dict[str, str] = {}
 
 
 def _write_store_daily(rows: list[dict[str, Any]]) -> None:
@@ -74,8 +98,22 @@ def _clean_qmt_kline_cache_after_download(progress: Any, symbols: list[str] | No
         progress.details["cache_clean_error"] = str(exc)
 
 
-def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
-    from app.db.duckdb import get_duckdb
+def _market_dataset_date_column(dataset: str) -> str:
+    return "datetime" if "minute" in dataset else "trade_date"
+
+
+def _coerce_market_date(value: Any) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return datetime.fromisoformat(str(value)).date()
+
+
+def _parquet_pattern(dataset: str) -> str | None:
+    cached = _PARQUET_PATTERN_CACHE.get(dataset)
+    if cached is not None:
+        return cached
 
     root = Path(app_settings.parquet_data_dir) / dataset
     if not root.exists() or not any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
@@ -84,7 +122,30 @@ def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
     pattern = str(root / "year=*" / "month=??" / "*.parquet")
     if not any(root.glob("year=*/month=??/*.parquet")):
         pattern = str(root / "**" / "*.parquet")
-    pattern = pattern.replace("\\", "/")
+    normalized = pattern.replace("\\", "/")
+    _PARQUET_PATTERN_CACHE[dataset] = normalized
+    return normalized
+
+
+def _year_month_partition_filter(start_date: date, end_date: date) -> str:
+    current = date(start_date.year, start_date.month, 1)
+    last = date(end_date.year, end_date.month, 1)
+    terms: list[str] = []
+    while current <= last:
+        terms.append(f"(year = {current.year} AND month = '{current.month:02d}')")
+        if current.month == 12:
+            current = date(current.year + 1, 1, 1)
+        else:
+            current = date(current.year, current.month + 1, 1)
+    return " AND (" + " OR ".join(terms) + ")" if terms else ""
+
+
+def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
+    from app.db.duckdb import get_duckdb
+
+    pattern = _parquet_pattern(dataset)
+    if pattern is None:
+        return None
 
     row = get_duckdb().execute(
         f"SELECT max({date_column}) FROM read_parquet(?, hive_partitioning=true)",
@@ -93,15 +154,11 @@ def _latest_parquet_date(dataset: str, date_column: str) -> date | None:
     value = row[0] if row else None
     if value is None:
         return None
-    if isinstance(value, datetime):
-        return value.date()
-    if isinstance(value, date):
-        return value
-    return datetime.fromisoformat(str(value)).date()
+    return _coerce_market_date(value)
 
 
 def _latest_market_date(dataset: str) -> date | None:
-    date_column = "datetime" if "minute" in dataset else "trade_date"
+    date_column = _market_dataset_date_column(dataset)
     return _latest_parquet_date(dataset, date_column)
 
 
@@ -109,18 +166,14 @@ def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | 
     if not symbols:
         return None
 
-    date_column = "datetime" if "minute" in dataset else "trade_date"
+    date_column = _market_dataset_date_column(dataset)
     if app_settings.market_data_backend == "parquet":
         from app.db.duckdb import get_duckdb
 
-        root = Path(app_settings.parquet_data_dir) / dataset
-        if not root.exists() or not any(".tmp-" not in str(file) for file in root.rglob("*.parquet")):
+        pattern = _parquet_pattern(dataset)
+        if pattern is None:
             return None
 
-        pattern = str(root / "year=*" / "month=??" / "*.parquet")
-        if not any(root.glob("year=*/month=??/*.parquet")):
-            pattern = str(root / "**" / "*.parquet")
-        pattern = pattern.replace("\\", "/")
         placeholders = ", ".join("?" for _ in symbols)
         rows = get_duckdb().execute(
             f"""
@@ -140,12 +193,7 @@ def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | 
 
     latest_values: list[date] = []
     for value in by_symbol.values():
-        if isinstance(value, datetime):
-            latest_values.append(value.date())
-        elif isinstance(value, date):
-            latest_values.append(value)
-        else:
-            latest_values.append(datetime.fromisoformat(str(value)).date())
+        latest_values.append(_coerce_market_date(value))
     return min(latest_values) if latest_values else None
 
 
@@ -153,6 +201,286 @@ def _next_sync_start(latest_date: date | None, end_date: date, initial_days: int
     if latest_date is None:
         return end_date - td(days=initial_days)
     return latest_date + td(days=1)
+
+
+def _compact_date_ranges(dates: list[date]) -> list[dict[str, str]]:
+    unique_dates = sorted(set(dates))
+    if not unique_dates:
+        return []
+
+    ranges: list[dict[str, str]] = []
+    start = prev = unique_dates[0]
+    for current in unique_dates[1:]:
+        if current == prev + td(days=1):
+            prev = current
+            continue
+        ranges.append({"start": start.isoformat(), "end": prev.isoformat()})
+        start = prev = current
+    ranges.append({"start": start.isoformat(), "end": prev.isoformat()})
+    return ranges
+
+
+def _sqlite_reference_trade_dates(start_date: date, end_date: date) -> set[date]:
+    import sqlite3
+
+    db_path = app_settings.sqlite_db_path
+    if not db_path.exists():
+        return set()
+
+    dates: set[date] = set()
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True, timeout=3)
+    except Exception as exc:
+        logger.debug("Unable to open SQLite trade-date reference: {}", exc)
+        return dates
+
+    try:
+        for table in ("stock_limit_prices", "stock_daily_basic"):
+            try:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT trade_date
+                    FROM {table}
+                    WHERE trade_date >= ? AND trade_date <= ?
+                    """,
+                    (start_date.isoformat(), end_date.isoformat()),
+                ).fetchall()
+            except Exception as exc:
+                logger.debug("Unable to read {} trade-date reference: {}", table, exc)
+                continue
+            for row in rows:
+                if row and row[0]:
+                    dates.add(_coerce_market_date(row[0]))
+    finally:
+        conn.close()
+
+    return dates
+
+
+def _parquet_distinct_market_dates(dataset: str, date_column: str, start_date: date, end_date: date) -> set[date]:
+    from app.db.duckdb import get_duckdb
+
+    pattern = _parquet_pattern(dataset)
+    if pattern is None:
+        return set()
+
+    date_expr = f"CAST({date_column} AS DATE)" if date_column == "datetime" else date_column
+    start_value: Any = datetime.combine(start_date, time.min) if date_column == "datetime" else start_date
+    end_value: Any = datetime.combine(end_date, time.max) if date_column == "datetime" else end_date
+    partition_filter = _year_month_partition_filter(start_date, end_date)
+    try:
+        rows = get_duckdb().execute(
+            f"""
+            SELECT DISTINCT {date_expr} AS trade_day
+            FROM read_parquet(?, hive_partitioning=true)
+            WHERE {date_column} >= ?
+              AND {date_column} <= ?
+              {partition_filter}
+            ORDER BY trade_day
+            """,
+            [pattern, start_value, end_value],
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("Unable to read {} distinct dates: {}", dataset, exc)
+        return set()
+    return {_coerce_market_date(row[0]) for row in rows if row and row[0] is not None}
+
+
+def _reference_market_dates(dataset: str, start_date: date, end_date: date) -> set[date]:
+    dates = _sqlite_reference_trade_dates(start_date, end_date)
+    dates.update(_parquet_distinct_market_dates("jq_index_daily_bars", "trade_date", start_date, end_date))
+    if dataset != "klines_daily":
+        dates.update(_parquet_distinct_market_dates("klines_daily", "trade_date", start_date, end_date))
+    return dates
+
+
+def _market_date_coverage(
+    dataset: str,
+    start_date: date,
+    end_date: date,
+    symbols: list[str] | None = None,
+) -> dict[date, _MarketDateCoverage]:
+    from app.db.duckdb import get_duckdb
+
+    pattern = _parquet_pattern(dataset)
+    if pattern is None:
+        return {}
+
+    date_column = _market_dataset_date_column(dataset)
+    date_expr = f"CAST({date_column} AS DATE)" if date_column == "datetime" else date_column
+    start_value: Any = datetime.combine(start_date, time.min) if date_column == "datetime" else start_date
+    end_value: Any = datetime.combine(end_date, time.max) if date_column == "datetime" else end_date
+    partition_filter = _year_month_partition_filter(start_date, end_date)
+    params: list[Any] = [pattern, start_value, end_value]
+    symbol_filter = ""
+    if symbols:
+        unique_symbols = sorted(set(symbols))
+        placeholders = ", ".join("?" for _ in unique_symbols)
+        symbol_filter = f"AND symbol IN ({placeholders})"
+        params.extend(unique_symbols)
+
+    try:
+        rows = get_duckdb().execute(
+            f"""
+            SELECT
+              {date_expr} AS trade_day,
+              COUNT(*) AS row_count,
+              COUNT(DISTINCT symbol) AS symbol_count
+            FROM read_parquet(?, hive_partitioning=true)
+            WHERE {date_column} >= ?
+              AND {date_column} <= ?
+              {partition_filter}
+              {symbol_filter}
+            GROUP BY 1
+            ORDER BY 1
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("Unable to read {} date coverage: {}", dataset, exc)
+        return {}
+
+    coverage: dict[date, _MarketDateCoverage] = {}
+    for trade_day, row_count, symbol_count in rows:
+        if trade_day is None:
+            continue
+        day = _coerce_market_date(trade_day)
+        coverage[day] = _MarketDateCoverage(
+            trade_date=day,
+            row_count=int(row_count or 0),
+            symbol_count=int(symbol_count or 0),
+        )
+    return coverage
+
+
+def _market_incremental_coverage_details(
+    dataset: str,
+    start_date: date,
+    end_date: date,
+    symbols: list[str] | None = None,
+) -> dict[str, Any]:
+    coverage = _market_date_coverage(dataset, start_date, end_date, symbols)
+    reference_dates = _reference_market_dates(dataset, start_date, end_date)
+    observed_dates = set(coverage)
+    missing_dates = sorted(reference_dates - observed_dates)
+
+    symbol_ratio = min(max(DATASYNC_INCREMENTAL_MIN_SYMBOL_RATIO, 0.1), 1.0)
+    expected_symbol_count = len(set(symbols)) if symbols else max(
+        (item.symbol_count for item in coverage.values()),
+        default=0,
+    )
+    symbol_threshold = int(expected_symbol_count * symbol_ratio) if expected_symbol_count >= 20 else 0
+
+    minute_bar_threshold: float | None = None
+    typical_minute_bars_per_symbol: float | None = None
+    if "minute" in dataset and symbol_threshold:
+        ratios = [
+            item.row_count / item.symbol_count
+            for item in coverage.values()
+            if item.symbol_count >= symbol_threshold and item.symbol_count > 0
+        ]
+        stable_ratios = [value for value in ratios if value >= 30]
+        if stable_ratios:
+            from statistics import median
+
+            typical_minute_bars_per_symbol = float(median(stable_ratios))
+            minute_bar_threshold = typical_minute_bars_per_symbol * min(
+                max(DATASYNC_INCREMENTAL_MINUTE_BAR_RATIO, 0.1),
+                1.0,
+            )
+
+    low_coverage: list[dict[str, Any]] = []
+    for day in sorted(coverage):
+        item = coverage[day]
+        reasons: list[str] = []
+        if symbol_threshold and item.symbol_count < symbol_threshold:
+            reasons.append("low_symbol_coverage")
+        if minute_bar_threshold is not None and item.symbol_count > 0:
+            bars_per_symbol = item.row_count / item.symbol_count
+            if bars_per_symbol < minute_bar_threshold:
+                reasons.append("low_minute_bar_coverage")
+        if reasons:
+            low_coverage.append(
+                {
+                    "date": day.isoformat(),
+                    "row_count": item.row_count,
+                    "symbol_count": item.symbol_count,
+                    "reasons": reasons,
+                }
+            )
+
+    issue_dates = missing_dates + [date.fromisoformat(item["date"]) for item in low_coverage]
+    earliest_issue = min(issue_dates) if issue_dates else None
+    return {
+        "lookback_start": start_date.isoformat(),
+        "lookback_end": end_date.isoformat(),
+        "reference_date_count": len(reference_dates),
+        "observed_date_count": len(observed_dates),
+        "missing_dates": [item.isoformat() for item in missing_dates[:30]],
+        "missing_ranges": _compact_date_ranges(missing_dates)[:30],
+        "low_coverage_dates": low_coverage[:30],
+        "earliest_issue_date": earliest_issue.isoformat() if earliest_issue else None,
+        "expected_symbol_count": expected_symbol_count,
+        "symbol_threshold": symbol_threshold or None,
+        "typical_minute_bars_per_symbol": typical_minute_bars_per_symbol,
+        "minute_bar_threshold": minute_bar_threshold,
+    }
+
+
+def _market_incremental_sync_plan(
+    dataset: str,
+    *,
+    requested_start_date: date,
+    end_date: date,
+    initial_days: int,
+    lookback_days: int,
+    symbols: list[str] | None = None,
+    explicit_start: bool = False,
+    overlap_days: int = 0,
+) -> tuple[date, date | None, dict[str, Any]]:
+    latest_date = (
+        _latest_market_date_for_symbols(dataset, symbols)
+        if symbols
+        else _latest_market_date(dataset)
+    )
+
+    if latest_date is None:
+        latest_based_start = requested_start_date if explicit_start else end_date - td(days=initial_days)
+    elif overlap_days > 0:
+        latest_based_start = latest_date - td(days=overlap_days)
+    else:
+        latest_based_start = latest_date + td(days=1)
+
+    lookback_start = requested_start_date if explicit_start else min(
+        requested_start_date,
+        end_date - td(days=lookback_days),
+    )
+    coverage_details = _market_incremental_coverage_details(
+        dataset,
+        lookback_start,
+        end_date,
+        symbols,
+    )
+    issue_start_text = coverage_details.get("earliest_issue_date")
+    issue_start = date.fromisoformat(issue_start_text) if issue_start_text else None
+
+    start_candidates = [latest_based_start]
+    start_reason = "latest_local_date"
+    if issue_start is not None:
+        start_candidates.append(issue_start)
+        start_reason = "coverage_gap_or_low_coverage"
+    start_date = min(start_candidates)
+    if explicit_start:
+        start_date = max(start_date, requested_start_date)
+
+    details = {
+        "latest_based_start_date": latest_based_start.isoformat(),
+        "incremental_start_reason": start_reason,
+        "incremental_gap_lookback_days": lookback_days,
+        "incremental_overlap_days": overlap_days,
+        "coverage": coverage_details,
+    }
+    return start_date, latest_date, details
 
 
 def _tushare_token() -> str | None:
@@ -442,11 +770,22 @@ class SyncService:
     async def build_datasync_plan(self, end_date: date | None = None) -> dict[str, Any]:
         target_end = end_date or date.today()
 
-        latest_daily = _latest_market_date("klines_daily")
-        latest_minute = _latest_market_date("klines_minute")
-        daily_start = _next_sync_start(latest_daily, target_end, DATASYNC_INITIAL_DAILY_DAYS)
+        daily_start, latest_daily, daily_incremental = _market_incremental_sync_plan(
+            "klines_daily",
+            requested_start_date=target_end - td(days=DATASYNC_INITIAL_DAILY_DAYS),
+            end_date=target_end,
+            initial_days=DATASYNC_INITIAL_DAILY_DAYS,
+            lookback_days=DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS,
+        )
         index_daily_start = target_end - td(days=DATASYNC_INITIAL_INDEX_DAILY_DAYS)
-        minute_start = _next_sync_start(latest_minute, target_end, DATASYNC_INITIAL_MINUTE_DAYS)
+        minute_start, latest_minute, minute_incremental = _market_incremental_sync_plan(
+            "klines_minute",
+            requested_start_date=target_end - td(days=DATASYNC_INITIAL_MINUTE_DAYS),
+            end_date=target_end,
+            initial_days=DATASYNC_INITIAL_MINUTE_DAYS,
+            lookback_days=DATASYNC_INCREMENTAL_MINUTE_GAP_LOOKBACK_DAYS,
+            overlap_days=1,
+        )
 
         plan = {
             "end_date": target_end.isoformat(),
@@ -460,6 +799,7 @@ class SyncService:
                     "start_date": daily_start.isoformat(),
                     "end_date": target_end.isoformat(),
                     "will_sync": daily_start <= target_end,
+                    "incremental": daily_incremental,
                 },
                 "index_daily": {
                     "start_date": index_daily_start.isoformat(),
@@ -470,6 +810,7 @@ class SyncService:
                     "start_date": minute_start.isoformat(),
                     "end_date": target_end.isoformat(),
                     "will_sync": minute_start <= target_end,
+                    "incremental": minute_incremental,
                 },
             },
             "steps": ["stock_info", "stock_full", "financial_data", "kline_daily", "index_daily", "kline_minute", "realtime_mv"],
@@ -1802,19 +2143,24 @@ class SyncService:
         # 设置默认日期范围
         if end_date is None:
             end_date = date.today()
+        start_date_was_provided = start_date is not None
         if start_date is None:
             start_date = end_date - td(days=30)
 
         requested_start_date = start_date
         requested_end_date = end_date
         incremental_latest_date: date | None = None
+        incremental_details: dict[str, Any] | None = None
         if auto_incremental and not full_sync:
-            if symbols:
-                incremental_latest_date = _latest_market_date_for_symbols("klines_daily", symbols)
-            else:
-                incremental_latest_date = _latest_market_date("klines_daily")
-            if incremental_latest_date is not None:
-                start_date = max(start_date, incremental_latest_date + td(days=1))
+            start_date, incremental_latest_date, incremental_details = _market_incremental_sync_plan(
+                "klines_daily",
+                requested_start_date=start_date,
+                end_date=end_date,
+                initial_days=DATASYNC_INITIAL_DAILY_DAYS,
+                lookback_days=DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS,
+                symbols=symbols,
+                explicit_start=start_date_was_provided,
+            )
 
         # 初始化进度
         progress = SyncProgress(
@@ -1830,6 +2176,7 @@ class SyncService:
                 "full_sync": full_sync,
                 "auto_incremental": auto_incremental,
                 "latest_local_date": incremental_latest_date.isoformat() if incremental_latest_date else None,
+                "incremental": incremental_details,
             },
         )
         _current_sync = progress
@@ -2101,17 +2448,19 @@ class SyncService:
         requested_start_date = start_date
         requested_end_date = end_date
         incremental_latest_date: date | None = None
+        incremental_details: dict[str, Any] | None = None
         if auto_incremental and not full_sync:
-            if symbols:
-                incremental_latest_date = _latest_market_date_for_symbols("klines_minute", symbols)
-            else:
-                incremental_latest_date = _latest_market_date("klines_minute")
-            if incremental_latest_date is not None:
-                # Why: 最新分钟分区可能只有个别 symbol 写入成功，重叠 1 天可补齐稀疏分区。
-                incremental_start = incremental_latest_date - td(days=1)
-                start_date = max(start_date, incremental_start) if start_date_was_provided else incremental_start
-            elif not start_date_was_provided:
-                start_date = end_date - td(days=DATASYNC_INITIAL_MINUTE_DAYS)
+            # Why: 最新分钟分区可能只有个别 symbol 写入成功，重叠 1 天可补齐稀疏分区。
+            start_date, incremental_latest_date, incremental_details = _market_incremental_sync_plan(
+                "klines_minute",
+                requested_start_date=start_date,
+                end_date=end_date,
+                initial_days=DATASYNC_INITIAL_MINUTE_DAYS,
+                lookback_days=DATASYNC_INCREMENTAL_MINUTE_GAP_LOOKBACK_DAYS,
+                symbols=symbols,
+                explicit_start=start_date_was_provided,
+                overlap_days=1,
+            )
 
         # 初始化进度
         progress = SyncProgress(
@@ -2128,6 +2477,7 @@ class SyncService:
                 "auto_incremental": auto_incremental,
                 "incremental_overlap_days": 1 if auto_incremental and not full_sync else 0,
                 "latest_local_date": incremental_latest_date.isoformat() if incremental_latest_date else None,
+                "incremental": incremental_details,
             },
         )
         _current_sync = progress

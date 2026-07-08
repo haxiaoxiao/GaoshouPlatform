@@ -426,6 +426,7 @@ export const liveTradingApi = {
     params?: Record<string, unknown>
     manual_account?: Record<string, unknown> | null
     evaluate_pipeline?: boolean
+    prepare_dependencies?: boolean
   }) => request.post<LivePreflightResponse>('/live-trading/preflight', data),
   signals: (data: {
     profile_key?: string | null

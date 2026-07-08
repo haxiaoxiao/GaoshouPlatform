@@ -76,6 +76,7 @@ LIVE_PENDING_STATUSES = {"live_pending", "submitted", "accepted", "partially_fil
 LIVE_FILLED_STATUSES = {"live_filled", "filled", "partially_cancelled"}
 LIVE_CANCELLED_STATUSES = {"cancelled", "partially_cancelled"}
 PAPER_FILLED_STATUSES = {"paper_filled"}
+LIVE_RUNTIME_PARAM_KEYS = {"trade_date"}
 
 
 @dataclass
@@ -473,6 +474,7 @@ class LiveTradingService:
         params: dict[str, Any] | None = None,
         manual_account: dict[str, Any] | None = None,
         evaluate_pipeline: bool = True,
+        prepare_dependencies: bool = False,
     ) -> dict[str, Any]:
         if mode not in {"paper", "live"}:
             raise ValueError("mode must be paper or live")
@@ -499,7 +501,8 @@ class LiveTradingService:
             mode=mode,
             trade_date=trade_date,
         )
-        return await self._build_preflight_report(
+        requirements, requirement_errors = self._factor_requirements(factor_configs, filters)
+        preflight = await self._build_preflight_report(
             bundle=bundle,
             params=normalized,
             trade_date=trade_date,
@@ -512,6 +515,24 @@ class LiveTradingService:
             include_factor_coverage=True,
             evaluate_pipeline=evaluate_pipeline,
         )
+        if prepare_dependencies and not requirement_errors:
+            preflight, _prepare_result = await self._prepare_and_refresh_preflight(
+                bundle=bundle,
+                params=normalized,
+                trade_date=trade_date,
+                account=account,
+                symbols=symbols,
+                factor_configs=factor_configs,
+                filters=filters,
+                requirements=requirements,
+                preflight=preflight,
+                mode=mode,
+                trigger_source="preflight",
+                run_id=None,
+                write_audit=True,
+                evaluate_pipeline=evaluate_pipeline,
+            )
+        return preflight
 
     async def list_profiles(self, *, include_disabled: bool = True) -> list[dict[str, Any]]:
         await self.ensure_default_profiles()
@@ -750,46 +771,24 @@ class LiveTradingService:
                 blocking_count=len(preflight.get("blocking_reasons") or []),
                 coverage_count=len(preflight.get("factor_coverage") or []),
             )
-            log_stage("intraday_prepare.start")
-            prepare_result = await self._prepare_live_intraday_factors(
+            preflight, prepare_result = await self._prepare_and_refresh_preflight(
                 bundle=bundle,
                 params=normalized,
                 trade_date=trade_date,
+                account=account,
                 symbols=symbols,
+                factor_configs=factor_configs,
+                filters=filters,
                 requirements=requirements,
                 preflight=preflight,
                 mode=mode,
                 trigger_source=trigger_source,
                 run_id=run_id,
                 write_audit=write_audit,
+                evaluate_pipeline=False,
                 log_stage=log_stage,
             )
-            log_stage(
-                "intraday_prepare.done",
-                attempted=prepare_result.get("attempted"),
-                status=prepare_result.get("status"),
-            )
             if prepare_result.get("attempted"):
-                log_stage("preflight_refresh.start")
-                preflight = await self._build_preflight_report(
-                    bundle=bundle,
-                    params=normalized,
-                    trade_date=trade_date,
-                    account=account,
-                    symbols=symbols,
-                    factor_configs=factor_configs,
-                    filters=filters,
-                    mode=mode,
-                    include_factor_coverage=True,
-                    evaluate_pipeline=False,
-                    intraday_prepare=prepare_result,
-                )
-                log_stage(
-                    "preflight_refresh.done",
-                    can_generate=preflight.get("can_generate"),
-                    blocking_count=len(preflight.get("blocking_reasons") or []),
-                    coverage_count=len(preflight.get("factor_coverage") or []),
-                )
                 effective_dates = self._factor_effective_dates(requirements, trade_date, symbols)
             signal_blocks = self._signal_blocking_reasons(preflight)
             if signal_blocks:
@@ -1107,8 +1106,44 @@ class LiveTradingService:
         if not qmt_status.get("quote_connected"):
             return await blocked("QMT quote connection is not ready.")
 
-        results = []
-        for order in order_list:
+        submit_params = dict(bundle.params or {})
+        if (
+            bool(submit_params.get("cash_aware_two_stage_rebalance", True))
+            and any(str(order.get("side") or "").upper() == "SELL" for order in order_list)
+            and any(str(order.get("side") or "").upper() == "BUY" for order in order_list)
+        ):
+            return await self._submit_live_orders_two_stage(
+                order_list,
+                bundle=bundle,
+                mode=mode,
+                trigger_source=trigger_source,
+                run_id=run_id,
+                params=submit_params,
+            )
+
+        results = await self._submit_live_order_batch(
+            order_list,
+            mode=mode,
+            trigger_source=trigger_source,
+            run_id=run_id,
+        )
+        return {
+            "enabled": True,
+            "submitted": all(bool(item.get("submitted")) for item in results) if results else False,
+            "pending_count": sum(1 for item in results if item.get("pending")),
+            "results": results,
+        }
+
+    async def _submit_live_order_batch(
+        self,
+        orders: Sequence[dict[str, Any]],
+        *,
+        mode: str,
+        trigger_source: str,
+        run_id: str | None,
+    ) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        for order in orders:
             if str(order.get("side") or "").upper() not in {"BUY", "SELL"}:
                 continue
             result = await qmt_trading_service.submit_order({**order, "confirm": True})
@@ -1121,12 +1156,147 @@ class LiveTradingService:
                 result["realized_pnl"] = 0.0
             results.append(result)
             await self._write_submit_audit(order, result, mode=mode, trigger_source=trigger_source, run_id=run_id)
+        return results
+
+    async def _submit_live_orders_two_stage(
+        self,
+        orders: Sequence[dict[str, Any]],
+        *,
+        bundle: StrategyProfileBundle,
+        mode: str,
+        trigger_source: str,
+        run_id: str | None,
+        params: dict[str, Any],
+    ) -> dict[str, Any]:
+        sell_orders = [order for order in orders if str(order.get("side") or "").upper() == "SELL"]
+        buy_orders = [order for order in orders if str(order.get("side") or "").upper() == "BUY"]
+        sell_results = await self._submit_live_order_batch(
+            sell_orders,
+            mode=mode,
+            trigger_source=trigger_source,
+            run_id=run_id,
+        )
+        sell_order_ids = [
+            str(result.get("order_id") or "")
+            for result in sell_results
+            if result.get("submitted") and str(result.get("order_id") or "").strip()
+        ]
+        sync_result: dict[str, Any] = {"synced": False, "pending_order_ids": sell_order_ids}
+        timeout_seconds = max(0.0, float(params.get("cash_aware_sell_sync_timeout_seconds", 45.0) or 45.0))
+        poll_seconds = max(0.5, float(params.get("cash_aware_sell_sync_poll_seconds", 2.0) or 2.0))
+        deadline = perf_counter() + timeout_seconds
+        pending_sell_ids = list(sell_order_ids)
+        while pending_sell_ids and perf_counter() <= deadline:
+            sync_result = await self.sync_order_status(
+                profile_key=bundle.profile.profile_key,
+                mode=mode,
+                limit=500,
+                order_ids=pending_sell_ids,
+            )
+            pending_sell_ids = await self._pending_live_order_ids(
+                profile_key=bundle.profile.profile_key,
+                mode=mode,
+                order_ids=sell_order_ids,
+            )
+            if not pending_sell_ids:
+                break
+            await asyncio.sleep(min(poll_seconds, max(0.0, deadline - perf_counter())))
+
+        if pending_sell_ids:
+            message = "卖单成交/撤单状态尚未确认，已暂停买单提交，避免卖出资金未释放导致买单失败。"
+            await self._write_control_audit(
+                profile_key=bundle.profile.profile_key,
+                strategy_id=bundle.profile.strategy_id,
+                trade_date=self._parse_date(orders[0].get("trade_date")) or date.today(),
+                signal_hash=str(orders[0].get("signal_hash") or "") or None,
+                trigger_source=trigger_source,
+                mode=mode,
+                run_id=run_id,
+                status="blocked",
+                reason=message,
+                payload={
+                    "stage": "two_stage_submit",
+                    "pending_sell_order_ids": pending_sell_ids,
+                    "sell_results": sell_results,
+                    "buy_orders": buy_orders,
+                },
+            )
+            return {
+                "enabled": True,
+                "submitted": False,
+                "two_stage": True,
+                "message": message,
+                "pending_count": sum(1 for item in sell_results if item.get("pending")),
+                "sell_results": sell_results,
+                "buy_results": [],
+                "sync_result": sync_result,
+                "results": sell_results,
+            }
+
+        scope_check = await self._validate_strategy_account_orders(
+            profile_key=bundle.profile.profile_key,
+            mode=mode,
+            orders=buy_orders,
+        )
+        if not scope_check.get("ok"):
+            message = str(scope_check.get("message") or "卖单确认后买单资金校验失败。")
+            await self._write_control_audit(
+                profile_key=bundle.profile.profile_key,
+                strategy_id=bundle.profile.strategy_id,
+                trade_date=self._parse_date(orders[0].get("trade_date")) or date.today(),
+                signal_hash=str(orders[0].get("signal_hash") or "") or None,
+                trigger_source=trigger_source,
+                mode=mode,
+                run_id=run_id,
+                status="blocked",
+                reason=message,
+                payload={"stage": "two_stage_buy_validate", "buy_orders": buy_orders, "sell_results": sell_results},
+            )
+            return {
+                "enabled": True,
+                "submitted": False,
+                "two_stage": True,
+                "message": message,
+                "pending_count": sum(1 for item in sell_results if item.get("pending")),
+                "sell_results": sell_results,
+                "buy_results": [],
+                "sync_result": sync_result,
+                "results": sell_results,
+            }
+
+        buy_results = await self._submit_live_order_batch(
+            buy_orders,
+            mode=mode,
+            trigger_source=trigger_source,
+            run_id=run_id,
+        )
+        results = [*sell_results, *buy_results]
         return {
             "enabled": True,
             "submitted": all(bool(item.get("submitted")) for item in results) if results else False,
+            "two_stage": True,
             "pending_count": sum(1 for item in results if item.get("pending")),
+            "sell_results": sell_results,
+            "buy_results": buy_results,
+            "sync_result": sync_result,
             "results": results,
         }
+
+    async def _pending_live_order_ids(
+        self,
+        *,
+        profile_key: str,
+        mode: str,
+        order_ids: Sequence[str | int],
+    ) -> list[str]:
+        rows = await self._load_live_trade_rows(
+            profile_key=profile_key,
+            mode=mode,
+            limit=max(1, len(order_ids)),
+            order_ids=order_ids,
+            only_pending=True,
+        )
+        return [str(row.order_id) for row in rows if row.order_id]
 
     async def sync_order_status(
         self,
@@ -1959,20 +2129,24 @@ class LiveTradingService:
                     )
                     signal_hash = str(signal.get("signal_hash") or "")
                     orders = list(signal.get("orders") or [])
+                    auto_submit_wait_reason = None
                     if orders:
-                        await self.submit_orders(
-                            orders,
-                            mode=mode,
-                            confirm=True,
-                            trigger_source="auto",
-                            run_id=run_id,
-                        )
+                        if mode == "live" and not settings.live_trading_auto_execute_enabled:
+                            auto_submit_wait_reason = "LIVE_TRADING_AUTO_EXECUTE_ENABLED=false，runner 仅生成信号，不自动提交。"
+                        else:
+                            await self.submit_orders(
+                                orders,
+                                mode=mode,
+                                confirm=True,
+                                trigger_source="auto",
+                                run_id=run_id,
+                            )
                     self._runner_status.update(
                         {
                             "last_cycle_at": datetime.now().isoformat(timespec="seconds"),
                             "last_signal_hash": signal_hash,
                             "last_error": None,
-                            "last_wait_reason": None,
+                            "last_wait_reason": auto_submit_wait_reason,
                         }
                     )
                     await self._update_run_status(
@@ -2022,11 +2196,13 @@ class LiveTradingService:
                 raise ValueError("No enabled live strategy profile is configured")
             profile, strategy = pair
         constants = self._parse_strategy_constants(strategy.code or "")
-        params = self._strategy_params(constants, strategy.parameters, profile.params_override)
+        params = self._strategy_params(constants, strategy.parameters)
         return StrategyProfileBundle(profile=profile, strategy=strategy, constants=constants, params=params)
 
     def _normalized_params(self, bundle: StrategyProfileBundle, override: dict[str, Any] | None) -> dict[str, Any]:
-        return {**bundle.params, **self._json_dict(override)}
+        runtime = self._json_dict(override)
+        allowed_runtime = {key: runtime[key] for key in LIVE_RUNTIME_PARAM_KEYS if key in runtime}
+        return {**bundle.params, **allowed_runtime}
 
     def _factor_configs(self, bundle: StrategyProfileBundle, params: dict[str, Any]) -> list[Any]:
         return list(params.get("factor_configs") or bundle.constants.get("FACTOR_CONFIGS") or [])
@@ -2505,8 +2681,6 @@ class LiveTradingService:
                 runner_blocks.append(f"profile {bundle.profile.profile_key} does not allow live submit")
             if not settings.live_trading_enable_order_submit:
                 runner_blocks.append("LIVE_TRADING_ENABLE_ORDER_SUBMIT=false，不能启动实盘自动交易")
-            if not settings.live_trading_auto_execute_enabled:
-                runner_blocks.append("LIVE_TRADING_AUTO_EXECUTE_ENABLED=false，不能启动实盘自动交易")
             if not qmt_status.get("account_configured"):
                 runner_blocks.append("QMT account is not configured")
             if not qmt_status.get("xttrader_available"):
@@ -2613,14 +2787,15 @@ class LiveTradingService:
         }
 
     def _resolve_index_symbol(self, profile: LiveStrategyProfile, params: dict[str, Any]) -> str | None:
+        strategy_index = self._strategy_index_symbol(params)
+        if strategy_index:
+            return strategy_index
+        if self._strategy_uses_all_a(params):
+            return None
         universe = self._json_dict(profile.universe_config)
         if self._is_all_a_universe(universe, params):
             return None
-        value = (
-            universe.get("index_symbol")
-            or params.get("index_symbol")
-            or ((params.get("backtest_settings") or {}).get("poolSource") or {}).get("indexSymbol")
-        )
+        value = universe.get("index_symbol")
         return str(value or "399101.SZ")
 
     def _is_all_a_universe(self, universe: dict[str, Any], params: dict[str, Any]) -> bool:
@@ -2634,6 +2809,18 @@ class LiveTradingService:
                 pool_source.get("type"),
             )
         )
+
+    def _strategy_pool_source(self, params: dict[str, Any]) -> dict[str, Any]:
+        return self._json_dict((params.get("backtest_settings") or {}).get("poolSource"))
+
+    def _strategy_index_symbol(self, params: dict[str, Any]) -> str | None:
+        pool_source = self._strategy_pool_source(params)
+        value = params.get("index_symbol") or pool_source.get("indexSymbol")
+        return str(value) if value else None
+
+    def _strategy_uses_all_a(self, params: dict[str, Any]) -> bool:
+        pool_source = self._strategy_pool_source(params)
+        return any(is_all_a_universe(value) for value in (params.get("universe_mode"), pool_source.get("type")))
 
     def _factor_requirements(self, factor_configs: list[Any], filters: list[Any]) -> tuple[list[dict[str, Any]], list[str]]:
         rows: dict[tuple[str, str | None, str | None], dict[str, Any]] = {}
@@ -2868,6 +3055,84 @@ class LiveTradingService:
 
     def _signal_blocking_reasons(self, preflight: dict[str, Any]) -> list[str]:
         return [str(item) for item in preflight.get("blocking_reasons") or [] if str(item).strip()]
+
+    async def _prepare_and_refresh_preflight(
+        self,
+        *,
+        bundle: StrategyProfileBundle,
+        params: dict[str, Any],
+        trade_date: date,
+        account: LiveAccountSnapshot,
+        symbols: list[str],
+        factor_configs: list[Any],
+        filters: list[Any],
+        requirements: list[dict[str, Any]],
+        preflight: dict[str, Any],
+        mode: str,
+        trigger_source: str,
+        run_id: str | None,
+        write_audit: bool,
+        evaluate_pipeline: bool,
+        log_stage: Callable[..., None] | None = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        if not bundle.profile.enabled:
+            result = {"attempted": False, "status": "skipped", "reason": "profile_disabled"}
+            return {**preflight, "intraday_prepare": result}, result
+        if bundle.profile.adapter_type != DEFAULT_ADAPTER:
+            result = {"attempted": False, "status": "skipped", "reason": "unsupported_adapter"}
+            return {**preflight, "intraday_prepare": result}, result
+        if not requirements:
+            result = {"attempted": False, "status": "skipped", "reason": "no_factor_requirements"}
+            return {**preflight, "intraday_prepare": result}, result
+
+        if log_stage is not None:
+            log_stage("intraday_prepare.start")
+        prepare_result = await self._prepare_live_intraday_factors(
+            bundle=bundle,
+            params=params,
+            trade_date=trade_date,
+            symbols=symbols,
+            requirements=requirements,
+            preflight=preflight,
+            mode=mode,
+            trigger_source=trigger_source,
+            run_id=run_id,
+            write_audit=write_audit,
+            log_stage=log_stage,
+        )
+        if log_stage is not None:
+            log_stage(
+                "intraday_prepare.done",
+                attempted=prepare_result.get("attempted"),
+                status=prepare_result.get("status"),
+            )
+
+        if not prepare_result.get("attempted"):
+            return {**preflight, "intraday_prepare": prepare_result}, prepare_result
+
+        if log_stage is not None:
+            log_stage("preflight_refresh.start")
+        refreshed = await self._build_preflight_report(
+            bundle=bundle,
+            params=params,
+            trade_date=trade_date,
+            account=account,
+            symbols=symbols,
+            factor_configs=factor_configs,
+            filters=filters,
+            mode=mode,
+            include_factor_coverage=True,
+            evaluate_pipeline=evaluate_pipeline,
+            intraday_prepare=prepare_result,
+        )
+        if log_stage is not None:
+            log_stage(
+                "preflight_refresh.done",
+                can_generate=refreshed.get("can_generate"),
+                blocking_count=len(refreshed.get("blocking_reasons") or []),
+                coverage_count=len(refreshed.get("factor_coverage") or []),
+            )
+        return refreshed, prepare_result
 
     async def _prepare_live_intraday_factors(
         self,
@@ -3218,7 +3483,6 @@ class LiveTradingService:
         self,
         constants: dict[str, Any],
         strategy_params: Any,
-        override: Any,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {}
         for key, value in constants.items():
@@ -3228,7 +3492,6 @@ class LiveTradingService:
         if "FILTER_FACTORS" in constants:
             params["filter_factors"] = constants["FILTER_FACTORS"]
         params.update(self._json_dict(strategy_params))
-        params.update(self._json_dict(override))
         return params
 
     def _parse_strategy_constants(self, code: str) -> dict[str, Any]:
@@ -3262,17 +3525,17 @@ class LiveTradingService:
         raw_symbols = params.get("symbols")
         if isinstance(raw_symbols, list) and raw_symbols:
             return [str(symbol) for symbol in raw_symbols if str(symbol).strip()]
+        if self._strategy_uses_all_a(params):
+            return load_all_a_symbols(as_of=trade_date, include_delisted_during_range=False)
+        strategy_index = self._strategy_index_symbol(params)
+        if strategy_index:
+            return await load_index_symbols(strategy_index, trade_date, trade_date)
         universe = self._json_dict(profile.universe_config)
         if universe.get("type") == "symbols":
             return [str(symbol) for symbol in universe.get("symbols") or [] if str(symbol).strip()]
         if self._is_all_a_universe(universe, params):
             return load_all_a_symbols(as_of=trade_date, include_delisted_during_range=False)
-        index_symbol = (
-            universe.get("index_symbol")
-            or params.get("index_symbol")
-            or ((params.get("backtest_settings") or {}).get("poolSource") or {}).get("indexSymbol")
-            or "399101.SZ"
-        )
+        index_symbol = universe.get("index_symbol") or "399101.SZ"
         return await load_index_symbols(str(index_symbol), trade_date, trade_date)
 
     async def _account_dict(self, account: LiveAccountSnapshot, *, mode: str) -> dict[str, Any]:
@@ -4153,12 +4416,24 @@ class LiveTradingService:
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         lot_size = int(params.get("lot_size", 100) or 100)
         tolerance = float(params.get("rebalance_tolerance_pct", 0.01) or 0.01)
-        execution_reserve = float(params.get("cash_execution_reserve_pct", params.get("cash_buffer_pct", 0.08)) or 0.0)
+        execution_reserve = float(params.get("cash_execution_reserve_pct", params.get("cash_buffer_pct", 0.02)) or 0.0)
         buy_fee_buffer = float(params.get("cash_aware_buy_fee_buffer_pct", 0.003) or 0.0)
+        max_position_pct = float(params.get("max_position_pct", 0.06) or 0.06)
+        target_cash_floor = max(
+            0.0,
+            float(portfolio_value or 0.0)
+            * max(
+                execution_reserve,
+                1.0 - sum(max(0.0, float(weight or 0.0)) for weight in target_weights.values()),
+            ),
+        )
         require_current = bool(params.get("require_current_market_data_for_orders", True))
+        round_lot_redeploy = bool(params.get("cash_aware_round_lot_redeploy", True))
         rank_map = {symbol: index + 1 for index, symbol in enumerate(ranked_symbols or [])}
+        post_qty = {symbol: float(qty or 0.0) for symbol, qty in positions.items()}
         sell_orders: list[dict[str, Any]] = []
         buy_candidates: list[dict[str, Any]] = []
+        buy_by_symbol: dict[str, dict[str, Any]] = {}
         skipped: list[dict[str, Any]] = []
 
         def skip(
@@ -4202,6 +4477,7 @@ class LiveTradingService:
                 available = float(account.positions.get(symbol, {}).get("available", current_qty) or current_qty)
                 sell_qty = self._round_lot(min(-delta if symbol in target_weights else current_qty, available), lot_size)
                 if sell_qty > 0:
+                    post_qty[symbol] = max(0.0, current_qty - sell_qty)
                     if symbol in target_weights:
                         summary = (
                             f"目标仓位降至 {target_qty:.0f} 股，当前 {current_qty:.0f} 股，"
@@ -4237,7 +4513,7 @@ class LiveTradingService:
                     ))
 
         projected_cash = account.cash + sum(float(order["quantity"]) * float(order["reference_price"]) for order in sell_orders)
-        available_cash = max(0.0, projected_cash * (1.0 - execution_reserve))
+        available_cash = max(0.0, projected_cash - target_cash_floor)
         for symbol, weight in target_weights.items():
             price = float(price_map.get(symbol, 0.0) or 0.0)
             if require_current and price <= 0:
@@ -4252,7 +4528,7 @@ class LiveTradingService:
             if price <= 0:
                 continue
             target_qty = self._round_lot((portfolio_value * float(weight or 0.0)) / price, lot_size)
-            current_qty = float(positions.get(symbol, 0.0) or 0.0)
+            current_qty = float(post_qty.get(symbol, positions.get(symbol, 0.0)) or 0.0)
             delta = target_qty - current_qty
             if delta <= 0 or abs(delta) * price < portfolio_value * tolerance:
                 continue
@@ -4287,6 +4563,7 @@ class LiveTradingService:
                     "buy_value_with_fee_buffer": round(buy_value, 2),
                     "cash_available_before": round(available_before, 2),
                     "cash_reserve_pct": execution_reserve,
+                    "target_cash_floor": round(target_cash_floor, 2),
                     "buy_fee_buffer_pct": buy_fee_buffer,
                     "portfolio_value": round(float(portfolio_value or 0.0), 2),
                     "cash_effect": -round(buy_value, 2),
@@ -4294,6 +4571,8 @@ class LiveTradingService:
             ))
             if buy_value <= available_cash:
                 available_cash -= buy_value
+                post_qty[symbol] = current_qty + buy_qty
+                buy_by_symbol[symbol] = buy_candidates[-1]
             else:
                 skip(symbol, "BUY", "cash_aware_deferred_insufficient_cash", buy_qty, attribution={
                     "action": "BUY",
@@ -4311,9 +4590,141 @@ class LiveTradingService:
                     "buy_value_with_fee_buffer": round(buy_value, 2),
                     "cash_available_before": round(available_before, 2),
                     "cash_shortfall": round(max(0.0, buy_value - available_before), 2),
+                    "target_cash_floor": round(target_cash_floor, 2),
                 })
                 buy_candidates.pop()
+        if round_lot_redeploy and target_weights and available_cash > 0:
+            self._redeploy_round_lot_cash(
+                bundle=bundle,
+                target_weights=target_weights,
+                post_qty=post_qty,
+                price_map=price_map,
+                buy_candidates=buy_candidates,
+                buy_by_symbol=buy_by_symbol,
+                available_cash=available_cash,
+                buy_fee_buffer=buy_fee_buffer,
+                lot_size=lot_size,
+                max_position_pct=max_position_pct,
+                portfolio_value=portfolio_value,
+                rank_map=rank_map,
+                target_cash_floor=target_cash_floor,
+            )
         return [*sell_orders, *buy_candidates], skipped
+
+    def _redeploy_round_lot_cash(
+        self,
+        *,
+        bundle: StrategyProfileBundle,
+        target_weights: dict[str, float],
+        post_qty: dict[str, float],
+        price_map: dict[str, float],
+        buy_candidates: list[dict[str, Any]],
+        buy_by_symbol: dict[str, dict[str, Any]],
+        available_cash: float,
+        buy_fee_buffer: float,
+        lot_size: int,
+        max_position_pct: float,
+        portfolio_value: float,
+        rank_map: dict[str, int],
+        target_cash_floor: float,
+    ) -> None:
+        lot = max(1, int(lot_size or 100))
+        remaining_cash = float(available_cash or 0.0)
+
+        while remaining_cash > 0:
+            best: tuple[tuple[float, float, float], str, float] | None = None
+            for symbol, weight in target_weights.items():
+                price = float(price_map.get(symbol, 0.0) or 0.0)
+                if price <= 0:
+                    continue
+                current_qty = float(post_qty.get(symbol, 0.0) or 0.0)
+                cap_qty = self._round_lot((portfolio_value * max_position_pct) / price, lot)
+                if cap_qty <= 0 or current_qty + lot > cap_qty:
+                    continue
+                lot_cost = lot * price * (1.0 + buy_fee_buffer)
+                if lot_cost > remaining_cash + 1e-6:
+                    continue
+                target_value = portfolio_value * max(0.0, float(weight or 0.0))
+                current_value = current_qty * price
+                under_target = target_value - current_value
+                rank = float(rank_map.get(symbol) or 999_999)
+                priority = (
+                    1.0 if under_target > 0 else 0.0,
+                    under_target,
+                    -rank,
+                )
+                if best is None or priority > best[0]:
+                    best = (priority, symbol, lot_cost)
+            if best is None:
+                break
+
+            _priority, symbol, lot_cost = best
+            price = float(price_map.get(symbol, 0.0) or 0.0)
+            previous_qty = float(post_qty.get(symbol, 0.0) or 0.0)
+            next_qty = previous_qty + lot
+            post_qty[symbol] = next_qty
+            remaining_cash -= lot_cost
+            order = buy_by_symbol.get(symbol)
+            top_up_value = lot * price
+            if order is None:
+                summary = (
+                    f"目标排名第 {rank_map.get(symbol, '-') }，100 股取整后仍有可用现金，"
+                    f"追加买入 {lot:.0f} 股提高资金使用率。"
+                )
+                order = self._order(
+                    bundle,
+                    symbol,
+                    "BUY",
+                    lot,
+                    price,
+                    summary,
+                    attribution={
+                        "action": "BUY",
+                        "trigger": "round_lot_cash_redeploy",
+                        "summary": summary,
+                        "rank": rank_map.get(symbol),
+                        "current_quantity": previous_qty,
+                        "target_quantity": next_qty,
+                        "delta_quantity": lot,
+                        "order_quantity": lot,
+                        "target_weight": float(target_weights.get(symbol, 0.0) or 0.0),
+                        "max_position_pct": max_position_pct,
+                        "reference_price": price,
+                        "notional": round(top_up_value, 2),
+                        "buy_value_with_fee_buffer": round(lot_cost, 2),
+                        "cash_available_before": round(remaining_cash + lot_cost, 2),
+                        "target_cash_floor": round(target_cash_floor, 2),
+                        "buy_fee_buffer_pct": buy_fee_buffer,
+                        "portfolio_value": round(float(portfolio_value or 0.0), 2),
+                        "cash_effect": -round(lot_cost, 2),
+                        "round_lot_top_up_quantity": lot,
+                    },
+                )
+                buy_candidates.append(order)
+                buy_by_symbol[symbol] = order
+                continue
+
+            new_quantity = int(float(order.get("quantity") or 0.0) + lot)
+            order["quantity"] = new_quantity
+            attr = self._json_dict(order.get("attribution"))
+            attr["trigger"] = (
+                f"{attr.get('trigger')}+round_lot_cash_redeploy"
+                if attr.get("trigger") and "round_lot_cash_redeploy" not in str(attr.get("trigger"))
+                else "round_lot_cash_redeploy"
+            )
+            attr["summary"] = f"{attr.get('summary') or order.get('remark') or ''} 100股取整剩余现金追加 {lot:.0f} 股。".strip()
+            attr["target_quantity"] = next_qty
+            attr["delta_quantity"] = float(attr.get("delta_quantity") or 0.0) + lot
+            attr["order_quantity"] = new_quantity
+            attr["notional"] = round(float(attr.get("notional") or 0.0) + top_up_value, 2)
+            attr["buy_value_with_fee_buffer"] = round(float(attr.get("buy_value_with_fee_buffer") or 0.0) + lot_cost, 2)
+            attr["cash_effect"] = -round(float(attr.get("buy_value_with_fee_buffer") or 0.0), 2)
+            attr["cash_available_after_top_up"] = round(remaining_cash, 2)
+            attr["round_lot_top_up_quantity"] = int(float(attr.get("round_lot_top_up_quantity") or 0.0) + lot)
+            attr["max_position_pct"] = max_position_pct
+            attr["target_cash_floor"] = round(target_cash_floor, 2)
+            order["attribution"] = attr
+            order["remark"] = attr["summary"]
 
     async def _validate_strategy_account_orders(
         self,
@@ -5443,7 +5854,7 @@ class LiveTradingService:
             return 0.0
         return min(
             float(params.get("max_position_pct", 0.06) or 0.06),
-            (1.0 - float(params.get("cash_buffer_pct", 0.08) or 0.08)) / float(len(target_symbols)),
+            (1.0 - float(params.get("cash_buffer_pct", 0.02) or 0.02)) / float(len(target_symbols)),
         )
 
     def _entry_filter_state(self, trade_date: date, params: dict[str, Any]) -> dict[str, Any]:

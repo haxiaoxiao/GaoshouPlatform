@@ -2032,12 +2032,13 @@ async function loadPreflight() {
   if (ownsRuntime) {
     startRuntimeTask(
       '运行检查',
-      '正在检查交易环境',
-      '读取账户、交易窗口、因子覆盖和数据依赖。',
+      '正在执行早盘检查',
+      '读取账户、交易窗口、因子覆盖，并提前准备盘中计算指标。',
       [
         { id: 'qmt', label: 'QMT状态' },
         { id: 'account', label: '账户快照' },
         { id: 'factor', label: '因子覆盖' },
+        { id: 'prepare', label: '早盘预计算' },
         { id: 'dependency', label: '依赖缺口' },
       ],
     )
@@ -2050,25 +2051,33 @@ async function loadPreflight() {
     preflightData.value = await liveTradingApi.preflight({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
-      params: {
-        trade_date: tradeDate.value,
-        index_symbol: indexSymbol.value,
-      },
       evaluate_pipeline: true,
+      prepare_dependencies: true,
     })
     if (ownsRuntime) {
       const gaps = arrayField(preflightData.value.dependency_prepare, 'coverage_gaps')
+      const intradayPrepare = preflightData.value.intraday_prepare || {}
+      const intradayStatus = String(intradayPrepare.status || '')
+      const intradayAttempted = Boolean(intradayPrepare.attempted)
       const blocks = uniqueStrings([
         ...(preflightData.value.blocking_reasons || []),
         ...(preflightData.value.runner_blocking_reasons || []),
       ])
       setRuntimeStep('qmt', 'done', 'QMT和护栏状态已读取。', 28)
-      setRuntimeStep('account', 'done', '账户快照已读取。', 44)
+      setRuntimeStep('account', 'done', '账户快照已读取。', 40)
       setRuntimeStep(
         'factor',
         preflightData.value.factor_coverage?.some(item => Number(item.value_count || 0) === 0) ? 'warn' : 'done',
-        '因子覆盖已检查。',
-        72,
+        intradayAttempted ? '因子覆盖已刷新。' : '因子覆盖已检查。',
+        62,
+      )
+      setRuntimeStep(
+        'prepare',
+        intradayStatus === 'failed' ? 'error' : intradayStatus === 'waiting' ? 'warn' : 'done',
+        intradayAttempted
+          ? `盘中计算指标准备 ${intradayStatus || '完成'}`
+          : '盘中计算指标已命中或暂无需准备。',
+        80,
       )
       setRuntimeStep(
         'dependency',
@@ -2139,14 +2148,10 @@ async function loadSignals() {
   try {
     setRuntimeStep('account', 'done', '策略资金池已确认。', 16)
     setRuntimeStep('preflight', 'running', '后端正在执行预检、同步成交状态和依赖检查。', 28)
-    setRuntimeMessage('后端正在生成信号', '可能会同步当天分钟线，并按当前分钟预计算停牌/涨跌停过滤因子。', 32)
+    setRuntimeMessage('后端正在生成信号', '优先复用早盘检查已准备的盘中指标，只做实时账户、行情和订单差额计算。', 32)
     signalData.value = await liveTradingApi.signals({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
-      params: {
-        trade_date: tradeDate.value,
-        index_symbol: indexSymbol.value,
-      },
     })
     stopRuntimeSyncPolling()
     preflightData.value = signalData.value.preflight || preflightData.value
@@ -2168,7 +2173,7 @@ async function loadSignals() {
     setRuntimeStep(
       'factor',
       intradayAttempted && intradayStatus === 'failed' ? 'error' : 'done',
-      intradayAttempted ? '交易过滤因子已按当前分钟处理。' : '过滤因子缓存已命中。',
+      intradayAttempted ? '缺失交易过滤因子已补齐。' : '早盘预计算结果已命中。',
       82,
     )
     setOrderBasket((signalData.value.orders || []).map(order => ({ ...order })))
@@ -2501,10 +2506,6 @@ async function cancelAndResubmitPendingOrders() {
     const result = await liveTradingApi.cancelAndResubmit({
       profile_key: selectedProfileKey.value || undefined,
       mode: 'live',
-      params: {
-        trade_date: tradeDate.value,
-        index_symbol: indexSymbol.value,
-      },
       limit: 200,
       min_age_seconds: useSelectedRows ? 0 : Math.max(0, staleOrderMinutes.value || 0) * 60,
       record_ids: rows.map(row => row.record_id),
@@ -2572,10 +2573,6 @@ async function startRunner() {
     await liveTradingApi.startRunner({
       profile_key: selectedProfileKey.value,
       mode: mode.value,
-      params: {
-        trade_date: tradeDate.value,
-        index_symbol: indexSymbol.value,
-      },
       interval_seconds: 60,
     })
     setRuntimeStep('start', 'done', 'runner 已启动。', 72)
@@ -2665,6 +2662,40 @@ function orderRowKey(row: LiveOrder) {
   ].join('|')
 }
 
+function orderSubmitIdentity(order: LiveOrder | Record<string, unknown>) {
+  const record = order as Record<string, unknown>
+  return [
+    String(record.signal_hash || signalData.value?.signal_hash || ''),
+    String(record.profile_key || ''),
+    String(record.strategy_id || ''),
+    String(record.symbol || ''),
+    String(record.side || record.action || '').toUpperCase(),
+    String(record.quantity || ''),
+  ].join('|')
+}
+
+function removeSubmittedBasketOrders(submittedOrders: LiveOrder[], result: LiveSubmitOrdersResponse) {
+  const successfulIds = new Set(
+    (result.results || [])
+      .filter(item => item.submitted || item.pending || item.paper || isFilledStatus(String(item.status || '')))
+      .map(item => orderSubmitIdentity(item.order || {}))
+      .filter(key => key.replace(/\|/g, '').length > 0),
+  )
+  if (!successfulIds.size && result.submitted) {
+    submittedOrders.forEach(order => successfulIds.add(orderSubmitIdentity(order)))
+  }
+  if (!successfulIds.size) return
+  orderBasketTableRef.value?.clearSelection()
+  orderRows.value = orderRows.value.filter(row => !successfulIds.has(orderSubmitIdentity(row)))
+  selectedOrderRows.value = selectedOrderRows.value.filter(row => !successfulIds.has(orderSubmitIdentity(row)))
+  if (signalData.value) {
+    signalData.value = {
+      ...signalData.value,
+      orders: (signalData.value.orders || []).filter(order => !successfulIds.has(orderSubmitIdentity(order))),
+    }
+  }
+}
+
 function onOrderSelectionChange(rows: LiveOrder[]) {
   selectedOrderRows.value = rows
 }
@@ -2712,6 +2743,7 @@ async function submitOrders() {
     })
     submitResult.value = result
     submitResultDialogOpen.value = true
+    removeSubmittedBasketOrders(orders, result)
     setRuntimeStep(
       'submit',
       submitResultFailedCount.value ? 'warn' : 'done',

@@ -11,14 +11,14 @@ from app.db.models.live_trading import LiveStrategyProfile, LiveTradeRecord
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory, init_db
 from app.main import app
-from app.services.live_trading import StrategyProfileBundle, live_trading_service
+from app.services.live_trading import LiveAccountSnapshot, StrategyProfileBundle, live_trading_service
 
 
 STABLE_CODE = """
 FACTOR_CONFIGS = [{"factor_name": "pe_ttm", "weight": 1.0}]
 FILTER_FACTORS = ["is_st", "is_suspend"]
 CASH_AWARE_TWO_STAGE_REBALANCE = True
-CASH_EXECUTION_RESERVE_PCT = 0.12
+CASH_EXECUTION_RESERVE_PCT = 0.02
 CASH_AWARE_BUY_FEE_BUFFER_PCT = 0.003
 REQUIRE_CURRENT_MARKET_DATA_FOR_ORDERS = True
 ENABLE_LIMIT_UP_HEAT_FILTER = True
@@ -29,7 +29,7 @@ AGGRESSIVE_CODE = """
 FACTOR_CONFIGS = [{"factor_name": "momentum_20d", "weight": 1.0}]
 FILTER_FACTORS = ["is_st"]
 CASH_AWARE_TWO_STAGE_REBALANCE = False
-CASH_EXECUTION_RESERVE_PCT = 0.08
+CASH_EXECUTION_RESERVE_PCT = 0.02
 CASH_AWARE_BUY_FEE_BUFFER_PCT = 0.002
 REQUIRE_CURRENT_MARKET_DATA_FOR_ORDERS = True
 ENABLE_LIMIT_UP_HEAT_FILTER = False
@@ -51,6 +51,8 @@ async def _prepare_live_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
     db_path = tmp_path / "gaoshou.db"
     monkeypatch.setattr(settings, "database_url", f"sqlite+aiosqlite:///{db_path.as_posix()}")
     monkeypatch.setattr(settings, "debug", False)
+    monkeypatch.setattr(settings, "live_trading_seed_strategy_ids", "62,63")
+    monkeypatch.setattr(settings, "live_trading_default_profile", "tsmf_cashaware_stable")
     monkeypatch.setattr("app.db.sqlite.apply_dev_data_mode_to_settings", lambda: None)
     monkeypatch.setattr("app.main.apply_dev_data_mode_to_settings", lambda: None)
     await init_db()
@@ -80,9 +82,57 @@ async def _prepare_live_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
                 ),
             ]
         )
+        session.add_all(
+            [
+                LiveStrategyProfile(
+                    strategy_id=62,
+                    profile_key="tsmf_cashaware_stable",
+                    display_name="[TSMF] 科技主线小市值多因子-当前最优CashAware",
+                    description="stable",
+                    enabled=True,
+                    is_default=True,
+                    adapter_type="multi_factor_cash_aware",
+                    params_override={},
+                    universe_config={"type": "strategy"},
+                    execution_policy={
+                        "allow_auto_trade": True,
+                        "allow_manual_submit": True,
+                        "allow_live_submit": True,
+                    },
+                ),
+                LiveStrategyProfile(
+                    strategy_id=63,
+                    profile_key="tsmf_cashaware_aggressive",
+                    display_name="[TSMF] 科技主线小市值多因子-进攻档MissingGuard",
+                    description="aggressive",
+                    enabled=True,
+                    is_default=False,
+                    adapter_type="multi_factor_cash_aware",
+                    params_override={},
+                    universe_config={"type": "strategy"},
+                    execution_policy={
+                        "allow_auto_trade": True,
+                        "allow_manual_submit": True,
+                        "allow_live_submit": True,
+                    },
+                ),
+            ]
+        )
         await session.commit()
     await live_trading_service.stop_runner()
     await live_trading_service.ensure_default_profiles()
+    await live_trading_service.initialize_strategy_account(
+        profile_key="tsmf_cashaware_stable",
+        mode="paper",
+        capital=100_000,
+        reset_existing=True,
+    )
+    await live_trading_service.initialize_strategy_account(
+        profile_key="tsmf_cashaware_aggressive",
+        mode="paper",
+        capital=100_000,
+        reset_existing=True,
+    )
 
 
 @pytest.mark.asyncio
@@ -198,11 +248,77 @@ def test_lunch_break_blocks_runner_but_not_manual_signal_generation():
 
 
 @pytest.mark.asyncio
+async def test_auto_execute_disabled_is_not_a_preflight_blocker(monkeypatch):
+    profile = LiveStrategyProfile(
+        id=996,
+        strategy_id=996,
+        profile_key="auto_execute_off_profile",
+        display_name="Auto Execute Off Profile",
+        description=None,
+        enabled=True,
+        is_default=False,
+        adapter_type="multi_factor_cash_aware",
+        params_override={},
+        universe_config={"type": "strategy"},
+        execution_policy={"allow_auto_trade": True, "allow_manual_submit": True, "allow_live_submit": True},
+    )
+    strategy = Strategy(
+        id=996,
+        name="Auto Execute Off Strategy",
+        code="FACTOR_CONFIGS = []\nFILTER_FACTORS = []\n",
+        parameters={},
+        description=None,
+    )
+    bundle = StrategyProfileBundle(profile=profile, strategy=strategy, constants={}, params={})
+    factor_configs = [{"factor_name": "pe_ttm", "weight": 1.0}]
+
+    async def fake_qmt_status():
+        return {"account_configured": True, "xttrader_available": True, "quote_connected": True}
+
+    def fake_prepare(*_args, **_kwargs):
+        return {"coverage_gaps": [], "sync_plan": None}
+
+    def fake_factor_coverage(*_args, **_kwargs):
+        return [{"name": "pe_ttm", "roles": ["factor"], "value_count": 1}]
+
+    monkeypatch.setattr(settings, "live_trading_enable_order_submit", True)
+    monkeypatch.setattr(settings, "live_trading_auto_execute_enabled", False)
+    monkeypatch.setattr("app.services.live_trading.qmt_trading_service.status", fake_qmt_status)
+    monkeypatch.setattr("app.services.live_trading.build_precompute_prepare", fake_prepare)
+    monkeypatch.setattr(live_trading_service, "_factor_coverage_snapshot", fake_factor_coverage)
+
+    preflight = await live_trading_service._build_preflight_report(
+        bundle=bundle,
+        params={"ignore_trading_window": True},
+        trade_date=date(2026, 5, 20),
+        account=LiveAccountSnapshot(
+            cash=100_000.0,
+            total_asset=100_000.0,
+            market_value=0.0,
+            positions={},
+            source="unit_test",
+            meta={"account_scope": "strategy_pool", "initialized": True},
+        ),
+        symbols=["600519.SH"],
+        factor_configs=factor_configs,
+        filters=[],
+        mode="live",
+        include_factor_coverage=True,
+        evaluate_pipeline=False,
+    )
+
+    assert preflight["can_generate"] is True
+    assert preflight["can_start_runner"] is True
+    assert preflight["can_auto_submit"] is False
+    assert all("LIVE_TRADING_AUTO_EXECUTE_ENABLED" not in item for item in preflight["runner_blocking_reasons"])
+
+
+@pytest.mark.asyncio
 async def test_cashaware_parser_and_duplicate_paper_audit(monkeypatch, tmp_path):
     await _prepare_live_db(monkeypatch, tmp_path)
     bundle = await live_trading_service._load_profile_bundle("tsmf_cashaware_stable")
     assert bundle.constants["CASH_AWARE_TWO_STAGE_REBALANCE"] is True
-    assert bundle.params["cash_execution_reserve_pct"] == 0.12
+    assert bundle.params["cash_execution_reserve_pct"] == 0.02
     assert bundle.params["cash_aware_buy_fee_buffer_pct"] == 0.003
     assert bundle.params["factor_configs"][0]["factor_name"] == "pe_ttm"
     assert bundle.params["filter_factors"] == ["is_st", "is_suspend"]
@@ -229,6 +345,126 @@ async def test_cashaware_parser_and_duplicate_paper_audit(monkeypatch, tmp_path)
     assert second["duplicate"] is True
     assert any(item["status"] == "paper_filled" for item in audits)
     assert any(item["status"] == "duplicate" for item in audits)
+
+
+@pytest.mark.asyncio
+async def test_live_strategy_params_ignore_profile_and_request_overrides(monkeypatch, tmp_path):
+    await _prepare_live_db(monkeypatch, tmp_path)
+    async with async_session_factory() as session:
+        profile = await session.get(LiveStrategyProfile, 1)
+        assert profile is not None
+        profile.params_override = {
+            "cash_execution_reserve_pct": 0.11,
+            "top_n": 99,
+            "index_symbol": "000300.SH",
+        }
+        await session.commit()
+
+    bundle = await live_trading_service._load_profile_bundle("tsmf_cashaware_stable")
+    normalized = live_trading_service._normalized_params(
+        bundle,
+        {
+            "cash_execution_reserve_pct": 0.15,
+            "top_n": 77,
+            "index_symbol": "000905.SH",
+            "trade_date": "2026-05-20",
+        },
+    )
+
+    assert bundle.params["cash_execution_reserve_pct"] == 0.02
+    assert normalized["cash_execution_reserve_pct"] == 0.02
+    assert normalized["top_n"] == 8
+    assert "index_symbol" not in normalized
+    assert normalized["trade_date"] == "2026-05-20"
+
+
+@pytest.mark.asyncio
+async def test_live_preflight_prepare_dependencies_warms_intraday_factors(monkeypatch):
+    profile = LiveStrategyProfile(
+        id=996,
+        strategy_id=996,
+        profile_key="preflight_prepare_profile",
+        display_name="Preflight Prepare Profile",
+        description=None,
+        enabled=True,
+        is_default=False,
+        adapter_type="multi_factor_cash_aware",
+        params_override={},
+        universe_config={"type": "strategy"},
+        execution_policy={},
+    )
+    factor_configs = [{"factor_name": "pe_ttm", "weight": 1.0}]
+    filters = [{"name": "is_limit_up", "as_of_time": "10:30", "params": {"time": "10:30"}}]
+    strategy = Strategy(
+        id=996,
+        name="Preflight Prepare Strategy",
+        code="FACTOR_CONFIGS = []\nFILTER_FACTORS = []\n",
+        parameters={},
+        description=None,
+    )
+    bundle = StrategyProfileBundle(
+        profile=profile,
+        strategy=strategy,
+        constants={"FACTOR_CONFIGS": factor_configs, "FILTER_FACTORS": filters},
+        params={"factor_configs": factor_configs, "filter_factors": filters, "trade_date": "2026-07-08"},
+    )
+    events: list[tuple[str, object]] = []
+
+    async def fake_load_profile_bundle(_profile_key):
+        return bundle
+
+    async def fake_account_snapshot(**_kwargs):
+        return LiveAccountSnapshot(
+            cash=100_000.0,
+            total_asset=100_000.0,
+            market_value=0.0,
+            positions={},
+            source="unit_test",
+            meta={"account_scope": "strategy_pool", "initialized": True},
+        )
+
+    async def fake_resolve_symbols(*_args, **_kwargs):
+        return ["600001.SH"]
+
+    async def fake_build_preflight_report(**kwargs):
+        events.append(("build", kwargs.get("intraday_prepare")))
+        return {
+            "market_phase": {"same_day": True},
+            "factor_coverage": [
+                {"name": "is_limit_up", "roles": ["filter"], "value_count": 0, "as_of_time": "10:30"}
+            ],
+            "blocking_reasons": [],
+            "runner_blocking_reasons": [],
+            "warnings": [],
+            "intraday_prepare": kwargs.get("intraday_prepare"),
+        }
+
+    async def fake_prepare_live_intraday_factors(**kwargs):
+        events.append(("prepare", kwargs["trigger_source"]))
+        assert kwargs["write_audit"] is True
+        assert kwargs["mode"] == "live"
+        assert any(item["name"] == "is_limit_up" for item in kwargs["requirements"])
+        return {"attempted": True, "status": "completed", "results": [{"status": "completed"}]}
+
+    monkeypatch.setattr(live_trading_service, "_load_profile_bundle", fake_load_profile_bundle)
+    monkeypatch.setattr(live_trading_service, "_account_snapshot", fake_account_snapshot)
+    monkeypatch.setattr(live_trading_service, "_resolve_symbols", fake_resolve_symbols)
+    monkeypatch.setattr(live_trading_service, "_build_preflight_report", fake_build_preflight_report)
+    monkeypatch.setattr(live_trading_service, "_prepare_live_intraday_factors", fake_prepare_live_intraday_factors)
+
+    result = await live_trading_service.preflight(
+        profile_key=profile.profile_key,
+        mode="live",
+        evaluate_pipeline=True,
+        prepare_dependencies=True,
+    )
+
+    assert events == [
+        ("build", None),
+        ("prepare", "preflight"),
+        ("build", {"attempted": True, "status": "completed", "results": [{"status": "completed"}]}),
+    ]
+    assert result["intraday_prepare"]["status"] == "completed"
 
 
 def test_live_execution_filter_time_uses_filter_timer_and_early_completed_minute(monkeypatch):
@@ -328,6 +564,183 @@ def test_live_intraday_sync_plan_skips_full_minute_sync() -> None:
     assert plan["coverage_gaps"] == [
         {"sync_step": "kline_minute", "dependency": "klines_minute_timer", "timer_time": "14:30"},
         {"sync_step": "tushare_daily", "dependency": "stock_limit_prices"},
+    ]
+
+
+def test_cashaware_redeploys_round_lot_cash_without_exceeding_position_cap():
+    profile = LiveStrategyProfile(
+        id=998,
+        strategy_id=998,
+        profile_key="round_lot_profile",
+        display_name="Round Lot Profile",
+        description=None,
+        enabled=True,
+        is_default=False,
+        adapter_type="multi_factor_cash_aware",
+        params_override={},
+        universe_config={},
+        execution_policy={},
+    )
+    strategy = Strategy(
+        id=998,
+        name="Round Lot Strategy",
+        code="FACTOR_CONFIGS = []\nFILTER_FACTORS = []\n",
+        parameters={},
+        description=None,
+    )
+    bundle = StrategyProfileBundle(profile=profile, strategy=strategy, constants={}, params={})
+    symbols = [f"600{i:03d}.SH" for i in range(20)]
+    target_weights = {symbol: 0.049 for symbol in symbols}
+    price_map = {symbol: 30.0 for symbol in symbols}
+    account = LiveAccountSnapshot(
+        cash=160_000.0,
+        total_asset=160_000.0,
+        market_value=0.0,
+        positions={},
+        source="unit_test",
+    )
+
+    orders, skipped = live_trading_service._build_cash_aware_orders(
+        target_weights=target_weights,
+        positions={},
+        price_map=price_map,
+        account=account,
+        params={
+            "cash_buffer_pct": 0.02,
+            "cash_execution_reserve_pct": 0.02,
+            "cash_aware_buy_fee_buffer_pct": 0.003,
+            "max_position_pct": 0.06,
+            "lot_size": 100,
+            "rebalance_tolerance_pct": 0.0,
+        },
+        portfolio_value=160_000.0,
+        bundle=bundle,
+        ranked_symbols=symbols,
+    )
+
+    buy_orders = [order for order in orders if order["side"] == "BUY"]
+    assert skipped == []
+    assert len(buy_orders) == 20
+    assert max(order["quantity"] for order in buy_orders) == 300
+    assert all(order["quantity"] <= 300 for order in buy_orders)
+    assert any(
+        "round_lot_cash_redeploy" in str((order.get("attribution") or {}).get("trigger"))
+        for order in buy_orders
+    )
+    deployed = sum(float(order["quantity"]) * float(order["reference_price"]) for order in buy_orders)
+    assert deployed >= 156_000.0
+
+
+@pytest.mark.asyncio
+async def test_live_submit_two_stage_waits_for_sell_sync_before_buy(monkeypatch):
+    profile = LiveStrategyProfile(
+        id=997,
+        strategy_id=997,
+        profile_key="two_stage_profile",
+        display_name="Two Stage Profile",
+        description=None,
+        enabled=True,
+        is_default=False,
+        adapter_type="multi_factor_cash_aware",
+        params_override={},
+        universe_config={},
+        execution_policy={"allow_manual_submit": True, "allow_live_submit": True},
+    )
+    strategy = Strategy(
+        id=997,
+        name="Two Stage Strategy",
+        code="FACTOR_CONFIGS = []\nFILTER_FACTORS = []\n",
+        parameters={},
+        description=None,
+    )
+    bundle = StrategyProfileBundle(
+        profile=profile,
+        strategy=strategy,
+        constants={},
+        params={
+            "cash_aware_two_stage_rebalance": True,
+            "cash_aware_sell_sync_timeout_seconds": 1.0,
+            "cash_aware_sell_sync_poll_seconds": 0.01,
+        },
+    )
+    events: list[str] = []
+
+    async def fake_load_profile_bundle(_profile_key):
+        return bundle
+
+    async def fake_validate_strategy_account_orders(**kwargs):
+        sides = ",".join(str(order.get("side")) for order in kwargs["orders"])
+        events.append(f"validate:{sides}")
+        return {"ok": True}
+
+    async def fake_status():
+        return {"account_configured": True, "xttrader_available": True, "quote_connected": True}
+
+    async def fake_submit_order(order):
+        events.append(f"submit:{order['side']}:{order['symbol']}")
+        return {"enabled": True, "submitted": True, "order_id": f"order-{order['side']}", "order": order}
+
+    async def fake_sync_order_status(**kwargs):
+        events.append(f"sync:{','.join(str(item) for item in kwargs.get('order_ids') or [])}")
+        return {"synced": True, "updated_count": 1, "pending_count": 0}
+
+    async def fake_pending_live_order_ids(**kwargs):
+        events.append(f"pending-check:{','.join(str(item) for item in kwargs.get('order_ids') or [])}")
+        return []
+
+    async def fake_write_submit_audit(*args, **kwargs):
+        return None
+
+    async def fake_write_control_audit(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(settings, "live_trading_enable_order_submit", True)
+    monkeypatch.setattr(live_trading_service, "_load_profile_bundle", fake_load_profile_bundle)
+    monkeypatch.setattr(live_trading_service, "_validate_strategy_account_orders", fake_validate_strategy_account_orders)
+    monkeypatch.setattr("app.services.live_trading.qmt_trading_service.status", fake_status)
+    monkeypatch.setattr("app.services.live_trading.qmt_trading_service.submit_order", fake_submit_order)
+    monkeypatch.setattr(live_trading_service, "sync_order_status", fake_sync_order_status)
+    monkeypatch.setattr(live_trading_service, "_pending_live_order_ids", fake_pending_live_order_ids)
+    monkeypatch.setattr(live_trading_service, "_write_submit_audit", fake_write_submit_audit)
+    monkeypatch.setattr(live_trading_service, "_write_control_audit", fake_write_control_audit)
+
+    result = await live_trading_service.submit_orders(
+        [
+            {
+                "profile_key": profile.profile_key,
+                "strategy_id": profile.strategy_id,
+                "signal_hash": "hash-two-stage",
+                "trade_date": "2026-07-06",
+                "symbol": "600001.SH",
+                "side": "BUY",
+                "quantity": 100,
+                "reference_price": 10.0,
+            },
+            {
+                "profile_key": profile.profile_key,
+                "strategy_id": profile.strategy_id,
+                "signal_hash": "hash-two-stage",
+                "trade_date": "2026-07-06",
+                "symbol": "600002.SH",
+                "side": "SELL",
+                "quantity": 100,
+                "reference_price": 10.0,
+            },
+        ],
+        mode="live",
+        confirm=True,
+        trigger_source="manual",
+    )
+
+    assert result["two_stage"] is True
+    assert result["submitted"] is True
+    assert events == [
+        "validate:SELL,BUY",
+        "submit:SELL:600002.SH",
+        "sync:order-SELL",
+        "pending-check:order-SELL",
+        "validate:BUY",
+        "submit:BUY:600001.SH",
     ]
 
 
@@ -438,19 +851,54 @@ async def test_live_mode_guardrails_block_runner_and_order_submit(monkeypatch, t
     fake_strategy = Strategy(
         id=999,
         name="Manual Live Strategy",
-        code="FACTOR_CONFIGS = []\nFILTER_FACTORS = []\n",
+        code="FACTOR_CONFIGS = [{'factor_name': 'pe_ttm', 'weight': 1.0}]\nFILTER_FACTORS = []\n",
         parameters={},
         description=None,
     )
     async with async_session_factory() as session:
         session.add(fake_strategy)
         await session.commit()
-    fake_bundle = StrategyProfileBundle(profile=fake_profile, strategy=fake_strategy, constants={}, params={})
+    factor_configs = [{"factor_name": "pe_ttm", "weight": 1.0}]
+    fake_bundle = StrategyProfileBundle(
+        profile=fake_profile,
+        strategy=fake_strategy,
+        constants={"FACTOR_CONFIGS": factor_configs, "FILTER_FACTORS": []},
+        params={"factor_configs": factor_configs, "filter_factors": []},
+    )
 
     async def fake_load_profile_bundle(_profile_key):
         return fake_bundle
 
+    async def fake_validate_strategy_account_orders(**_kwargs):
+        return {"ok": True}
+
+    async def fake_account_snapshot(**_kwargs):
+        return LiveAccountSnapshot(
+            cash=100_000.0,
+            total_asset=100_000.0,
+            market_value=0.0,
+            positions={},
+            source="unit_test",
+            meta={"account_scope": "strategy_pool", "initialized": True},
+        )
+
+    async def fake_resolve_symbols(*_args, **_kwargs):
+        return ["600519.SH"]
+
+    async def fake_qmt_status():
+        return {"account_configured": True, "xttrader_available": True, "quote_connected": True}
+
+    def fake_factor_coverage_snapshot(*_args, **_kwargs):
+        return [{"name": "pe_ttm", "roles": ["factor"], "value_count": 1}]
+
     monkeypatch.setattr(live_trading_service, "_load_profile_bundle", fake_load_profile_bundle)
+    monkeypatch.setattr(live_trading_service, "_validate_strategy_account_orders", fake_validate_strategy_account_orders)
+    monkeypatch.setattr(live_trading_service, "_account_snapshot", fake_account_snapshot)
+    monkeypatch.setattr(live_trading_service, "_resolve_symbols", fake_resolve_symbols)
+    monkeypatch.setattr(live_trading_service, "_factor_coverage_snapshot", fake_factor_coverage_snapshot)
+    monkeypatch.setattr("app.services.live_trading.qmt_trading_service.status", fake_qmt_status)
+    monkeypatch.setattr(settings, "live_trading_enable_order_submit", False)
+    monkeypatch.setattr(settings, "live_trading_auto_execute_enabled", True)
 
     submit_resp = await live_trading_service.submit_orders(
         [

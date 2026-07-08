@@ -2062,9 +2062,13 @@ function idleStatus(): SyncStatus {
 }
 
 .risk-tag--medium {
-  border-color: var(--accent-warning) !important;
-  color: var(--accent-warning) !important;
-  background: var(--status-warning-bg) !important;
+  border-color: #d08a16 !important;
+  color: #6f3f00 !important;
+  background: #fff4d6 !important;
+}
+
+.risk-tag--medium :deep(.el-tag__content) {
+  color: #6f3f00 !important;
 }
 
 .risk-tag--high {
