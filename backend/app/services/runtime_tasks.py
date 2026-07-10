@@ -1,17 +1,28 @@
-"""In-memory runtime task registry for UI notifications.
-
-This is intentionally process-local. It gives the frontend a single lightweight
-place to poll for long-running task completion without introducing WebSocket or
-database-backed notifications yet.
-"""
+"""Persistent runtime task registry with an in-process hot cache."""
 
 from __future__ import annotations
 
+import json
+import sqlite3
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-TERMINAL_STATUSES = {"done", "failed", "completed", "cancelled"}
+from loguru import logger
+
+from app.core.config import settings
+from app.core.contracts import JobStatus
+
+TERMINAL_STATUSES = {
+    JobStatus.SUCCEEDED.value,
+    JobStatus.FAILED.value,
+    JobStatus.CANCELLED.value,
+}
+_STATUS_ALIASES = {
+    "done": JobStatus.SUCCEEDED.value,
+    "completed": JobStatus.SUCCEEDED.value,
+}
 _TASK_TTL_SECONDS = 6 * 3600
 _MAX_TASKS = 300
 
@@ -49,6 +60,128 @@ class RuntimeTask:
 _tasks: dict[str, RuntimeTask] = {}
 
 
+def _normalize_status(status: str) -> str:
+    return _STATUS_ALIASES.get(status, status)
+
+
+def _connect() -> sqlite3.Connection | None:
+    path = settings.sqlite_db_path
+    if not path.exists():
+        return None
+    connection = sqlite3.connect(path, timeout=5)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _persist_task(task: RuntimeTask, *, event_type: str) -> None:
+    connection = _connect()
+    if connection is None:
+        return
+    now = datetime.fromtimestamp(task.updated_at)
+    try:
+        connection.execute(
+            """
+            INSERT INTO jobs (
+                id, kind, title, status, progress, payload, result_ref, error,
+                heartbeat_at, finished_at, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                kind=excluded.kind,
+                title=excluded.title,
+                status=excluded.status,
+                progress=excluded.progress,
+                payload=excluded.payload,
+                result_ref=excluded.result_ref,
+                error=excluded.error,
+                heartbeat_at=excluded.heartbeat_at,
+                finished_at=excluded.finished_at,
+                updated_at=excluded.updated_at
+            """,
+            (
+                task.task_id,
+                task.kind,
+                task.title,
+                task.status,
+                task.progress,
+                json.dumps(task.meta, ensure_ascii=False),
+                task.result_ref,
+                task.error,
+                now.isoformat(sep=" "),
+                datetime.fromtimestamp(task.finished_at).isoformat(sep=" ") if task.finished_at else None,
+                datetime.fromtimestamp(task.created_at).isoformat(sep=" "),
+                now.isoformat(sep=" "),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO job_events (job_id, event_type, data, created_at) VALUES (?, ?, ?, ?)",
+            (
+                task.task_id,
+                event_type,
+                json.dumps(task.to_dict(), ensure_ascii=False),
+                now.isoformat(sep=" "),
+            ),
+        )
+        connection.commit()
+    except sqlite3.OperationalError as exc:
+        logger.debug("Runtime task persistence unavailable: {}", exc)
+    finally:
+        connection.close()
+
+
+def _row_to_task(row: sqlite3.Row) -> RuntimeTask:
+    created_at = datetime.fromisoformat(str(row["created_at"])).timestamp()
+    updated_at = datetime.fromisoformat(str(row["updated_at"])).timestamp()
+    finished_at = (
+        datetime.fromisoformat(str(row["finished_at"])).timestamp()
+        if row["finished_at"]
+        else None
+    )
+    return RuntimeTask(
+        task_id=str(row["id"]),
+        kind=str(row["kind"]),
+        title=str(row["title"]),
+        status=_normalize_status(str(row["status"])),
+        progress=float(row["progress"] or 0.0),
+        result_ref=row["result_ref"],
+        error=row["error"],
+        created_at=created_at,
+        updated_at=updated_at,
+        finished_at=finished_at,
+        meta=json.loads(row["payload"] or "{}"),
+    )
+
+
+def _load_persistent_task(task_id: str) -> RuntimeTask | None:
+    connection = _connect()
+    if connection is None:
+        return None
+    try:
+        row = connection.execute("SELECT * FROM jobs WHERE id = ?", (task_id,)).fetchone()
+        return _row_to_task(row) if row else None
+    except sqlite3.OperationalError as exc:
+        logger.debug("Runtime task persistence unavailable: {}", exc)
+        return None
+    finally:
+        connection.close()
+
+
+def _load_persistent_tasks() -> list[RuntimeTask]:
+    connection = _connect()
+    if connection is None:
+        return []
+    try:
+        rows = connection.execute(
+            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
+            (_MAX_TASKS,),
+        ).fetchall()
+        return [_row_to_task(row) for row in rows]
+    except sqlite3.OperationalError as exc:
+        logger.debug("Runtime task persistence unavailable: {}", exc)
+        return []
+    finally:
+        connection.close()
+
+
 def _cleanup() -> None:
     now = time.time()
     expired = [
@@ -78,15 +211,17 @@ def register_task(
     meta: dict[str, Any] | None = None,
 ) -> None:
     _cleanup()
-    _tasks[task_id] = RuntimeTask(
+    task = RuntimeTask(
         task_id=task_id,
         kind=kind,
         title=title,
-        status=status,
+        status=_normalize_status(status),
         progress=float(progress),
         result_ref=result_ref,
         meta=meta or {},
     )
+    _tasks[task_id] = task
+    _persist_task(task, event_type="registered")
 
 
 def update_task(
@@ -98,11 +233,12 @@ def update_task(
     error: str | None = None,
     meta: dict[str, Any] | None = None,
 ) -> None:
-    task = _tasks.get(task_id)
+    task = _tasks.get(task_id) or _load_persistent_task(task_id)
     if task is None:
         return
+    _tasks[task_id] = task
     if status is not None:
-        task.status = status
+        task.status = _normalize_status(status)
     if progress is not None:
         task.progress = float(progress)
     if result_ref is not None:
@@ -114,11 +250,14 @@ def update_task(
     task.updated_at = time.time()
     if task.status in TERMINAL_STATUSES and task.finished_at is None:
         task.finished_at = task.updated_at
+    _persist_task(task, event_type="updated")
 
 
 def list_tasks(include_finished: bool = True) -> list[dict[str, Any]]:
     _cleanup()
-    tasks = _tasks.values()
+    merged = {task.task_id: task for task in _load_persistent_tasks()}
+    merged.update(_tasks)
+    tasks = merged.values()
     if not include_finished:
         tasks = [task for task in tasks if task.status not in TERMINAL_STATUSES]
     return [task.to_dict() for task in sorted(tasks, key=lambda task: task.created_at, reverse=True)]
@@ -126,5 +265,23 @@ def list_tasks(include_finished: bool = True) -> list[dict[str, Any]]:
 
 def get_task(task_id: str) -> dict[str, Any] | None:
     _cleanup()
-    task = _tasks.get(task_id)
+    task = _tasks.get(task_id) or _load_persistent_task(task_id)
+    if task is not None:
+        _tasks[task_id] = task
     return task.to_dict() if task else None
+
+
+def reset_runtime_tasks(*, clear_persistent: bool = False) -> None:
+    """Clear process memory; persistent deletion is reserved for isolated tests."""
+    _tasks.clear()
+    if not clear_persistent:
+        return
+    connection = _connect()
+    if connection is None:
+        return
+    try:
+        connection.execute("DELETE FROM job_events")
+        connection.execute("DELETE FROM jobs")
+        connection.commit()
+    finally:
+        connection.close()

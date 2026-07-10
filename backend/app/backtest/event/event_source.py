@@ -109,7 +109,10 @@ class Bar:
 
     @property
     def limit_up(self) -> float:
-        """涨停价（A股 ±10%）"""
+        """涨停价，优先使用交易所数据，缺失时按昨收 10% 回退。"""
+        explicit = float(self._data.get("limit_up", np.nan))
+        if np.isfinite(explicit) and explicit > 0:
+            return explicit
         pc = self.prev_close
         if np.isnan(pc) or pc <= 0:
             return np.nan
@@ -117,7 +120,10 @@ class Bar:
 
     @property
     def limit_down(self) -> float:
-        """跌停价（A股 ±10%）"""
+        """跌停价，优先使用交易所数据，缺失时按昨收 10% 回退。"""
+        explicit = float(self._data.get("limit_down", np.nan))
+        if np.isfinite(explicit) and explicit > 0:
+            return explicit
         pc = self.prev_close
         if np.isnan(pc) or pc <= 0:
             return np.nan

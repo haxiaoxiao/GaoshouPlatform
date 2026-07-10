@@ -21,7 +21,7 @@ function Resolve-Defaults {
             Branch = "main"
             BackendPort = "8800"
             SyncPort = "8810"
-            FrontendPort = "3500"
+            FrontendPort = "3511"
         }
     }
 

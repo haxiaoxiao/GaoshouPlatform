@@ -54,10 +54,10 @@ class ComputeService:
         # 指数池：走 index_components 表
         try:
             from app.services.index_catalog import get_index_item
-            from app.services.index_components import load_index_symbols
+            from app.services.index_components import load_index_symbols_as_of
         except Exception:
             get_index_item = None
-            load_index_symbols = None
+            load_index_symbols_as_of = None
 
         item = get_index_item(pool_name) if get_index_item else None
         if item is not None:
@@ -65,9 +65,9 @@ class ComputeService:
                 raise ValueError(
                     f"Stock pool {pool_name} is unavailable because strict historical constituents are missing"
                 )
-            if load_index_symbols is None:
+            if load_index_symbols_as_of is None:
                 raise RuntimeError("Index component loader is unavailable")
-            symbols = await load_index_symbols(item.symbol, today, today)
+            symbols = await load_index_symbols_as_of(item.symbol, today)
             if symbols:
                 return sorted(symbols)
             raise ValueError(f"Historical constituents for {item.symbol} are unavailable in the requested window")

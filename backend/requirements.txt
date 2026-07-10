@@ -29,6 +29,7 @@ akquant>=0.2.40
 apscheduler>=3.10.0
 playwright>=1.60.0
 tushare>=1.4.0
+alembic>=1.13.0
 
 # Optional local integrations. Install manually when you need live QMT,
 # VeighNa trading adapters, or native TA libraries:

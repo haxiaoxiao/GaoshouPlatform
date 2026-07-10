@@ -3443,6 +3443,8 @@ class SyncService:
         task_id: int | None = None,
         failure_strategy: str = "skip",
     ) -> SyncProgress:
+        import pandas as pd
+
         """
         同步分红送股数据 + 计算股息率
 

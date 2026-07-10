@@ -3,6 +3,7 @@
 Flow: Frontend -> API -> EngineRegistry.get(engine) -> IBacktestEngine.run().
 """
 import asyncio
+import hashlib
 import math
 import time
 import uuid
@@ -20,6 +21,7 @@ from sqlalchemy import select
 from app.backtest.config import BacktestConfig
 from app.backtest.engine import EngineRegistry
 from app.backtest.engine.data_provider import StoreDataProvider
+from app.backtest.metric_schema import normalize_metrics_v2
 from app.backtest.strategies.builtin_templates import (
     DEFAULT_DUAL_STOCK_GRID_PARAM_GRID,
     DEFAULT_DUAL_STOCK_GRID_PARAMS,
@@ -351,6 +353,8 @@ def _config_from_request(req: "RunBacktestRequest", start_date: date, end_date: 
         warm_start=req.warm_start.model_dump() if req.warm_start else None,
         strategy_id=req.strategy_id,
         strategy_code=req.strategy_code,
+        release_id=getattr(req, "release_id", None),
+        data_snapshot_id=getattr(req, "data_snapshot_id", None),
         index_symbol=normalize_index_symbol(req.index_symbol),
         universe_mode=req.universe_mode,
     )
@@ -524,10 +528,24 @@ async def _save_backtest_result(
                 strategy = Strategy(
                     name=f"backtest-{task_id}",
                     code=code,
-                description="完美世界 + 昆仑万维分钟级底仓网格策略",
+                    description="Backtest-created strategy",
                 )
                 session.add(strategy)
                 await session.flush()
+            effective_code = strategy.code or code
+
+            metric_result = normalize_metrics_v2(
+                result_dict,
+                costs={
+                    "commission_rate": config.commission_rate,
+                    "slippage": config.slippage,
+                    "stamp_tax_rate": config.stamp_tax_rate,
+                    "transfer_fee_rate": config.transfer_fee_rate,
+                    "min_commission": config.min_commission,
+                },
+            )
+            persisted_result = {**result_dict, **metric_result} if success else None
+            warnings = list(result_dict.get("warnings") or [])
 
             backtest = Backtest(
                 strategy_id=strategy.id,
@@ -555,7 +573,14 @@ async def _save_backtest_result(
                     "benchmark_symbol": config.benchmark_symbol,
                     "warm_start": config.warm_start,
                 },
-                result=result_dict if success else None,
+                result=persisted_result,
+                run_id=task_id,
+                release_id=config.release_id,
+                data_snapshot_id=config.data_snapshot_id,
+                engine=config.engine,
+                result_schema_version=2,
+                code_hash=hashlib.sha256(effective_code.encode("utf-8")).hexdigest(),
+                warnings=warnings,
             )
             session.add(backtest)
             await session.commit()
@@ -605,7 +630,13 @@ async def run_backtest(req: RunBacktestRequest):
         status="queued",
         progress=0,
         result_ref=f"/backtest?task_id={task_id}",
-        meta={"engine": req.engine, "start_date": req.start_date, "end_date": req.end_date},
+        meta={
+            "engine": req.engine,
+            "start_date": req.start_date,
+            "end_date": req.end_date,
+            "release_id": config.release_id,
+            "data_snapshot_id": config.data_snapshot_id,
+        },
     )
 
     async def _run():

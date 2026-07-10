@@ -420,7 +420,6 @@ def find_earliest_timer_coverage_date(
             "cache_hit": False,
         }
 
-    timer_minutes = tuple(t.hour * 60 + t.minute for t in timer_times)
     required_symbols = max(1, int(len(all_symbols) * min_symbol_coverage))
     store = get_market_data_store()
     df = store.load_minute(

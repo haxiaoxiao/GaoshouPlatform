@@ -575,18 +575,26 @@ def _latest_index_component_date(index_symbol: str) -> str | None:
 
 def _index_components_cover_request(index_symbol: str, start_date: date, end_date: date) -> bool:
     idx = normalize_index_symbol(index_symbol) or index_symbol
-    # Current-snapshot fallback is accepted for factor research when strict
-    # point-in-time constituents have not been accumulated yet.
     with sqlite3.connect(settings.sqlite_db_path) as conn:
-        row = conn.execute(
+        before = conn.execute(
             """
-            SELECT COUNT(*)
+            SELECT MAX(trade_date)
             FROM index_components
-            WHERE index_symbol = ?
+            WHERE index_symbol = ? AND trade_date <= ?
             """,
-            (idx,),
+            (idx, start_date.isoformat()),
         ).fetchone()
-    return bool(row and int(row[0] or 0) > 0)
+        latest = conn.execute(
+            """
+            SELECT MAX(trade_date)
+            FROM index_components
+            WHERE index_symbol = ? AND trade_date >= ? AND trade_date <= ?
+            """,
+            (idx, start_date.isoformat(), end_date.isoformat()),
+        ).fetchone()
+    if not before or not before[0] or not latest or not latest[0]:
+        return False
+    return date.fromisoformat(str(latest[0])) >= end_date - timedelta(days=45)
 
 
 def _latest_market_date(dataset: str, *, timer_time: str | None = None) -> str | None:

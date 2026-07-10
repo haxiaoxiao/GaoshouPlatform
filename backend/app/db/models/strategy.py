@@ -3,7 +3,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.sqlite import JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,6 +36,13 @@ class Backtest(Base, TimestampMixin):
     parameters: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="回测参数")
     result: Mapped[dict[str, Any] | None] = mapped_column(JSON, comment="回测结果摘要")
     report_path: Mapped[str | None] = mapped_column(String(255), comment="详细报告路径")
+    run_id: Mapped[str | None] = mapped_column(String(64), unique=True, index=True)
+    release_id: Mapped[str | None] = mapped_column(ForeignKey("strategy_releases.id"), index=True)
+    data_snapshot_id: Mapped[str | None] = mapped_column(ForeignKey("data_snapshots.id"), index=True)
+    engine: Mapped[str | None] = mapped_column(String(30))
+    result_schema_version: Mapped[int | None] = mapped_column(Integer)
+    code_hash: Mapped[str | None] = mapped_column(String(64))
+    warnings: Mapped[list[str] | None] = mapped_column(JSON)
 
     strategy: Mapped["Strategy"] = relationship()
 

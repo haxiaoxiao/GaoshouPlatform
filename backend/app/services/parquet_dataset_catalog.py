@@ -105,8 +105,7 @@ def iter_parquet_dataset_specs(root: str | Path | None = None) -> Iterable[Parqu
 
     root_path = Path(root)
     known = set(PARQUET_DATASET_SPECS)
-    for spec in _SPECS:
-        yield spec
+    yield from _SPECS
     if root_path.exists():
         for child in sorted(path for path in root_path.iterdir() if path.is_dir()):
             if child.name in known or child.name in {"temp", "import_state"}:

@@ -50,6 +50,8 @@ class BacktestConfig:
     warm_start: dict[str, Any] | None = None
     strategy_id: int | None = None
     strategy_code: str | None = None  # akquant 策略代码
+    release_id: str | None = None
+    data_snapshot_id: str | None = None
 
     instruments_config: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None
     indicator_mode: str = "precompute"

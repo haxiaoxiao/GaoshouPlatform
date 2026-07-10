@@ -40,6 +40,8 @@ from app.backtest.strategies.tech_small_cap_akquant import (
     get_tech_small_cap_variant,
 )
 
+__all__ = ["get_tech_small_cap_variant"]
+
 
 @dataclass(frozen=True)
 class BuiltinStrategyTemplate:

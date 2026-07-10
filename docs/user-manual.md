@@ -29,7 +29,7 @@ npm run dev
 | `http://localhost:8000/docs` | FastAPI Swagger |
 | `http://localhost:8000/health` | 健康检查 |
 
-dev 桌面脚本使用 `13500`/`18800`/`18810`，prod 使用 `3500`/`8800`/`8810`；以启动脚本输出和 `/api/system/health` 为准。
+dev 桌面脚本使用 `13500`/`18800`/`18810`，prod 使用 `3511`/`8800`/`8810`；以启动脚本输出和 `/api/system/health` 为准。
 
 ## 2. 数据源使用原则
 

@@ -311,36 +311,43 @@ def _has_any_snapshot(index_symbol: str, start: date, end: date) -> bool:
     return bool(row and int(row[0] or 0) > 0)
 
 
-def _query_symbols_between(index_symbol: str, start: date, end: date) -> list[str]:
+def _query_symbols_for_range(index_symbol: str, start: date, end: date) -> list[str]:
     idx = normalize_index_symbol(index_symbol) or index_symbol
     with _connect() as conn:
         rows = conn.execute(
             """
+            WITH start_snapshot AS (
+                SELECT MAX(trade_date) AS trade_date
+                FROM index_components
+                WHERE index_symbol = ? AND trade_date <= ?
+            )
             SELECT DISTINCT symbol
             FROM index_components
             WHERE index_symbol = ?
-              AND trade_date >= ?
-              AND trade_date <= ?
+              AND (
+                  trade_date = (SELECT trade_date FROM start_snapshot)
+                  OR (trade_date >= ? AND trade_date <= ?)
+              )
             ORDER BY symbol
             """,
-            (idx, start.isoformat(), end.isoformat()),
+            (idx, start.isoformat(), idx, start.isoformat(), end.isoformat()),
         ).fetchall()
     return [str(row["symbol"]).upper() for row in rows]
 
 
-def _query_latest_snapshot_symbols(index_symbol: str) -> tuple[str | None, list[str]]:
+def _query_snapshot_symbols(index_symbol: str, as_of: date) -> tuple[str | None, list[str]]:
     idx = normalize_index_symbol(index_symbol) or index_symbol
     with _connect() as conn:
-        latest = conn.execute(
+        snapshot = conn.execute(
             """
             SELECT MAX(trade_date)
             FROM index_components
-            WHERE index_symbol = ?
+            WHERE index_symbol = ? AND trade_date <= ?
             """,
-            (idx,),
+            (idx, as_of.isoformat()),
         ).fetchone()
-        latest_date = str(latest[0]) if latest and latest[0] else None
-        if latest_date is None:
+        snapshot_date = str(snapshot[0]) if snapshot and snapshot[0] else None
+        if snapshot_date is None:
             return None, []
         rows = conn.execute(
             """
@@ -349,9 +356,9 @@ def _query_latest_snapshot_symbols(index_symbol: str) -> tuple[str | None, list[
             WHERE index_symbol = ? AND trade_date = ?
             ORDER BY symbol
             """,
-            (idx, latest_date),
+            (idx, snapshot_date),
         ).fetchall()
-    return latest_date, [str(row["symbol"]).upper() for row in rows]
+    return snapshot_date, [str(row["symbol"]).upper() for row in rows]
 
 
 async def load_index_symbols(index_symbol: str, start: date, end: date) -> list[str]:
@@ -363,45 +370,27 @@ async def load_index_symbols(index_symbol: str, start: date, end: date) -> list[
         logger.warning("Index component sync failed for {} in {}..{}: {}", index_symbol, start, end, exc)
 
     idx = normalize_index_symbol(index_symbol) or index_symbol
-    lookback = start - timedelta(days=370)
-    symbols = await asyncio.to_thread(_query_symbols_between, idx, lookback, end)
+    symbols = await asyncio.to_thread(_query_symbols_for_range, idx, start, end)
     if symbols:
         return symbols
 
-    # Some newer thematic pools have incomplete historical constituent files.
-    # Factor research can still run on a stable universe by using the latest
-    # snapshot while future syncs keep recording point-in-time history.
-    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
-    if latest_symbols:
-        logger.info(
-            "Index components fallback to latest snapshot {} for {} requested {}..{}",
-            latest_date,
-            idx,
-            start,
-            end,
-        )
-        return latest_symbols
+    if ensure_error is not None:
+        raise ensure_error
+    return []
 
-    today = date.today()
-    if end < today or start < today:
-        try:
-            await ensure_index_components(idx, today, today)
-        except Exception as exc:
-            if ensure_error is None:
-                ensure_error = exc
-            logger.warning("Index component current fallback sync failed for {}: {}", idx, exc)
 
-    latest_date, latest_symbols = await asyncio.to_thread(_query_latest_snapshot_symbols, idx)
-    if latest_symbols:
-        logger.info(
-            "Index components fallback to current/latest snapshot {} for {} requested {}..{}",
-            latest_date,
-            idx,
-            start,
-            end,
-        )
-        return latest_symbols
+async def load_index_symbols_as_of(index_symbol: str, as_of: date) -> list[str]:
+    ensure_error: Exception | None = None
+    try:
+        await ensure_index_components(index_symbol, as_of, as_of)
+    except Exception as exc:
+        ensure_error = exc
+        logger.warning("Index component sync failed for {} as of {}: {}", index_symbol, as_of, exc)
 
+    idx = normalize_index_symbol(index_symbol) or index_symbol
+    _snapshot_date, symbols = await asyncio.to_thread(_query_snapshot_symbols, idx, as_of)
+    if symbols:
+        return symbols
     if ensure_error is not None:
         raise ensure_error
     return []

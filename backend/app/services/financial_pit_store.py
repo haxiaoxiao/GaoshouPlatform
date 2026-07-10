@@ -10,10 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.data_stores.parquet_store import _list_param, _sql_literal
 from app.db.duckdb import get_duckdb
 from app.db.models.financial import FinancialData
-from app.data_stores.parquet_store import _list_param, _sql_literal
-
 
 STATEMENT_DATASETS = {
     "income": "financial_income",

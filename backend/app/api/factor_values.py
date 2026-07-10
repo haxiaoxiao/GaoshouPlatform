@@ -38,7 +38,10 @@ from app.services.factor_value_store import (
     list_factor_groups,
 )
 from app.services.index_components import load_index_symbols
-from app.services.ml_score_factor_calculator import ML_SCORE_FACTOR_SPECS, precompute_ml_score_factors
+from app.services.ml_score_factor_calculator import (
+    ML_SCORE_FACTOR_SPECS,
+    precompute_ml_score_factors,
+)
 from app.services.research_factor_calculator import precompute_research_factors
 from app.services.runtime_tasks import register_task, update_task
 from app.services.stock_universe import is_all_a_universe, load_all_a_symbols

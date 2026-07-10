@@ -167,7 +167,7 @@ import { ref, reactive, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { Plus, Delete } from '@element-plus/icons-vue'
-import { backtestApi, strategyApi, type Backtest, type Strategy } from '@/api/backtest'
+import { backtestApi, strategyApi, type Backtest, type StrategySummary } from '@/api/backtest'
 import BacktestReport from './BacktestReport.vue'
 import { formatDateTime, getStatusType, getStatusLabel } from '@/utils/format'
 import { isOptimizationRecord, optimizationType } from '@/utils/optimizationReport'
@@ -185,7 +185,7 @@ const pageSize = ref(20)
 const createDialogVisible = ref(false)
 const creating = ref(false)
 const createFormRef = ref<FormInstance>()
-const strategyOptions = ref<Strategy[]>([])
+const strategyOptions = ref<StrategySummary[]>([])
 
 const createFormData = reactive({
   strategy_id: undefined as number | undefined,

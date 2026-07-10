@@ -1,5 +1,5 @@
 import axios, { type AxiosInstance, type AxiosResponse } from 'axios'
-import { ElMessage } from 'element-plus'
+import { notifyRequestError } from './requestNotifications'
 
 const instance: AxiosInstance = axios.create({
   baseURL: '/api',
@@ -20,7 +20,7 @@ instance.interceptors.response.use(
         return backendData.data
       } else {
         // 业务错误
-        ElMessage.error(backendData.message || '请求失败')
+        notifyRequestError(backendData.message || '请求失败')
         return Promise.reject(new Error(backendData.message || '请求失败'))
       }
     }
@@ -28,7 +28,7 @@ instance.interceptors.response.use(
   },
   (error) => {
     const message = error.response?.data?.detail || error.message || '请求失败'
-    ElMessage.error(message)
+    notifyRequestError(message)
     return Promise.reject(error)
   }
 )

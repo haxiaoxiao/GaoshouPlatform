@@ -5,6 +5,7 @@
       class="factor-shell"
       :class="`factor-shell--${activeTab}`"
     >
+      <ProvenanceStrip />
       <el-tabs v-model="activeTab" class="factor-tabs" @tab-change="handleTabChange">
         <el-tab-pane label="因子研究" name="factor-values" lazy>
           <FactorValueStore v-show="activeTab === 'factor-values'" />
@@ -22,6 +23,7 @@
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageContext } from '@/app/pageContext'
+import ProvenanceStrip from '@/components/ProvenanceStrip.vue'
 import FactorBoard from './FactorBoard.vue'
 import FactorValueStore from './FactorValueStore.vue'
 
@@ -93,7 +95,7 @@ watch(
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 8px;
   overflow: hidden;
 }
 

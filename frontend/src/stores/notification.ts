@@ -14,7 +14,7 @@ export interface Notification {
   taskId?: string
 }
 
-const TERMINAL_STATUSES = new Set(['done', 'completed', 'failed', 'cancelled'])
+const TERMINAL_STATUSES = new Set(['done', 'completed', 'succeeded', 'failed', 'cancelled'])
 const POLL_INTERVAL_MS = 5000
 
 export const useNotificationStore = defineStore('notification', () => {

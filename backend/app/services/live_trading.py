@@ -28,6 +28,7 @@ from sqlalchemy import delete, select, update
 
 from app.core.blocking import run_blocking
 from app.core.config import settings
+from app.data_stores import get_market_data_store
 from app.db.models.live_trading import (
     LiveEquitySnapshot,
     LiveOrderAudit,
@@ -40,9 +41,11 @@ from app.db.models.live_trading import (
 from app.db.models.stock import Stock
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory
-from app.data_stores import get_market_data_store
 from app.engines.qmt_gateway import qmt_gateway
-from app.services.factor_dependency_sync import build_precompute_prepare, execute_factor_dependency_sync
+from app.services.factor_dependency_sync import (
+    build_precompute_prepare,
+    execute_factor_dependency_sync,
+)
 from app.services.factor_pipeline import FactorPipeline, LinearFactorScorer
 from app.services.factor_precompute import (
     precompute_high_volume_features,
@@ -54,12 +57,14 @@ from app.services.factor_value_store import (
     get_factor_value_store,
     normalize_factor_time,
 )
-from app.services.index_components import load_index_symbols
+from app.services.index_components import load_index_symbols_as_of
 from app.services.qmt_trading import QmtAccountSnapshot, qmt_trading_service
 from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 from app.services.sync_service import SyncProgress, SyncService
-from app.services.us_market import apply_entry_filter_to_target_weights, us_overnight_entry_filter_state
-
+from app.services.us_market import (
+    apply_entry_filter_to_target_weights,
+    us_overnight_entry_filter_state,
+)
 
 DEFAULT_ADAPTER = "multi_factor_cash_aware"
 PAPER_ACCOUNT_KEY = "default"
@@ -90,7 +95,7 @@ class LiveAccountSnapshot:
     meta: dict[str, Any] | None = None
 
     @classmethod
-    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> "LiveAccountSnapshot":
+    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> LiveAccountSnapshot:
         return cls(
             cash=snapshot.cash,
             total_asset=snapshot.total_asset,
@@ -3529,14 +3534,14 @@ class LiveTradingService:
             return load_all_a_symbols(as_of=trade_date, include_delisted_during_range=False)
         strategy_index = self._strategy_index_symbol(params)
         if strategy_index:
-            return await load_index_symbols(strategy_index, trade_date, trade_date)
+            return await load_index_symbols_as_of(strategy_index, trade_date)
         universe = self._json_dict(profile.universe_config)
         if universe.get("type") == "symbols":
             return [str(symbol) for symbol in universe.get("symbols") or [] if str(symbol).strip()]
         if self._is_all_a_universe(universe, params):
             return load_all_a_symbols(as_of=trade_date, include_delisted_during_range=False)
         index_symbol = universe.get("index_symbol") or "399101.SZ"
-        return await load_index_symbols(str(index_symbol), trade_date, trade_date)
+        return await load_index_symbols_as_of(str(index_symbol), trade_date)
 
     async def _account_dict(self, account: LiveAccountSnapshot, *, mode: str) -> dict[str, Any]:
         raw_total_asset = account.total_asset or (account.cash + account.market_value)

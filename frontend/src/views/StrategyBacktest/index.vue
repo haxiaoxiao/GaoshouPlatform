@@ -3,6 +3,7 @@
     class="page-frame page-container backtest-page"
     :class="`backtest-page--layout-${layoutMode.toLowerCase()}`"
   >
+    <ProvenanceStrip />
     <div class="strategy-tabs-frame">
       <div class="page-header-actions backtest-action-strip">
         <el-button link type="primary" @click="openDocs">
@@ -511,7 +512,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
 import { usePageContext } from '@/app/pageContext'
-import { strategyApi, type Strategy, type LiveData, type BacktestResultData } from '@/api/backtest'
+import ProvenanceStrip from '@/components/ProvenanceStrip.vue'
+import {
+  loadStrategyDetail,
+  strategyApi,
+  type BacktestResultData,
+  type LiveData,
+  type Strategy,
+  type StrategySummary,
+} from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
 import BacktestList from './BacktestList.vue'
@@ -613,7 +622,7 @@ def compute_daily_signal(context, symbol, today):
 
 const activeTab = ref('strategyList')
 const loading = ref(false)
-const strategyList = ref<Strategy[]>([])
+const strategyList = ref<StrategySummary[]>([])
 const total = ref(0)
 const currentPage = ref(1)
 const pageSize = ref(20)
@@ -698,7 +707,7 @@ const handleCreate = async (type: string) => {
   }
 }
 
-const handleDelete = async (row: Strategy) => {
+const handleDelete = async (row: StrategySummary) => {
   try {
     await ElMessageBox.confirm(`确定要删除策略“${row.name}”吗？`, '确认删除', {
       confirmButtonText: '确定',
@@ -1652,11 +1661,12 @@ const handleSaveStrategy = async () => {
   }
 }
 
-const handleBacktest = async (row: Strategy) => {
+const handleBacktest = async (row: StrategySummary) => {
   try {
-    activeStrategy.value = { ...row }
-    setStrategyParamsText((row.parameters || {}) as Record<string, unknown>)
-    const code = row.code || ''
+    const strategy = await loadStrategyDetail(row)
+    activeStrategy.value = strategy
+    setStrategyParamsText((strategy.parameters || {}) as Record<string, unknown>)
+    const code = strategy.code || ''
     if (code.includes('def handle_bar') || code.includes('def init') || code.includes('def before_trading')) {
       editorTab.value = 'rqalpha-code'
       btMode.value = 'script'
@@ -1672,7 +1682,7 @@ const handleBacktest = async (row: Strategy) => {
       btCode.value = code
     }
     // Auto-detect bar_type from code content
-    const savedRunSettings = (row.parameters as any)?.backtest_settings as BtSettings | undefined
+    const savedRunSettings = (strategy.parameters as any)?.backtest_settings as BtSettings | undefined
     if (savedRunSettings) {
       applyBtSettings(savedRunSettings)
     } else {
@@ -1828,8 +1838,6 @@ const seedTrendCapitalStrategy = async () => {
   // 如果已存在则跳过
   if (strategyList.value.some(s => s.name === '趋势资金策略')) return
   try {
-    const existing = await strategyApi.list(1, 100)
-    if (existing.items.some((s: Strategy) => s.name === '趋势资金策略')) return
     await strategyApi.create({
       name: '趋势资金策略',
       code: TREND_CAPITAL_CODE,

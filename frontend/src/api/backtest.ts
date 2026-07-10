@@ -10,6 +10,10 @@ export interface Strategy {
   updated_at: string | null
 }
 
+export interface StrategySummary extends Omit<Strategy, 'code'> {
+  code_size: number
+}
+
 export interface StrategyCreate {
   name: string
   code: string
@@ -379,12 +383,17 @@ export interface BacktestResultData {
 
 export const strategyApi = {
   list: (page = 1, pageSize = 20) =>
-    request.get<{ items: Strategy[]; total: number }>(`/backtest/strategies?page=${page}&page_size=${pageSize}`),
+    request.get<{ items: StrategySummary[]; total: number }>(`/backtest/strategies?page=${page}&page_size=${pageSize}`),
   get: (id: number) => request.get<Strategy>(`/backtest/strategies/${id}`),
   create: (data: StrategyCreate) => request.post<Strategy>('/backtest/strategies', data),
   update: (id: number, data: StrategyUpdate) => request.put<Strategy>(`/backtest/strategies/${id}`, data),
   delete: (id: number) => request.delete<{ deleted: boolean }>(`/backtest/strategies/${id}`),
 }
+
+export const loadStrategyDetail = (
+  summary: Pick<StrategySummary, 'id'>,
+  loader: (id: number) => Promise<Strategy> = strategyApi.get,
+) => loader(summary.id)
 
 export const backtestApi = {
   list: (params?: { strategy_id?: number; status?: string; page?: number; page_size?: number }) => {

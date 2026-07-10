@@ -1,5 +1,68 @@
 import request from './request'
 
+export const isMobileTradingReadOnly = (viewportWidth: number) => viewportWidth <= 760
+
+export interface LiveControlContext {
+  releaseId: string
+  expectedAccountMask: string
+  controlToken: string
+  idempotencyKey: string
+}
+
+export interface LiveControlSessionState {
+  token: string
+  accountMask: string
+  expiresAt: number
+}
+
+export function isLiveControlSessionActive(
+  session: LiveControlSessionState | null,
+  expectedAccountMask: string,
+  now = Date.now(),
+): boolean {
+  return Boolean(
+    session
+    && session.expiresAt >= now
+    && session.accountMask === expectedAccountMask,
+  )
+}
+
+export interface V1LiveOrderRequest {
+  payload: {
+    mode: LiveTradingMode
+    orders: Record<string, unknown>[]
+    confirm: boolean
+    release_id?: string
+    expected_account_mask?: string
+    idempotency_key?: string
+  }
+  headers: Record<string, string>
+}
+
+export function buildV1LiveOrderRequest(
+  mode: LiveTradingMode,
+  orders: Record<string, unknown>[],
+  control?: Partial<LiveControlContext>,
+): V1LiveOrderRequest {
+  if (mode === 'paper') {
+    return { payload: { mode, orders, confirm: true }, headers: {} }
+  }
+  if (!control?.releaseId || !control.expectedAccountMask || !control.controlToken || !control.idempotencyKey) {
+    throw new Error('Live submit requires an approved release and valid control session')
+  }
+  return {
+    payload: {
+      mode,
+      orders,
+      confirm: true,
+      release_id: control.releaseId,
+      expected_account_mask: control.expectedAccountMask,
+      idempotency_key: control.idempotencyKey,
+    },
+    headers: { 'X-Gaoshou-Control-Token': control.controlToken },
+  }
+}
+
 export type LiveTradingMode = 'paper' | 'live'
 
 export interface LiveStrategyProfile {
@@ -427,7 +490,7 @@ export const liveTradingApi = {
     manual_account?: Record<string, unknown> | null
     evaluate_pipeline?: boolean
     prepare_dependencies?: boolean
-  }) => request.post<LivePreflightResponse>('/live-trading/preflight', data),
+  }) => request.post<LivePreflightResponse>('/v1/live/preflight', data),
   signals: (data: {
     profile_key?: string | null
     mode?: LiveTradingMode
@@ -445,6 +508,12 @@ export const liveTradingApi = {
     request.post<LiveTradingStatus['runner']>('/live-trading/runner/takeover', { reason }),
   submitOrders: (data: { mode: LiveTradingMode; orders: Record<string, unknown>[]; confirm?: boolean }) =>
     request.post<LiveSubmitOrdersResponse>('/live-trading/orders/submit', data),
+  unlockControl: (data: { secret: string; expected_account_mask: string }) =>
+    request.post<{ token: string; account_mask: string; ttl_seconds: number }>('/v1/live/control-session', data),
+  submitOrdersV1: (requestData: V1LiveOrderRequest) =>
+    request.post<LiveSubmitOrdersResponse>('/v1/live/orders/submit', requestData.payload, {
+      headers: requestData.headers,
+    }),
   audits: (params?: { profile_key?: string; mode?: LiveTradingMode; limit?: number }) => {
     const query = new URLSearchParams()
     if (params?.profile_key) query.set('profile_key', params.profile_key)

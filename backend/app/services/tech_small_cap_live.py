@@ -22,9 +22,12 @@ from app.backtest.strategies.tech_small_cap_akquant import (
 from app.core.config import settings
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.factor_pipeline import FactorPipeline, LinearFactorScorer
-from app.services.index_components import load_index_symbols
+from app.services.index_components import load_index_symbols_as_of
 from app.services.qmt_trading import QmtAccountSnapshot, qmt_trading_service
-from app.services.us_market import apply_entry_filter_to_target_weights, us_overnight_entry_filter_state
+from app.services.us_market import (
+    apply_entry_filter_to_target_weights,
+    us_overnight_entry_filter_state,
+)
 
 
 @dataclass
@@ -47,7 +50,7 @@ class LiveAccount:
     error: str | None = None
 
     @classmethod
-    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> "LiveAccount":
+    def from_qmt(cls, snapshot: QmtAccountSnapshot) -> LiveAccount:
         """把 QMT 快照转换成服务内部统一结构。"""
         return cls(
             cash=snapshot.cash,
@@ -223,7 +226,7 @@ class TechSmallCapLiveService:
             return [str(symbol) for symbol in raw_symbols if str(symbol).strip()]
         # 如果没有自定义股票池，就回退到指数成分。
         index_symbol = str(params.get("index_symbol") or "399101.SZ")
-        return await load_index_symbols(index_symbol, trade_date, trade_date)
+        return await load_index_symbols_as_of(index_symbol, trade_date)
 
     async def _account_snapshot(self, manual: dict[str, Any] | None) -> LiveAccount:
         """优先使用手工账户快照，否则回落到 QMT 实盘账户。"""

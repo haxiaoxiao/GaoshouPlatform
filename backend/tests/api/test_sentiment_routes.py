@@ -257,6 +257,6 @@ async def test_sentiment_ingest_task_stores_result(monkeypatch):
     )
 
     task = get_task(task_id)
-    assert task["status"] == "completed"
+    assert task["status"] == "succeeded"
     assert task["progress"] == 1.0
     assert task["meta"]["result"]["requested_sources"] == ["flocktrader"]

@@ -11,8 +11,11 @@ from app.db.models.live_trading import LiveStrategyProfile, LiveTradeRecord
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory, init_db
 from app.main import app
-from app.services.live_trading import LiveAccountSnapshot, StrategyProfileBundle, live_trading_service
-
+from app.services.live_trading import (
+    LiveAccountSnapshot,
+    StrategyProfileBundle,
+    live_trading_service,
+)
 
 STABLE_CODE = """
 FACTOR_CONFIGS = [{"factor_name": "pe_ttm", "weight": 1.0}]

@@ -1,5 +1,10 @@
 <template>
-  <div class="page-frame live-page">
+  <div class="page-frame live-page" :class="{ 'live-page--mobile-readonly': mobileReadOnly }">
+    <section v-if="mobileReadOnly" class="mobile-readonly-banner" role="status">
+      <strong>移动端只读</strong>
+      <span>可查看行情、账户、信号与审计；配置、自动执行和订单操作仅允许桌面端。</span>
+    </section>
+    <ProvenanceStrip :release-id="controlForm.releaseId || null" />
     <header class="panel-card page-head">
       <div>
         <span class="section-kicker">LIVE TRADING DESK</span>
@@ -27,6 +32,14 @@
           </button>
         </div>
         <el-segmented v-model="mode" :options="modeOptions" />
+        <el-button
+          v-if="mode === 'live'"
+          type="warning"
+          :disabled="mobileReadOnly"
+          @click="openControlDialog"
+        >
+          {{ controlSessionActive ? '实盘已授权' : '授权实盘' }}
+        </el-button>
         <el-button type="primary" class="action-button action-button--preflight" :loading="preflightLoading" @click="loadPreflight">早盘检查</el-button>
         <el-button :loading="loading" @click="loadAll">刷新</el-button>
       </div>
@@ -55,6 +68,7 @@
             v-model="guardrailDraft.enable_order_submit"
             size="small"
             :loading="savingGuardrails"
+            :disabled="mobileReadOnly"
             inline-prompt
             active-text="开"
             inactive-text="关"
@@ -71,7 +85,7 @@
           <el-switch
             v-model="guardrailDraft.auto_execute_enabled"
             size="small"
-            :disabled="!guardrailDraft.enable_order_submit"
+            :disabled="mobileReadOnly || !guardrailDraft.enable_order_submit"
             :loading="savingGuardrails"
             inline-prompt
             active-text="开"
@@ -83,6 +97,12 @@
       <div>
         <label>Runner</label>
         <span :class="['state-text', runnerStateClass]">{{ runnerText }}</span>
+      </div>
+      <div>
+        <label>控制会话</label>
+        <span :class="['state-text', controlSessionActive ? 'state-text--good' : 'state-text--warn']">
+          {{ controlSessionActive ? '有效' : '未授权' }}
+        </span>
       </div>
     </section>
 
@@ -140,7 +160,7 @@
                 <span class="section-kicker">STRATEGY PROFILE</span>
                 <h3>策略配置</h3>
               </div>
-              <el-button size="small" @click="profileDialogOpen = true">新增 Profile</el-button>
+              <el-button size="small" :disabled="mobileReadOnly" @click="profileDialogOpen = true">新增 Profile</el-button>
             </div>
             <div class="control-body">
               <el-select v-model="selectedProfileKey" filterable placeholder="选择策略 Profile" @change="onProfileChange">
@@ -194,8 +214,9 @@
                     active-text="启用"
                     inactive-text="停用"
                     @change="toggleProfileEnabled"
+                    :disabled="mobileReadOnly"
                   />
-                  <el-button text size="small" @click="makeDefaultProfile">设为默认</el-button>
+                  <el-button text size="small" :disabled="mobileReadOnly" @click="makeDefaultProfile">设为默认</el-button>
                 </div>
               </div>
             </div>
@@ -237,9 +258,9 @@
               </div>
             </div>
             <div class="runner-actions">
-              <el-button type="primary" class="action-button action-button--auto" :loading="runnerLoading" @click="startRunner">启动自动</el-button>
-              <el-button :loading="runnerLoading" @click="stopRunner">停止</el-button>
-              <el-button type="warning" class="action-button action-button--takeover" :loading="runnerLoading" @click="takeoverRunner">人工接管</el-button>
+              <el-button type="primary" class="action-button action-button--auto" :disabled="mobileReadOnly" :loading="runnerLoading" @click="startRunner">启动自动</el-button>
+              <el-button :disabled="mobileReadOnly" :loading="runnerLoading" @click="stopRunner">停止</el-button>
+              <el-button type="warning" class="action-button action-button--takeover" :disabled="mobileReadOnly" :loading="runnerLoading" @click="takeoverRunner">人工接管</el-button>
             </div>
             <div class="runner-state">
               <div><label>状态</label><strong>{{ status?.runner.status || '-' }}</strong></div>
@@ -266,7 +287,7 @@
             <el-button size="small" @click="openStrategyReviewDialog">策略表现</el-button>
             <el-button size="small" @click="openPositionsDialog">持仓明细</el-button>
             <span class="drag-hint">拖拽表头排序</span>
-            <el-button size="small" @click="capitalDialogOpen = true">
+            <el-button size="small" :disabled="mobileReadOnly" @click="capitalDialogOpen = true">
               {{ strategyAccountReady ? '调整本金' : '圈定本金' }}
             </el-button>
           </div>
@@ -355,7 +376,7 @@
             <el-button text size="small" :disabled="!orderRows.length" @click="selectAllOrders">全选</el-button>
             <el-button text size="small" :disabled="!selectedOrderRows.length" @click="clearSelectedOrders">清空选择</el-button>
             <el-button size="small" type="primary" class="action-button action-button--signal" :loading="signalsLoading" @click="loadSignals">生成信号</el-button>
-            <el-button size="small" type="success" class="action-button action-button--submit" :disabled="!selectedSubmittableOrders.length" @click="submitOrders">提交已选 {{ selectedSubmittableOrders.length }}</el-button>
+            <el-button size="small" type="success" class="action-button action-button--submit" :disabled="mobileReadOnly || !selectedSubmittableOrders.length" @click="submitOrders">提交已选 {{ selectedSubmittableOrders.length }}</el-button>
           </div>
         </div>
         <el-table
@@ -639,9 +660,9 @@
             分钟
           </span>
           <el-button text size="small" :loading="pendingLoading" @click="syncPendingOrderStatus">同步成交</el-button>
-          <el-button text size="small" type="warning" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelPendingOrders">批量撤单</el-button>
-          <el-button text size="small" type="info" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="closeLocalPendingOrders()">本地关闭</el-button>
-          <el-button text size="small" type="danger" :disabled="!pendingOrders.length" :loading="pendingActionLoading" @click="cancelAndResubmitPendingOrders">撤单再提交</el-button>
+          <el-button text size="small" type="warning" :disabled="mobileReadOnly || !pendingOrders.length" :loading="pendingActionLoading" @click="cancelPendingOrders">批量撤单</el-button>
+          <el-button text size="small" type="info" :disabled="mobileReadOnly || !pendingOrders.length" :loading="pendingActionLoading" @click="closeLocalPendingOrders()">本地关闭</el-button>
+          <el-button text size="small" type="danger" :disabled="mobileReadOnly || !pendingOrders.length" :loading="pendingActionLoading" @click="cancelAndResubmitPendingOrders">撤单再提交</el-button>
         </div>
       </div>
       <el-table
@@ -694,7 +715,7 @@
         </el-table-column>
         <el-table-column label="操作" width="104" fixed="right">
           <template #default="{ row }">
-            <el-button text size="small" type="info" :loading="pendingActionLoading" @click="closeLocalPendingOrders([row])">本地关闭</el-button>
+            <el-button text size="small" type="info" :disabled="mobileReadOnly" :loading="pendingActionLoading" @click="closeLocalPendingOrders([row])">本地关闭</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -844,6 +865,35 @@
       </template>
     </el-dialog>
 
+    <el-dialog
+      v-model="controlDialogOpen"
+      title="实盘控制会话"
+      width="460px"
+      :close-on-click-modal="false"
+    >
+      <el-form label-width="110px">
+        <el-form-item label="Release ID">
+          <el-input v-model="controlForm.releaseId" placeholder="live_approved release" />
+        </el-form-item>
+        <el-form-item label="账户掩码">
+          <el-input v-model="controlForm.expectedAccountMask" placeholder="66***80" />
+        </el-form-item>
+        <el-form-item label="控制密钥">
+          <el-input
+            v-model="controlForm.secret"
+            type="password"
+            show-password
+            autocomplete="off"
+            placeholder="仅用于本次授权，不保存"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="controlDialogOpen = false">取消</el-button>
+        <el-button type="warning" :loading="controlSaving" @click="unlockLiveControl">授权</el-button>
+      </template>
+    </el-dialog>
+
     <el-dialog v-model="profileDialogOpen" title="新增 Live Profile" width="520px">
       <el-form label-width="110px">
         <el-form-item label="策略 ID">
@@ -864,7 +914,7 @@
       </el-form>
       <template #footer>
         <el-button @click="profileDialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="profileSaving" @click="createProfile">保存</el-button>
+        <el-button type="primary" :disabled="mobileReadOnly" :loading="profileSaving" @click="createProfile">保存</el-button>
       </template>
     </el-dialog>
 
@@ -899,7 +949,7 @@
       </el-form>
       <template #footer>
         <el-button @click="capitalDialogOpen = false">取消</el-button>
-        <el-button type="primary" :loading="capitalSaving" @click="initializeCapitalPool">
+        <el-button type="primary" :disabled="mobileReadOnly" :loading="capitalSaving" @click="initializeCapitalPool">
           {{ strategyAccountReady && !capitalForm.reset_existing ? '确认调整' : '确认初始化' }}
         </el-button>
       </template>
@@ -1072,10 +1122,14 @@
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
+import ProvenanceStrip from '@/components/ProvenanceStrip.vue'
 import * as echarts from '@/lib/echarts'
 import { systemApi, type LiveTradingGuardrails } from '@/api/system'
 import { syncApi, type SyncStatus } from '@/api/sync'
 import {
+  buildV1LiveOrderRequest,
+  isLiveControlSessionActive,
+  isMobileTradingReadOnly,
   liveTradingApi,
   type LiveAccountSnapshot,
   type LiveAccountPosition,
@@ -1103,6 +1157,7 @@ const modeOptions = [
 ]
 
 const layoutMode = ref<'A' | 'B' | 'C'>('A')
+const mobileReadOnly = ref(isMobileTradingReadOnly(window.innerWidth))
 const mode = ref<LiveTradingMode>('live')
 const tradeDate = ref(new Date().toISOString().slice(0, 10))
 const indexSymbol = ref('399101.SZ')
@@ -1137,6 +1192,15 @@ const pendingActionLoading = ref(false)
 const journalLoading = ref(false)
 const pendingLoading = ref(false)
 const savingGuardrails = ref(false)
+const controlDialogOpen = ref(false)
+const controlSaving = ref(false)
+const controlSession = ref<{ token: string; accountMask: string; expiresAt: number } | null>(null)
+const controlClock = ref(Date.now())
+const controlForm = reactive({
+  releaseId: '',
+  expectedAccountMask: '',
+  secret: '',
+})
 const profileDialogOpen = ref(false)
 const profileSaving = ref(false)
 const capitalDialogOpen = ref(false)
@@ -1159,6 +1223,8 @@ let accountPollTimer: number | null = null
 let orderSyncTimer: number | null = null
 let orderSyncBurstUntil = 0
 let orderSyncInFlight = false
+let mobileTradingMediaQuery: MediaQueryList | null = null
+let controlClockTimer: number | null = null
 const liveStreamState = ref<'off' | 'connecting' | 'live' | 'polling' | 'error'>('off')
 const liveStreamUpdatedAt = ref<string | null>(null)
 const liveStreamError = ref('')
@@ -1200,6 +1266,51 @@ const runtimeState = reactive({
 })
 let runtimeSyncTimer: number | null = null
 
+function syncMobileTradingMode(event: MediaQueryListEvent | MediaQueryList) {
+  mobileReadOnly.value = event.matches
+}
+
+function ensureDesktopMutation(action: string) {
+  if (!mobileReadOnly.value) return true
+  ElMessage.warning(`${action}仅允许在桌面端执行`)
+  return false
+}
+
+function openControlDialog() {
+  if (!ensureDesktopMutation('实盘授权')) return
+  if (!controlForm.expectedAccountMask && status.value?.account_id) {
+    controlForm.expectedAccountMask = status.value.account_id
+  }
+  controlDialogOpen.value = true
+}
+
+async function unlockLiveControl() {
+  if (!ensureDesktopMutation('实盘授权')) return
+  if (!controlForm.releaseId.trim() || !controlForm.expectedAccountMask.trim() || !controlForm.secret) {
+    ElMessage.warning('请填写 live release、账户掩码和控制密钥')
+    return
+  }
+  controlSaving.value = true
+  try {
+    const result = await liveTradingApi.unlockControl({
+      secret: controlForm.secret,
+      expected_account_mask: controlForm.expectedAccountMask.trim(),
+    })
+    controlSession.value = {
+      token: result.token,
+      accountMask: result.account_mask,
+      expiresAt: Date.now() + result.ttl_seconds * 1000,
+    }
+    controlForm.expectedAccountMask = result.account_mask
+    controlForm.secret = ''
+    controlDialogOpen.value = false
+    ElMessage.success(`实盘控制会话已授权，有效期 ${Math.round(result.ttl_seconds / 60)} 分钟`)
+  } finally {
+    controlForm.secret = ''
+    controlSaving.value = false
+  }
+}
+
 type PositionColumnKey =
   | 'symbol'
   | 'stock_name'
@@ -1238,6 +1349,13 @@ const positionColumnDefs: PositionColumnDef[] = [
 const positionColumnOrder = ref<PositionColumnKey[]>(positionColumnDefs.map(column => column.key))
 
 const selectedProfile = computed(() => profiles.value.find(item => item.profile_key === selectedProfileKey.value) || null)
+const controlSessionActive = computed(() => Boolean(
+  isLiveControlSessionActive(
+    controlSession.value,
+    controlForm.expectedAccountMask,
+    controlClock.value,
+  ),
+))
 const currentStrategyName = computed(() => selectedProfile.value?.display_name || selectedProfile.value?.strategy_name || selectedProfileKey.value || '策略组合')
 const strategyPortfolioTitle = computed(() => `${currentStrategyName.value} Portfolio`)
 const strategyPortfolioSubtitle = computed(() => {
@@ -1762,6 +1880,7 @@ async function confirmLiveGuardrailSave(): Promise<{ acknowledge_risk: boolean; 
 }
 
 async function saveLiveGuardrails() {
+  if (!ensureDesktopMutation('修改实盘护栏')) return
   if (!liveGuardrails.value || !guardrailsDirty.value || savingGuardrails.value) return
   if (guardrailDraft.auto_execute_enabled && !guardrailDraft.enable_order_submit) {
     guardrailDraft.auto_execute_enabled = false
@@ -1821,6 +1940,9 @@ async function loadAll() {
       systemApi.getLiveTradingGuardrails(),
     ])
     status.value = nextStatus
+    if (!controlForm.expectedAccountMask && nextStatus.account_id) {
+      controlForm.expectedAccountMask = nextStatus.account_id
+    }
     profiles.value = nextProfiles
     liveGuardrails.value = nextGuardrails
     resetLiveGuardrailDraft()
@@ -2416,6 +2538,7 @@ function selectedOrStalePendingRows() {
 }
 
 async function cancelPendingOrders() {
+  if (!ensureDesktopMutation('撤单')) return
   const rows = selectedOrStalePendingRows()
   const useSelectedRows = selectedPendingOrders.value.length > 0
   if (!rows.length) {
@@ -2451,6 +2574,7 @@ async function cancelPendingOrders() {
 }
 
 async function closeLocalPendingOrders(inputRows?: LiveTradeRecord[]) {
+  if (!ensureDesktopMutation('关闭本地订单')) return
   const rows = inputRows?.length ? inputRows : selectedOrStalePendingRows()
   const useSelectedRows = Boolean(inputRows?.length) || selectedPendingOrders.value.length > 0
   if (!rows.length) {
@@ -2486,6 +2610,7 @@ async function closeLocalPendingOrders(inputRows?: LiveTradeRecord[]) {
 }
 
 async function cancelAndResubmitPendingOrders() {
+  if (!ensureDesktopMutation('撤单再提交')) return
   const rows = selectedOrStalePendingRows()
   const useSelectedRows = selectedPendingOrders.value.length > 0
   if (!rows.length) {
@@ -2535,6 +2660,7 @@ async function cancelAndResubmitPendingOrders() {
 }
 
 async function startRunner() {
+  if (!ensureDesktopMutation('启动自动执行')) return
   if (!selectedProfileKey.value) return
   if (!strategyAccountReady.value) {
     await loadAccount()
@@ -2590,6 +2716,7 @@ async function startRunner() {
 }
 
 async function stopRunner() {
+  if (!ensureDesktopMutation('停止自动执行')) return
   startRuntimeTask(
     '自动运行',
     '正在停止 runner',
@@ -2618,6 +2745,7 @@ async function stopRunner() {
 }
 
 async function takeoverRunner() {
+  if (!ensureDesktopMutation('人工接管')) return
   await ElMessageBox.confirm('确认人工接管并停止自动提交？', '人工接管', {
     type: 'warning',
     confirmButtonText: '接管',
@@ -2713,9 +2841,15 @@ function clearSelectedOrders() {
 }
 
 async function submitOrders() {
+  if (!ensureDesktopMutation('提交订单')) return
   const orders = selectedSubmittableOrders.value
   if (!orders.length) {
     ElMessage.info('请先勾选需要提交且数量大于 0 的订单')
+    return
+  }
+  if (mode.value === 'live' && !controlSessionActive.value) {
+    ElMessage.warning('真实委托需要先授权有效控制会话')
+    openControlDialog()
     return
   }
   const title = mode.value === 'live' ? '真实委托确认' : '模拟成交确认'
@@ -2736,11 +2870,25 @@ async function submitOrders() {
   )
   try {
     setRuntimeStep('submit', 'running', `${orders.length} 条订单正在提交。`, 32)
-    const result = await liveTradingApi.submitOrders({
-      mode: mode.value,
-      orders: orders as unknown as Record<string, unknown>[],
-      confirm: true,
-    })
+    const idempotencyKey = [
+      controlForm.releaseId,
+      signalData.value?.signal_hash || tradeDate.value,
+      ...orders.map(orderSubmitIdentity).sort(),
+    ].join(':')
+    const control = mode.value === 'live' && controlSession.value
+      ? {
+          releaseId: controlForm.releaseId.trim(),
+          expectedAccountMask: controlForm.expectedAccountMask.trim(),
+          controlToken: controlSession.value.token,
+          idempotencyKey,
+        }
+      : undefined
+    const requestData = buildV1LiveOrderRequest(
+      mode.value,
+      orders as unknown as Record<string, unknown>[],
+      control,
+    )
+    const result = await liveTradingApi.submitOrdersV1(requestData)
     submitResult.value = result
     submitResultDialogOpen.value = true
     removeSubmittedBasketOrders(orders, result)
@@ -2778,6 +2926,7 @@ async function submitOrders() {
 }
 
 async function initializeCapitalPool() {
+  if (!ensureDesktopMutation('初始化资金池')) return
   if (!selectedProfileKey.value) return
   const adjustingCapital = strategyAccountReady.value && !capitalForm.reset_existing
   if (strategyAccountReady.value && capitalForm.reset_existing) {
@@ -2816,12 +2965,14 @@ function removeOrder(index: number) {
 }
 
 async function toggleProfileEnabled(value: string | number | boolean) {
+  if (!ensureDesktopMutation('修改 Profile')) return
   if (!selectedProfile.value) return
   const updated = await liveTradingApi.updateProfile(selectedProfile.value.profile_key, { enabled: Boolean(value) })
   profiles.value = profiles.value.map(item => item.profile_key === updated.profile_key ? updated : item)
 }
 
 async function makeDefaultProfile() {
+  if (!ensureDesktopMutation('设置默认 Profile')) return
   if (!selectedProfile.value) return
   const updated = await liveTradingApi.updateProfile(selectedProfile.value.profile_key, { is_default: true })
   profiles.value = profiles.value.map(item => ({ ...item, is_default: item.profile_key === updated.profile_key }))
@@ -2829,6 +2980,7 @@ async function makeDefaultProfile() {
 }
 
 async function createProfile() {
+  if (!ensureDesktopMutation('创建 Profile')) return
   profileSaving.value = true
   try {
     const created = await liveTradingApi.createProfile({
@@ -3357,6 +3509,12 @@ const pageContextBlocks = computed(() => [
 usePageContext(pageContextBlocks)
 
 onMounted(() => {
+  controlClockTimer = window.setInterval(() => {
+    controlClock.value = Date.now()
+  }, 1000)
+  mobileTradingMediaQuery = window.matchMedia('(max-width: 760px)')
+  syncMobileTradingMode(mobileTradingMediaQuery)
+  mobileTradingMediaQuery.addEventListener('change', syncMobileTradingMode)
   window.addEventListener('page-context-action', handlePageContextAction)
   document.addEventListener('visibilitychange', handleVisibilityChange)
   loadAll()
@@ -3368,6 +3526,8 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (controlClockTimer != null) window.clearInterval(controlClockTimer)
+  mobileTradingMediaQuery?.removeEventListener('change', syncMobileTradingMode)
   window.removeEventListener('page-context-action', handlePageContextAction)
   document.removeEventListener('visibilitychange', handleVisibilityChange)
   stopRuntimeSyncPolling()
@@ -3388,6 +3548,23 @@ onUnmounted(() => {
   --trade-bad: #b91c1c;
   --trade-info: #0369a1;
   overflow: auto;
+}
+
+.mobile-readonly-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border: 1px solid rgba(178, 122, 30, 0.34);
+  border-radius: 6px;
+  background: var(--status-warning-bg, #fbf3df);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.mobile-readonly-banner strong {
+  color: var(--accent-warning);
+  white-space: nowrap;
 }
 
 .live-page > * {

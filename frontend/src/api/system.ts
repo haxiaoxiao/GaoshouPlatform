@@ -62,12 +62,91 @@ export interface LiveTradingGuardrails {
   updated_at: string
 }
 
+export type DatasetReadinessStatus = 'ready' | 'stale' | 'missing' | 'invalid'
+
+export interface DatasetReadinessItem {
+  dataset: string
+  status: DatasetReadinessStatus
+  max_date: string | null
+  age_days?: number | null
+  reason?: string | null
+  row_count?: number | null
+  file_count?: number | null
+  source?: string
+  schema_hash?: string | null
+}
+
+export interface PlatformReadiness {
+  as_of: string
+  environment: 'research' | 'paper' | 'live'
+  overall_status: 'ready' | 'degraded' | 'invalid'
+  datasets: Record<string, DatasetReadinessItem>
+  trading: {
+    order_submit_enabled: boolean
+    auto_execute_enabled: boolean
+    control_secret_configured: boolean
+  }
+}
+
+export interface ReadinessContext {
+  environmentLabel: string
+  dataDate: string
+  readinessLabel: string
+  orderSubmitLabel: string
+  orderSubmitRisk: boolean
+}
+
+export function formatReadinessContext(payload: PlatformReadiness): ReadinessContext {
+  const dailyDate = payload.datasets.klines_daily?.max_date
+  const fallbackDate = Object.values(payload.datasets)
+    .map(item => item.max_date)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1)
+  const readinessLabels: Record<PlatformReadiness['overall_status'], string> = {
+    ready: '数据就绪',
+    degraded: '数据降级',
+    invalid: '数据异常',
+  }
+
+  return {
+    environmentLabel: payload.environment.toUpperCase(),
+    dataDate: dailyDate || fallbackDate || '未知',
+    readinessLabel: readinessLabels[payload.overall_status],
+    orderSubmitLabel: payload.trading.order_submit_enabled ? '真实下单开启' : '真实下单关闭',
+    orderSubmitRisk: payload.trading.order_submit_enabled,
+  }
+}
+
+let readinessCache: PlatformReadiness | null = null
+let readinessCacheUntil = 0
+let readinessRequest: Promise<PlatformReadiness> | null = null
+
+export function getPlatformReadiness(force = false): Promise<PlatformReadiness> {
+  if (!force && readinessCache && Date.now() < readinessCacheUntil) {
+    return Promise.resolve(readinessCache)
+  }
+  if (!force && readinessRequest) return readinessRequest
+  readinessRequest = request.get<PlatformReadiness>('/v1/readiness')
+    .then(payload => {
+      readinessCache = payload
+      readinessCacheUntil = Date.now() + 30_000
+      return payload
+    })
+    .finally(() => {
+      readinessRequest = null
+    })
+  return readinessRequest
+}
+
 export const systemApi = {
   getStatus: () => request.get<SystemStatus>('/system/status'),
 
   healthCheck: () => request.get<{ status: string }>('/system/health'),
 
   dataSummary: () => request.get<DataSummary>('/system/data-summary'),
+
+  readiness: (force = false) => getPlatformReadiness(force),
 
   getDevDataMode: () => request.get<DevDataMode>('/system/dev-data-mode'),
 

@@ -17,6 +17,7 @@ from loguru import logger
 from app.core.config import settings
 from app.data_stores.parquet_store import _list_param, _sql_literal
 from app.db.duckdb import get_duckdb
+from app.services.dataset_manifest import read_dataset_manifest
 from app.services.factor_catalog import (
     get_catalog_definition,
     get_catalog_group,
@@ -500,9 +501,14 @@ class FactorValueStore:
 
     def __init__(self, data_dir: str | None = None):
         self._data_dir = Path(data_dir or settings.parquet_data_dir)
+        self._dataset_override = (
+            Path(settings.factor_value_store_dir)
+            if data_dir is None and settings.factor_value_store_dir
+            else None
+        )
 
     def _dataset_path(self) -> Path:
-        return self._data_dir / self.dataset
+        return self._dataset_override or (self._data_dir / self.dataset)
 
     def _glob_pattern(self) -> str:
         return str(self._dataset_path() / "year=*" / "month=??" / "*.parquet").replace("\\", "/")
@@ -536,7 +542,7 @@ class FactorValueStore:
         return f"read_parquet({source}, hive_partitioning=true, union_by_name=true)"
 
     def _metadata_cache_key(self) -> tuple[str, str]:
-        return str(self._data_dir.absolute()), self.dataset
+        return str(self._dataset_path().absolute()), self.dataset
 
     def invalidate_metadata(self) -> None:
         _FACTOR_VALUE_METADATA_CACHE.pop(self._metadata_cache_key(), None)
@@ -936,6 +942,17 @@ class FactorValueStore:
         if not names or not self.exists():
             return {name: self._empty_coverage(name) for name in names}
 
+        indexed = self._indexed_coverage_many(
+            names,
+            start_date=start_date,
+            end_date=end_date,
+            symbols=symbols,
+            as_of_time=as_of_time,
+            params=params,
+        )
+        if indexed is not None:
+            return indexed
+
         params_hash = factor_params_hash(params) if params is not None else None
         conditions = [f"factor_name IN {_list_param(names)}"]
         partition_filter = ""
@@ -1011,6 +1028,52 @@ class FactorValueStore:
                 "date_count": int(row[3] or 0),
                 "min_date": str(row[4]) if row[4] is not None else None,
                 "max_date": str(row[5]) if row[5] is not None else None,
+                "symbols_sample": [],
+            }
+        return result
+
+    def _indexed_coverage_many(
+        self,
+        names: Sequence[str],
+        *,
+        start_date: date | None,
+        end_date: date | None,
+        symbols: Sequence[str] | None,
+        as_of_time: str | None,
+        params: dict[str, Any] | None,
+    ) -> dict[str, dict[str, Any]] | None:
+        if symbols or as_of_time is not None or params is not None:
+            return None
+        manifest = read_dataset_manifest(self._dataset_path())
+        if manifest is None or manifest.validation_status != "valid":
+            return None
+        coverage = manifest.details.get("factor_coverage")
+        if not isinstance(coverage, dict):
+            return None
+
+        for name in names:
+            item = coverage.get(name)
+            if not isinstance(item, dict):
+                continue
+            min_date = item.get("min_date")
+            max_date = item.get("max_date")
+            if start_date is not None and min_date and start_date.isoformat() > str(min_date):
+                return None
+            if end_date is not None and max_date and end_date.isoformat() < str(max_date):
+                return None
+
+        result = {name: self._empty_coverage(name) for name in names}
+        for name in names:
+            item = coverage.get(name)
+            if not isinstance(item, dict):
+                continue
+            result[name] = {
+                "factor_name": name,
+                "total_rows": int(item.get("total_rows") or 0),
+                "symbol_count": int(item.get("symbol_count") or 0),
+                "date_count": int(item.get("date_count") or 0),
+                "min_date": item.get("min_date"),
+                "max_date": item.get("max_date"),
                 "symbols_sample": [],
             }
         return result

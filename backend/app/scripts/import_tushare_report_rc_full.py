@@ -14,7 +14,6 @@ import pandas as pd
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.services.security_symbols import normalize_security_symbol
 
-
 DEFAULT_SOURCE_DIR = Path("/Users/albert/Downloads/Tushare盈利预测历史数据2010-2026全量")
 DEFAULT_DATASET = "analyst_report_forecasts"
 DATE_COL = "report_date"

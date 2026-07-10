@@ -40,7 +40,8 @@ class StrategyItem(BaseModel):
 
     id: int = Field(description="策略ID")
     name: str = Field(description="策略名称")
-    code: str = Field(description="策略代码")
+    code: str | None = Field(default=None, description="策略代码；列表默认省略")
+    code_size: int = Field(default=0, description="策略代码字符数")
     parameters: dict[str, Any] | None = Field(default=None, description="策略参数")
     description: str | None = Field(default=None, description="策略描述")
     created_at: str | None = Field(default=None, description="创建时间")
@@ -126,10 +127,26 @@ class BacktestListResponse(BaseModel):
 # ============== Strategy Endpoints ==============
 
 
+def _strategy_list_item(strategy: Any, *, include_code: bool = False) -> dict[str, Any]:
+    item = {
+        "id": strategy.id,
+        "name": strategy.name,
+        "parameters": strategy.parameters,
+        "description": strategy.description,
+        "created_at": strategy.created_at.isoformat() if strategy.created_at else None,
+        "updated_at": strategy.updated_at.isoformat() if strategy.updated_at else None,
+        "code_size": len(strategy.code or ""),
+    }
+    if include_code:
+        item["code"] = strategy.code
+    return item
+
+
 @router.get("/strategies", response_model=StrategyListResponse, summary="获取策略列表")
 async def get_strategies(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    include_code: bool = Query(default=False, description="兼容旧客户端：在列表中包含完整源码"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
@@ -138,18 +155,7 @@ async def get_strategies(
     service = BacktestService(session)
     strategies, total = await service.get_strategies(page=page, page_size=page_size)
 
-    items = [
-        {
-            "id": strategy.id,
-            "name": strategy.name,
-            "code": strategy.code,
-            "parameters": strategy.parameters,
-            "description": strategy.description,
-            "created_at": strategy.created_at.isoformat() if strategy.created_at else None,
-            "updated_at": strategy.updated_at.isoformat() if strategy.updated_at else None,
-        }
-        for strategy in strategies
-    ]
+    items = [_strategy_list_item(strategy, include_code=include_code) for strategy in strategies]
 
     total_pages = (total + page_size - 1) // page_size if page_size > 0 else 0
 
@@ -190,6 +196,7 @@ async def create_strategy(
             "id": strategy.id,
             "name": strategy.name,
             "code": strategy.code,
+            "code_size": len(strategy.code or ""),
             "parameters": strategy.parameters,
             "description": strategy.description,
             "created_at": strategy.created_at.isoformat() if strategy.created_at else None,

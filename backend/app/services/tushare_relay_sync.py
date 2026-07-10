@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
 from app.db.models import Stock, StockConceptMembership
+from app.services.dataset_manifest import read_dataset_manifest
 from app.services.security_symbols import normalize_security_symbol
 from app.services.tushare_relay import TushareRelayClient, TushareRelayMeta
 from app.services.tushare_relay_specs import (
@@ -317,6 +318,22 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
     cached = _COVERAGE_CACHE.get(cache_key)
     if cached and now < cached[0]:
         return copy.deepcopy(cached[1])
+
+    dataset_root = Path(settings.parquet_data_dir) / dataset
+    manifest = read_dataset_manifest(dataset_root)
+    if manifest is not None:
+        result = {
+            "row_count": manifest.row_count,
+            "min_date": manifest.min_date,
+            "max_date": manifest.max_date,
+            "estimated": False,
+            "source": "manifest",
+            "file_count": manifest.file_count,
+            "partition_count": manifest.partition_count,
+            "validation_status": manifest.validation_status,
+        }
+        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        return copy.deepcopy(result)
 
     store = ParquetMarketDataStore(settings.parquet_data_dir)
     if not dataset or not store._exists(dataset):

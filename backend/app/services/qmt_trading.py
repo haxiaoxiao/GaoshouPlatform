@@ -6,10 +6,10 @@ explicitly enables it in config and sends a confirmation flag with the request.
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-import re
 from typing import Any, Sequence
 
 from app.core.config import settings

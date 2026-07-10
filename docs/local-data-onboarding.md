@@ -112,7 +112,7 @@ cd E:\Projects\GaoshouPlatform\frontend
 npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 ```
 
-dev 使用 `13500`/`18800`/`18810`，prod 使用 `3500`/`8800`/`8810`；以启动脚本输出为准。
+dev 使用 `13500`/`18800`/`18810`，prod 使用 `3511`/`8800`/`8810`；以启动脚本输出为准。
 
 ## 验证
 

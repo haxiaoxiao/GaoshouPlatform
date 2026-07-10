@@ -3,13 +3,22 @@
     class="app-shell"
     :class="{
       'app-shell--collapsed': isCollapsed,
+      'app-shell--mobile-nav-open': mobileNavOpen,
     }"
   >
     <div class="ambient-bg" aria-hidden="true">
       <div class="grid-pattern"></div>
     </div>
 
-    <aside class="sidebar">
+    <button
+      v-if="mobileNavOpen"
+      class="mobile-nav-backdrop"
+      type="button"
+      aria-label="关闭导航"
+      @click="mobileNavOpen = false"
+    />
+
+    <aside class="sidebar" :aria-hidden="isMobile && !mobileNavOpen">
       <div class="sidebar__brand">
         <div class="brand-icon" aria-hidden="true">
           GS
@@ -19,6 +28,9 @@
           <span class="brand-name">GAOSHOU</span>
           <span class="brand-tagline">Quant Research Cockpit</span>
         </div>
+        <button class="mobile-nav-close" type="button" title="关闭导航" @click="mobileNavOpen = false">
+          <el-icon><Close /></el-icon>
+        </button>
       </div>
 
       <nav class="sidebar__nav" aria-label="主导航">
@@ -31,6 +43,7 @@
             class="nav-item"
             :class="{ 'nav-item--active': isActive(item) }"
             :title="isCollapsed ? item.label : undefined"
+            @click="mobileNavOpen = false"
           >
             <span class="nav-item__icon" v-html="item.icon"></span>
             <span v-if="!isCollapsed" class="nav-item__body">
@@ -65,10 +78,15 @@
     <main class="main-area">
       <header class="topbar">
         <div class="topbar__left">
-          <span class="page-kicker">{{ pageKicker }}</span>
-          <div class="page-copy">
-            <h1 class="page-title">{{ pageTitle }}</h1>
-            <span v-if="pageSubtitle" class="page-subtitle">{{ pageSubtitle }}</span>
+          <button class="mobile-menu-button" type="button" title="打开导航" @click="mobileNavOpen = true">
+            <el-icon><Menu /></el-icon>
+          </button>
+          <div class="topbar__copy">
+            <span class="page-kicker">{{ pageKicker }}</span>
+            <div class="page-copy">
+              <h1 class="page-title">{{ pageTitle }}</h1>
+              <span v-if="pageSubtitle" class="page-subtitle">{{ pageSubtitle }}</span>
+            </div>
           </div>
         </div>
 
@@ -103,6 +121,8 @@
         </div>
       </header>
 
+      <StatusBar />
+
       <div class="content-wrapper">
         <router-view v-slot="{ Component }">
           <transition name="page" mode="out-in">
@@ -110,8 +130,6 @@
           </transition>
         </router-view>
       </div>
-
-      <StatusBar />
     </main>
   </div>
 </template>
@@ -119,6 +137,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { Close, Menu } from '@element-plus/icons-vue'
 import {
   NAV_SECTIONS,
   navItemsForSection,
@@ -133,9 +152,12 @@ const notificationStore = useNotificationStore()
 const route = useRoute()
 
 const isCollapsed = ref(false)
+const isMobile = ref(false)
+const mobileNavOpen = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
 const showNotifications = ref(false)
+let mobileMediaQuery: MediaQueryList | null = null
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
@@ -157,7 +179,16 @@ const pageKicker = computed(() => {
 })
 
 function toggleSidebar() {
+  if (isMobile.value) {
+    mobileNavOpen.value = !mobileNavOpen.value
+    return
+  }
   isCollapsed.value = !isCollapsed.value
+}
+
+function syncMobileState(event: MediaQueryListEvent | MediaQueryList) {
+  isMobile.value = event.matches
+  if (!event.matches) mobileNavOpen.value = false
 }
 
 function toggleNotificationPanel() {
@@ -196,11 +227,15 @@ onMounted(() => {
   notificationStore.startTaskPolling()
   localStorage.setItem('gs-theme', DEFAULT_THEME)
   applyTheme(DEFAULT_THEME)
+  mobileMediaQuery = window.matchMedia('(max-width: 760px)')
+  syncMobileState(mobileMediaQuery)
+  mobileMediaQuery.addEventListener('change', syncMobileState)
 })
 
 onUnmounted(() => {
   document.removeEventListener('click', closeNotificationPanel)
   notificationStore.stopTaskPolling()
+  mobileMediaQuery?.removeEventListener('change', syncMobileState)
 })
 </script>
 
@@ -242,6 +277,12 @@ onUnmounted(() => {
 .main-area {
   position: relative;
   z-index: var(--z-elevated);
+}
+
+.mobile-nav-backdrop,
+.mobile-nav-close,
+.mobile-menu-button {
+  display: none;
 }
 
 .sidebar {
@@ -515,6 +556,13 @@ onUnmounted(() => {
 
 .topbar__left {
   min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.topbar__copy {
+  min-width: 0;
   display: grid;
   gap: 4px;
 }
@@ -713,15 +761,51 @@ onUnmounted(() => {
 @media (max-width: 760px) {
   .app-shell,
   .app-shell--collapsed {
-    --sidebar-width: 100%;
-    display: grid;
+    --sidebar-width: 0px;
     grid-template-columns: 1fr;
-    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .sidebar {
-    height: auto;
-    max-height: 42vh;
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(86vw, 320px);
+    height: 100vh;
+    max-height: none;
+    z-index: calc(var(--z-modal) + 1);
+    transform: translateX(-102%);
+    transition: transform var(--duration-normal) var(--ease-out);
+  }
+
+  .app-shell--mobile-nav-open .sidebar {
+    transform: translateX(0);
+  }
+
+  .mobile-nav-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: var(--z-modal);
+    display: block;
+    border: 0;
+    background: rgba(34, 48, 42, 0.42);
+    backdrop-filter: blur(2px);
+  }
+
+  .mobile-nav-close,
+  .mobile-menu-button {
+    display: grid;
+    width: 36px;
+    height: 36px;
+    place-items: center;
+    flex: 0 0 36px;
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    cursor: pointer;
+  }
+
+  .mobile-nav-close {
+    margin-left: auto;
   }
 
   .sidebar__toggle {
@@ -730,14 +814,17 @@ onUnmounted(() => {
 
   .topbar {
     min-height: auto;
-    grid-template-columns: 1fr;
-    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr) auto;
+    padding: 10px 12px;
   }
 
-  .topbar__right,
   .page-copy {
     justify-content: flex-start;
     flex-wrap: wrap;
+  }
+
+  .topbar__right .user-avatar {
+    display: none;
   }
 
   .page-title,
@@ -746,12 +833,11 @@ onUnmounted(() => {
   }
 
   .main-area {
-    height: auto;
-    min-height: 0;
+    height: 100vh;
   }
 
   .content-wrapper {
-    padding: var(--space-3);
+    padding: 10px;
   }
 }
 </style>

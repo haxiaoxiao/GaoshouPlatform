@@ -509,7 +509,7 @@ dev 和 prod 端口必须严格分开；启动、关闭、健康检查、前端�
 | 环境 | 根目录 | 后端 API | 同步服务 | 前端 |
 |---|---|---:|---:|---:|
 | dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
-| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3500` |
+| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3511` |
 
 ```powershell
 # dev 后端

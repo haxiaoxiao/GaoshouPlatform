@@ -30,7 +30,8 @@ jobs:
       DUCKDB_PATH: ":memory:"
       ENABLE_SYNC_SCHEDULER: "false"
       DEBUG: "false"
-      GRID_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      LIVE_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      LIVE_TRADING_AUTO_EXECUTE_ENABLED: "false"
       PIP_INDEX_URL: https://pypi.org/simple
       PIP_DEFAULT_TIMEOUT: "60"
       PIP_RETRIES: "5"
@@ -50,7 +51,6 @@ jobs:
           python -m pip install -e ".[dev]"
 
       - name: Ruff
-        continue-on-error: true
         run: python -m ruff check app tests
 
       - name: Pytest
@@ -76,5 +76,44 @@ jobs:
       - name: Install frontend dependencies
         run: npm ci
 
+      - name: Unit tests
+        run: npm test
+
       - name: Build frontend
         run: npm run build
+
+  e2e:
+    name: Browser smoke tests
+    runs-on: windows-latest
+    env:
+      LIVE_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      LIVE_TRADING_AUTO_EXECUTE_ENABLED: "false"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install backend dependencies
+        run: python -m pip install -e "./backend[dev]"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Playwright smoke tests
+        working-directory: frontend
+        env:
+          GAOSHOU_E2E_PYTHON: python
+        run: npm run test:e2e

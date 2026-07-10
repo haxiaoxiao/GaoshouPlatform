@@ -12,19 +12,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.cache.redis_cache import get_redis_client
 from app.core.config import settings
-from app.db.models.financial import FinancialData
-from app.db.models.stock import Stock
-from app.db.sqlite import get_async_session
-from app.services.backtest_redis_cache import get_backtest_cache
 from app.core.dev_data_mode import (
     apply_dev_data_mode_to_settings,
     dev_data_mode_payload,
     set_dev_data_mode,
 )
+from app.db.models.financial import FinancialData
+from app.db.models.stock import Stock
+from app.db.sqlite import get_async_session
+from app.services.backtest_redis_cache import get_backtest_cache
+from app.services.parquet_dataset_catalog import get_parquet_date_column
 from app.services.runtime_tasks import get_task, list_tasks
 from app.services.sentiment import SentimentService
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
-from app.services.parquet_dataset_catalog import get_parquet_date_column
 from app.services.tushare_relay_sync import dataset_coverage
 
 router = APIRouter()

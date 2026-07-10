@@ -2,7 +2,7 @@ import os
 import socket
 from pathlib import Path
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
 _BASE_DIR = _BACKEND_DIR.parent
@@ -57,6 +57,12 @@ if not _DB_PATH.exists() and _LEGACY_DB_PATH is not None:
 class Settings(BaseSettings):
     """应用配置"""
 
+    model_config = SettingsConfigDict(
+        env_file=_ENV_FILES,
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
+
     # 应用信息
     app_name: str = "GaoshouPlatform"
     app_version: str = "0.1.0"
@@ -76,6 +82,7 @@ class Settings(BaseSettings):
     # 行情数据存储配置
     market_data_backend: str = "parquet"
     parquet_data_dir: str = str(_DATA_DIR / "parquet")
+    factor_value_store_dir: str = ""
     duckdb_path: str = ":memory:"
     dev_local_data_dir: str = str(_DATA_DIR)
     dev_prod_data_dir: str = str(_DATA_DIR)
@@ -101,6 +108,8 @@ class Settings(BaseSettings):
     # 模拟 / 实盘交易配置
     live_trading_enable_order_submit: bool = False
     live_trading_auto_execute_enabled: bool = False
+    live_trading_control_secret: str = ""
+    live_trading_control_session_ttl_seconds: int = 900
     live_trading_default_profile: str = "tsmf_cashaware_stable"
     live_trading_seed_strategy_ids: str = "62,63"
     qmt_account_id: str = ""
@@ -128,7 +137,7 @@ class Settings(BaseSettings):
     # API 配置
     api_prefix: str = "/api"
     backend_port: int = 8800
-    frontend_port: int = 3500
+    frontend_port: int = 3511
 
     @property
     def base_dir(self) -> Path:
@@ -146,11 +155,5 @@ class Settings(BaseSettings):
                 path = Path(self.database_url[len(prefix):])
                 return path if path.is_absolute() else (_BASE_DIR / path).resolve()
         return _DB_PATH
-
-    class Config:
-        env_file = _ENV_FILES
-        env_file_encoding = "utf-8"
-        extra = "ignore"
-
 
 settings = Settings()

@@ -20,7 +20,6 @@ from app.backtest.strategies.multi_factor_akquant import (
 )
 from app.services.us_market import default_us_market_file
 
-
 # 这个预设保留轻度小市值倾向，但排序主力交给研报类质量、成长、
 # 风格轮动和技术信号。生成出来的策略代码会直接出现在回测列表里，
 # 所以这里的注释本身也是策略说明的一部分。

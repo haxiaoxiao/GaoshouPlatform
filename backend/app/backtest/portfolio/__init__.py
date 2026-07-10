@@ -7,6 +7,7 @@ from app.backtest.portfolio.risk_validators import (
     CashValidator,
     PositionLimitValidator,
     PriceValidator,
+    TradabilityValidator,
 )
 
 __all__ = [
@@ -18,5 +19,6 @@ __all__ = [
     "DailySnapshot",
     "CashValidator",
     "PriceValidator",
+    "TradabilityValidator",
     "PositionLimitValidator",
 ]

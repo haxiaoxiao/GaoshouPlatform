@@ -32,6 +32,7 @@ Last updated: 2026-06-20.
 | `docs/strategy-data-contract.md` | 策略数据契约：策略只读公开因子/行情契约，内部派生缓存只供预计算任务使用 |
 | `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
 | `docs/frontend-information-architecture.md` | 新版前端页面职责、菜单分层、工作台/运维差异化和颜色语义 |
+| `docs/platform-upgrade-runbook.md` | 数据 manifest、Alembic、Factor Store 原子切换、发布审批与 live canary 运行手册 |
 | `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |
 | `AGENTS.md` | AI coding agent 项目指南和关键约束 |
 
@@ -155,7 +156,7 @@ npm install
 | 环境 | 根目录 | 后端 API | 同步服务 | 前端 |
 |---|---|---:|---:|---:|
 | dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
-| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3500` |
+| prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3511` |
 
 **后端：**
 ```powershell
@@ -183,7 +184,7 @@ npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
 - 健康检查：http://localhost:18800/health
 
 > 后端启动时会自动创建 SQLite 表，并通过 DuckDB 按需扫描 Parquet 数据集。
-> 生产环境对应端口为 `8800/8810/3500`，不要把 dev 前端代理到 prod API，也不要从 dev 页面触发 prod 写入任务。
+> 生产环境对应端口为 `8800/8810/3511`，不要把 dev 前端代理到 prod API，也不要从 dev 页面触发 prod 写入任务。
 
 ---
 

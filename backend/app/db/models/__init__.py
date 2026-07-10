@@ -12,6 +12,13 @@ from .live_trading import (
     LiveTradeRecord,
     LiveTradingRun,
 )
+from .research_lineage import (
+    DataSnapshot,
+    JobEvent,
+    PersistentJob,
+    ResearchArtifact,
+    StrategyRelease,
+)
 from .sentiment import SentimentPost, SentimentThread
 from .stock import Stock, StockConceptMembership
 from .strategy import Backtest, Order, Strategy, Trade
@@ -39,6 +46,11 @@ __all__ = [
     "LiveTradeRecord",
     "LivePositionState",
     "LivePaperAccount",
+    "DataSnapshot",
+    "StrategyRelease",
+    "ResearchArtifact",
+    "PersistentJob",
+    "JobEvent",
     "SentimentPost",
     "SentimentThread",
     "WatchlistGroup",

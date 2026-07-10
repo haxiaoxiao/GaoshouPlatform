@@ -22,6 +22,7 @@ dependencies = [
     "loguru>=0.7.0",
     "akquant>=0.2.40",
     "tushare>=1.4.0",
+    "alembic>=1.13.0",
 ]
 
 [project.optional-dependencies]
@@ -57,3 +58,4 @@ ignore = ["E501", "B008", "B023", "B904", "E402", "E701", "E741", "N806", "N807"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--basetemp=.pytest_cache/runtime"

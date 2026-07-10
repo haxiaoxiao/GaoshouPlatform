@@ -9,9 +9,8 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import pandas as pd
 
-from app.services.factor_value_store import factor_params_hash, get_factor_value_store
 from app.db.duckdb import get_duckdb
-
+from app.services.factor_value_store import factor_params_hash, get_factor_value_store
 
 QUANTA_RESULTS = Path(r"E:\Projects\QuantaAlpha\data\results")
 ML_DIR = QUANTA_RESULTS / "ml_multifactor_strategies_20260618"
@@ -109,7 +108,7 @@ def build_ml_score_frame(
     spec = ML_SCORE_FACTOR_SPECS[factor_name]
     source = _read_predictions(Path(spec["source_path"]))
     pieces: list[pd.DataFrame] = []
-    for key, weight in spec["models"].items():
+    for key, _weight in spec["models"].items():
         experiment, model = key.split(":", 1)
         part = source[source["experiment"].eq(experiment) & source["model"].eq(model)].copy()
         if part.empty:

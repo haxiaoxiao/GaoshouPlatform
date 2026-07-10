@@ -9,7 +9,7 @@ runner for manual development compatibility checks.
 | Branch | GitHub environment | Target | Ports |
 |---|---|---|---|
 | `develop` | `development` | `E:\Projects\GaoshouPlatform-dev` | `18800`, `18810`, `13500` |
-| `main` | `production` | `E:\Projects\GaoshouPlatform-prod` | `8800`, `8810`, `3500` |
+| `main` | `production` | `E:\Projects\GaoshouPlatform-prod` | `8800`, `8810`, `3511` |
 
 Configure the `production` GitHub environment with required reviewers. This is
 the production approval gate; do not put production secrets in workflow files.

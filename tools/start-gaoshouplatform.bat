@@ -21,7 +21,7 @@ if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else
 if defined GAOSHOU_SYNC_HOST (set "SYNC_HOST=%GAOSHOU_SYNC_HOST%") else (set "SYNC_HOST=127.0.0.1")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
 if defined GAOSHOU_FRONTEND_HOST (set "FRONTEND_HOST=%GAOSHOU_FRONTEND_HOST%") else (set "FRONTEND_HOST=127.0.0.1")
-if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3511")
 
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
@@ -33,6 +33,7 @@ if "%GAOSHOU_SKIP_DOCKER%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 set "MARKET_DATA_BACKEND=parquet"
 set "GAOSHOU_DATA_DIR="
 set "PARQUET_DATA_DIR="
+set "FACTOR_VALUE_STORE_DIR="
 set "DATABASE_URL="
 set "REDIS_PORT=16379"
 set "QMT_ACCOUNT_ID="
@@ -47,6 +48,7 @@ if exist "%ENV_FILE%" (
     set "V=%%b"
     if /i "!K!"=="GAOSHOU_DATA_DIR" set "GAOSHOU_DATA_DIR=!V!"
     if /i "!K!"=="PARQUET_DATA_DIR" set "PARQUET_DATA_DIR=!V!"
+    if /i "!K!"=="FACTOR_VALUE_STORE_DIR" set "FACTOR_VALUE_STORE_DIR=!V!"
     if /i "!K!"=="DATABASE_URL" set "DATABASE_URL=!V!"
     if /i "!K!"=="MARKET_DATA_BACKEND" set "MARKET_DATA_BACKEND=!V!"
     if /i "!K!"=="REDIS_PORT" set "REDIS_PORT=!V!"
@@ -70,8 +72,8 @@ set "SYNC_URL=http://%SYNC_HOST%:%SYNC_PORT%/health"
 set "FRONTEND_URL=http://%FRONTEND_HOST%:%FRONTEND_PORT%"
 set "SYNC_SERVICE_URL=http://%SYNC_HOST%:%SYNC_PORT%"
 set "SYNC_SERVICE_PORT=%SYNC_PORT%"
-set "QMT_ACCOUNT_STATUS=not configured"
-if defined QMT_ACCOUNT_ID set "QMT_ACCOUNT_STATUS=configured"
+set "QMT_ACCOUNT_MASK=not configured"
+if defined QMT_ACCOUNT_ID set "QMT_ACCOUNT_MASK=!QMT_ACCOUNT_ID:~0,2!***!QMT_ACCOUNT_ID:~-2!"
 
 echo ========================================
 echo   GaoshouPlatform Startup
@@ -84,8 +86,9 @@ echo Frontend:  %FRONTEND_URL%
 echo Data mode: %MARKET_DATA_BACKEND%  storage=Parquet/DuckDB
 if defined GAOSHOU_DATA_DIR echo Data root: %GAOSHOU_DATA_DIR%
 if defined PARQUET_DATA_DIR echo Parquet:   %PARQUET_DATA_DIR%
+if defined FACTOR_VALUE_STORE_DIR echo Factors:   %FACTOR_VALUE_STORE_DIR%
 if defined DATABASE_URL echo SQLite:   %DATABASE_URL%
-echo miniQMT:   account %QMT_ACCOUNT_STATUS%  order_submit=%LIVE_TRADING_ENABLE_ORDER_SUBMIT%  auto_execute=%LIVE_TRADING_AUTO_EXECUTE_ENABLED%
+echo miniQMT:   account %QMT_ACCOUNT_MASK%  order_submit=%LIVE_TRADING_ENABLE_ORDER_SUBMIT%  auto_execute=%LIVE_TRADING_AUTO_EXECUTE_ENABLED%
 echo.
 
 if not exist "%ROOT%" (
@@ -104,7 +107,7 @@ if not exist "%FRONTEND_DIR%\package.json" (
   exit /b 1
 )
 
-echo [1/7] Stopping stale project processes on configured ports...
+echo [1/8] Stopping stale project processes on configured ports...
 call :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
 call :assert_ports_free
@@ -114,7 +117,7 @@ if errorlevel 1 (
 )
 echo       OK
 
-echo [2/7] Optional Redis handling...
+echo [2/8] Optional Redis handling...
 if "%SKIP_OPTIONAL_CHECKS%"=="1" (
   echo       SKIP: optional Redis/Docker checks disabled for this startup.
 ) else (
@@ -136,7 +139,7 @@ if "%SKIP_OPTIONAL_CHECKS%"=="1" (
   )
 )
 
-echo [3/7] Market data storage...
+echo [3/8] Market data storage...
 if /i not "%MARKET_DATA_BACKEND%"=="parquet" (
   echo       WARN: MARKET_DATA_BACKEND=%MARKET_DATA_BACKEND% is ignored; Parquet/DuckDB is the only supported backend.
 )
@@ -152,9 +155,29 @@ if not defined PARQUET_DATA_DIR (
   powershell -NoProfile -ExecutionPolicy Bypass -Command "if(-not (Test-Path -LiteralPath '%PARQUET_DATA_DIR%')){ exit 1 }" >nul 2>&1
   if errorlevel 1 echo       WARN: PARQUET_DATA_DIR does not exist or is not reachable from this shell: %PARQUET_DATA_DIR%
 )
+if defined FACTOR_VALUE_STORE_DIR (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "if(-not (Test-Path -LiteralPath '%FACTOR_VALUE_STORE_DIR%\_manifest.json')){ exit 1 }" >nul 2>&1
+  if errorlevel 1 (
+    echo       ERROR: FACTOR_VALUE_STORE_DIR has no validated manifest: %FACTOR_VALUE_STORE_DIR%
+    if "%NO_PAUSE%"=="0" pause
+    exit /b 1
+  )
+)
 echo       OK: Parquet/DuckDB mode
 
-echo [4/7] Starting sync service on %SYNC_HOST%:%SYNC_PORT%...
+echo [4/8] Applying database migrations...
+pushd "%BACKEND_DIR%"
+"%PYTHON%" -m alembic -c alembic.ini upgrade head
+if errorlevel 1 (
+  popd
+  echo       ERROR: Database migration failed. Backend services were not started.
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
+)
+popd
+echo       OK
+
+echo [5/8] Starting sync service on %SYNC_HOST%:%SYNC_PORT%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','uvicorn','app.sync_main:app','--host','%SYNC_HOST%','--port','%SYNC_PORT%') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%SYNC_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
@@ -164,7 +187,7 @@ if errorlevel 1 (
 )
 echo       OK
 
-echo [5/7] Starting backend on %BACKEND_HOST%:%BACKEND_PORT%...
+echo [6/8] Starting backend on %BACKEND_HOST%:%BACKEND_PORT%...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','uvicorn','app.main:app','--host','%BACKEND_HOST%','--port','%BACKEND_PORT%') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%BACKEND_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
@@ -174,7 +197,7 @@ if errorlevel 1 (
 )
 echo       OK
 
-echo [6/7] Checking miniQMT live-trading bridge...
+echo [7/8] Checking miniQMT live-trading bridge...
 if not defined QMT_ACCOUNT_ID (
   echo       SKIP: miniQMT account is optional and QMT_ACCOUNT_ID is not configured.
 ) else if not defined QMT_TRADER_PATH (
@@ -184,8 +207,17 @@ if not defined QMT_ACCOUNT_ID (
   echo       OPTIONAL: status can be checked at http://%BACKEND_HOST%:%BACKEND_PORT%/api/live-trading/status
 )
 
-echo [7/7] Starting frontend on %FRONTEND_HOST%:%FRONTEND_PORT%...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c','set VITE_API_PROXY_TARGET=http://%BACKEND_HOST%:%BACKEND_PORT%&& npm run dev -- --host %FRONTEND_HOST% --port %FRONTEND_PORT% --strictPort') -WorkingDirectory '%FRONTEND_DIR%' -WindowStyle Hidden"
+echo [8/8] Building and starting frontend on %FRONTEND_HOST%:%FRONTEND_PORT%...
+pushd "%FRONTEND_DIR%"
+call npm run build
+if errorlevel 1 (
+  popd
+  echo       ERROR: Frontend production build failed.
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
+)
+popd
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath 'cmd.exe' -ArgumentList @('/c','set VITE_API_PROXY_TARGET=http://%BACKEND_HOST%:%BACKEND_PORT%&& npm run preview -- --host %FRONTEND_HOST% --port %FRONTEND_PORT% --strictPort') -WorkingDirectory '%FRONTEND_DIR%' -WindowStyle Hidden"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%FRONTEND_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Frontend did not bind to %FRONTEND_URL%
@@ -209,11 +241,13 @@ exit /b 0
 
 :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run dev|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run (dev|preview)|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
 exit /b 0
 
 :assert_ports_free
 set "PORTS_BUSY=0"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ranges=netsh interface ipv4 show excludedportrange protocol=tcp | Select-String '^\s*(\d+)\s+(\d+)\s*$'; foreach($match in $ranges){$start=[int]$match.Matches[0].Groups[1].Value; $end=[int]$match.Matches[0].Groups[2].Value; foreach($port in $ports){if($port -ge $start -and $port -le $end){Write-Host ('      ERROR: port ' + $port + ' is reserved by Windows (' + $start + '-' + $end + ')'); exit 1}}}"
+if errorlevel 1 exit /b 1
 for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT%) do (
   netstat -ano 2>nul | findstr ":%%p " | findstr "LISTENING" >nul 2>&1
   if not errorlevel 1 (

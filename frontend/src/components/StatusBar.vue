@@ -1,6 +1,22 @@
 <template>
   <div class="status-bar">
     <div class="status-bar__left">
+      <div class="runtime-chip runtime-chip--environment" title="当前运行环境">
+        {{ readinessContext.environmentLabel }}
+      </div>
+
+      <div class="status-item" title="日线数据最新日期">
+        <span class="status-label">数据日期 {{ readinessContext.dataDate }}</span>
+      </div>
+
+      <div class="runtime-chip" :class="`runtime-chip--${readinessTone}`">
+        {{ readinessContext.readinessLabel }}
+      </div>
+
+      <div class="runtime-chip" :class="readinessContext.orderSubmitRisk ? 'runtime-chip--risk' : 'runtime-chip--safe'">
+        {{ readinessContext.orderSubmitLabel }}
+      </div>
+
       <!-- 连接状态 -->
       <div class="status-item" :title="connectionTitle">
         <span class="status-led" :class="`status-led--${connectionStatus}`"></span>
@@ -49,6 +65,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { syncApi } from '@/api/sync'
+import { formatReadinessContext, systemApi, type PlatformReadiness } from '@/api/system'
 
 type ConnStatus = 'connected' | 'disconnected' | 'checking'
 
@@ -56,6 +73,7 @@ const connectionStatus = ref<ConnStatus>('checking')
 const lastSyncEnd = ref<string | null>(null)
 const dataInfo = ref('')
 const currentTime = ref('')
+const readiness = ref<PlatformReadiness | null>(null)
 let clockTimer: ReturnType<typeof setInterval> | null = null
 let healthTimer: ReturnType<typeof setInterval> | null = null
 let healthCheckOngoing = false
@@ -74,6 +92,22 @@ const connectionLabel = computed(() => {
     case 'disconnected': return '断开'
     case 'checking': return '检测中'
   }
+})
+
+const readinessContext = computed(() => readiness.value
+  ? formatReadinessContext(readiness.value)
+  : {
+      environmentLabel: 'UNKNOWN',
+      dataDate: '未知',
+      readinessLabel: '检查中',
+      orderSubmitLabel: '下单状态未知',
+      orderSubmitRisk: false,
+    })
+
+const readinessTone = computed(() => {
+  if (!readiness.value) return 'neutral'
+  if (readiness.value.overall_status === 'ready') return 'safe'
+  return readiness.value.overall_status === 'degraded' ? 'warn' : 'risk'
 })
 
 const lastSyncTime = computed(() => {
@@ -98,14 +132,18 @@ function updateClock() {
 async function checkHealth() {
   if (healthCheckOngoing) return
   healthCheckOngoing = true
+  connectionStatus.value = 'checking'
   try {
-    connectionStatus.value = 'checking'
-    const status = await syncApi.getStatus()
-    connectionStatus.value = 'connected'
-    if (status.end_time) lastSyncEnd.value = status.end_time
-    dataInfo.value = status.total > 0 ? `已同步 ${status.total} 条` : ''
-  } catch {
-    connectionStatus.value = 'disconnected'
+    const [syncResult, readinessResult] = await Promise.allSettled([
+      syncApi.getStatus(),
+      systemApi.readiness(),
+    ])
+    connectionStatus.value = readinessResult.status === 'fulfilled' ? 'connected' : 'disconnected'
+    if (readinessResult.status === 'fulfilled') readiness.value = readinessResult.value
+    if (syncResult.status === 'fulfilled') {
+      if (syncResult.value.end_time) lastSyncEnd.value = syncResult.value.end_time
+      dataInfo.value = syncResult.value.total > 0 ? `已同步 ${syncResult.value.total} 条` : ''
+    }
   } finally {
     healthCheckOngoing = false
   }
@@ -127,15 +165,16 @@ onUnmounted(() => {
 
 <style scoped>
 .status-bar {
-  height: 28px;
+  min-height: 32px;
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
-  background: rgba(8, 8, 10, 0.8);
-  border-top: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  background: rgba(238, 243, 240, 0.94);
+  border-bottom: 1px solid var(--border-default);
   font-size: 11px;
-  color: var(--text-ghost);
+  color: var(--text-secondary);
   flex-shrink: 0;
   z-index: var(--z-elevated);
   user-select: none;
@@ -198,5 +237,53 @@ onUnmounted(() => {
   height: 12px;
   background: var(--border-subtle);
   flex-shrink: 0;
+}
+
+.runtime-chip {
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 7px;
+  border: 1px solid var(--border-default);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-data);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.runtime-chip--environment {
+  border-color: rgba(27, 61, 50, 0.28);
+  color: var(--accent-primary);
+}
+
+.runtime-chip--safe {
+  border-color: rgba(45, 106, 79, 0.3);
+  color: var(--accent-success);
+}
+
+.runtime-chip--warn {
+  border-color: rgba(178, 122, 30, 0.34);
+  color: var(--accent-warning);
+}
+
+.runtime-chip--risk {
+  border-color: rgba(168, 50, 50, 0.38);
+  background: var(--status-critical-bg);
+  color: var(--accent-danger);
+}
+
+@media (max-width: 760px) {
+  .status-bar {
+    justify-content: flex-start;
+    padding: 4px 10px;
+  }
+
+  .status-bar__right,
+  .status-divider,
+  .status-item[title="最近一次数据同步时间"] {
+    display: none;
+  }
 }
 </style>

@@ -2,16 +2,50 @@ from datetime import date
 
 import pandas as pd
 
-from app.services.tushare_relay import parse_relay_rows
 from app.services import tushare_relay_sync
+from app.services.dataset_manifest import DatasetManifest, write_dataset_manifest
+from app.services.tushare_relay import parse_relay_rows
 from app.services.tushare_relay_sync import (
     ANALYST_RELAY_DATASETS,
     FINANCIAL_STATEMENT_RELAY_DATASETS,
     INSTITUTION_RELAY_DATASETS,
     STRUCTURED_RELAY_DATASETS,
-    build_sync_catalog,
     _normalize_dataset_rows,
+    build_sync_catalog,
 )
+
+
+def test_dataset_coverage_prefers_valid_manifest(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "klines_daily"
+    write_dataset_manifest(
+        dataset_root,
+        DatasetManifest(
+            dataset="klines_daily",
+            generated_at=pd.Timestamp("2026-07-10 10:00:00").to_pydatetime(),
+            file_count=2,
+            byte_size=2048,
+            row_count=321,
+            partition_count=1,
+            min_date="2026-07-01",
+            max_date="2026-07-09",
+            schema_hash="schema",
+        ),
+    )
+    monkeypatch.setattr(tushare_relay_sync.settings, "parquet_data_dir", str(tmp_path))
+    tushare_relay_sync._COVERAGE_CACHE.clear()
+
+    coverage = tushare_relay_sync.dataset_coverage("klines_daily", "trade_date")
+
+    assert coverage == {
+        "row_count": 321,
+        "min_date": "2026-07-01",
+        "max_date": "2026-07-09",
+        "estimated": False,
+        "source": "manifest",
+        "file_count": 2,
+        "partition_count": 1,
+        "validation_status": "valid",
+    }
 
 
 def test_dataset_coverage_uses_exact_partition_boundaries_with_cache(monkeypatch, tmp_path) -> None:

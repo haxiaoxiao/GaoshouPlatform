@@ -1757,8 +1757,8 @@ h4 { font-size: var(--text-lg); }
 
 /* Loading */
 .el-loading-mask {
-  background: rgba(10, 10, 12, 0.8);
-  backdrop-filter: blur(4px);
+  background: rgba(253, 251, 247, 0.72);
+  backdrop-filter: none;
 }
 
 .el-loading-spinner .circular {

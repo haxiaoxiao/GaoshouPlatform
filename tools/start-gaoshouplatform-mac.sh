@@ -46,7 +46,7 @@ BACKEND_PORT="${GAOSHOU_BACKEND_PORT:-${BACKEND_PORT:-8800}}"
 SYNC_HOST="${GAOSHOU_SYNC_HOST:-127.0.0.1}"
 SYNC_PORT="${GAOSHOU_SYNC_PORT:-${SYNC_SERVICE_PORT:-${SYNC_PORT:-8810}}}"
 FRONTEND_HOST="${GAOSHOU_FRONTEND_HOST:-127.0.0.1}"
-FRONTEND_PORT="${GAOSHOU_FRONTEND_PORT:-${FRONTEND_PORT:-3500}}"
+FRONTEND_PORT="${GAOSHOU_FRONTEND_PORT:-${FRONTEND_PORT:-3511}}"
 MARKET_DATA_BACKEND="${MARKET_DATA_BACKEND:-parquet}"
 REDIS_PORT="${REDIS_PORT:-16379}"
 LIVE_TRADING_ENABLE_ORDER_SUBMIT="${LIVE_TRADING_ENABLE_ORDER_SUBMIT:-false}"
@@ -182,7 +182,7 @@ fi
 
 mkdir -p "$LOG_DIR"
 
-echo "[1/7] Stopping stale project processes on configured ports..."
+echo "[1/8] Stopping stale project processes on configured ports..."
 stop_project_processes
 sleep 1
 if ! assert_ports_free; then
@@ -191,7 +191,7 @@ if ! assert_ports_free; then
 fi
 echo "      OK"
 
-echo "[2/7] Optional Redis handling..."
+echo "[2/8] Optional Redis handling..."
 if [[ "$SKIP_OPTIONAL_CHECKS" == "1" || "${GAOSHOU_SKIP_DOCKER:-0}" == "1" ]]; then
   echo "      SKIP: optional Redis/Docker checks disabled for this startup."
 elif command -v docker >/dev/null 2>&1; then
@@ -204,7 +204,7 @@ else
   echo "      WARN: Docker not found. Continue without Redis."
 fi
 
-echo "[3/7] Market data storage..."
+echo "[3/8] Market data storage..."
 case "$MARKET_DATA_BACKEND" in
   parquet|PARQUET|Parquet) ;;
   *) echo "      WARN: MARKET_DATA_BACKEND=$MARKET_DATA_BACKEND is ignored; Parquet/DuckDB is the only supported backend." ;;
@@ -219,9 +219,25 @@ if [[ -z "${PARQUET_DATA_DIR:-}" ]]; then
 elif [[ ! -d "$PARQUET_DATA_DIR" ]]; then
   echo "      WARN: PARQUET_DATA_DIR does not exist: $PARQUET_DATA_DIR"
 fi
+if [[ -n "${FACTOR_VALUE_STORE_DIR:-}" && ! -f "$FACTOR_VALUE_STORE_DIR/_manifest.json" ]]; then
+  echo "      ERROR: FACTOR_VALUE_STORE_DIR has no validated manifest: $FACTOR_VALUE_STORE_DIR"
+  pause_if_needed "${1:-}"
+  exit 1
+fi
 echo "      OK: Parquet/DuckDB mode"
 
-echo "[4/7] Starting sync service on $SYNC_HOST:$SYNC_PORT..."
+echo "[4/8] Applying database migrations..."
+(
+  cd "$BACKEND_DIR"
+  "$PYTHON" -m alembic -c alembic.ini upgrade head
+) || {
+  echo "      ERROR: Database migration failed. Backend services were not started."
+  pause_if_needed "${1:-}"
+  exit 1
+}
+echo "      OK"
+
+echo "[5/8] Starting sync service on $SYNC_HOST:$SYNC_PORT..."
 start_service "sync" "$BACKEND_DIR" "$LOG_DIR/sync-service.log" "$PYTHON" -m uvicorn app.sync_main:app --host "$SYNC_HOST" --port "$SYNC_PORT"
 if ! wait_service_http_ok "sync" "$SYNC_URL" "$LOG_DIR/sync-service.log" 60; then
   pause_if_needed "${1:-}"
@@ -229,7 +245,7 @@ if ! wait_service_http_ok "sync" "$SYNC_URL" "$LOG_DIR/sync-service.log" 60; the
 fi
 echo "      OK"
 
-echo "[5/7] Starting backend on $BACKEND_HOST:$BACKEND_PORT..."
+echo "[6/8] Starting backend on $BACKEND_HOST:$BACKEND_PORT..."
 start_service "backend" "$BACKEND_DIR" "$LOG_DIR/backend.log" "$PYTHON" -m uvicorn app.main:app --host "$BACKEND_HOST" --port "$BACKEND_PORT"
 if ! wait_service_http_ok "backend" "$BACKEND_URL" "$LOG_DIR/backend.log" 60; then
   pause_if_needed "${1:-}"
@@ -237,7 +253,7 @@ if ! wait_service_http_ok "backend" "$BACKEND_URL" "$LOG_DIR/backend.log" 60; th
 fi
 echo "      OK"
 
-echo "[6/7] Checking miniQMT live-trading bridge..."
+echo "[7/8] Checking miniQMT live-trading bridge..."
 if [[ -z "${QMT_ACCOUNT_ID:-}" ]]; then
   echo "      SKIP: miniQMT account is optional and QMT_ACCOUNT_ID is not configured."
 elif [[ -z "${QMT_TRADER_PATH:-}" ]]; then
@@ -247,11 +263,12 @@ else
   echo "      OPTIONAL: status can be checked at http://$BACKEND_HOST:$BACKEND_PORT/api/live-trading/status"
 fi
 
-echo "[7/7] Starting frontend on $FRONTEND_HOST:$FRONTEND_PORT..."
+echo "[8/8] Building and starting frontend on $FRONTEND_HOST:$FRONTEND_PORT..."
 (
   cd "$FRONTEND_DIR"
+  npm run build
   export VITE_API_PROXY_TARGET="http://$BACKEND_HOST:$BACKEND_PORT"
-  nohup npm run dev -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --strictPort >"$LOG_DIR/frontend.log" 2>&1 &
+  nohup npm run preview -- --host "$FRONTEND_HOST" --port "$FRONTEND_PORT" --strictPort >"$LOG_DIR/frontend.log" 2>&1 &
   echo "      frontend PID: $!"
   echo "      log: $LOG_DIR/frontend.log"
 )

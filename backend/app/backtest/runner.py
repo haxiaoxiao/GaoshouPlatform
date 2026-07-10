@@ -68,6 +68,7 @@ class BacktestRunner:
             PositionLimitValidator,
             PositionManager,
             PriceValidator,
+            TradabilityValidator,
         )
         from app.backtest.strategy.user_script import UserContext
         from app.backtest.strategy_loader import ExpressionSignalStrategy, StrategyContext
@@ -106,6 +107,7 @@ class BacktestRunner:
         # 风控校验链
         CashValidator(account).register(event_bus)
         PriceValidator(0.1).register(event_bus)
+        TradabilityValidator().register(event_bus)
         if config.max_positions:
             PositionLimitValidator(position_manager, config.max_positions).register(event_bus)
 

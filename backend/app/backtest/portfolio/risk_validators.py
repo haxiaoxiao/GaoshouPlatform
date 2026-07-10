@@ -1,4 +1,6 @@
 """风控校验器 — 注册为 system listener，校验失败阻断传播"""
+import math
+
 from loguru import logger
 
 from app.backtest.event.events import Event, EventType
@@ -57,6 +59,39 @@ class PriceValidator:
             event.stop_propagation()
             return True
 
+        return False
+
+
+class TradabilityValidator:
+    """A-share execution rules for suspended and limit-locked bars."""
+
+    def register(self, event_bus) -> None:
+        event_bus.add_listener(EventType.ORDER_PENDING_NEW, self.validate, system=True)
+
+    def validate(self, event: Event) -> bool:
+        order = event.data.get("order", {})
+        bar = event.data.get("bar")
+        if bar is None:
+            return False
+
+        symbol = order.get("symbol", "?")
+        if bar.suspended or not bar.is_trading:
+            logger.warning("TradabilityValidator rejected suspended symbol {}", symbol)
+            event.stop_propagation()
+            return True
+
+        direction = str(order.get("direction", "buy")).lower()
+        price = float(bar.close)
+        limit_up = float(bar.limit_up)
+        limit_down = float(bar.limit_down)
+        if direction == "buy" and math.isfinite(limit_up) and price >= limit_up - 1e-4:
+            logger.warning("TradabilityValidator rejected limit-up buy for {}", symbol)
+            event.stop_propagation()
+            return True
+        if direction == "sell" and math.isfinite(limit_down) and price <= limit_down + 1e-4:
+            logger.warning("TradabilityValidator rejected limit-down sell for {}", symbol)
+            event.stop_propagation()
+            return True
         return False
 
 

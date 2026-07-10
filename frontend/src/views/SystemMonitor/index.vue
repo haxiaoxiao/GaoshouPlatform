@@ -1197,7 +1197,8 @@ onMounted(loadOps)
 }
 
 .flow-shell {
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   padding: 14px;
 }
 
@@ -1217,6 +1218,7 @@ onMounted(loadOps)
   grid-template-columns: repeat(6, minmax(138px, 1fr));
   gap: 14px;
   align-items: stretch;
+  min-width: 920px;
 }
 
 .flow-canvas::before {
@@ -1591,6 +1593,7 @@ onMounted(loadOps)
 @media (max-width: 1320px) {
   .flow-canvas {
     grid-template-columns: repeat(3, minmax(0, 1fr));
+    min-width: 0;
   }
 
   .flow-canvas::before {

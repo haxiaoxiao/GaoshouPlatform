@@ -6,6 +6,7 @@ from app.api.factor_values import router as factor_values_router
 from app.api.factors import router as factors_router
 from app.api.live_trading import router as live_trading_router
 from app.api.sentiment import router as sentiment_router
+from app.api.v1 import router as v1_router
 from app.backtest.api import router as backtest_engine_router
 from app.compute.api import router as compute_router
 
@@ -22,6 +23,8 @@ from .strategy import router as strategy_router
 from .system import router as system_router
 
 api_router = APIRouter()
+
+api_router.include_router(v1_router, prefix="/v1")
 
 api_router.include_router(system_router, prefix="/system", tags=["系统"])
 api_router.include_router(data_router, prefix="/data", tags=["数据"])

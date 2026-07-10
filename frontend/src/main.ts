@@ -1,15 +1,17 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import { VueQueryPlugin, QueryClient } from '@tanstack/vue-query'
-import { ElLoading } from 'element-plus'
+import { ElLoading, ElMessage } from 'element-plus'
 import 'element-plus/theme-chalk/el-message.css'
 import 'element-plus/theme-chalk/el-message-box.css'
 import 'element-plus/theme-chalk/el-loading.css'
 
 import App from './App.vue'
+import { setRequestErrorNotifier } from './api/requestNotifications'
 import router from './router'
 
 const app = createApp(App)
+setRequestErrorNotifier(message => ElMessage.error(message))
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {

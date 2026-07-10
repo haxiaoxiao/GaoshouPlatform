@@ -46,7 +46,6 @@ export default defineConfig({
           if (id.includes('lightweight-charts')) return 'vendor-lightweight-charts'
           if (id.includes('@tanstack')) return 'vendor-query'
           if (id.includes('@vueuse')) return 'vendor-vueuse'
-          if (id.includes('axios')) return 'vendor-request'
           if (id.includes('vue-router')) return 'vendor-router'
           if (id.includes('pinia')) return 'vendor-pinia'
           if (id.includes('vue')) return 'vendor-vue'
@@ -56,7 +55,17 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 3500,
+    port: 3511,
+    proxy: {
+      '/api': {
+        target: apiProxyTarget,
+        changeOrigin: true,
+      },
+    },
+  },
+  preview: {
+    host: '127.0.0.1',
+    port: 3511,
     proxy: {
       '/api': {
         target: apiProxyTarget,

@@ -459,10 +459,10 @@ class AkquantEngine(IBacktestEngine):
         mode = options["mode"]
         if mode == "off":
             return False
-        if config.bar_type not in {"daily", "minute", "minute_timer"}:
-            return False
-        # Timer streams are sparse by design and should stay single-pass.
-        if config.bar_type == "minute_timer":
+        # Chunk checkpoints preserve the state of full minute streams only.
+        # Daily and sparse timer feeds must remain single-pass even in
+        # explicit "always" mode.
+        if config.bar_type != "minute":
             return False
         if os.getenv("AKQUANT_DISABLE_CHUNKED", "").lower() in {"1", "true", "yes"} and mode != "always":
             return False

@@ -1,6 +1,6 @@
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
-import json
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -14,18 +14,18 @@ from app.services.sentiment import (
     SentimentPostInput,
     SentimentService,
     _inject_xueqiu_cookie,
-    _parse_laohu8_stock_posts,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
+    _parse_laohu8_stock_posts,
     _parse_nga_board_topics,
     _parse_taoguba_article_detail,
     _parse_taoguba_blog_articles,
     _parse_tieba_stock_threads,
     _parse_wechat_sogou_articles,
-    _wechat_sogou_queries,
     _post_mentions_symbol,
     _resolve_chrome_path,
     _verify_xueqiu_login,
+    _wechat_sogou_queries,
     normalize_eastmoney_guba_post,
     normalize_flocktrader_post,
     normalize_jisilu_data_post,
