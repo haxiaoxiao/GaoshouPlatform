@@ -59,6 +59,51 @@ async def test_sync_endpoint_accepts_multiple_requests_and_runs_them_serially(mo
 
 
 @pytest.mark.asyncio
+async def test_sentiment_sync_uses_dedicated_queue(monkeypatch):
+    completed = asyncio.Event()
+    captured: dict[str, object] = {}
+
+    async def fake_session():
+        yield object()
+
+    async def fake_upsert_sync_run(*args, **kwargs):
+        return None
+
+    async def fake_run_sync_task(run_id, request):
+        captured["run_id"] = run_id
+        captured["request"] = request
+        completed.set()
+
+    reset_task_queues()
+    sync_app.dependency_overrides[get_async_session] = fake_session
+    monkeypatch.setattr("app.api.sync.upsert_sync_run", fake_upsert_sync_run)
+    monkeypatch.setattr("app.api.sync._run_sync_task", fake_run_sync_task)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=sync_app), base_url="http://test") as client:
+            response = await client.post(
+                "/api/data/sync",
+                json={
+                    "sync_type": "sentiment",
+                    "sentiment_sources": ["eastmoney_guba", "flocktrader"],
+                    "max_pages": 2,
+                    "min_reply": 0,
+                    "sync_mode": "incremental",
+                },
+            )
+        await asyncio.wait_for(completed.wait(), timeout=2)
+        await asyncio.wait_for(get_task_queue("sentiment_sync").join(), timeout=2)
+    finally:
+        sync_app.dependency_overrides.clear()
+        reset_task_queues()
+
+    assert response.status_code == 200
+    assert response.json()["data"]["sync_type"] == "sentiment"
+    request = captured["request"]
+    assert request.sentiment_sources == ["eastmoney_guba", "flocktrader"]
+    assert request.max_pages == 2
+
+
+@pytest.mark.asyncio
 async def test_sync_status_stays_triggerable_while_queue_is_busy(monkeypatch):
     async def fake_session():
         yield object()

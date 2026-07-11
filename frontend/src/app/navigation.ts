@@ -299,7 +299,7 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
         title: '服务健康',
         rows: [
           { label: 'Backend', value: '8800' },
-          { label: 'Frontend', value: '3511' },
+          { label: 'Frontend', value: '3500' },
           { label: 'Sync', value: '8810' },
           { label: 'QMT', value: 'Optional' },
         ],

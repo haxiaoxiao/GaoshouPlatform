@@ -77,6 +77,10 @@ async def init_db():
         financial_columns = {str(row[1]) for row in columns.fetchall()}
         if "ann_date" not in financial_columns:
             await conn.exec_driver_sql("ALTER TABLE financial_data ADD COLUMN ann_date DATE")
+        sync_task_columns_result = await conn.exec_driver_sql("PRAGMA table_info(sync_tasks)")
+        sync_task_columns = {str(row[1]) for row in sync_task_columns_result.fetchall()}
+        if "options_json" not in sync_task_columns:
+            await conn.exec_driver_sql("ALTER TABLE sync_tasks ADD COLUMN options_json TEXT")
         await conn.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_financial_data_ann_date ON financial_data (ann_date)"
         )

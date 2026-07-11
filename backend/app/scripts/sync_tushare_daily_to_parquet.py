@@ -20,6 +20,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.data_stores import get_market_data_store
+from app.data_stores.parquet_store import ParquetMarketDataStore
 
 DEFAULT_STATE_DB = Path(settings.parquet_data_dir) / "import_state" / "tushare_daily_sync.sqlite"
 
@@ -271,6 +272,29 @@ def fetch_limit_prices(pro: Any, trade_date: date) -> pd.DataFrame:
         }
     )
     return out.dropna(subset=["up_limit", "down_limit"])
+
+
+def fetch_adj_factors(pro: Any, trade_date: date) -> pd.DataFrame:
+    df = pro.adj_factor(
+        trade_date=yyyymmdd(trade_date),
+        fields="ts_code,trade_date,adj_factor",
+    )
+    if df is None or df.empty:
+        return pd.DataFrame()
+    return pd.DataFrame(
+        {
+            "symbol": df["ts_code"].astype(str),
+            "trade_date": pd.to_datetime(df["trade_date"].astype(str)).dt.date,
+            "adj_factor": pd.to_numeric(df["adj_factor"], errors="coerce"),
+        }
+    ).dropna(subset=["adj_factor"])
+
+
+def write_adj_factors_parquet(df: pd.DataFrame) -> int:
+    if df.empty:
+        return 0
+    store = ParquetMarketDataStore(settings.parquet_data_dir)
+    return store.write_dataset(df, dataset="adj_factors", date_col="trade_date")
 
 
 def write_limit_prices_sqlite(db_path: Path, df: pd.DataFrame) -> int:

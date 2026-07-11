@@ -159,6 +159,10 @@ class SyncRequest(BaseModel):
     factor_sync_plan: dict[str, Any] | None = Field(default=None, description="因子依赖同步计划")
     relay_datasets: list[str] | None = Field(default=None, description="Tushare Relay dataset names")
     relay_options: dict[str, Any] | None = Field(default=None, description="Tushare Relay sync options")
+    sentiment_sources: list[str] | None = Field(default=None, description="舆情来源列表")
+    max_pages: int = Field(default=3, ge=1, le=30, description="舆情抓取最大页数")
+    min_reply: int = Field(default=20, ge=0, le=10000, description="舆情最少回复数")
+    force_refresh: bool = Field(default=False, description="强制刷新来源缓存")
 
 
     index_symbols: list[str] | None = Field(default=None, description="指数代码列表")
@@ -944,6 +948,16 @@ async def get_sync_status(
             unavailable_reason=unavailable_reason,
         ),
     }
+
+
+@router.get("/sync/runs/{run_id}", summary="获取指定同步任务")
+async def get_sync_run_status(run_id: str) -> dict[str, Any]:
+    return await proxy_sync_request("GET", f"/api/data/sync/runs/{run_id}")
+
+
+@router.get("/sync/scheduler", summary="获取同步调度器状态")
+async def get_sync_scheduler_status() -> dict[str, Any]:
+    return await proxy_sync_request("GET", "/api/data/sync/scheduler")
 
 
 @router.get("/sync/logs", summary="获取同步日志")

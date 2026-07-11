@@ -1,262 +1,133 @@
+from __future__ import annotations
+
+from typing import Any
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from app.api.sentiment import IngestRunRequest, _run_sentiment_ingest_task
 from app.main import app
-from app.services.runtime_tasks import get_task, register_task
 
 
 @pytest.mark.asyncio
-async def test_sentiment_routes_are_registered_and_validate_sources():
+async def test_sentiment_routes_validate_sources():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.get("/api/sentiment/summary/600519.SH?sources=reddit")
-        overview_resp = await client.get("/api/sentiment/overview?sources=reddit")
-        threads_resp = await client.get("/api/sentiment/threads?sources=reddit")
+        summary = await client.get("/api/sentiment/summary/600519.SH?sources=reddit")
+        overview = await client.get("/api/sentiment/overview?sources=reddit")
+        threads = await client.get("/api/sentiment/threads?sources=reddit")
 
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 1
-    assert "unsupported sentiment source" in resp.json()["message"]
-    assert overview_resp.status_code == 200
-    assert overview_resp.json()["code"] == 1
-    assert "unsupported sentiment source" in overview_resp.json()["message"]
-    assert threads_resp.status_code == 200
-    assert threads_resp.json()["code"] == 1
-    assert "unsupported sentiment source" in threads_resp.json()["message"]
+    assert summary.json()["code"] == 1
+    assert overview.json()["code"] == 1
+    assert threads.json()["code"] == 1
+    assert "unsupported sentiment source" in summary.json()["message"]
 
 
 @pytest.mark.asyncio
-async def test_sentiment_ingest_route_accepts_merged_sources(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
+async def test_sentiment_ingest_submits_unified_sync_run(monkeypatch):
+    captured: dict[str, Any] = {}
 
-    async def fake_schedule(task_id, request, sources):
-        scheduled.append((task_id, sources))
+    async def fake_proxy(method, path, *, json_body=None, params=None):
+        captured.update({"method": method, "path": path, "body": json_body, "params": params})
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "task_id": "sync-sentiment",
+                "run_id": "sync-sentiment",
+                "sync_type": "sentiment",
+                "status": "queued",
+                "details": {},
+            },
+        }
 
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
+    monkeypatch.setattr("app.api.sentiment.proxy_sync_request", fake_proxy)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
+        response = await client.post(
             "/api/sentiment/ingest/run",
             json={
-                "symbol": "600519.SH",
                 "sources": ["xueqiu", "eastmoney", "taoguba", "tieba", "laohu8", "jisilu", "wechat", "nga"],
+                "symbol": "600519.SH",
                 "max_pages": 2,
                 "min_reply": 10,
             },
         )
 
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["status"] == "queued"
-    assert data["sources"] == ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"]
-    assert scheduled == [(data["task_id"], ["xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader"])]
-    assert get_task(data["task_id"])["status"] == "queued"
+    assert response.json()["code"] == 0
+    assert captured["path"] == "/api/data/sync"
+    assert captured["body"]["sync_type"] == "sentiment"
+    assert captured["body"]["symbols"] == ["600519.SH"]
+    assert captured["body"]["sentiment_sources"] == [
+        "xueqiu_spyder",
+        "eastmoney_guba",
+        "taoguba",
+        "tieba_stock",
+        "laohu8_stock",
+        "jisilu",
+        "wechat_sogou",
+        "flocktrader",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_flocktrader_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
+async def test_sentiment_ingest_requires_symbol_for_xueqiu(monkeypatch):
+    called = False
 
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
+    async def fake_proxy(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("proxy must not be called")
 
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
+    monkeypatch.setattr("app.api.sentiment.proxy_sync_request", fake_proxy)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
+        response = await client.post("/api/sentiment/ingest/run", json={"sources": ["xueqiu"]})
+
+    assert response.json()["code"] == 1
+    assert "requires a symbol" in response.json()["message"]
+    assert called is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("alias", "canonical"),
+    [
+        ("eastmoney", "eastmoney_guba"),
+        ("淘股吧", "taoguba"),
+        ("百度贴吧", "tieba_stock"),
+        ("老虎社区", "laohu8_stock"),
+        ("集思录", "jisilu"),
+        ("微信", "wechat_sogou"),
+        ("nga", "flocktrader"),
+    ],
+)
+async def test_non_xueqiu_sources_allow_global_ingest(monkeypatch, alias, canonical):
+    captured: dict[str, Any] = {}
+
+    async def fake_proxy(method, path, *, json_body=None, params=None):
+        captured["body"] = json_body
+        return {"code": 0, "data": {"run_id": "sync-1", "task_id": "sync-1", "status": "queued"}}
+
+    monkeypatch.setattr("app.api.sentiment.proxy_sync_request", fake_proxy)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
             "/api/sentiment/ingest/run",
-            json={
-                "sources": ["nga"],
-                "start_date": "2026-05-01",
-                "end_date": "2026-05-02",
-            },
+            json={"sources": [alias], "max_pages": 1, "min_reply": 0},
         )
 
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["flocktrader"]
-    assert scheduled == [(data["task_id"], ["flocktrader"])]
+    assert response.json()["code"] == 0
+    assert captured["body"]["symbols"] is None
+    assert captured["body"]["sentiment_sources"] == [canonical]
 
 
 @pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_jisilu_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
+async def test_sentiment_run_status_proxies_by_run_id(monkeypatch):
+    captured: dict[str, Any] = {}
 
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
+    async def fake_proxy(method, path, *, json_body=None, params=None):
+        captured.update({"method": method, "path": path})
+        return {"code": 0, "data": {"run_id": "sync-abc", "status": "completed"}}
 
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
+    monkeypatch.setattr("app.api.sentiment.proxy_sync_request", fake_proxy)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["jisilu"], "max_pages": 1, "min_reply": 0},
-        )
+        response = await client.get("/api/sentiment/ingest/runs/sync-abc")
 
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["jisilu"]
-    assert scheduled == [(data["task_id"], ["jisilu"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_requires_symbol_for_xueqiu():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["xueqiu"]},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 1
-    assert "requires a symbol" in resp.json()["message"]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_eastmoney_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
-
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
-
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["eastmoney_guba"], "max_pages": 1, "min_reply": 0},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["eastmoney_guba"]
-    assert scheduled == [(data["task_id"], ["eastmoney_guba"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_taoguba_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
-
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
-
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["淘股吧"], "max_pages": 1, "min_reply": 0},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["taoguba"]
-    assert scheduled == [(data["task_id"], ["taoguba"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_tieba_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
-
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
-
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["百度贴吧"], "max_pages": 1, "min_reply": 0},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["tieba_stock"]
-    assert scheduled == [(data["task_id"], ["tieba_stock"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_laohu8_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
-
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
-
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["老虎社区"], "max_pages": 1, "min_reply": 0},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["laohu8_stock"]
-    assert scheduled == [(data["task_id"], ["laohu8_stock"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_route_allows_wechat_without_symbol(monkeypatch):
-    scheduled: list[tuple[str, list[str]]] = []
-
-    async def fake_schedule(task_id, request, sources):
-        assert request.symbol is None
-        scheduled.append((task_id, sources))
-
-    monkeypatch.setattr("app.api.sentiment._schedule_sentiment_ingest_task", fake_schedule)
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        resp = await client.post(
-            "/api/sentiment/ingest/run",
-            json={"sources": ["wechat_sogou"], "max_pages": 1, "min_reply": 0},
-        )
-
-    assert resp.status_code == 200
-    assert resp.json()["code"] == 0
-    data = resp.json()["data"]
-    assert data["sources"] == ["wechat_sogou"]
-    assert scheduled == [(data["task_id"], ["wechat_sogou"])]
-
-
-@pytest.mark.asyncio
-async def test_sentiment_ingest_task_stores_result(monkeypatch):
-    async def fake_run_many(self, symbol: str | None, **kwargs):
-        return {
-            "symbol": symbol,
-            "requested_sources": kwargs["sources"],
-            "results": [],
-            "all_succeeded": True,
-            "succeeded_sources": kwargs["sources"],
-            "failed_sources": [],
-            "total_upserted": 1,
-            "total_collected": 2,
-            "total_matched": 1,
-        }
-
-    monkeypatch.setattr("app.api.sentiment.SentimentIngestService.run_many", fake_run_many)
-    task_id = "sentiment-test-task"
-    register_task(task_id=task_id, kind="sentiment_ingest", title="Sentiment ingest")
-
-    await _run_sentiment_ingest_task(
-        task_id,
-        IngestRunRequest(sources=["nga"], start_date="2026-05-01", end_date="2026-05-02"),
-        ["flocktrader"],
-    )
-
-    task = get_task(task_id)
-    assert task["status"] == "succeeded"
-    assert task["progress"] == 1.0
-    assert task["meta"]["result"]["requested_sources"] == ["flocktrader"]
+    assert response.json()["data"]["status"] == "completed"
+    assert captured == {"method": "GET", "path": "/api/data/sync/runs/sync-abc"}

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 
 import pytest
 
@@ -228,6 +228,89 @@ async def test_sync_kline_minute_incremental_overlaps_latest_local_date(monkeypa
     assert progress.details["latest_local_date"] == "2026-06-04"
     assert progress.details["auto_incremental"] is True
     assert progress.details["incremental_overlap_days"] == 1
+
+
+@pytest.mark.asyncio
+async def test_build_datasync_plan_reports_exact_minute_watermark(monkeypatch):
+    def fake_plan(dataset, **kwargs):
+        latest = date(2026, 7, 10) if dataset == "klines_minute" else date(2026, 7, 9)
+        return date(2026, 7, 9), latest, {"coverage": {}}
+
+    monkeypatch.setattr(sync_service_module, "_market_incremental_sync_plan", fake_plan)
+    monkeypatch.setattr(
+        sync_service_module,
+        "_latest_market_datetime",
+        lambda dataset, symbols=None: datetime(2026, 7, 10, 14, 37),
+    )
+    monkeypatch.setattr(
+        sync_service_module,
+        "_daily_trading_dependency_start",
+        lambda end_date: date(2026, 7, 9),
+        raising=False,
+    )
+
+    plan = await SyncService(FakeSession()).build_datasync_plan(end_date=date(2026, 7, 10))
+
+    assert plan["latest"]["kline_minute"] == "2026-07-10T14:37:00"
+    assert plan["ranges"]["kline_minute"]["watermark"] == "2026-07-10T14:37:00"
+    assert "daily_trading_dependencies" in plan["steps"]
+    assert plan["ranges"]["daily_trading_dependencies"] == {
+        "start_date": "2026-07-09",
+        "end_date": "2026-07-10",
+        "will_sync": True,
+    }
+
+
+def test_sync_daily_trading_dependencies_requests_only_p0_datasets(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def fake_sync(step):
+        captured.update(step)
+        return {"daily_basic_rows": 10, "limit_rows": 10, "adj_factor_rows": 10}
+
+    monkeypatch.setattr("app.services.factor_dependency_sync._sync_tushare_daily_step", fake_sync)
+
+    result = sync_service_module._sync_daily_trading_dependencies(
+        date(2026, 7, 9),
+        date(2026, 7, 10),
+    )
+
+    assert captured["datasets"] == ["stock_daily_basic", "stock_limit_prices", "adj_factors"]
+    assert result["adj_factor_rows"] == 10
+
+
+def test_minute_sync_completeness_reports_coverage_and_missing_symbols(monkeypatch):
+    monkeypatch.setattr(
+        sync_service_module,
+        "_latest_market_datetime",
+        lambda dataset, symbols=None: datetime(2026, 7, 10, 14, 37),
+    )
+    monkeypatch.setattr(
+        sync_service_module,
+        "_market_incremental_coverage_details",
+        lambda dataset, start_date, end_date, symbols=None: {
+            "missing_dates": ["2026-07-09"],
+            "missing_ranges": [{"start": "2026-07-09", "end": "2026-07-09"}],
+            "low_coverage_dates": [],
+        },
+    )
+    monkeypatch.setattr(
+        sync_service_module,
+        "_minute_latest_date_symbols",
+        lambda trade_date, symbols=None: {"000001.SZ"},
+    )
+
+    result = sync_service_module._minute_sync_completeness(
+        start_date=date(2026, 7, 9),
+        end_date=date(2026, 7, 10),
+        symbols=["000001.SZ", "000002.SZ"],
+    )
+
+    assert result["latest_datetime"] == "2026-07-10T14:37:00"
+    assert result["symbol_coverage_ratio"] == 0.5
+    assert result["missing_symbol_count"] == 1
+    assert result["missing_symbols"] == ["000002.SZ"]
+    assert result["missing_ranges"] == [{"start": "2026-07-09", "end": "2026-07-09"}]
 
 
 @pytest.mark.asyncio

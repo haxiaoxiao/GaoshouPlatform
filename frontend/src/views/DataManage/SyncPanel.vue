@@ -877,12 +877,13 @@ const recommendedRunbook = computed(() => {
   return Array.from(deduped.values()).slice(0, 4).map((preset) => {
     const relayCount = preset.relay_datasets.length
     const syncCount = preset.sync_types.length
+    const displayItemCount = preset.display_item_count ?? syncCount + relayCount
     const requiresRelay = relayCount > 0
     return {
       key: preset.name,
       title: preset.display_name,
       description: preset.description,
-      meta: `${syncCount + relayCount} 项 · ${requiresRelay ? 'Relay 额度任务' : '本地/核心任务'}`,
+      meta: `${displayItemCount} 类 · ${requiresRelay ? 'Relay 额度任务' : '本地/核心任务'}`,
       badge: isPresetQueued(preset) ? '已加入' : requiresRelay ? '额度敏感' : '推荐执行',
       tone: requiresRelay ? 'warn' : 'good',
       disabled: requiresRelay && catalog.value?.relay.configured === false,

@@ -285,3 +285,35 @@ def reset_runtime_tasks(*, clear_persistent: bool = False) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def mark_stale_runtime_tasks_failed(
+    *,
+    kinds: set[str],
+    older_than_seconds: int = 30 * 60,
+    message: str = "Application restarted before the task completed",
+) -> int:
+    connection = _connect()
+    if connection is None or not kinds:
+        return 0
+    cutoff = datetime.fromtimestamp(time.time() - max(older_than_seconds, 60)).isoformat(sep=" ")
+    placeholders = ",".join("?" for _ in kinds)
+    now = datetime.now().isoformat(sep=" ")
+    try:
+        cursor = connection.execute(
+            f"""
+            UPDATE jobs
+            SET status = ?, error = ?, finished_at = ?, updated_at = ?
+            WHERE kind IN ({placeholders})
+              AND status IN ('queued', 'running')
+              AND updated_at < ?
+            """,
+            (JobStatus.FAILED.value, message, now, now, *sorted(kinds), cutoff),
+        )
+        connection.commit()
+        return int(cursor.rowcount or 0)
+    except sqlite3.OperationalError as exc:
+        logger.debug("Runtime task stale cleanup unavailable: {}", exc)
+        return 0
+    finally:
+        connection.close()

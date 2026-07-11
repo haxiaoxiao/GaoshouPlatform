@@ -123,6 +123,22 @@ async def get_latest_sync_run(session: AsyncSession) -> SyncRun | None:
     return latest.scalar_one_or_none()
 
 
+async def get_sync_run(session: AsyncSession, run_id: str) -> SyncRun | None:
+    result = await session.execute(
+        select(SyncRun).where(SyncRun.run_id == run_id).limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def get_queued_sync_runs(session: AsyncSession) -> list[SyncRun]:
+    result = await session.execute(
+        select(SyncRun)
+        .where(SyncRun.status == "queued")
+        .order_by(SyncRun.created_at.asc())
+    )
+    return list(result.scalars().all())
+
+
 async def mark_stale_running_syncs_failed(
     session: AsyncSession,
     *,
@@ -132,7 +148,7 @@ async def mark_stale_running_syncs_failed(
     now = datetime.now()
     result = await session.execute(
         update(SyncRun)
-        .where(SyncRun.status.in_(("queued", "running")))
+        .where(SyncRun.status == "running")
         .values(
             status="failed",
             end_time=now,

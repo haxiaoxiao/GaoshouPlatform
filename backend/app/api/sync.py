@@ -15,6 +15,7 @@ from app.db.sqlite import get_async_session
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.cache_invalidation import invalidate_after_sync
 from app.services.sync_run_store import (
+    get_sync_run,
     get_latest_sync_run,
     idle_sync_status,
     run_to_status,
@@ -38,6 +39,10 @@ class SyncRequest(BaseModel):
     factor_sync_plan: dict[str, Any] | None = None
     relay_datasets: list[str] | None = None
     relay_options: dict[str, Any] | None = None
+    sentiment_sources: list[str] | None = None
+    max_pages: int = Field(default=3, ge=1, le=30)
+    min_reply: int = Field(default=20, ge=0, le=10000)
+    force_refresh: bool = False
 
 
 VALID_SYNC_TYPES = (
@@ -57,6 +62,7 @@ VALID_SYNC_TYPES = (
     "ths_concept",
     "sentiment_xueqiu",
     "sentiment_nga",
+    "sentiment",
 )
 
 
@@ -390,6 +396,19 @@ async def _run_sync_task(
                     failure_strategy=request.failure_strategy,
                     run_id=run_id,
                 )
+            elif request.sync_type == "sentiment":
+                progress = await service.sync_sentiment(
+                    sources=request.sentiment_sources,
+                    symbols=request.symbols,
+                    max_pages=request.max_pages,
+                    min_reply=request.min_reply,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                    force_refresh=request.force_refresh,
+                    sync_mode=request.sync_mode,
+                    failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
 
             if progress is not None:
                 await service.persist_sync_progress(progress, run_id=run_id)
@@ -440,7 +459,8 @@ async def trigger_sync(
         status="queued",
         request=request.model_dump(mode="json"),
     )
-    await get_task_queue("data_sync").submit(
+    queue_name = "sentiment_sync" if request.sync_type.startswith("sentiment") else "data_sync"
+    await get_task_queue(queue_name).submit(
         QueuedTask(
             task_id=run_id,
             title=f"data sync {request.sync_type}",
@@ -459,6 +479,37 @@ async def trigger_sync(
         details={"run_id": run_id},
     )
     return {"code": 0, "message": "success", "data": {**initial_progress.to_dict(), "task_id": run_id, "run_id": run_id}}
+
+
+@router.get("/sync/runs/{run_id}")
+async def get_sync_run_status(
+    run_id: str,
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    run = await get_sync_run(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"sync run not found: {run_id}")
+    return {"code": 0, "message": "success", "data": run_to_status(run)}
+
+
+@router.get("/sync/scheduler")
+async def get_sync_scheduler_status() -> dict[str, Any]:
+    from app.core.scheduler import get_scheduler
+
+    scheduler = get_scheduler()
+    jobs = [
+        {
+            "id": job.id,
+            "name": job.name,
+            "next_run_at": job.next_run_time.isoformat() if job.next_run_time else None,
+        }
+        for job in scheduler.get_jobs()
+    ]
+    return {
+        "code": 0,
+        "message": "success",
+        "data": {"running": scheduler.running, "jobs": jobs},
+    }
 
 
 @router.get("/sync/catalog")

@@ -1,10 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 
 from fastapi import FastAPI
 from loguru import logger
 
-from app.api.sync import router as sync_router
+from app.api.sync import SyncRequest, _run_sync_task, router as sync_router
 from app.core.blocking import install_default_executor, shutdown_default_executor
 from app.core.config import settings
 from app.core.dev_data_mode import apply_dev_data_mode_to_settings
@@ -12,7 +13,8 @@ from app.core.logging import setup_logging
 from app.core.scheduler import load_enabled_tasks, start_scheduler, stop_scheduler
 from app.db import init_db
 from app.db.sqlite import async_session_factory
-from app.services.sync_run_store import mark_stale_running_syncs_failed
+from app.services.sync_run_store import get_queued_sync_runs, mark_stale_running_syncs_failed, upsert_sync_run
+from app.services.task_queue import QueuedTask, get_task_queue
 
 setup_logging(debug=True)
 
@@ -27,6 +29,35 @@ async def _mark_stale_sync_runs_after_startup() -> None:
         logger.warning("Failed to mark stale sync runs after startup: {}", exc)
 
 
+async def _recover_queued_sync_runs() -> None:
+    async with async_session_factory() as session:
+        queued_runs = await get_queued_sync_runs(session)
+        for run in queued_runs:
+            try:
+                request = SyncRequest.model_validate(run.request or {})
+            except Exception as exc:
+                await upsert_sync_run(
+                    session,
+                    run_id=run.run_id,
+                    sync_type=run.sync_type,
+                    status="failed",
+                    end_time=datetime.now(),
+                    error_message=f"Cannot recover queued sync request: {exc}",
+                )
+                continue
+            queue_name = "sentiment_sync" if request.sync_type.startswith("sentiment") else "data_sync"
+            await get_task_queue(queue_name).submit(
+                QueuedTask(
+                    task_id=run.run_id,
+                    title=f"recovered data sync {request.sync_type}",
+                    handler=lambda run_id=run.run_id, recovered=request: _run_sync_task(run_id, recovered),
+                    metadata={"sync_type": request.sync_type, "recovered": True},
+                )
+            )
+        if queued_runs:
+            logger.warning("Recovered {} queued sync run(s)", len(queued_runs))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting sync service...")
@@ -34,7 +65,8 @@ async def lifespan(app: FastAPI):
     install_default_executor()
     await init_db()
     logger.info("Sync service database initialized")
-    asyncio.create_task(_mark_stale_sync_runs_after_startup())
+    await _mark_stale_sync_runs_after_startup()
+    await _recover_queued_sync_runs()
 
     if settings.enable_sync_scheduler:
         start_scheduler()

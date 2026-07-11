@@ -95,6 +95,13 @@ def test_sync_catalog_exposes_relay_guardrails() -> None:
     dataset_names = {item["name"] for item in catalog["datasets"]}
     presets = {item["name"]: item for item in catalog["presets"]}
 
+    assert "datasync" in dataset_names
+    assert presets["daily"]["sync_types"] == ["datasync"]
+    assert presets["daily"]["display_item_count"] == 4
+    assert "日频市值" in presets["daily"]["description"]
+    assert "涨跌停" in presets["daily"]["description"]
+    assert "复权" in presets["daily"]["description"]
+    assert "完整分钟线" in presets["daily"]["description"]
     assert set(STRUCTURED_RELAY_DATASETS).issubset(dataset_names)
     assert set(ANALYST_RELAY_DATASETS).issubset(dataset_names)
     assert set(INSTITUTION_RELAY_DATASETS).issubset(dataset_names)

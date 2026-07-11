@@ -43,6 +43,18 @@ _FAST_COVERAGE_DATASETS = {"klines_daily", "klines_minute", "factor_values"}
 
 CORE_SYNC_CATALOG = [
     {
+        "name": "datasync",
+        "display_name": "日常更新",
+        "category": "core",
+        "source": "Built-in",
+        "recommended_frequency": "daily",
+        "requires_qmt": True,
+        "requires_relay_key": False,
+        "risk_level": "medium",
+        "description": "顺序更新股票基础与财务、日频市值/换手、涨跌停、复权、日 K、指数与成分、实时市值和全 A 完整分钟线。",
+        "default_enabled": True,
+    },
+    {
         "name": "stock_info",
         "display_name": "股票基础信息",
         "category": "core",
@@ -235,9 +247,10 @@ def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
             {
                 "name": "daily",
                 "display_name": "日常更新",
-                "description": "股票基础信息、日线、指数、实时市值。",
-                "sync_types": ["stock_info", "kline_daily", "index_daily", "realtime_mv"],
+                "description": "股票基础与财务、日频市值/换手、涨跌停、复权、日线、指数与成分、实时市值；完整分钟线增量追到 QMT 当前可用最新分钟。",
+                "sync_types": ["datasync"],
                 "relay_datasets": [],
+                "display_item_count": 4,
                 "include_by_default": True,
             },
             {

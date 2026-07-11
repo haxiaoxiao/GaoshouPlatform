@@ -21,4 +21,9 @@ describe('platform upgrade UI contracts', () => {
     expect(read('views/SystemMonitor/index.vue')).toContain('overflow-x: auto')
     expect(read('styles/design-system.css')).not.toContain('background: rgba(10, 10, 12, 0.8)')
   })
+
+  it('uses the daily preset display count for composite sync tasks', () => {
+    const panel = read('views/DataManage/SyncPanel.vue')
+    expect(panel).toContain('preset.display_item_count ?? syncCount + relayCount')
+  })
 })

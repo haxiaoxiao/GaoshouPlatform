@@ -11,6 +11,13 @@ export interface SentimentOverviewSource {
   cache_dir: string | null
   cache_file_count: number
   ready: boolean
+  pipeline_state?: 'healthy' | 'stale' | 'auth_required' | 'failing' | 'blocked'
+  data_state?: 'fresh' | 'quiet' | 'stale' | 'missing'
+  last_attempt_at?: string | null
+  last_success_at?: string | null
+  lag_hours?: number | null
+  verification_required?: boolean
+  last_error?: string | null
   post_count: number
   symbol_count: number
   latest_published_at: string | null
@@ -30,6 +37,9 @@ export interface SentimentSummarySource {
   bullish_ratio: number
   bearish_ratio: number
   avg_sentiment: number | null
+  weighted_sentiment?: number | null
+  confidence?: number
+  sample_count?: number
   top_keywords: string
 }
 
@@ -50,6 +60,18 @@ export interface SentimentPost {
   sentiment_label: string | null
   keywords: string[]
   source_meta: Record<string, unknown>
+  analysis?: {
+    model_version?: string
+    score?: number
+    label?: string
+    confidence?: number
+    evidence?: Array<Record<string, unknown>>
+  } | null
+  match?: {
+    method?: string
+    confidence?: number
+    evidence?: string | null
+  } | null
 }
 
 export interface SentimentThread {
@@ -80,6 +102,18 @@ export interface SentimentSummary {
   start_date: string | null
   end_date: string | null
   sources: SentimentSummarySource[]
+  weighted_score?: number | null
+  confidence?: number
+  sample_count?: number
+  trend?: 'up' | 'down' | 'flat' | null
+  model_version?: string
+  event_clusters?: Array<{
+    title: string
+    post_count: number
+    sources: SentimentSource[]
+    latest_at: string | null
+    sentiment_score: number | null
+  }>
   hottest_posts: SentimentPost[]
 }
 
@@ -138,6 +172,22 @@ export interface SentimentIngestParams {
   force_refresh?: boolean
 }
 
+export interface SentimentIngestRun {
+  task_id: string
+  run_id: string
+  sync_type: 'sentiment'
+  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+  total: number
+  current: number
+  success_count: number
+  failed_count: number
+  progress_percent: number
+  start_time: string | null
+  end_time: string | null
+  error_message: string | null
+  details: Record<string, unknown>
+}
+
 const toSourceQuery = (sources?: SentimentSource[]) =>
   sources && sources.length ? sources.join(',') : undefined
 
@@ -178,5 +228,8 @@ export const sentimentApi = {
     }),
 
   ingest: (payload: SentimentIngestParams) =>
-    request.post<SentimentIngestBatchResult | SentimentIngestSourceResult>('/sentiment/ingest/run', payload),
+    request.post<SentimentIngestRun>('/sentiment/ingest/run', payload),
+
+  ingestRun: (runId: string) =>
+    request.get<SentimentIngestRun>(`/sentiment/ingest/runs/${runId}`),
 }

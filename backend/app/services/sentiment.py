@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import html
 import json
+import math
 import os
 import re
 import subprocess
@@ -21,8 +22,14 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models.sentiment import SentimentPost, SentimentThread
+from app.db.models.sentiment import (
+    SentimentAnalysis,
+    SentimentMention,
+    SentimentPost,
+    SentimentThread,
+)
 from app.db.models.stock import Stock
+from app.db.models.sync import SyncLog
 from app.services.security_symbols import normalize_security_symbol
 
 DEFAULT_SOURCE_ORDER = ("xueqiu_spyder", "eastmoney_guba", "taoguba", "tieba_stock", "laohu8_stock", "jisilu", "wechat_sogou", "flocktrader")
@@ -79,6 +86,72 @@ LEGACY_SOURCE_NAMES = {
 }
 SUPPORTED_SOURCES = set(SOURCE_ALIASES)
 SentimentProgressCallback = Callable[[dict[str, Any]], None]
+SENTIMENT_MODEL_VERSION = "finance_lexicon_v2"
+SOURCE_SENTIMENT_WEIGHTS = {
+    "xueqiu_spyder": 1.0,
+    "eastmoney_guba": 0.8,
+    "taoguba": 1.05,
+    "tieba_stock": 0.65,
+    "laohu8_stock": 0.85,
+    "jisilu": 1.1,
+    "wechat_sogou": 1.15,
+    "flocktrader": 0.85,
+}
+FINANCE_BULLISH_TERMS = {
+    "强烈看多": 2.0,
+    "超预期": 1.8,
+    "业绩增长": 1.6,
+    "订单增长": 1.4,
+    "上调目标价": 1.8,
+    "买入": 1.4,
+    "增持": 1.2,
+    "加仓": 1.3,
+    "抄底": 0.9,
+    "看多": 1.2,
+    "看涨": 1.2,
+    "看好": 1.0,
+    "利好": 1.1,
+    "大涨": 1.2,
+    "上涨": 0.8,
+    "涨停": 1.1,
+    "突破": 1.0,
+    "反弹": 0.8,
+    "新高": 0.9,
+    "低估": 0.8,
+    "回购": 1.0,
+    "改善": 0.7,
+    "机会": 0.5,
+}
+FINANCE_BEARISH_TERMS = {
+    "强烈看空": 2.0,
+    "低于预期": 1.8,
+    "业绩下滑": 1.6,
+    "订单下降": 1.4,
+    "下调目标价": 1.8,
+    "卖出": 1.4,
+    "减持": 1.2,
+    "减仓": 1.3,
+    "看空": 1.2,
+    "看跌": 1.2,
+    "利空": 1.1,
+    "大跌": 1.2,
+    "下跌": 0.8,
+    "跌停": 1.1,
+    "破位": 1.0,
+    "暴雷": 1.5,
+    "新低": 0.9,
+    "高估": 0.8,
+    "回调": 0.5,
+    "亏损": 1.0,
+    "下降": 0.7,
+    "风险": 0.5,
+    "套牢": 0.8,
+    "崩盘": 1.5,
+    "违约": 1.5,
+    "退市": 2.0,
+}
+SENTIMENT_NEGATIONS = ("不", "没", "未", "无", "并非", "不是", "难以")
+SENTIMENT_INTENSIFIERS = {"非常": 1.4, "明显": 1.25, "大幅": 1.35, "极度": 1.5, "持续": 1.2}
 DEFAULT_WECHAT_SOGOU_QUERIES = (
     "开盘啦 创始人 股票",
     "开盘啦 A股 股票",
@@ -266,6 +339,96 @@ def _normalize_sentiment_label(label: str | None, score: float | None = None) ->
     if text in {"neutral", "中性", "mixed"}:
         return "neutral"
     return _label_from_score(score) or "neutral"
+
+
+def _finance_sentiment_v2(text: str | None) -> tuple[float, str, float, list[dict[str, Any]]]:
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if not normalized:
+        return 0.5, "neutral", 0.0, []
+
+    evidence: list[dict[str, Any]] = []
+    occupied: list[tuple[int, int]] = []
+    positive = 0.0
+    negative = 0.0
+    terms = [
+        *((term, weight, 1) for term, weight in FINANCE_BULLISH_TERMS.items()),
+        *((term, weight, -1) for term, weight in FINANCE_BEARISH_TERMS.items()),
+    ]
+    terms.sort(key=lambda item: len(item[0]), reverse=True)
+
+    for term, base_weight, direction in terms:
+        for match in re.finditer(re.escape(term), normalized):
+            span = match.span()
+            if any(not (span[1] <= used[0] or span[0] >= used[1]) for used in occupied):
+                continue
+            context = normalized[max(0, span[0] - 6):span[0]]
+            negated = any(token in context for token in SENTIMENT_NEGATIONS)
+            multiplier = 1.0
+            for token, value in SENTIMENT_INTENSIFIERS.items():
+                if token in context:
+                    multiplier = max(multiplier, value)
+            applied_direction = -direction if negated else direction
+            weight = base_weight * multiplier
+            if applied_direction > 0:
+                positive += weight
+            else:
+                negative += weight
+            occupied.append(span)
+            if len(evidence) < 12:
+                evidence.append(
+                    {
+                        "term": term,
+                        "direction": "bullish" if applied_direction > 0 else "bearish",
+                        "weight": round(weight, 3),
+                        "negated": negated,
+                    }
+                )
+
+    total = positive + negative
+    if total == 0:
+        return 0.5, "neutral", min(0.1, len(normalized) / 2000), []
+    score = positive / total
+    length_factor = min(1.0, 0.6 + len(normalized) / 500)
+    confidence = min(0.98, (0.2 + total / 8) * length_factor)
+    return round(score, 4), _normalize_sentiment_label(None, score), round(confidence, 4), evidence
+
+
+def _analysis_payload(
+    title: str | None,
+    content: str | None,
+    raw: dict[str, Any] | None,
+    existing_score: float | None = None,
+    existing_label: str | None = None,
+) -> tuple[float, str, float, list[dict[str, Any]], dict[str, Any]]:
+    score, label, confidence, evidence = _finance_sentiment_v2(
+        " ".join(part for part in (title or "", content or "") if part)
+    )
+    if existing_score is not None:
+        score = max(0.0, min(1.0, float(existing_score)))
+        label = _normalize_sentiment_label(existing_label, score)
+        confidence = max(confidence, 0.7)
+        evidence = [{"term": "source_provided_score", "direction": label, "weight": 1.0}, *evidence]
+    enriched_raw = dict(raw or {})
+    enriched_raw["_analysis"] = {
+        "model_version": SENTIMENT_MODEL_VERSION,
+        "score": score,
+        "label": label,
+        "confidence": confidence,
+        "evidence": evidence,
+    }
+    return score, label, confidence, evidence, enriched_raw
+
+
+def _mention_match(raw: dict[str, Any], symbol: str) -> tuple[str, float, str | None]:
+    normalized_symbol = normalize_sentiment_symbol(symbol)
+    code = normalized_symbol.split(".", 1)[0]
+    text = " ".join(_text_parts(raw))
+    if re.search(rf"(?<!\d){re.escape(code)}(?!\d)", text):
+        return "code_exact", 1.0, code
+    raw_codes = [str(item) for item in (raw.get("stock_codes") or [])]
+    if normalized_symbol in raw_codes or code in raw_codes:
+        return "source_code", 0.95, normalized_symbol
+    return "alias", 0.75, next((part for part in _text_parts(raw) if part), None)
 
 
 def _to_int(value: Any, default: int = 0) -> int:
@@ -526,6 +689,83 @@ def _eastmoney_headers(code: str) -> dict[str, str]:
         "Accept": "application/json,text/plain,*/*",
         "Referer": f"https://guba.eastmoney.com/list,{code}.html",
     }
+
+
+def _post_analysis_meta(post: SentimentPost) -> dict[str, Any]:
+    try:
+        raw = json.loads(post.raw_json or "{}")
+    except json.JSONDecodeError:
+        return {}
+    analysis = raw.get("_analysis") if isinstance(raw, dict) else None
+    return analysis if isinstance(analysis, dict) else {}
+
+
+def _sentiment_weight(post: SentimentPost, *, now: datetime) -> float:
+    age_days = 30.0
+    if post.published_at is not None:
+        age_days = max(0.0, (now - post.published_at).total_seconds() / 86400)
+    time_weight = 0.5 ** (age_days / 3.0)
+    engagement = max(post.reply_count or 0, post.comment_count or 0) + max(post.like_count or 0, 0)
+    engagement_weight = 1.0 + min(math.log1p(engagement), 3.0)
+    confidence = float(_post_analysis_meta(post).get("confidence") or 0.05)
+    author_weight = 1.25 if str(post.author or "").strip() in DEFAULT_WECHAT_SOGOU_ACCOUNTS else 1.0
+    return (
+        SOURCE_SENTIMENT_WEIGHTS.get(normalize_sentiment_source(post.source), 0.75)
+        * time_weight
+        * engagement_weight
+        * max(0.05, confidence)
+        * author_weight
+    )
+
+
+def _event_clusters(posts: list[SentimentPost], *, limit: int = 10) -> list[dict[str, Any]]:
+    clusters: list[dict[str, Any]] = []
+    for post in posts[:100]:
+        raw_text = " ".join([str(post.title or ""), str(post.content or "")])
+        normalized = re.sub(r"[^\u4e00-\u9fffA-Za-z0-9]", "", raw_text).lower()[:600]
+        if len(normalized) < 8:
+            continue
+        shingles = {normalized[index:index + 2] for index in range(len(normalized) - 1)}
+        target: dict[str, Any] | None = None
+        for cluster in clusters:
+            representative = cluster["_shingles"]
+            union = len(shingles | representative)
+            similarity = len(shingles & representative) / union if union else 0.0
+            if similarity >= 0.72:
+                target = cluster
+                break
+        if target is None:
+            target = {
+                "title": post.title or (post.content or "")[:80],
+                "post_count": 0,
+                "sources": set(),
+                "latest_at": None,
+                "scores": [],
+                "_shingles": shingles,
+            }
+            clusters.append(target)
+        target["post_count"] += 1
+        target["sources"].add(normalize_sentiment_source(post.source))
+        if post.sentiment_score is not None:
+            target["scores"].append(float(post.sentiment_score))
+        if post.published_at and (target["latest_at"] is None or post.published_at > target["latest_at"]):
+            target["latest_at"] = post.published_at
+
+    clusters.sort(key=lambda item: (item["post_count"], item["latest_at"] or datetime.min), reverse=True)
+    return [
+        {
+            "title": cluster["title"],
+            "post_count": cluster["post_count"],
+            "sources": sorted(cluster["sources"]),
+            "latest_at": cluster["latest_at"].isoformat() if cluster["latest_at"] else None,
+            "sentiment_score": (
+                round(sum(cluster["scores"]) / len(cluster["scores"]), 4)
+                if cluster["scores"]
+                else None
+            ),
+        }
+        for cluster in clusters[:limit]
+    ]
 
 
 def _fetch_eastmoney_guba_page(code: str, page: int, page_size: int = 20) -> dict[str, Any]:
@@ -1507,7 +1747,11 @@ class SentimentService:
         self.session = session
 
     async def upsert_threads(self, threads: list[SentimentThreadInput]) -> int:
-        count = 0
+        if not threads:
+            return 0
+        prepared: list[SentimentThreadInput] = []
+        storage_sources: set[str] = set()
+        source_ids: set[str] = set()
         for thread in threads:
             thread.source = normalize_sentiment_source(thread.source)
             if not thread.source_thread_id:
@@ -1518,13 +1762,47 @@ class SentimentService:
                 if normalize_security_symbol(symbol)
             ]
             symbols = list(dict.fromkeys(symbols))
-            label = _normalize_sentiment_label(thread.sentiment_label, thread.sentiment_score)
-            storage_sources = _source_storage_values([thread.source]) or [thread.source]
-            stmt = select(SentimentThread).where(
-                SentimentThread.source.in_(storage_sources),
-                SentimentThread.source_thread_id == str(thread.source_thread_id),
+            score, label, _confidence, _evidence, raw = _analysis_payload(
+                thread.title,
+                thread.content,
+                thread.raw,
+                thread.sentiment_score,
+                thread.sentiment_label,
             )
-            existing_rows = list((await self.session.execute(stmt)).scalars().all())
+            raw.setdefault("title", thread.title)
+            raw.setdefault("content", thread.content)
+            raw["_matches"] = {
+                symbol: {
+                    "method": method,
+                    "confidence": confidence,
+                    "evidence": evidence,
+                }
+                for symbol in symbols
+                for method, confidence, evidence in [_mention_match(raw, symbol)]
+            }
+            thread.symbols = symbols
+            thread.sentiment_score = score
+            thread.sentiment_label = label
+            thread.raw = raw
+            prepared.append(thread)
+            storage_sources.update(_source_storage_values([thread.source]) or [thread.source])
+            source_ids.add(str(thread.source_thread_id))
+
+        existing_result = await self.session.execute(
+            select(SentimentThread).where(
+                SentimentThread.source.in_(storage_sources),
+                SentimentThread.source_thread_id.in_(source_ids),
+            )
+        )
+        existing_by_key: dict[tuple[str, str], list[SentimentThread]] = {}
+        for row in existing_result.scalars().all():
+            key = (normalize_sentiment_source(row.source), row.source_thread_id)
+            existing_by_key.setdefault(key, []).append(row)
+
+        targets: list[tuple[SentimentThreadInput, SentimentThread]] = []
+        for thread in prepared:
+            key = (thread.source, str(thread.source_thread_id))
+            existing_rows = existing_by_key.get(key, [])
             existing = next((row for row in existing_rows if row.source == thread.source), None)
             existing = existing or (existing_rows[0] if existing_rows else None)
             for duplicate in existing_rows:
@@ -1544,30 +1822,77 @@ class SentimentService:
             target.reply_count = max(int(thread.reply_count or 0), 0)
             target.comment_count = max(int(thread.comment_count or 0), 0)
             target.sentiment_score = thread.sentiment_score
-            target.sentiment_label = label
-            target.symbols_json = _json_list(symbols)
+            target.sentiment_label = thread.sentiment_label
+            target.symbols_json = _json_list(thread.symbols)
             target.keywords_json = _json_list(thread.keywords)
-            target.raw_json = json.dumps(thread.raw or {}, ensure_ascii=False)
+            target.raw_json = json.dumps(thread.raw, ensure_ascii=False)
             if existing is None:
                 self.session.add(target)
-            count += 1
+            targets.append((thread, target))
         await self.session.flush()
-        return count
+        await self._upsert_mention_analysis_rows(
+            [
+                {
+                    "source": thread.source,
+                    "source_item_id": str(thread.source_thread_id),
+                    "symbols": thread.symbols,
+                    "title": thread.title,
+                    "content": thread.content,
+                    "keywords": thread.keywords,
+                    "raw": thread.raw,
+                }
+                for thread, _target in targets
+            ]
+        )
+        return len(prepared)
 
     async def upsert_posts(self, posts: list[SentimentPostInput]) -> int:
-        count = 0
+        if not posts:
+            return 0
+        prepared: list[SentimentPostInput] = []
+        storage_sources: set[str] = set()
+        source_ids: set[str] = set()
         for post in posts:
             post.source = normalize_sentiment_source(post.source)
             post.symbol = normalize_sentiment_symbol(post.symbol)
             if not post.source_post_id:
                 raise ValueError("source_post_id is required")
-            label = _normalize_sentiment_label(post.sentiment_label, post.sentiment_score)
-            storage_sources = _source_storage_values([post.source]) or [post.source]
-            stmt = select(SentimentPost).where(
-                SentimentPost.source.in_(storage_sources),
-                SentimentPost.source_post_id == str(post.source_post_id),
+            score, label, _confidence, _evidence, raw = _analysis_payload(
+                post.title,
+                post.content,
+                post.raw,
+                post.sentiment_score,
+                post.sentiment_label,
             )
-            existing_rows = list((await self.session.execute(stmt)).scalars().all())
+            raw.setdefault("title", post.title)
+            raw.setdefault("content", post.content)
+            method, match_confidence, match_evidence = _mention_match(raw, post.symbol)
+            raw["_match"] = {
+                "method": method,
+                "confidence": match_confidence,
+                "evidence": match_evidence,
+            }
+            post.sentiment_score = score
+            post.sentiment_label = label
+            post.raw = raw
+            prepared.append(post)
+            storage_sources.update(_source_storage_values([post.source]) or [post.source])
+            source_ids.add(str(post.source_post_id))
+
+        existing_result = await self.session.execute(
+            select(SentimentPost).where(
+                SentimentPost.source.in_(storage_sources),
+                SentimentPost.source_post_id.in_(source_ids),
+            )
+        )
+        existing_by_key: dict[tuple[str, str], list[SentimentPost]] = {}
+        for row in existing_result.scalars().all():
+            key = (normalize_sentiment_source(row.source), row.source_post_id)
+            existing_by_key.setdefault(key, []).append(row)
+
+        for post in prepared:
+            key = (post.source, str(post.source_post_id))
+            existing_rows = existing_by_key.get(key, [])
             existing = next((row for row in existing_rows if row.source == post.source), None)
             existing = existing or (existing_rows[0] if existing_rows else None)
             for duplicate in existing_rows:
@@ -1589,14 +1914,95 @@ class SentimentService:
             target.like_count = max(int(post.like_count or 0), 0)
             target.comment_count = max(int(post.comment_count or 0), 0)
             target.sentiment_score = post.sentiment_score
-            target.sentiment_label = label
+            target.sentiment_label = post.sentiment_label
             target.keywords_json = _json_list(post.keywords)
-            target.raw_json = json.dumps(post.raw or {}, ensure_ascii=False)
+            target.raw_json = json.dumps(post.raw, ensure_ascii=False)
             if existing is None:
                 self.session.add(target)
-            count += 1
         await self.session.flush()
-        return count
+        await self._upsert_mention_analysis_rows(
+            [
+                {
+                    "source": post.source,
+                    "source_item_id": str(post.source_post_id),
+                    "symbols": [post.symbol],
+                    "title": post.title,
+                    "content": post.content,
+                    "keywords": post.keywords,
+                    "raw": post.raw,
+                }
+                for post in prepared
+            ]
+        )
+        return len(prepared)
+
+    async def _upsert_mention_analysis_rows(self, items: list[dict[str, Any]]) -> None:
+        if not items:
+            return
+        sources = {str(item["source"]) for item in items}
+        item_ids = {str(item["source_item_id"]) for item in items}
+        mentions_result = await self.session.execute(
+            select(SentimentMention).where(
+                SentimentMention.source.in_(sources),
+                SentimentMention.source_thread_id.in_(item_ids),
+            )
+        )
+        mentions = {
+            (row.source, row.source_thread_id, row.symbol): row
+            for row in mentions_result.scalars().all()
+        }
+        analyses_result = await self.session.execute(
+            select(SentimentAnalysis).where(
+                SentimentAnalysis.source.in_(sources),
+                SentimentAnalysis.source_item_id.in_(item_ids),
+                SentimentAnalysis.model_version == SENTIMENT_MODEL_VERSION,
+            )
+        )
+        analyses = {
+            (row.source, row.source_item_id, row.symbol): row
+            for row in analyses_result.scalars().all()
+        }
+
+        for item in items:
+            source = str(item["source"])
+            source_item_id = str(item["source_item_id"])
+            raw = dict(item.get("raw") or {})
+            analysis = raw.get("_analysis") if isinstance(raw.get("_analysis"), dict) else {}
+            symbols = list(dict.fromkeys(str(symbol) for symbol in (item.get("symbols") or []) if symbol))
+            analysis_symbols = symbols or [""]
+            for symbol in symbols:
+                mention_key = (source, source_item_id, symbol)
+                mention = mentions.get(mention_key)
+                method, confidence, evidence = _mention_match(raw, symbol)
+                if mention is None:
+                    mention = SentimentMention(
+                        source=source,
+                        source_thread_id=source_item_id,
+                        symbol=symbol,
+                    )
+                    self.session.add(mention)
+                mention.match_method = method
+                mention.confidence = confidence
+                mention.evidence = str(evidence or "")[:500] or None
+
+            for symbol in analysis_symbols:
+                analysis_key = (source, source_item_id, symbol)
+                target = analyses.get(analysis_key)
+                if target is None:
+                    target = SentimentAnalysis(
+                        source=source,
+                        source_item_id=source_item_id,
+                        symbol=symbol,
+                        model_version=SENTIMENT_MODEL_VERSION,
+                    )
+                    self.session.add(target)
+                target.score = analysis.get("score")
+                target.label = str(analysis.get("label") or "neutral")
+                target.confidence = float(analysis.get("confidence") or 0.0)
+                target.evidence_json = json.dumps(analysis.get("evidence") or [], ensure_ascii=False)
+                target.keywords_json = _json_list([str(value) for value in (item.get("keywords") or [])])
+                target.analyzed_at = datetime.now()
+        await self.session.flush()
 
     async def list_threads(
         self,
@@ -1670,6 +2076,8 @@ class SentimentService:
             by_source.setdefault(source, []).append(post)
 
         rows = []
+        now = datetime.now()
+        all_weighted_scores: list[tuple[float, float]] = []
         for source, source_posts in sorted(by_source.items()):
             labels = [str(p.sentiment_label or "neutral").lower() for p in source_posts]
             scores = [p.sentiment_score for p in source_posts if p.sentiment_score is not None]
@@ -1678,29 +2086,104 @@ class SentimentService:
                 for keyword in _loads_list(post.keywords_json):
                     keywords[str(keyword)] = keywords.get(str(keyword), 0) + 1
             top_keywords = sorted(keywords, key=keywords.get, reverse=True)[:10]
+            weighted_scores = [
+                (float(post.sentiment_score), _sentiment_weight(post, now=now))
+                for post in source_posts
+                if post.sentiment_score is not None
+            ]
+            all_weighted_scores.extend(weighted_scores)
+            total_weight = sum(weight for _score, weight in weighted_scores)
+            weighted_sentiment = (
+                sum(score * weight for score, weight in weighted_scores) / total_weight
+                if total_weight
+                else None
+            )
+            source_confidences = [
+                float(_post_analysis_meta(post).get("confidence") or 0.0)
+                for post in source_posts
+            ]
             rows.append(
                 {
                     "source": source,
                     "post_count": len(source_posts),
+                    "sample_count": len(weighted_scores),
                     "comment_count": sum(p.comment_count or p.reply_count or 0 for p in source_posts),
                     "bullish_ratio": round(labels.count("bullish") / len(labels), 4) if labels else 0,
                     "bearish_ratio": round(labels.count("bearish") / len(labels), 4) if labels else 0,
                     "avg_sentiment": round(sum(scores) / len(scores), 4) if scores else None,
+                    "weighted_sentiment": round(weighted_sentiment, 4) if weighted_sentiment is not None else None,
+                    "confidence": round(sum(source_confidences) / len(source_confidences), 4) if source_confidences else 0.0,
                     "top_keywords": ",".join(top_keywords),
                 }
             )
+
+        total_weight = sum(weight for _score, weight in all_weighted_scores)
+        weighted_score = (
+            sum(score * weight for score, weight in all_weighted_scores) / total_weight
+            if total_weight
+            else None
+        )
+        recent_cutoff = now - timedelta(days=1)
+        previous_cutoff = now - timedelta(days=4)
+        recent_scores = [float(post.sentiment_score) for post in posts if post.sentiment_score is not None and post.published_at and post.published_at >= recent_cutoff]
+        previous_scores = [float(post.sentiment_score) for post in posts if post.sentiment_score is not None and post.published_at and previous_cutoff <= post.published_at < recent_cutoff]
+        trend = None
+        if recent_scores and previous_scores:
+            delta = sum(recent_scores) / len(recent_scores) - sum(previous_scores) / len(previous_scores)
+            trend = "up" if delta > 0.05 else "down" if delta < -0.05 else "flat"
 
         return {
             "symbol": normalize_sentiment_symbol(symbol),
             "start_date": start_date.isoformat() if start_date else None,
             "end_date": end_date.isoformat() if end_date else None,
             "sources": rows,
+            "weighted_score": round(weighted_score, 4) if weighted_score is not None else None,
+            "confidence": round(min(1.0, total_weight / 20), 4),
+            "sample_count": len(all_weighted_scores),
+            "trend": trend,
+            "model_version": SENTIMENT_MODEL_VERSION,
+            "event_clusters": _event_clusters(posts),
             "hottest_posts": [serialize_post(post) for post in posts[:5]],
         }
 
     async def overview(self, sources: list[str] | None = None) -> dict[str, Any]:
         requested_sources = ordered_sentiment_sources(sources)
         storage_sources = _source_storage_values(requested_sources)
+
+        logs_result = await self.session.execute(
+            select(SyncLog)
+            .where(SyncLog.sync_type.in_(("sentiment", "sentiment_xueqiu", "sentiment_nga")))
+            .order_by(SyncLog.start_time.desc())
+            .limit(100)
+        )
+        run_history: dict[str, dict[str, Any]] = {source: {} for source in requested_sources}
+        legacy_sources = {
+            "sentiment_xueqiu": "xueqiu_spyder",
+            "sentiment_nga": "flocktrader",
+        }
+        for log in logs_result.scalars().all():
+            finished_at = log.end_time or log.start_time
+            details = log.details if isinstance(log.details, dict) else {}
+            if log.sync_type == "sentiment":
+                result_rows = details.get("results") if isinstance(details.get("results"), list) else []
+                source_results = [row for row in result_rows if isinstance(row, dict)]
+            else:
+                source = legacy_sources.get(log.sync_type)
+                source_results = [{"source": source, "ok": log.status == "completed", "error": log.error_message}]
+            for result_row in source_results:
+                try:
+                    source = normalize_sentiment_source(str(result_row.get("source") or ""))
+                except ValueError:
+                    continue
+                if source not in run_history:
+                    continue
+                history = run_history[source]
+                if "last_attempt_at" not in history:
+                    history["last_attempt_at"] = finished_at
+                    history["last_error"] = str(result_row.get("error") or log.error_message or "") or None
+                    history["last_result"] = result_row
+                if result_row.get("ok") is not False and log.status == "completed" and "last_success_at" not in history:
+                    history["last_success_at"] = finished_at
 
         totals_stmt = select(
             func.count(SentimentPost.id),
@@ -1720,10 +2203,58 @@ class SentimentService:
                 func.max(SentimentPost.published_at),
             ).where(SentimentPost.source.in_(source_storage))
             post_count, symbol_count, latest_source_published_at = (await self.session.execute(source_stmt)).one()
+            runtime = _source_runtime_status(source)
+            history = run_history.get(source, {})
+            now = datetime.now()
+            lag_hours = (
+                max(0.0, (now - latest_source_published_at).total_seconds() / 3600)
+                if latest_source_published_at
+                else None
+            )
+            last_attempt = history.get("last_attempt_at")
+            last_success = history.get("last_success_at")
+            last_result = history.get("last_result") if isinstance(history.get("last_result"), dict) else {}
+            last_error = str(history.get("last_error") or "") or None
+            error_text = str(last_error or "").lower()
+            verification_required = any(
+                token in error_text
+                for token in ("captcha", "verification", "cookie", "login", "验证码", "登录")
+            ) or bool(last_result.get("verification_required"))
+
+            if not runtime.get("project_ready", False):
+                pipeline_state = "blocked"
+            elif verification_required:
+                pipeline_state = "auth_required"
+            elif last_attempt and last_error and (not last_success or last_success < last_attempt):
+                pipeline_state = "failing"
+            elif not last_success or (now - last_success).total_seconds() > 36 * 3600:
+                pipeline_state = "stale"
+            else:
+                pipeline_state = "healthy"
+
+            if not post_count:
+                data_state = "missing"
+            elif lag_hours is not None and lag_hours <= 48:
+                data_state = "fresh"
+            elif (
+                pipeline_state == "healthy"
+                and int(last_result.get("collected") or 0) == 0
+            ):
+                data_state = "quiet"
+            else:
+                data_state = "stale"
             source_rows.append(
                 {
                     "source": source,
-                    **_source_runtime_status(source),
+                    **runtime,
+                    "ready": pipeline_state == "healthy",
+                    "pipeline_state": pipeline_state,
+                    "data_state": data_state,
+                    "last_attempt_at": last_attempt.isoformat() if last_attempt else None,
+                    "last_success_at": last_success.isoformat() if last_success else None,
+                    "lag_hours": round(lag_hours, 2) if lag_hours is not None else None,
+                    "verification_required": verification_required,
+                    "last_error": last_error,
                     "post_count": int(post_count or 0),
                     "symbol_count": int(symbol_count or 0),
                     "latest_published_at": (
@@ -1741,6 +2272,10 @@ class SentimentService:
 
 
 def serialize_post(post: SentimentPost) -> dict[str, Any]:
+    try:
+        raw = json.loads(post.raw_json or "{}")
+    except json.JSONDecodeError:
+        raw = {}
     return {
         "id": post.id,
         "source": normalize_sentiment_source(post.source),
@@ -1758,6 +2293,8 @@ def serialize_post(post: SentimentPost) -> dict[str, Any]:
         "sentiment_label": post.sentiment_label,
         "keywords": _loads_list(post.keywords_json),
         "source_meta": _post_source_meta(post),
+        "analysis": raw.get("_analysis") if isinstance(raw, dict) else None,
+        "match": raw.get("_match") if isinstance(raw, dict) else None,
     }
 
 
@@ -1795,6 +2332,8 @@ def serialize_thread(thread: SentimentThread) -> dict[str, Any]:
         "keywords": _loads_list(thread.keywords_json),
         "comments": comments,
         "full_text": "\n".join(part for part in full_text_parts if part.strip()),
+        "analysis": raw.get("_analysis") if isinstance(raw, dict) else None,
+        "matches": raw.get("_matches") if isinstance(raw, dict) else None,
     }
 
 
@@ -1892,206 +2431,63 @@ class SentimentIngestService:
         end_date: date | None = None,
         force_refresh: bool = False,
     ) -> dict[str, Any]:
+        from app.services.sentiment_adapters import AdapterRequest, get_adapter
+
         source = normalize_sentiment_source(source)
         symbol = normalize_sentiment_symbol(symbol) if symbol else None
-        if source == "xueqiu_spyder":
-            if not symbol:
-                raise ValueError("xueqiu_spyder ingest requires a symbol")
-            posts, xueqiu_stats = await asyncio.to_thread(
-                self._collect_xueqiu,
-                symbol,
-                max_pages,
-                min_reply,
-                start_date,
-                end_date,
-            )
-            stats: dict[str, Any] = {
-                "mode": "stock_page",
-                "collected": len(posts),
-                "matched": len(posts),
-                "page_url": f"https://xueqiu.com/S/{_to_xueqiu_symbol(symbol)}",
-                **xueqiu_stats,
-            }
-        elif source == "eastmoney_guba":
-            if symbol:
-                posts, eastmoney_stats = await asyncio.to_thread(
-                    self._collect_eastmoney_guba,
-                    symbol,
-                    max_pages,
-                    min_reply,
-                    start_date,
-                    end_date,
+        adapter = get_adapter(source)
+        request = AdapterRequest(
+            symbol=symbol,
+            max_pages=max_pages,
+            min_reply=min_reply,
+            start_date=start_date,
+            end_date=end_date,
+            force_refresh=force_refresh,
+        )
+        retry_delays = [
+            float(value)
+            for value in os.getenv("SENTIMENT_RETRY_DELAYS", "30,120,600").split(",")
+            if value.strip()
+        ]
+        attempt = 0
+        while True:
+            try:
+                adapter_result = await adapter(self, request)
+                break
+            except requests.RequestException as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                retryable = status_code is None or status_code == 429 or status_code >= 500
+                if not retryable or attempt >= len(retry_delays):
+                    raise
+                delay = retry_delays[attempt]
+                attempt += 1
+                self._emit_progress(
+                    f"{source}.retry",
+                    source=source,
+                    current_step="retry",
+                    retry_attempt=attempt,
+                    retry_delay_seconds=delay,
+                    error=str(exc),
                 )
-                mode = "stock_bar"
-                page_url = f"https://guba.eastmoney.com/list,{symbol.split('.', 1)[0]}.html"
-            else:
-                posts, eastmoney_stats = await asyncio.to_thread(
-                    self._collect_eastmoney_guba_hot_bars,
-                    max_pages,
-                    min_reply,
-                    start_date,
-                    end_date,
-                )
-                mode = "hot_bars"
-                page_url = "https://guba.eastmoney.com/remenba.aspx"
-            stats = {
-                "mode": mode,
-                "collected": eastmoney_stats["collected"],
-                "matched": len(posts),
-                "page_url": page_url,
-                **eastmoney_stats,
+                await asyncio.sleep(delay)
+
+        posts = adapter_result.posts
+        stats = dict(adapter_result.stats)
+        collected = int(stats.get("collected") or len(posts))
+        matched = int(stats.get("matched") or len(posts))
+        stats.update(
+            {
+                "fetched": collected,
+                "parsed": int(stats.get("parsed") or collected),
+                "matched": matched,
+                "rejected": max(0, collected - matched),
+                "deduplicated": int(stats.get("duplicate_count") or 0),
+                "retry_count": attempt,
             }
-        elif source == "taoguba":
-            aliases = None
-            stock = await self.session.get(Stock, symbol) if symbol else None
-            stock_aliases = await self._load_stock_aliases() if not symbol else None
-            if symbol:
-                aliases = _symbol_aliases_from_parts(symbol, stock)
-            blogs = _taoguba_blog_values()
-            posts, threads, taoguba_stats = await asyncio.to_thread(
-                self._collect_taoguba,
-                symbol,
-                aliases,
-                stock_aliases,
-                blogs,
-                max_pages,
-                min_reply,
-                start_date,
-                end_date,
-            )
-            threads_upserted = await self.service.upsert_threads(threads)
-            stats = {
-                "mode": "blog_author_stream",
-                "collected": taoguba_stats["collected"],
-                "matched": len(posts),
-                "threads_upserted": threads_upserted,
-                "page_url": "https://www.tgb.cn/",
-                **taoguba_stats,
-            }
-        elif source == "tieba_stock":
-            aliases: list[str] | None = None
-            stock = await self.session.get(Stock, symbol) if symbol else None
-            stock_aliases = await self._load_stock_aliases() if not symbol else None
-            if symbol:
-                aliases = _symbol_aliases_from_parts(symbol, stock)
-            bars = _tieba_stock_bars(symbol, stock)
-            posts, threads, tieba_stats = await asyncio.to_thread(
-                self._collect_tieba_stock,
-                symbol,
-                aliases,
-                stock_aliases,
-                bars,
-                max_pages,
-                min_reply,
-                start_date,
-                end_date,
-            )
-            threads_upserted = await self.service.upsert_threads(threads)
-            stats = {
-                "mode": "stock_forum_bars",
-                "collected": tieba_stats["collected"],
-                "matched": len(posts),
-                "threads_upserted": threads_upserted,
-                "page_url": "https://tieba.baidu.com/mg/f/getFrsData",
-                **tieba_stats,
-            }
-        elif source == "laohu8_stock":
-            symbols = _laohu8_stock_symbol_values(symbol)
-            posts, threads, laohu8_stats = await asyncio.to_thread(
-                self._collect_laohu8_stock,
-                symbols,
-                0,
-                start_date,
-                end_date,
-            )
-            threads_upserted = await self.service.upsert_threads(threads)
-            stats = {
-                "mode": "stock_pages",
-                "collected": laohu8_stats["collected"],
-                "matched": len(posts),
-                "threads_upserted": threads_upserted,
-                "page_url": "https://www.laohu8.com/stock/{code}",
-                "min_reply_applied": 0,
-                **laohu8_stats,
-            }
-        elif source == "jisilu":
-            aliases: list[str] | None = None
-            stock_aliases = await self._load_stock_aliases() if not symbol else None
-            if symbol:
-                stock = await self.session.get(Stock, symbol)
-                aliases = _symbol_aliases_from_parts(symbol, stock)
-            posts, jisilu_stats = await asyncio.to_thread(
-                self._collect_jisilu,
-                symbol,
-                aliases,
-                stock_aliases,
-                max_pages,
-                min_reply,
-                start_date,
-                end_date,
-            )
-            stats = {
-                "mode": "topic_board",
-                "collected": jisilu_stats["collected"],
-                "matched": len(posts),
-                "page_url": "https://www.jisilu.cn/category/8",
-                **jisilu_stats,
-            }
-        elif source == "wechat_sogou":
-            aliases = None
-            stock = await self.session.get(Stock, symbol) if symbol else None
-            stock_aliases = await self._load_stock_aliases() if not symbol else None
-            if symbol:
-                aliases = _symbol_aliases_from_parts(symbol, stock)
-            queries = _wechat_sogou_queries(symbol, stock)
-            posts, threads, wechat_stats = await asyncio.to_thread(
-                self._collect_wechat_sogou,
-                symbol,
-                aliases,
-                stock_aliases,
-                queries,
-                max_pages,
-                start_date,
-                end_date,
-            )
-            threads_upserted = await self.service.upsert_threads(threads)
-            stats = {
-                "mode": "public_account_search",
-                "collected": wechat_stats["collected"],
-                "matched": len(posts),
-                "threads_upserted": threads_upserted,
-                "page_url": "https://weixin.sogou.com/weixin?type=2",
-                **wechat_stats,
-            }
-        elif source == "flocktrader":
-            posts, threads, nga_stats = await self._collect_flocktrader_by_date(
-                symbol,
-                max_pages=max_pages,
-                start_date=start_date,
-                end_date=end_date,
-                force_refresh=force_refresh,
-            )
-            nga_stats.thread_upserted = await self.service.upsert_threads(threads)
-            stats = {
-                "mode": nga_stats.mode,
-                "collected": nga_stats.total_posts,
-                "analyzed": nga_stats.analyzed_posts,
-                "matched": nga_stats.matched_posts,
-                "threads_upserted": nga_stats.thread_upserted,
-                "loaded_dates": nga_stats.loaded_dates,
-                "crawled_dates": nga_stats.crawled_dates,
-                "date_files": nga_stats.date_files,
-                "extra_date_files": nga_stats.extra_date_files,
-                "empty_dates": nga_stats.empty_dates,
-                "search_queries": nga_stats.search_queries,
-                "search_pages": nga_stats.search_pages,
-                "scan_time_basis": nga_stats.scan_time_basis,
-                "cache_partition": nga_stats.cache_partition,
-            }
-        else:
-            raise ValueError(f"unsupported sentiment source: {source}")
+        )
         inserted = await self.service.upsert_posts(posts)
-        return {"source": source, "symbol": symbol, **stats, "upserted": inserted}
+        stats["upserted"] = inserted
+        return {"source": source, "symbol": symbol, **stats}
 
     def _collect_xueqiu(
         self,
@@ -2109,7 +2505,26 @@ class SentimentIngestService:
             auth = _verify_xueqiu_login(crawler, auth)
             raw_posts: list[dict[str, Any]] = []
             for page in range(1, max_pages + 1):
-                raw_posts.extend(crawler.get_stock_posts(xq_symbol, page=page))
+                self._emit_progress(
+                    "xueqiu_spyder.page_fetch",
+                    source="xueqiu_spyder",
+                    current_step="stock_page",
+                    current_symbol=symbol,
+                    current_page=page,
+                    page_limit=max_pages,
+                )
+                page_posts = crawler.get_stock_posts(xq_symbol, page=page)
+                raw_posts.extend(page_posts)
+                self._emit_progress(
+                    "xueqiu_spyder.page_parsed",
+                    source="xueqiu_spyder",
+                    current_step="stock_page",
+                    current_symbol=symbol,
+                    current_page=page,
+                    page_limit=max_pages,
+                    rows_on_page=len(page_posts),
+                    posts_collected=len(raw_posts),
+                )
             normalized: list[SentimentPostInput] = []
             for raw in raw_posts:
                 post = normalize_xueqiu_spyder_post(raw, symbol=symbol, strip_html=_strip_html_fallback)
@@ -2120,7 +2535,10 @@ class SentimentIngestService:
                 if not _in_date_window(post.published_at, start_date, end_date):
                     continue
                 normalized.append(post)
-            return [post for post in normalized if post.source_post_id], {"auth": auth}
+            return [post for post in normalized if post.source_post_id], {
+                "auth": auth,
+                "raw_count": len(raw_posts),
+            }
         finally:
             crawler.close()
 

@@ -4,6 +4,7 @@
 使用 APScheduler 实现定时任务调度，支持 cron 表达式。
 """
 from datetime import datetime
+import json
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -81,8 +82,26 @@ async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None
                     start_date=kwargs.get("start_date"),
                     end_date=kwargs.get("end_date"),
                 )
+            elif sync_type in {"sentiment", "sentiment_xueqiu", "sentiment_nga"}:
+                sources = kwargs.get("sources")
+                if sync_type == "sentiment_xueqiu":
+                    sources = ["xueqiu_spyder"]
+                elif sync_type == "sentiment_nga":
+                    sources = ["flocktrader"]
+                await sync_service.sync_sentiment(
+                    task_id=task_id,
+                    sources=sources,
+                    symbols=kwargs.get("symbols"),
+                    max_pages=int(kwargs.get("max_pages") or 3),
+                    min_reply=int(kwargs.get("min_reply") or 0),
+                    start_date=kwargs.get("start_date"),
+                    end_date=kwargs.get("end_date"),
+                    force_refresh=bool(kwargs.get("force_refresh", False)),
+                    sync_mode=kwargs.get("sync_mode") or "incremental",
+                    failure_strategy=kwargs.get("failure_strategy") or "skip",
+                )
             else:
-                logger.error(f"Unknown sync type: {sync_type}")
+                raise ValueError(f"Unknown sync type: {sync_type}")
 
             # 更新任务的最后执行时间
             now = datetime.now()
@@ -119,8 +138,6 @@ def add_sync_job(task: SyncTask) -> str | None:
         # 准备任务参数
         kwargs: dict[str, Any] = {}
         if task.symbols:
-            import json
-
             try:
                 kwargs["symbols"] = json.loads(task.symbols)
             except json.JSONDecodeError:
@@ -130,6 +147,14 @@ def add_sync_job(task: SyncTask) -> str | None:
             kwargs["start_date"] = task.start_date
         if task.end_date:
             kwargs["end_date"] = task.end_date
+        kwargs["failure_strategy"] = task.failure_strategy
+        if task.options_json:
+            try:
+                options = json.loads(task.options_json)
+                if isinstance(options, dict):
+                    kwargs.update(options)
+            except json.JSONDecodeError:
+                logger.warning("Invalid options_json for sync task {}", task.id)
 
         # 添加任务
         scheduler.add_job(
@@ -232,6 +257,64 @@ async def load_enabled_tasks() -> None:
     在应用启动时调用，从数据库加载所有启用的任务。
     """
     async with async_session_factory() as session:
+        existing_sentiment = await session.execute(
+            select(SyncTask).where(SyncTask.sync_type == "sentiment").limit(1)
+        )
+        if existing_sentiment.scalar_one_or_none() is None:
+            session.add(
+                SyncTask(
+                    name="每日舆情增量",
+                    cron_expression="30 22 * * *",
+                    sync_type="sentiment",
+                    failure_strategy="skip",
+                    retry_count=3,
+                    enabled=True,
+                    options_json=json.dumps(
+                        {
+                            "sources": [
+                                "xueqiu_spyder",
+                                "eastmoney_guba",
+                                "taoguba",
+                                "tieba_stock",
+                                "laohu8_stock",
+                                "jisilu",
+                                "wechat_sogou",
+                                "flocktrader",
+                            ],
+                            "max_pages": 3,
+                            "min_reply": 0,
+                            "force_refresh": False,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            await session.commit()
+
+        existing_intraday = await session.execute(
+            select(SyncTask).where(SyncTask.name == "盘中关注股舆情").limit(1)
+        )
+        if existing_intraday.scalar_one_or_none() is None:
+            session.add(
+                SyncTask(
+                    name="盘中关注股舆情",
+                    cron_expression="30 10,14 * * 1-5",
+                    sync_type="sentiment",
+                    failure_strategy="skip",
+                    retry_count=2,
+                    enabled=False,
+                    options_json=json.dumps(
+                        {
+                            "sources": ["xueqiu_spyder", "eastmoney_guba"],
+                            "max_pages": 2,
+                            "min_reply": 0,
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            await session.commit()
+
         result = await session.execute(
             select(SyncTask).where(SyncTask.enabled)
         )
@@ -242,6 +325,14 @@ async def load_enabled_tasks() -> None:
             job_id = add_sync_job(task)
             if job_id:
                 loaded_count += 1
+                job = get_scheduler().get_job(job_id)
+                if job and job.next_run_time:
+                    next_run = job.next_run_time
+                    if next_run.tzinfo is not None:
+                        next_run = next_run.replace(tzinfo=None)
+                    task.next_run_at = next_run
+
+        await session.commit()
 
         logger.info(f"Loaded {loaded_count} enabled sync tasks from database")
 

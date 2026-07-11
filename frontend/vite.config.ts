@@ -25,6 +25,7 @@ export default defineConfig({
     }
   },
   build: {
+    chunkSizeWarningLimit: 700,
     rolldownOptions: {
       output: {
         manualChunks(id) {
@@ -55,7 +56,7 @@ export default defineConfig({
   },
   server: {
     host: '127.0.0.1',
-    port: 3511,
+    port: 3500,
     proxy: {
       '/api': {
         target: apiProxyTarget,
@@ -65,7 +66,7 @@ export default defineConfig({
   },
   preview: {
     host: '127.0.0.1',
-    port: 3511,
+    port: 3500,
     proxy: {
       '/api': {
         target: apiProxyTarget,

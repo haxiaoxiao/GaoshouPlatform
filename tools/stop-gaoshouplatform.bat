@@ -14,7 +14,7 @@ if defined GAOSHOU_ENV_FILE (
 )
 if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else (set "BACKEND_PORT=8800")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
-if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3511")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
 set "STOP_REDIS=0"
 set "NO_PAUSE=0"
 
@@ -36,6 +36,7 @@ if exist "%ENV_FILE%" (
     if /i "!K!"=="FRONTEND_PORT" if not defined GAOSHOU_FRONTEND_PORT set "FRONTEND_PORT=!V!"
   )
 )
+if exist "%ROOT%\.runtime\frontend-port.txt" set /p FRONTEND_PORT=<"%ROOT%\.runtime\frontend-port.txt"
 
 echo ========================================
 echo   GaoshouPlatform Shutdown

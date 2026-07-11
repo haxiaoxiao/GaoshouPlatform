@@ -19,7 +19,7 @@ from .research_lineage import (
     ResearchArtifact,
     StrategyRelease,
 )
-from .sentiment import SentimentPost, SentimentThread
+from .sentiment import SentimentAnalysis, SentimentMention, SentimentPost, SentimentThread
 from .stock import Stock, StockConceptMembership
 from .strategy import Backtest, Order, Strategy, Trade
 from .sync import SyncLog, SyncRun, SyncTask
@@ -53,6 +53,8 @@ __all__ = [
     "JobEvent",
     "SentimentPost",
     "SentimentThread",
+    "SentimentMention",
+    "SentimentAnalysis",
     "WatchlistGroup",
     "WatchlistStock",
     "SyncTask",

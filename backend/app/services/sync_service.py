@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from loguru import logger
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from app.core.retry import async_retry
 from app.data_stores import get_market_data_store
 from app.db.models import Stock, SyncLog
 from app.db.models.financial import FinancialData
+from app.db.sqlite import async_session_factory
 from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
@@ -36,6 +37,10 @@ SYNC_STOCK_INFO_COMPUTE_INDICATORS = os.getenv("SYNC_STOCK_INFO_COMPUTE_INDICATO
 DATASYNC_INITIAL_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_DAILY_DAYS", "30"))
 DATASYNC_INITIAL_INDEX_DAILY_DAYS = int(os.getenv("DATASYNC_INITIAL_INDEX_DAILY_DAYS", "30"))
 DATASYNC_INITIAL_MINUTE_DAYS = int(os.getenv("DATASYNC_INITIAL_MINUTE_DAYS", "7"))
+DATASYNC_INITIAL_TRADING_DEPENDENCY_DAYS = int(os.getenv("DATASYNC_INITIAL_TRADING_DEPENDENCY_DAYS", "7"))
+DATASYNC_MAX_TRADING_DEPENDENCY_BACKFILL_DAYS = int(
+    os.getenv("DATASYNC_MAX_TRADING_DEPENDENCY_BACKFILL_DAYS", "30")
+)
 DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS = int(
     os.getenv(
         "DATASYNC_INCREMENTAL_DAILY_GAP_LOOKBACK_DAYS",
@@ -195,6 +200,138 @@ def _latest_market_date_for_symbols(dataset: str, symbols: list[str]) -> date | 
     for value in by_symbol.values():
         latest_values.append(_coerce_market_date(value))
     return min(latest_values) if latest_values else None
+
+
+def _latest_market_datetime(dataset: str, symbols: list[str] | None = None) -> datetime | None:
+    if app_settings.market_data_backend != "parquet":
+        return None
+
+    from app.db.duckdb import get_duckdb
+
+    pattern = _parquet_pattern(dataset)
+    if pattern is None:
+        return None
+
+    params: list[Any] = [pattern]
+    symbol_filter = ""
+    if symbols:
+        unique_symbols = sorted(set(symbols))
+        placeholders = ", ".join("?" for _ in unique_symbols)
+        symbol_filter = f"WHERE symbol IN ({placeholders})"
+        params.extend(unique_symbols)
+    row = get_duckdb().execute(
+        f"SELECT max(datetime) FROM read_parquet(?, hive_partitioning=true) {symbol_filter}",
+        params,
+    ).fetchone()
+    value = row[0] if row else None
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
+
+
+def _minute_latest_date_symbols(trade_date: date, symbols: list[str] | None = None) -> set[str]:
+    if app_settings.market_data_backend != "parquet":
+        return set()
+
+    from app.db.duckdb import get_duckdb
+
+    pattern = _parquet_pattern("klines_minute")
+    if pattern is None:
+        return set()
+
+    start_value = datetime.combine(trade_date, time.min)
+    end_value = datetime.combine(trade_date, time.max)
+    params: list[Any] = [pattern, start_value, end_value]
+    symbol_filter = ""
+    if symbols:
+        unique_symbols = sorted(set(symbols))
+        placeholders = ", ".join("?" for _ in unique_symbols)
+        symbol_filter = f"AND symbol IN ({placeholders})"
+        params.extend(unique_symbols)
+    rows = get_duckdb().execute(
+        f"""
+        SELECT DISTINCT symbol
+        FROM read_parquet(?, hive_partitioning=true)
+        WHERE datetime >= ? AND datetime <= ?
+          AND year = {trade_date.year} AND month = '{trade_date.month:02d}'
+          {symbol_filter}
+        """,
+        params,
+    ).fetchall()
+    return {str(row[0]) for row in rows if row and row[0]}
+
+
+def _minute_sync_completeness(
+    *,
+    start_date: date,
+    end_date: date,
+    symbols: list[str] | None,
+) -> dict[str, Any]:
+    latest = _latest_market_datetime("klines_minute", symbols)
+    coverage = _market_incremental_coverage_details(
+        "klines_minute",
+        start_date,
+        end_date,
+        symbols,
+    )
+    expected_symbols = sorted(set(symbols or []))
+    observed_symbols = _minute_latest_date_symbols(latest.date(), expected_symbols) if latest else set()
+    missing_symbols = sorted(set(expected_symbols) - observed_symbols)
+    expected_count = len(expected_symbols)
+    coverage_ratio = len(observed_symbols) / expected_count if expected_count else None
+    return {
+        "latest_datetime": latest.isoformat() if latest else None,
+        "latest_trade_date": latest.date().isoformat() if latest else None,
+        "expected_symbol_count": expected_count or None,
+        "observed_symbol_count": len(observed_symbols) if expected_count else None,
+        "symbol_coverage_ratio": round(coverage_ratio, 4) if coverage_ratio is not None else None,
+        "missing_symbol_count": len(missing_symbols),
+        "missing_symbols": missing_symbols[:100],
+        "missing_dates": coverage.get("missing_dates", []),
+        "missing_ranges": coverage.get("missing_ranges", []),
+        "low_coverage_dates": coverage.get("low_coverage_dates", []),
+    }
+
+
+def _latest_sqlite_table_date(table: str) -> date | None:
+    import sqlite3
+
+    if table not in {"stock_daily_basic", "stock_limit_prices"}:
+        raise ValueError(f"Unsupported daily dependency table: {table}")
+    if not app_settings.sqlite_db_path.exists():
+        return None
+    with sqlite3.connect(app_settings.sqlite_db_path) as conn:
+        row = conn.execute(f"SELECT MAX(trade_date) FROM {table}").fetchone()
+    return date.fromisoformat(str(row[0])[:10]) if row and row[0] else None
+
+
+def _daily_trading_dependency_start(end_date: date) -> date:
+    latest_dates = [
+        _latest_sqlite_table_date("stock_daily_basic"),
+        _latest_sqlite_table_date("stock_limit_prices"),
+        _latest_market_date("adj_factors"),
+    ]
+    known_dates = [item for item in latest_dates if item is not None]
+    if not known_dates:
+        return end_date - td(days=DATASYNC_INITIAL_TRADING_DEPENDENCY_DAYS)
+    earliest_latest = min(known_dates)
+    requested_start = earliest_latest - td(days=1)
+    backfill_floor = end_date - td(days=DATASYNC_MAX_TRADING_DEPENDENCY_BACKFILL_DAYS)
+    return max(requested_start, backfill_floor)
+
+
+def _sync_daily_trading_dependencies(start_date: date, end_date: date) -> dict[str, Any]:
+    from app.services.factor_dependency_sync import _sync_tushare_daily_step
+
+    return _sync_tushare_daily_step(
+        {
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat(),
+            "datasets": ["stock_daily_basic", "stock_limit_prices", "adj_factors"],
+        }
+    )
 
 
 def _next_sync_start(latest_date: date | None, end_date: date, initial_days: int) -> date:
@@ -769,6 +906,7 @@ class SyncService:
 
     async def build_datasync_plan(self, end_date: date | None = None) -> dict[str, Any]:
         target_end = end_date or date.today()
+        daily_dependency_start = _daily_trading_dependency_start(target_end)
 
         daily_start, latest_daily, daily_incremental = _market_incremental_sync_plan(
             "klines_daily",
@@ -786,13 +924,14 @@ class SyncService:
             lookback_days=DATASYNC_INCREMENTAL_MINUTE_GAP_LOOKBACK_DAYS,
             overlap_days=1,
         )
+        latest_minute_datetime = _latest_market_datetime("klines_minute")
 
         plan = {
             "end_date": target_end.isoformat(),
             "market_data_backend": app_settings.market_data_backend,
             "latest": {
                 "kline_daily": latest_daily.isoformat() if latest_daily else None,
-                "kline_minute": latest_minute.isoformat() if latest_minute else None,
+                "kline_minute": latest_minute_datetime.isoformat() if latest_minute_datetime else None,
             },
             "ranges": {
                 "kline_daily": {
@@ -806,14 +945,29 @@ class SyncService:
                     "end_date": target_end.isoformat(),
                     "will_sync": index_daily_start <= target_end,
                 },
+                "daily_trading_dependencies": {
+                    "start_date": daily_dependency_start.isoformat(),
+                    "end_date": target_end.isoformat(),
+                    "will_sync": daily_dependency_start <= target_end,
+                },
                 "kline_minute": {
                     "start_date": minute_start.isoformat(),
                     "end_date": target_end.isoformat(),
                     "will_sync": minute_start <= target_end,
+                    "watermark": latest_minute_datetime.isoformat() if latest_minute_datetime else None,
                     "incremental": minute_incremental,
                 },
             },
-            "steps": ["stock_info", "stock_full", "financial_data", "kline_daily", "index_daily", "kline_minute", "realtime_mv"],
+            "steps": [
+                "stock_info",
+                "stock_full",
+                "financial_data",
+                "daily_trading_dependencies",
+                "kline_daily",
+                "index_daily",
+                "kline_minute",
+                "realtime_mv",
+            ],
         }
         plan["skipped"] = {
             "dividends": "stored in Parquet indicators; not part of the default sync plan",
@@ -870,6 +1024,32 @@ class SyncService:
                         task_id=task_id,
                         failure_strategy=failure_strategy,
                     )
+                elif step == "daily_trading_dependencies":
+                    dependency_range = plan["ranges"]["daily_trading_dependencies"]
+                    try:
+                        dependency_result = await asyncio.to_thread(
+                            _sync_daily_trading_dependencies,
+                            date.fromisoformat(dependency_range["start_date"]),
+                            date.fromisoformat(dependency_range["end_date"]),
+                        )
+                        step_progress = SyncProgress(
+                            sync_type=step,
+                            status="completed",
+                            total=3,
+                            current=3,
+                            success_count=3,
+                            details={**dependency_range, **dependency_result},
+                        )
+                    except Exception as exc:
+                        step_progress = SyncProgress(
+                            sync_type=step,
+                            status="failed",
+                            total=3,
+                            current=3,
+                            failed_count=3,
+                            error_message=str(exc),
+                            details=dependency_range,
+                        )
                 elif step == "kline_daily":
                     daily_range = plan["ranges"]["kline_daily"]
                     if not daily_range["will_sync"]:
@@ -2657,6 +2837,11 @@ class SyncService:
             progress.end_time = datetime.now()
             progress.details["total_klines"] = total_klines
             progress.details["failed_symbols"] = failed_symbols[:100]
+            progress.details["completeness"] = _minute_sync_completeness(
+                start_date=start_date,
+                end_date=end_date,
+                symbols=symbols,
+            )
             _clean_qmt_kline_cache_after_download(progress, cleanup_symbols)
             await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
 
@@ -3013,6 +3198,211 @@ class SyncService:
             _current_sync = None
 
         return progress
+
+    async def sync_sentiment(
+        self,
+        sources: list[str] | None = None,
+        symbols: list[str] | None = None,
+        max_pages: int = 3,
+        min_reply: int = 20,
+        start_date: date | None = None,
+        end_date: date | None = None,
+        force_refresh: bool = False,
+        sync_mode: str = "incremental",
+        failure_strategy: str = "skip",
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import (
+            SentimentIngestService,
+            normalize_sentiment_symbol,
+            ordered_sentiment_sources,
+        )
+
+        global _current_sync
+        requested_sources = ordered_sentiment_sources(sources)
+        symbol_list = list(
+            dict.fromkeys(
+                normalize_sentiment_symbol(symbol)
+                for symbol in (symbols or [])
+                if str(symbol or "").strip()
+            )
+        )
+        explicit_symbols = bool(symbol_list)
+        if "xueqiu_spyder" in requested_sources and not symbol_list:
+            from app.db.models.watchlist import WatchlistStock
+
+            watchlist_result = await self.session.execute(
+                select(WatchlistStock.symbol).distinct().limit(100)
+            )
+            symbol_list = list(
+                dict.fromkeys(
+                    normalize_sentiment_symbol(symbol)
+                    for symbol in watchlist_result.scalars().all()
+                    if str(symbol or "").strip()
+                )
+            )
+        work_items: list[tuple[str, str | None]] = []
+        for source in requested_sources:
+            if source == "xueqiu_spyder":
+                targets: list[str | None] = symbol_list or [None]
+            else:
+                targets = symbol_list if explicit_symbols else [None]
+            work_items.extend((source, target) for target in targets)
+
+        progress = SyncProgress(
+            sync_type="sentiment",
+            status="running",
+            start_time=datetime.now(),
+            total=len(work_items),
+            details={
+                "run_id": run_id,
+                "sources": requested_sources,
+                "symbols": symbol_list,
+                "max_pages": max_pages,
+                "min_reply": min_reply,
+                "force_refresh": force_refresh,
+                "sync_mode": sync_mode,
+                "results": [],
+            },
+        )
+        _current_sync = progress
+
+        def on_progress(event: dict[str, Any]) -> None:
+            progress.details["crawler_progress"] = event
+            progress.details["stage"] = event.get("stage")
+            progress.details["current_source"] = event.get("source")
+            for key in (
+                "current_step",
+                "current_symbol",
+                "current_date",
+                "current_page",
+                "page_limit",
+                "current_tid",
+                "current_title",
+                "query_index",
+                "query_count",
+            ):
+                if key in event:
+                    progress.details[key] = event[key]
+
+        try:
+            results: list[dict[str, Any]] = []
+            source_semaphore = asyncio.Semaphore(3)
+            browser_semaphore = asyncio.Semaphore(1)
+
+            async def run_item(source: str, symbol: str | None) -> dict[str, Any]:
+                semaphore = browser_semaphore if source == "xueqiu_spyder" else source_semaphore
+                async with semaphore:
+                    async with async_session_factory() as ingest_session:
+                        ingest = SentimentIngestService(ingest_session, progress_callback=on_progress)
+                        try:
+                            effective_start = start_date
+                            effective_end = end_date
+                            if sync_mode == "incremental":
+                                from app.db.models.sentiment import SentimentPost
+                                from app.services.sentiment import _source_storage_values
+
+                                source_values = _source_storage_values([source]) or [source]
+                                latest_stmt = select(func.max(SentimentPost.published_at)).where(
+                                    SentimentPost.source.in_(source_values)
+                                )
+                                if symbol:
+                                    latest_stmt = latest_stmt.where(SentimentPost.symbol == symbol)
+                                latest_value = (await ingest_session.execute(latest_stmt)).scalar_one_or_none()
+                                if latest_value is not None and effective_start is None:
+                                    effective_start = latest_value.date() - td(days=1)
+                                effective_end = effective_end or date.today()
+                            result = await ingest.run(
+                                source,
+                                symbol,
+                                max_pages=max_pages,
+                                min_reply=min_reply,
+                                start_date=effective_start,
+                                end_date=effective_end,
+                                force_refresh=force_refresh,
+                            )
+                            await ingest_session.commit()
+                            return {"ok": True, **result}
+                        except Exception as exc:
+                            await ingest_session.rollback()
+                            return {
+                                "ok": False,
+                                "source": source,
+                                "symbol": symbol,
+                                "error": str(exc),
+                            }
+
+            pending = [asyncio.create_task(run_item(source, symbol)) for source, symbol in work_items]
+            for index, completed in enumerate(asyncio.as_completed(pending), start=1):
+                result = await completed
+                source = str(result.get("source") or "")
+                symbol = result.get("symbol")
+                progress.details["current_source"] = source
+                progress.details["current_symbol"] = symbol
+                if result.get("ok") is not False:
+                    progress.success_count += 1
+                else:
+                    progress.failed_count += 1
+                results.append(result)
+                if result.get("ok") is False and failure_strategy == "stop":
+                    for task in pending:
+                        if not task.done():
+                            task.cancel()
+                    raise RuntimeError(str(result.get("error") or f"{source} sentiment ingest failed"))
+                progress.current = index
+                progress.details["results"] = results
+                progress.details["outcome"] = (
+                    "partial" if progress.success_count and progress.failed_count else "running"
+                )
+                if run_id:
+                    await self.persist_sync_progress(progress, run_id=run_id, sync_task_id=task_id)
+
+            progress.end_time = datetime.now()
+            if progress.success_count == 0 and progress.failed_count:
+                progress.status = "failed"
+                progress.error_message = "All sentiment sources failed"
+                progress.details["outcome"] = "failed"
+            else:
+                progress.status = "completed"
+                progress.details["outcome"] = "partial" if progress.failed_count else "success"
+
+            await self.create_sync_log(
+                sync_type="sentiment",
+                status=progress.status,
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=progress.error_message,
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            return progress
+        except Exception as exc:
+            progress.status = "failed"
+            progress.end_time = datetime.now()
+            progress.error_message = str(exc)
+            progress.details["outcome"] = "failed"
+            progress.details["error"] = str(exc)[:500]
+            await self.create_sync_log(
+                sync_type="sentiment",
+                status="failed",
+                total_count=progress.total,
+                success_count=progress.success_count,
+                failed_count=progress.failed_count,
+                start_time=progress.start_time,
+                end_time=progress.end_time,
+                error_message=str(exc),
+                details=progress.details,
+                task_id=task_id,
+            )
+            await self.session.commit()
+            raise
+        finally:
+            _current_sync = None
 
     async def sync_sentiment_xueqiu(
         self,

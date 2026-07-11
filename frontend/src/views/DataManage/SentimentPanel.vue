@@ -14,6 +14,14 @@
       </div>
     </div>
 
+    <div v-if="activeRun && ['queued', 'running'].includes(activeRun.status)" class="run-status">
+      <div>
+        <strong>{{ activeRun.status === 'queued' ? '任务排队中' : '正在抓取舆情' }}</strong>
+        <span>{{ String(activeRun.details.stage || activeRun.details.current_source || '准备抓取') }}</span>
+      </div>
+      <el-progress :percentage="Math.round(activeRun.progress_percent || 0)" :stroke-width="8" />
+    </div>
+
     <div class="status-strip">
       <div class="status-card">
         <span>缓存帖子</span>
@@ -131,13 +139,15 @@
                 <small>{{ source.source }}</small>
               </div>
               <el-tag :type="source.ready ? 'success' : 'warning'" effect="dark" size="small">
-                {{ source.ready ? '可用' : '待配置' }}
+                {{ pipelineStateLabel(source.pipeline_state) }}
               </el-tag>
             </div>
             <ul class="source-card__meta">
               <li>缓存帖子 {{ formatNumber(source.post_count) }}</li>
               <li>覆盖股票 {{ formatNumber(source.symbol_count) }}</li>
               <li>最近时间 {{ formatDateTime(source.latest_published_at) }}</li>
+              <li>最近成功 {{ formatDateTime(source.last_success_at) }}</li>
+              <li>数据状态 {{ dataStateLabel(source.data_state) }}</li>
               <li>目录 {{ source.project_ready ? '已连接' : '缺失' }}</li>
               <li>Cookie {{ source.cookie_configured ? '已配置' : '未配置' }}</li>
               <li v-if="source.cache_dir">缓存文件 {{ formatNumber(source.cache_file_count) }}</li>
@@ -150,7 +160,10 @@
     <section class="panel summary-panel">
       <div class="panel-title">
         <h3>股票摘要</h3>
-        <span>{{ selectedSymbol || '请选择股票' }}</span>
+        <span v-if="selectedSymbol">
+          {{ selectedSymbol }} · 加权 {{ formatScore(summary?.weighted_score) }} · 置信度 {{ formatRatio(summary?.confidence) }}
+        </span>
+        <span v-else>请选择股票</span>
       </div>
 
       <el-empty v-if="!selectedSymbol" description="先选择一只股票" :image-size="72" />
@@ -163,8 +176,8 @@
             </div>
             <div class="summary-card__metrics">
               <div>
-                <span>均值情绪</span>
-                <strong>{{ formatScore(row.avg_sentiment) }}</strong>
+                <span>加权情绪</span>
+                <strong>{{ formatScore(row.weighted_sentiment ?? row.avg_sentiment) }}</strong>
               </div>
               <div>
                 <span>看多占比</span>
@@ -218,6 +231,20 @@
               </div>
             </article>
           </div>
+        </div>
+
+        <div v-if="summary?.event_clusters?.length" class="event-clusters">
+          <div class="hot-posts__head">
+            <strong>事件聚类</strong>
+            <span>{{ summary.model_version || 'finance_lexicon_v2' }}</span>
+          </div>
+          <article v-for="cluster in summary.event_clusters" :key="`${cluster.title}-${cluster.latest_at}`" class="event-cluster">
+            <div>
+              <strong>{{ trimText(cluster.title, 80) }}</strong>
+              <span>{{ cluster.sources.map(sourceLabel).join(' / ') }}</span>
+            </div>
+            <span>{{ cluster.post_count }} 条 · {{ formatScore(cluster.sentiment_score) }}</span>
+          </article>
         </div>
       </template>
     </section>
@@ -293,9 +320,17 @@
         <el-table-column prop="author" label="作者" width="120" show-overflow-tooltip />
         <el-table-column label="情绪" width="120">
           <template #default="{ row }">
-            <el-tag :type="sentimentTagType(row.sentiment_label)" effect="dark" size="small">
-              {{ sentimentLabel(row.sentiment_label) }}
-            </el-tag>
+            <div class="sentiment-cell">
+              <el-tag :type="sentimentTagType(row.sentiment_label)" effect="dark" size="small">
+                {{ sentimentLabel(row.sentiment_label) }}
+              </el-tag>
+              <small>{{ formatScore(row.sentiment_score) }} / {{ formatRatio(row.analysis?.confidence) }}</small>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column label="匹配" width="112" show-overflow-tooltip>
+          <template #default="{ row }">
+            {{ row.match?.method || '-' }} {{ row.match?.confidence != null ? formatRatio(row.match.confidence) : '' }}
           </template>
         </el-table-column>
         <el-table-column label="热度" width="148">
@@ -315,7 +350,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
@@ -323,6 +358,7 @@ import {
   sentimentApi,
   type SentimentIngestBatchResult,
   type SentimentIngestSourceResult,
+  type SentimentIngestRun,
   type SentimentOverview,
   type SentimentOverviewSource,
   type SentimentPost,
@@ -330,6 +366,10 @@ import {
   type SentimentSummary,
   type SentimentSummarySource,
 } from '@/api/sentiment'
+
+const props = defineProps<{
+  initialSymbol?: string
+}>()
 
 interface StockOption {
   symbol: string
@@ -347,7 +387,7 @@ const sourceOptions: Array<{ value: SentimentSource; label: string }> = [
   { value: 'flocktrader', label: 'NGA' },
 ]
 
-const selectedSymbol = ref('')
+const selectedSymbol = ref(props.initialSymbol || '')
 const selectedSources = ref<SentimentSource[]>(sourceOptions.map(item => item.value))
 const dateRange = ref<[string, string] | []>([])
 const maxPages = ref(3)
@@ -363,6 +403,7 @@ const overview = ref<SentimentOverview | null>(null)
 const summary = ref<SentimentSummary | null>(null)
 const posts = ref<SentimentPost[]>([])
 const lastIngest = ref<SentimentIngestBatchResult | null>(null)
+const activeRun = ref<SentimentIngestRun | null>(null)
 
 const isRefreshing = computed(() => loadingOverview.value || loadingSummary.value || loadingPosts.value)
 const requiresSymbolForIngest = computed(() =>
@@ -400,6 +441,8 @@ const sourceCards = computed(() =>
       post_count: 0,
       symbol_count: 0,
       latest_published_at: null,
+      pipeline_state: 'blocked' as const,
+      data_state: 'missing' as const,
     }
   }),
 )
@@ -415,6 +458,8 @@ const summarySourceRows = computed(() =>
       bullish_ratio: summaryRow?.bullish_ratio || 0,
       bearish_ratio: summaryRow?.bearish_ratio || 0,
       avg_sentiment: summaryRow?.avg_sentiment ?? null,
+      weighted_sentiment: summaryRow?.weighted_sentiment ?? null,
+      confidence: summaryRow?.confidence || 0,
       top_keywords: summaryRow?.top_keywords || '',
     }
   }),
@@ -436,6 +481,21 @@ function sourceLabel(source: SentimentSource) {
 function ingestTargetLabel(result?: SentimentIngestBatchResult | null) {
   if (!result) return '-'
   return result.symbol || '全市场/主题抓取'
+}
+
+function pipelineStateLabel(value?: SentimentOverviewSource['pipeline_state']) {
+  if (value === 'healthy') return '健康'
+  if (value === 'auth_required') return '需登录'
+  if (value === 'failing') return '抓取失败'
+  if (value === 'stale') return '已过期'
+  return '不可用'
+}
+
+function dataStateLabel(value?: SentimentOverviewSource['data_state']) {
+  if (value === 'fresh') return '新鲜'
+  if (value === 'quiet') return '暂无新帖'
+  if (value === 'stale') return '过期'
+  return '无数据'
 }
 
 function formatNumber(value: number) {
@@ -555,24 +615,36 @@ async function reloadAll() {
   }
 }
 
-function normalizeBatchResult(
-  result: SentimentIngestBatchResult | SentimentIngestSourceResult,
-): SentimentIngestBatchResult {
-  if ('results' in result) {
-    return result
-  }
-  const ok = result.ok !== false
+function batchResultFromRun(run: SentimentIngestRun): SentimentIngestBatchResult {
+  const rawResults = Array.isArray(run.details.results) ? run.details.results : []
+  const results = rawResults.filter(
+    (item): item is SentimentIngestSourceResult => Boolean(item && typeof item === 'object' && 'source' in item),
+  )
+  const succeeded = results.filter(item => item.ok !== false).map(item => item.source)
+  const failed = results.filter(item => item.ok === false).map(item => item.source)
   return {
-    symbol: result.symbol,
-    requested_sources: [result.source],
-    succeeded_sources: ok ? [result.source] : [],
-    failed_sources: ok ? [] : [result.source],
-    all_succeeded: ok,
-    total_upserted: Number(result.upserted || 0),
-    total_collected: Number(result.collected || 0),
-    total_matched: Number(result.matched || 0),
-    results: [{ ok, ...result }],
+    symbol: selectedSymbol.value || null,
+    requested_sources: selectedSources.value,
+    succeeded_sources: succeeded,
+    failed_sources: failed,
+    all_succeeded: failed.length === 0 && run.status === 'completed',
+    total_upserted: results.reduce((sum, item) => sum + Number(item.upserted || 0), 0),
+    total_collected: results.reduce((sum, item) => sum + Number(item.collected || 0), 0),
+    total_matched: results.reduce((sum, item) => sum + Number(item.matched || 0), 0),
+    results,
   }
+}
+
+async function waitForIngestRun(initial: SentimentIngestRun) {
+  activeRun.value = initial
+  const deadline = Date.now() + 30 * 60 * 1000
+  while (Date.now() < deadline) {
+    const run = await sentimentApi.ingestRun(initial.run_id)
+    activeRun.value = run
+    if (['completed', 'failed', 'cancelled'].includes(run.status)) return run
+    await new Promise(resolve => window.setTimeout(resolve, 1000))
+  }
+  throw new Error('舆情任务等待超时，请在系统监控中查看任务状态')
 }
 
 async function runIngest() {
@@ -596,7 +668,7 @@ async function runIngest() {
   ingesting.value = true
   try {
     const [start_date, end_date] = Array.isArray(dateRange.value) ? dateRange.value : []
-    const result = await sentimentApi.ingest({
+    const submitted = await sentimentApi.ingest({
       symbol: selectedSymbol.value || undefined,
       sources: selectedSources.value,
       max_pages: maxPages.value,
@@ -605,15 +677,18 @@ async function runIngest() {
       end_date: end_date || undefined,
       force_refresh: forceRefresh.value,
     })
-    const normalized = normalizeBatchResult(result)
+    const run = await waitForIngestRun(submitted)
+    const normalized = batchResultFromRun(run)
     lastIngest.value = normalized
 
-    if (normalized.failed_sources.length && normalized.succeeded_sources.length) {
+    if (run.status === 'cancelled') {
+      ElMessage.warning('舆情抓取已取消')
+    } else if (normalized.failed_sources.length && normalized.succeeded_sources.length) {
       ElMessage.warning(
         `部分完成：成功 ${normalized.succeeded_sources.join(', ')}，失败 ${normalized.failed_sources.join(', ')}`,
       )
-    } else if (normalized.failed_sources.length) {
-      ElMessage.error(`抓取失败：${normalized.failed_sources.join(', ')}`)
+    } else if (normalized.failed_sources.length || run.status === 'failed') {
+      ElMessage.error(run.error_message || `抓取失败：${normalized.failed_sources.join(', ')}`)
     } else {
       ElMessage.success(`抓取完成，新增/更新 ${normalized.total_upserted} 条情绪记录`)
     }
@@ -623,6 +698,16 @@ async function runIngest() {
     ingesting.value = false
   }
 }
+
+watch(
+  () => props.initialSymbol,
+  value => {
+    if (value && value !== selectedSymbol.value) {
+      selectedSymbol.value = value
+      void reloadSnapshot()
+    }
+  },
+)
 
 onMounted(() => {
   void reloadAll()
@@ -641,6 +726,66 @@ onMounted(() => {
     linear-gradient(320deg, rgba(251, 191, 36, 0.05), transparent 24%),
     #0d141d;
   min-height: 100%;
+}
+
+.run-status {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.8fr) minmax(260px, 1.2fr);
+  gap: 18px;
+  align-items: center;
+  padding: 12px 14px;
+  border: 1px solid var(--border-color);
+  background: rgba(15, 23, 42, 0.34);
+}
+
+.run-status div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.run-status span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.event-clusters {
+  margin-top: 16px;
+  border-top: 1px solid var(--border-color);
+  padding-top: 14px;
+}
+
+.event-cluster {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.event-cluster div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.event-cluster span {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.sentiment-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+}
+
+.sentiment-cell small {
+  color: var(--text-secondary);
+  font-size: 11px;
 }
 
 .sentiment-head {
@@ -1045,6 +1190,129 @@ a:hover {
   color: #07111c;
 }
 
+/* Embedded DataManage theme */
+.sentiment-workbench {
+  min-width: 0;
+  overflow: hidden;
+  padding: 14px 0 0;
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.sentiment-head {
+  padding: 4px 0 18px;
+  border: 0;
+  border-bottom: 1px solid var(--border-default);
+  border-radius: 0;
+  background: transparent;
+}
+
+.eyebrow {
+  color: var(--accent-primary);
+  letter-spacing: 0;
+}
+
+.sentiment-head h2,
+.panel-title h3,
+.source-card__head strong,
+.summary-card__head strong,
+.summary-card__metrics strong,
+.hot-posts__head strong,
+.hot-post__title,
+.post-main strong,
+.status-card strong {
+  color: var(--text-bright);
+}
+
+.sentiment-head p,
+.panel-title span,
+.source-card__head small,
+.summary-card__head span,
+.summary-card__metrics span,
+.hot-posts__head span,
+.hot-post__meta,
+.hot-post__footer,
+.hot-post__content,
+.post-main small,
+.field-hint,
+.status-card span,
+.source-card__meta {
+  color: var(--text-secondary);
+}
+
+.run-status,
+.status-card,
+.source-card,
+.summary-card,
+.hot-post {
+  border: 1px solid var(--border-default);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--bg-primary) 92%, var(--bg-elevated));
+  box-shadow: none;
+}
+
+.panel {
+  padding: 18px 0;
+  border: 0;
+  border-top: 1px solid var(--border-default);
+  border-radius: 0;
+  background: transparent;
+}
+
+.layout-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.source-card-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.keyword-chip,
+.keyword-chip--ghost {
+  border-radius: 4px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+}
+
+.sentiment-table :deep(.el-table th.el-table__cell) {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+}
+
+.sentiment-table :deep(.el-table td.el-table__cell) {
+  color: var(--text-primary);
+  border-bottom-color: var(--border-subtle);
+}
+
+a,
+a:hover {
+  color: var(--accent-primary);
+}
+
+:deep(.el-input__wrapper),
+:deep(.el-select__wrapper),
+:deep(.el-textarea__inner),
+:deep(.el-input-number__decrease),
+:deep(.el-input-number__increase),
+:deep(.el-checkbox-button__inner) {
+  background: var(--bg-primary);
+  border-color: var(--border-default);
+  color: var(--text-primary);
+}
+
+:deep(.el-input__inner),
+:deep(.el-select__selected-item),
+:deep(.el-textarea__inner) {
+  color: var(--text-primary);
+}
+
+:deep(.el-checkbox-button.is-checked .el-checkbox-button__inner) {
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+  color: #fff;
+}
+
 @media (max-width: 1200px) {
   .layout-grid,
   .summary-grid,
@@ -1071,6 +1339,15 @@ a:hover {
   }
 
   .source-card__meta {
+    grid-template-columns: 1fr;
+  }
+
+  .source-card-list,
+  .summary-grid,
+  .hot-posts__list,
+  .status-strip,
+  .result-strip,
+  .run-status {
     grid-template-columns: 1fr;
   }
 }

@@ -3,10 +3,11 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
-from app.db.models.sentiment import SentimentPost
+from app.db.models.sentiment import SentimentAnalysis, SentimentMention, SentimentPost
 from app.db.models.stock import Stock
 from app.services.sentiment import (
     NgaIngestStats,
@@ -14,6 +15,7 @@ from app.services.sentiment import (
     SentimentPostInput,
     SentimentService,
     _inject_xueqiu_cookie,
+    _finance_sentiment_v2,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
     _parse_laohu8_stock_posts,
@@ -88,6 +90,53 @@ def test_parse_sources_validates_supported_values():
     assert normalize_sentiment_source("股吧") == "eastmoney_guba"
     assert normalize_sentiment_source("淘股吧") == "taoguba"
     assert normalize_sentiment_source("百度贴吧") == "tieba_stock"
+
+
+def test_finance_lexicon_v2_handles_negation_and_confidence():
+    bullish_score, bullish_label, bullish_confidence, bullish_evidence = _finance_sentiment_v2(
+        "业绩超预期，准备明显加仓，看多后续突破"
+    )
+    bearish_score, bearish_label, bearish_confidence, bearish_evidence = _finance_sentiment_v2(
+        "业绩低于预期，不看多，计划减仓"
+    )
+
+    assert bullish_score > 0.6
+    assert bullish_label == "bullish"
+    assert bullish_confidence > 0.4
+    assert bullish_evidence
+    assert bearish_score < 0.4
+    assert bearish_label == "bearish"
+    assert bearish_confidence > 0.4
+    assert any(item["negated"] for item in bearish_evidence)
+
+
+@pytest.mark.asyncio
+async def test_upsert_writes_versioned_analysis_and_match_evidence(sentiment_session):
+    service = SentimentService(sentiment_session)
+    await service.upsert_posts(
+        [
+            SentimentPostInput(
+                source="xueqiu",
+                source_post_id="analysis-1",
+                symbol="600519.SH",
+                title="贵州茅台业绩超预期，继续加仓",
+                content="600519 有望突破前高",
+            )
+        ]
+    )
+
+    post = (await sentiment_session.execute(select(SentimentPost))).scalar_one()
+    mention = (await sentiment_session.execute(select(SentimentMention))).scalar_one()
+    analysis = (await sentiment_session.execute(select(SentimentAnalysis))).scalar_one()
+    serialized = serialize_post(post)
+
+    assert post.sentiment_label == "bullish"
+    assert mention.match_method == "code_exact"
+    assert mention.confidence == 1.0
+    assert analysis.model_version == "finance_lexicon_v2"
+    assert analysis.confidence > 0
+    assert serialized["analysis"]["model_version"] == "finance_lexicon_v2"
+    assert serialized["match"]["method"] == "code_exact"
     assert normalize_sentiment_source("老虎社区") == "laohu8_stock"
     assert normalize_sentiment_source("集思录") == "jisilu"
     assert normalize_sentiment_source("公众号") == "wechat_sogou"
@@ -289,16 +338,17 @@ async def test_sentiment_service_overview_counts_sources_and_runtime_status(sent
     assert overview["total_posts"] == 2
     assert overview["symbol_count"] == 2
     assert overview["latest_published_at"] == "2026-05-11T10:00:00"
-    assert rows["xueqiu_spyder"]["ready"] is True
+    assert rows["xueqiu_spyder"]["ready"] is False
+    assert rows["xueqiu_spyder"]["pipeline_state"] == "stale"
     assert rows["xueqiu_spyder"]["cookie_configured"] is True
-    assert rows["taoguba"]["ready"] is True
-    assert rows["tieba_stock"]["ready"] is True
+    assert rows["taoguba"]["ready"] is False
+    assert rows["tieba_stock"]["ready"] is False
     assert rows["tieba_stock"]["bar_count"] >= 3
-    assert rows["laohu8_stock"]["ready"] is True
+    assert rows["laohu8_stock"]["ready"] is False
     assert rows["laohu8_stock"]["symbol_count_configured"] >= 5
-    assert rows["wechat_sogou"]["ready"] is True
+    assert rows["wechat_sogou"]["ready"] is False
     assert rows["wechat_sogou"]["account_count"] >= 10
-    assert rows["flocktrader"]["ready"] is True
+    assert rows["flocktrader"]["ready"] is False
     assert rows["flocktrader"]["cache_file_count"] == 1
 
 

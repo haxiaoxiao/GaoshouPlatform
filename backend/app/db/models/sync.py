@@ -23,6 +23,7 @@ class SyncTask(Base, TimestampMixin):
         String(50), nullable=False, comment="同步类型: stock_info/kline_daily/kline_minute"
     )
     symbols: Mapped[str | None] = mapped_column(Text, comment="股票代码列表(JSON)")
+    options_json: Mapped[str | None] = mapped_column(Text, comment="同步任务扩展参数(JSON)")
     start_date: Mapped[date | None] = mapped_column(Date, comment="历史数据起始日期")
     end_date: Mapped[date | None] = mapped_column(Date, comment="历史数据结束日期")
     failure_strategy: Mapped[str] = mapped_column(

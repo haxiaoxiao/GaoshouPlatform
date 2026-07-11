@@ -60,3 +60,49 @@ class SentimentThread(Base, TimestampMixin):
     symbols_json: Mapped[str | None] = mapped_column(Text)
     keywords_json: Mapped[str | None] = mapped_column(Text)
     raw_json: Mapped[str | None] = mapped_column(Text)
+
+
+class SentimentMention(Base, TimestampMixin):
+    """Evidence-backed mapping from a source document to an A-share symbol."""
+
+    __tablename__ = "sentiment_mentions"
+    __table_args__ = (
+        UniqueConstraint("source", "source_thread_id", "symbol", name="uq_sentiment_mention"),
+        Index("ix_sentiment_mention_symbol", "symbol"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_thread_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False)
+    match_method: Mapped[str] = mapped_column(String(32), nullable=False, default="legacy")
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    evidence: Mapped[str | None] = mapped_column(String(500))
+
+
+class SentimentAnalysis(Base, TimestampMixin):
+    """Versioned sentiment output for a source item and optional symbol scope."""
+
+    __tablename__ = "sentiment_analyses"
+    __table_args__ = (
+        UniqueConstraint(
+            "source",
+            "source_item_id",
+            "symbol",
+            "model_version",
+            name="uq_sentiment_analysis_version",
+        ),
+        Index("ix_sentiment_analysis_symbol", "symbol", "analyzed_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_item_id: Mapped[str] = mapped_column(String(160), nullable=False)
+    symbol: Mapped[str] = mapped_column(String(20), nullable=False, default="")
+    model_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    score: Mapped[float | None] = mapped_column(Float)
+    label: Mapped[str | None] = mapped_column(String(20))
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    evidence_json: Mapped[str | None] = mapped_column(Text)
+    keywords_json: Mapped[str | None] = mapped_column(Text)
+    analyzed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)

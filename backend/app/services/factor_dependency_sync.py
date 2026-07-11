@@ -411,10 +411,12 @@ async def execute_factor_dependency_sync(
 
 def _sync_tushare_daily_step(step: dict[str, Any]) -> dict[str, Any]:
     from app.scripts.sync_tushare_daily_to_parquet import (
+        fetch_adj_factors,
         fetch_daily_basic,
         fetch_limit_prices,
         iter_days,
         tushare_client,
+        write_adj_factors_parquet,
         write_daily_basic_sqlite,
         write_limit_prices_sqlite,
     )
@@ -436,12 +438,19 @@ def _sync_tushare_daily_step(step: dict[str, Any]) -> dict[str, Any]:
     db_path = Path(settings.data_dir) / "gaoshou.db"
     daily_basic_rows = 0
     limit_rows = 0
+    adj_factor_rows = 0
     for trade_date in iter_days(start, end):
         if "stock_daily_basic" in datasets:
             daily_basic_rows += write_daily_basic_sqlite(db_path, fetch_daily_basic(pro, trade_date))
         if "stock_limit_prices" in datasets:
             limit_rows += write_limit_prices_sqlite(db_path, fetch_limit_prices(pro, trade_date))
-    return {"daily_basic_rows": daily_basic_rows, "limit_rows": limit_rows}
+        if "adj_factors" in datasets:
+            adj_factor_rows += write_adj_factors_parquet(fetch_adj_factors(pro, trade_date))
+    return {
+        "daily_basic_rows": daily_basic_rows,
+        "limit_rows": limit_rows,
+        "adj_factor_rows": adj_factor_rows,
+    }
 
 
 async def _sync_kline_daily_step(

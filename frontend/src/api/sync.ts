@@ -51,6 +51,7 @@ export interface SyncRequest {
     | 'ths_concept'
     | 'sentiment_xueqiu'
     | 'sentiment_nga'
+    | 'sentiment'
   symbols?: string[]
   index_symbols?: string[]
   start_date?: string
@@ -61,6 +62,10 @@ export interface SyncRequest {
   factor_sync_plan?: Record<string, unknown>
   relay_datasets?: string[]
   relay_options?: Record<string, unknown>
+  sentiment_sources?: string[]
+  max_pages?: number
+  min_reply?: number
+  force_refresh?: boolean
 }
 
 export interface SyncCatalogItem {
@@ -95,6 +100,7 @@ export interface SyncPreset {
   description: string
   sync_types: string[]
   relay_datasets: string[]
+  display_item_count?: number
   include_by_default?: boolean
 }
 

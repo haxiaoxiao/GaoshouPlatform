@@ -286,42 +286,8 @@
             </div>
           </div>
 
-          <div v-show="activeTab === 'sentiment'" class="tab-runtime-panel">
-            <div class="panel-head">
-              <div>
-                <span class="section-kicker">SENTIMENT / EVENTS</span>
-                <h3>舆情与事件</h3>
-              </div>
-              <div class="panel-tools">
-                <el-select v-model="sentimentSource" class="compact-control">
-                  <el-option label="全部来源" value="all" />
-                  <el-option label="雪球" value="xueqiu" />
-                  <el-option label="东财股吧" value="eastmoney" />
-                  <el-option label="淘股吧" value="taoguba" />
-                  <el-option label="NGA" value="nga" />
-                </el-select>
-              </div>
-            </div>
-
-            <div class="sentiment-layout">
-              <article class="sentiment-score">
-                <span>情绪评分</span>
-                <strong>{{ sentimentScore }}</strong>
-                <p>基于缓存帖子数量、最近同步时间和关键词热度展示；无缓存时显示待同步状态。</p>
-              </article>
-
-              <div class="keyword-cloud">
-                <span v-for="keyword in sentimentKeywords" :key="keyword">{{ keyword }}</span>
-              </div>
-            </div>
-
-            <div class="event-timeline">
-              <article v-for="event in sentimentEvents" :key="event.title" class="timeline-row">
-                <span>{{ event.time }}</span>
-                <strong>{{ event.title }}</strong>
-                <p>{{ event.detail }}</p>
-              </article>
-            </div>
+          <div v-show="activeTab === 'sentiment'" class="tab-runtime-panel tab-runtime-panel--flush">
+            <SentimentPanel :initial-symbol="selectedSymbol" />
           </div>
 
           <div v-show="activeTab === 'schema'" class="tab-runtime-panel">
@@ -440,6 +406,7 @@ import { klineApi, toDisplayFormat, type KlineDataDisplay, type KlineType } from
 import { systemApi, type DataSummary, type DataSummaryItem } from '@/api/system'
 import { syncApi, type SyncLog } from '@/api/sync'
 import KlineChart from './KlineChart.vue'
+import SentimentPanel from './SentimentPanel.vue'
 
 type FreshnessTone = 'good' | 'warn' | 'bad' | 'neutral'
 type TabKey = 'market' | 'financial' | 'capital' | 'sentiment' | 'schema'
@@ -527,7 +494,6 @@ const klineDateRange = ref<[string, string]>(defaultDateRange(365))
 const financialPeriodFilter = ref<FinancialPeriodFilter>('all')
 const pitMode = ref(true)
 const capitalMode = ref<'historical' | 'intraday'>('historical')
-const sentimentSource = ref('all')
 const schemaScope = ref('stock')
 
 const domainTabs: { key: TabKey; label: string; hint: string }[] = [
@@ -664,36 +630,6 @@ const liquidityRows = computed(() => [
   { label: '最大样本成交额', value: formatYuanMoney(maxBy(klineRows.value, row => row.amount)), hint: '用于大额下单可行性判断' },
   { label: '数据口径', value: klinePeriod.value === 'daily' ? 'klines_daily' : 'klines_minute', hint: '与同步服务保持一致' },
 ])
-
-const sentimentScore = computed(() => {
-  const item = summaryMap.value.sentiment
-  if (!item || item.status === 'missing') return '待同步'
-  if (item.status === 'good') return '64'
-  if (item.status === 'stale') return '48'
-  return '需检查'
-})
-
-const sentimentKeywords = computed(() => {
-  if (sentimentSource.value === 'xueqiu') return ['业绩', '分红', '机构', '估值']
-  if (sentimentSource.value === 'eastmoney') return ['股吧', '龙虎榜', '资金', '公告']
-  return ['业绩', '估值', '资金', '公告', '分红', '情绪反转']
-})
-
-const sentimentEvents = computed(() => {
-  const item = summaryMap.value.sentiment
-  return [
-    {
-      time: latestValue(item),
-      title: item?.status_text || '舆情缓存状态',
-      detail: item ? `${item.source} · ${formatRowCount(item.row_count, item.row_count_estimated)}` : '暂无舆情口径，请先同步。',
-    },
-    {
-      time: stockDetail.value?.latest_ann_date || '-',
-      title: '最近财报披露',
-      detail: stockDetail.value?.latest_report_date ? `报告期 ${stockDetail.value.latest_report_date}` : '当前股票未读取到披露日期。',
-    },
-  ]
-})
 
 const sourceRows = computed(() => [
   sourceRow('market_daily', '日线行情'),

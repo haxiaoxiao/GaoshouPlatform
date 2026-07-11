@@ -21,7 +21,7 @@ if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else
 if defined GAOSHOU_SYNC_HOST (set "SYNC_HOST=%GAOSHOU_SYNC_HOST%") else (set "SYNC_HOST=127.0.0.1")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
 if defined GAOSHOU_FRONTEND_HOST (set "FRONTEND_HOST=%GAOSHOU_FRONTEND_HOST%") else (set "FRONTEND_HOST=127.0.0.1")
-if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3511")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
 
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
@@ -29,6 +29,8 @@ if "%GAOSHOU_SKIP_PAUSE%"=="1" set "NO_PAUSE=1"
 set "SKIP_OPTIONAL_CHECKS=0"
 if "%GAOSHOU_SKIP_OPTIONAL_CHECKS%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
 if "%GAOSHOU_SKIP_DOCKER%"=="1" set "SKIP_OPTIONAL_CHECKS=1"
+set "OPEN_BROWSER=1"
+if "%GAOSHOU_OPEN_BROWSER%"=="0" set "OPEN_BROWSER=0"
 
 set "MARKET_DATA_BACKEND=parquet"
 set "GAOSHOU_DATA_DIR="
@@ -69,7 +71,6 @@ if not defined TUSHARE_TOKEN if defined TS_TOKEN set "TUSHARE_TOKEN=%TS_TOKEN%"
 
 set "BACKEND_URL=http://%BACKEND_HOST%:%BACKEND_PORT%/health"
 set "SYNC_URL=http://%SYNC_HOST%:%SYNC_PORT%/health"
-set "FRONTEND_URL=http://%FRONTEND_HOST%:%FRONTEND_PORT%"
 set "SYNC_SERVICE_URL=http://%SYNC_HOST%:%SYNC_PORT%"
 set "SYNC_SERVICE_PORT=%SYNC_PORT%"
 set "QMT_ACCOUNT_MASK=not configured"
@@ -82,7 +83,7 @@ echo Root:      %ROOT%
 echo Env file:  %ENV_FILE%
 echo Backend:   http://%BACKEND_HOST%:%BACKEND_PORT%
 echo Sync:      http://%SYNC_HOST%:%SYNC_PORT%
-echo Frontend:  %FRONTEND_URL%
+echo Frontend:  preferred port %FRONTEND_PORT% (dynamic fallback enabled)
 echo Data mode: %MARKET_DATA_BACKEND%  storage=Parquet/DuckDB
 if defined GAOSHOU_DATA_DIR echo Data root: %GAOSHOU_DATA_DIR%
 if defined PARQUET_DATA_DIR echo Parquet:   %PARQUET_DATA_DIR%
@@ -110,6 +111,13 @@ if not exist "%FRONTEND_DIR%\package.json" (
 echo [1/8] Stopping stale project processes on configured ports...
 call :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
+call :resolve_frontend_port
+if errorlevel 1 (
+  echo [ERROR] No usable frontend port was found.
+  if "%NO_PAUSE%"=="0" pause
+  exit /b 1
+)
+set "FRONTEND_URL=http://%FRONTEND_HOST%:%FRONTEND_PORT%"
 call :assert_ports_free
 if errorlevel 1 (
   if "%NO_PAUSE%"=="0" pause
@@ -236,17 +244,28 @@ echo Sync health:   http://%SYNC_HOST%:%SYNC_PORT%/health
 echo Live trading:  %FRONTEND_URL%/trade
 echo Frontend:      %FRONTEND_URL%
 echo.
+if "%OPEN_BROWSER%"=="1" start "" "%FRONTEND_URL%/data"
 if "%NO_PAUSE%"=="0" pause
+exit /b 0
+
+:resolve_frontend_port
+set "PREFERRED_FRONTEND_PORT=%FRONTEND_PORT%"
+set "FRONTEND_PORT="
+for /f "usebackq delims=" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$candidates=@([int]'%PREFERRED_FRONTEND_PORT%') + (3511..3599); foreach($port in $candidates){ $listener=$null; try { $listener=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,$port); $listener.Start(); $listener.Stop(); Write-Output $port; exit 0 } catch { if($listener){$listener.Stop()} } }; exit 1"`) do set "FRONTEND_PORT=%%p"
+if not defined FRONTEND_PORT exit /b 1
+if not "%FRONTEND_PORT%"=="%PREFERRED_FRONTEND_PORT%" echo       WARN: frontend port %PREFERRED_FRONTEND_PORT% is unavailable; using %FRONTEND_PORT%.
+if not exist "%ROOT%\.runtime" mkdir "%ROOT%\.runtime" >nul 2>&1
+>"%ROOT%\.runtime\frontend-port.txt" echo %FRONTEND_PORT%
 exit /b 0
 
 :stop_project_processes
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run (dev|preview)|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%'); if(Test-Path -LiteralPath '%ROOT%\.runtime\frontend-port.txt'){ $saved=Get-Content -LiteralPath '%ROOT%\.runtime\frontend-port.txt' -ErrorAction SilentlyContinue; if($saved -match '^\d+$'){ $ports += [int]$saved } }; $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run (dev|preview)|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*%ROOT%\frontend*' -and $_.CommandLine -match 'vite\.js.*preview' } | ForEach-Object { $ids += [int]$_.ProcessId }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
 exit /b 0
 
 :assert_ports_free
 set "PORTS_BUSY=0"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ranges=netsh interface ipv4 show excludedportrange protocol=tcp | Select-String '^\s*(\d+)\s+(\d+)\s*$'; foreach($match in $ranges){$start=[int]$match.Matches[0].Groups[1].Value; $end=[int]$match.Matches[0].Groups[2].Value; foreach($port in $ports){if($port -ge $start -and $port -le $end){Write-Host ('      ERROR: port ' + $port + ' is reserved by Windows (' + $start + '-' + $end + ')'); exit 1}}}"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%'); $ranges=netsh interface ipv4 show excludedportrange protocol=tcp | Select-String '^\s*(\d+)\s+(\d+)\s*$'; foreach($match in $ranges){$start=[int]$match.Matches[0].Groups[1].Value; $end=[int]$match.Matches[0].Groups[2].Value; foreach($port in $ports){if($port -ge $start -and $port -le $end){Write-Host ('      ERROR: port ' + $port + ' is reserved by Windows (' + $start + '-' + $end + ')'); exit 1}}}"
 if errorlevel 1 exit /b 1
 for %%p in (%BACKEND_PORT% %SYNC_PORT% %FRONTEND_PORT%) do (
   netstat -ano 2>nul | findstr ":%%p " | findstr "LISTENING" >nul 2>&1

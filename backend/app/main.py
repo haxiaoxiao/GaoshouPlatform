@@ -11,6 +11,7 @@ from app.core.blocking import install_default_executor, shutdown_default_executo
 from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 from app.core.logging import setup_logging
 from app.db import init_db
+from app.services.runtime_tasks import mark_stale_runtime_tasks_failed
 
 # 配置日志
 setup_logging(debug=True)
@@ -26,6 +27,9 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     await init_db()
     logger.info("Database initialized")
+    stale_sentiment_tasks = mark_stale_runtime_tasks_failed(kinds={"sentiment_ingest"})
+    if stale_sentiment_tasks:
+        logger.warning("Marked {} legacy sentiment task(s) as failed", stale_sentiment_tasks)
 
     # 启动调度器
     logger.info("Sync scheduler is owned by the isolated sync service")
