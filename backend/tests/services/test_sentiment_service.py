@@ -20,6 +20,7 @@ from app.services.sentiment import (
     _parse_jisilu_list_posts,
     _parse_laohu8_stock_posts,
     _parse_nga_board_topics,
+    _parse_nga_thread_posts,
     _parse_taoguba_article_detail,
     _parse_taoguba_blog_articles,
     _parse_tieba_stock_threads,
@@ -496,6 +497,36 @@ def test_parse_nga_board_topics_reads_last_reply_time():
     assert topics[0]["reply_count"] == 10355
     assert topics[0]["publish_time"] == datetime.fromtimestamp(1779952664)
     assert topics[0]["last_reply_time"] == datetime.fromtimestamp(1782532787)
+
+
+def test_parse_nga_thread_posts_separates_quote_and_reads_author():
+    html_text = """
+    <a href='nuke.php?func=ucp&uid=37978846' id='postauthor43' class='author b'></a>
+    <span id='postdate43'>2026-07-11 17:53</span>
+    <span id='postcontentandsubject43'>
+      <h3 id='postsubject43'></h3><br/>
+      <span id='postcontent43' class='postcontent ubbcode'>
+        [quote]Gothの7酱 (2026-07-11 17:45): 市场不是都告诉你了吗[/quote]
+        这波逻辑如果走通都要涨，迟早的问题
+      </span>
+    </span>
+    <script>NEEDLE 当前回复者 19232
+    </script>
+    """
+
+    posts = _parse_nga_thread_posts(html_text)
+
+    assert posts == [
+        {
+            "floor": 43,
+            "author": "当前回复者",
+            "author_id": "37978846",
+            "publish_time": "2026-07-11 17:53",
+            "title": "",
+            "content": "这波逻辑如果走通都要涨，迟早的问题",
+            "quoted_content": "Gothの7酱 (2026-07-11 17:45): 市场不是都告诉你了吗",
+        }
+    ]
 
 
 @pytest.mark.asyncio

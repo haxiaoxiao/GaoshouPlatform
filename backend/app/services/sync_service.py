@@ -3404,6 +3404,92 @@ class SyncService:
         finally:
             _current_sync = None
 
+    async def sync_sentiment_thread_url(
+        self,
+        thread_url: str,
+        task_id: int | None = None,
+        run_id: str | None = None,
+    ) -> SyncProgress:
+        from app.services.sentiment import (
+            SentimentService,
+            SentimentThreadInput,
+            _finance_sentiment_v2,
+            _parse_datetime,
+            crawl_forum_thread_url,
+        )
+
+        if not thread_url.strip():
+            raise ValueError("thread_url is required")
+        progress = SyncProgress(
+            sync_type="sentiment_thread",
+            status="running",
+            start_time=datetime.now(),
+            total=1,
+            details={"run_id": run_id, "thread_url": thread_url, "sync_mode": "full"},
+        )
+
+        def on_progress(event: dict[str, Any]) -> None:
+            progress.details.update({
+                "crawler_progress": event,
+                "stage": event.get("stage"),
+                "current_source": event.get("source"),
+                "current_step": event.get("current_step"),
+                "current_page": event.get("current_page"),
+                "page_limit": event.get("page_limit"),
+                "current_tid": event.get("current_tid"),
+            })
+
+        try:
+            raw = await asyncio.to_thread(crawl_forum_thread_url, thread_url, on_progress)
+            analysis_text = " ".join([
+                str(raw.get("title") or ""),
+                str(raw.get("content") or ""),
+                *[str(item.get("content") or "") for item in raw.get("comments") or []],
+            ])
+            sentiment_score, sentiment_label, _, _ = _finance_sentiment_v2(analysis_text)
+            thread = SentimentThreadInput(
+                source=str(raw["source"]),
+                source_thread_id=str(raw["source_thread_id"]),
+                title=str(raw.get("title") or ""),
+                content=str(raw.get("content") or ""),
+                author=raw.get("author"),
+                published_at=_parse_datetime(raw.get("published_at")),
+                last_reply_at=_parse_datetime(raw.get("last_reply_at")),
+                url=str(raw.get("url") or thread_url),
+                reply_count=int(raw.get("reply_count") or 0),
+                comment_count=len(raw.get("comments") or []),
+                sentiment_score=sentiment_score,
+                sentiment_label=sentiment_label,
+                symbols=[],
+                keywords=[],
+                raw=raw,
+            )
+            upserted = await SentimentService(self.session).upsert_threads([thread])
+            progress.current = progress.total = progress.success_count = 1
+            progress.status = "completed"
+            progress.end_time = datetime.now()
+            progress.details.update({
+                "source": raw["source"],
+                "source_thread_id": raw["source_thread_id"],
+                "title": raw.get("title"),
+                "page_count": raw.get("page_count"),
+                "floor_count": len(raw.get("all_floors") or []),
+                "comment_count": len(raw.get("comments") or []),
+                "complete": raw.get("complete"),
+                "warning": raw.get("warning"),
+                "threads_upserted": upserted,
+                "outcome": "success" if raw.get("complete") else "partial",
+            })
+            await self.session.commit()
+            return progress
+        except Exception as exc:
+            await self.session.rollback()
+            progress.status = "failed"
+            progress.failed_count = 1
+            progress.end_time = datetime.now()
+            progress.error_message = str(exc)
+            raise
+
     async def sync_sentiment_xueqiu(
         self,
         symbols: list[str] | None = None,

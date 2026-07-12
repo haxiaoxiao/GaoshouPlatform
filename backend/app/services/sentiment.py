@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Callable, Iterable
-from urllib.parse import urlencode, urljoin
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
 import requests
 from sqlalchemy import func, or_, select
@@ -3457,8 +3457,11 @@ class SentimentIngestService:
                         current_tid=tid,
                         current_title=title[:120],
                     )
-                    detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
-                    thread_posts = _parse_nga_thread_posts(detail_html)
+                    thread_posts = _fetch_nga_thread_posts(
+                        tid,
+                        _to_int(topic.get("reply_count")),
+                        reply_start=start_dt,
+                    )
                     if not thread_posts:
                         continue
                     publish_time = _parse_datetime(thread_posts[0].get("publish_time")) or _parse_datetime(topic.get("publish_time"))
@@ -3468,9 +3471,17 @@ class SentimentIngestService:
                     body_title = thread_posts[0].get("title") or title
                     content = thread_posts[0].get("content") or body_title
                     comments = [
-                        {"content": post.get("content") or "", "publish_time": post.get("publish_time")}
+                        {
+                            "author": post.get("author"),
+                            "author_id": post.get("author_id"),
+                            "content": post.get("content") or "",
+                            "quoted_content": post.get("quoted_content"),
+                            "publish_time": post.get("publish_time"),
+                        }
                         for post in thread_posts[1:]
                         if str(post.get("content") or "").strip()
+                        and (post_time := _parse_datetime(post.get("publish_time"))) is not None
+                        and start_dt <= post_time <= end_dt
                     ]
                     stock_codes = _extract_nga_post_symbols({"title": body_title, "content": content, "comments": comments})
                     sentiment_score, sentiment_label = _nga_sentiment(" ".join([body_title, content, *[str(item.get('content') or '') for item in comments]]))
@@ -3785,8 +3796,11 @@ class SentimentIngestService:
                     detail_page="e",
                     threads_collected=len(collected),
                 )
-                detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
-                thread_posts = _parse_nga_thread_posts(detail_html)
+                thread_posts = _fetch_nga_thread_posts(
+                    tid,
+                    _to_int(topic.get("reply_count")),
+                    reply_start=start_dt,
+                )
                 if not thread_posts:
                     self._emit_progress(
                         "nga.thread.empty",
@@ -3810,10 +3824,18 @@ class SentimentIngestService:
                     else title
                 ) or title
                 comments = [
-                    {"content": post.get("content") or "", "publish_time": post.get("publish_time")}
+                    {
+                        "author": post.get("author"),
+                        "author_id": post.get("author_id"),
+                        "content": post.get("content") or "",
+                        "quoted_content": post.get("quoted_content"),
+                        "publish_time": post.get("publish_time"),
+                    }
                     for post in thread_posts
                     if str(post.get("content") or "").strip()
                     and _parse_datetime(post.get("publish_time")) != publish_time
+                    and (post_time := _parse_datetime(post.get("publish_time"))) is not None
+                    and start_dt <= post_time <= end_dt
                 ]
                 stock_codes = _extract_nga_post_symbols({"title": title, "content": content, "comments": comments})
                 sentiment_score, sentiment_label = _nga_sentiment(" ".join([title, content, *[str(item.get('content') or '') for item in comments]]))
@@ -4089,15 +4111,138 @@ def _parse_nga_thread_posts(html_text: str) -> list[dict[str, Any]]:
     )
     posts: list[dict[str, Any]] = []
     for match in pattern.finditer(html_text):
+        raw_content = match.group("content")
+        quote_matches = list(re.finditer(r"\[quote\](.*?)\[/quote\]", raw_content, re.I | re.S))
+        quoted_content = _nga_clean_text("\n".join(item.group(1) for item in quote_matches))
+        own_content = re.sub(r"\[quote\].*?\[/quote\]", " ", raw_content, flags=re.I | re.S)
+        author_window = html_text[match.end(): match.end() + 8000]
+        author_match = re.search(r"NEEDLE\s+([^\r\n]+?)\s+\d+\s*(?:\r?\n|$)", author_window)
         posts.append(
             {
-                "author": match.group("author_id"),
+                "floor": _to_int(match.group("idx")),
+                "author": _nga_clean_text(author_match.group(1)) if author_match else match.group("author_id"),
+                "author_id": match.group("author_id"),
                 "publish_time": match.group("publish_time"),
                 "title": _nga_clean_text(match.group("title")),
-                "content": _nga_clean_text(match.group("content")),
+                "content": _nga_clean_text(own_content),
+                "quoted_content": quoted_content or None,
             }
         )
     return posts
+
+
+def _fetch_nga_thread_posts(
+    tid: str,
+    reply_count: int,
+    *,
+    reply_start: datetime | None = None,
+) -> list[dict[str, Any]]:
+    page_count = max(1, math.ceil((max(0, reply_count) + 1) / 20))
+    posts_by_floor: dict[int, dict[str, Any]] = {}
+    pages = [1] if page_count == 1 else [1, *range(page_count, 1, -1)]
+    for page in pages:
+        detail_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": page})
+        page_posts = _parse_nga_thread_posts(detail_html)
+        for page_index, post in enumerate(page_posts):
+            floor = post.get("floor")
+            key = _to_int(floor) if floor is not None else (page - 1) * 20 + page_index
+            posts_by_floor[key] = post
+        if page > 1 and reply_start is not None:
+            parsed_times = [
+                parsed
+                for post in page_posts
+                if (parsed := _parse_datetime(post.get("publish_time"))) is not None
+            ]
+            if parsed_times and min(parsed_times) < reply_start:
+                break
+    return [posts_by_floor[floor] for floor in sorted(posts_by_floor)]
+
+
+def crawl_forum_thread_url(
+    url: str,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    parsed_url = urlparse(str(url or "").strip())
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
+        raise ValueError("thread URL must be an absolute HTTP(S) URL")
+    hostname = parsed_url.hostname.lower()
+    if hostname.endswith("nga.cn") or hostname.endswith("nga.178.com") or hostname.endswith("bbs.nga.cn"):
+        query = parse_qs(parsed_url.query)
+        tid_match = re.search(r"(?:^|[?&])tid=(\d+)", url)
+        tid = (query.get("tid") or [None])[0] or (tid_match.group(1) if tid_match else None)
+        if not tid:
+            raise ValueError("NGA thread URL does not contain tid")
+        first_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": 1})
+        end_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": "e"})
+        first_posts = _parse_nga_thread_posts(first_html)
+        end_posts = _parse_nga_thread_posts(end_html)
+        max_floor = max([_to_int(post.get("floor")) for post in end_posts], default=0)
+        page_count = max(1, math.ceil((max_floor + 1) / 20))
+        posts_by_floor: dict[int, dict[str, Any]] = {}
+        for page in range(1, page_count + 1):
+            if progress_callback:
+                progress_callback({
+                    "stage": "thread.page_fetch",
+                    "source": "flocktrader",
+                    "current_step": "thread_page",
+                    "current_tid": tid,
+                    "current_page": page,
+                    "page_limit": page_count,
+                })
+            if page == 1:
+                page_posts = first_posts
+            elif page == page_count:
+                page_posts = end_posts
+            else:
+                page_html = _fetch_nga_html("https://nga.178.com/read.php", params={"tid": tid, "page": page})
+                page_posts = _parse_nga_thread_posts(page_html)
+            for post in page_posts:
+                posts_by_floor[_to_int(post.get("floor"), len(posts_by_floor))] = post
+        posts = [posts_by_floor[key] for key in sorted(posts_by_floor)]
+        if not posts:
+            raise RuntimeError("NGA thread returned no parseable floors")
+        title = next((str(post.get("title") or "").strip() for post in posts if post.get("title")), f"NGA thread {tid}")
+        return {
+            "source": "flocktrader",
+            "source_thread_id": str(tid),
+            "title": title,
+            "author": posts[0].get("author"),
+            "content": posts[0].get("content") or title,
+            "published_at": posts[0].get("publish_time"),
+            "last_reply_at": posts[-1].get("publish_time"),
+            "url": f"https://bbs.nga.cn/read.php?tid={tid}",
+            "reply_count": max(0, len(posts) - 1),
+            "comments": posts[1:],
+            "all_floors": posts,
+            "page_count": page_count,
+            "complete": True,
+        }
+
+    response = requests.get(url, headers={"User-Agent": _nga_headers()["User-Agent"]}, timeout=30)
+    response.raise_for_status()
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(response.text, "html.parser")
+    title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
+    content_node = soup.select_one("article, main, .post-content, .post_content, .content") or soup.body
+    content = _clean_text(content_node.get_text("\n", strip=True) if content_node else "")
+    source_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
+    return {
+        "source": "forum_url",
+        "source_thread_id": source_id,
+        "title": title or url,
+        "author": None,
+        "content": content,
+        "published_at": None,
+        "last_reply_at": None,
+        "url": url,
+        "reply_count": 0,
+        "comments": [],
+        "all_floors": [],
+        "page_count": 1,
+        "complete": False,
+        "warning": "No dedicated adapter for this domain; only the visible page body was captured.",
+    }
 
 
 def _nga_sentiment(text: str) -> tuple[float | None, str | None]:

@@ -163,6 +163,7 @@ class SyncRequest(BaseModel):
     max_pages: int = Field(default=3, ge=1, le=30, description="舆情抓取最大页数")
     min_reply: int = Field(default=20, ge=0, le=10000, description="舆情最少回复数")
     force_refresh: bool = Field(default=False, description="强制刷新来源缓存")
+    thread_url: str | None = Field(default=None, description="单帖全量抓取 URL")
 
 
     index_symbols: list[str] | None = Field(default=None, description="指数代码列表")

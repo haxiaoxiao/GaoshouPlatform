@@ -32,6 +32,10 @@ class IngestRunRequest(BaseModel):
     force_refresh: bool = Field(False, description="Re-crawl NGA daily files even when cached")
 
 
+class ThreadIngestRequest(BaseModel):
+    url: str = Field(min_length=10, max_length=2000)
+
+
 def _resolve_ingest_sources(request: IngestRunRequest) -> list[str]:
     if request.sources:
         return ordered_sentiment_sources(request.sources)
@@ -150,3 +154,17 @@ async def run_sentiment_ingest(
 @router.get("/ingest/runs/{run_id}", summary="Get a sentiment ingest run")
 async def get_sentiment_ingest_run(run_id: str) -> dict[str, Any]:
     return await proxy_sync_request("GET", f"/api/data/sync/runs/{run_id}")
+
+
+@router.post("/ingest/thread", summary="Fully crawl one forum thread by URL")
+async def run_thread_ingest(request: ThreadIngestRequest) -> dict[str, Any]:
+    return await proxy_sync_request(
+        "POST",
+        "/api/data/sync",
+        json_body={
+            "sync_type": "sentiment_thread",
+            "sync_mode": "full",
+            "failure_strategy": "stop",
+            "thread_url": request.url,
+        },
+    )

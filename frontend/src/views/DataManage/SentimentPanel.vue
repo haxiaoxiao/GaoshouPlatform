@@ -120,6 +120,25 @@
         </div>
       </section>
 
+      <section class="panel controls-panel thread-crawler-panel">
+        <div class="panel-title">
+          <h3>单帖全量抓取</h3>
+          <span>NGA 高楼完整分页，其他论坛按站点能力抓取</span>
+        </div>
+        <div class="thread-url-row">
+          <el-input v-model="threadUrl" clearable placeholder="粘贴论坛帖子链接" />
+          <el-button type="primary" :loading="threadIngesting" @click="runThreadIngest">全量抓取</el-button>
+        </div>
+        <div v-if="lastThreadRun" class="thread-result">
+          <strong>{{ String(lastThreadRun.details.title || '帖子抓取完成') }}</strong>
+          <span>
+            {{ Number(lastThreadRun.details.page_count || 0) }} 页 ·
+            {{ Number(lastThreadRun.details.floor_count || 0) }} 楼 ·
+            {{ lastThreadRun.details.complete ? '完整' : '部分抓取' }}
+          </span>
+        </div>
+      </section>
+
       <section class="panel source-panel">
         <div class="panel-title">
           <h3>来源状态</h3>
@@ -399,6 +418,9 @@ const loadingOverview = ref(false)
 const loadingSummary = ref(false)
 const loadingPosts = ref(false)
 const ingesting = ref(false)
+const threadIngesting = ref(false)
+const threadUrl = ref('')
+const lastThreadRun = ref<SentimentIngestRun | null>(null)
 const overview = ref<SentimentOverview | null>(null)
 const summary = ref<SentimentSummary | null>(null)
 const posts = ref<SentimentPost[]>([])
@@ -699,6 +721,30 @@ async function runIngest() {
   }
 }
 
+async function runThreadIngest() {
+  const url = threadUrl.value.trim()
+  if (!/^https?:\/\//i.test(url)) {
+    ElMessage.warning('请输入完整的帖子链接')
+    return
+  }
+  threadIngesting.value = true
+  try {
+    const submitted = await sentimentApi.ingestThread(url)
+    const run = await waitForIngestRun(submitted)
+    lastThreadRun.value = run
+    if (run.status === 'failed') {
+      ElMessage.error(run.error_message || '帖子抓取失败')
+    } else if (!run.details.complete) {
+      ElMessage.warning(String(run.details.warning || '该站点目前只完成可见页面抓取'))
+    } else {
+      ElMessage.success(`完整抓取 ${Number(run.details.floor_count || 0)} 楼`)
+    }
+    await loadOverview()
+  } finally {
+    threadIngesting.value = false
+  }
+}
+
 watch(
   () => props.initialSymbol,
   value => {
@@ -726,6 +772,24 @@ onMounted(() => {
     linear-gradient(320deg, rgba(251, 191, 36, 0.05), transparent 24%),
     #0d141d;
   min-height: 100%;
+}
+
+.thread-crawler-panel {
+  grid-column: 1 / -1;
+}
+
+.thread-url-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.thread-result {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 12px;
+  color: var(--text-secondary);
 }
 
 .run-status {

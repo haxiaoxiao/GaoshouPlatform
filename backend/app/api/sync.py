@@ -43,6 +43,7 @@ class SyncRequest(BaseModel):
     max_pages: int = Field(default=3, ge=1, le=30)
     min_reply: int = Field(default=20, ge=0, le=10000)
     force_refresh: bool = False
+    thread_url: str | None = None
 
 
 VALID_SYNC_TYPES = (
@@ -63,6 +64,7 @@ VALID_SYNC_TYPES = (
     "sentiment_xueqiu",
     "sentiment_nga",
     "sentiment",
+    "sentiment_thread",
 )
 
 
@@ -407,6 +409,11 @@ async def _run_sync_task(
                     force_refresh=request.force_refresh,
                     sync_mode=request.sync_mode,
                     failure_strategy=request.failure_strategy,
+                    run_id=run_id,
+                )
+            elif request.sync_type == "sentiment_thread":
+                progress = await service.sync_sentiment_thread_url(
+                    thread_url=request.thread_url or "",
                     run_id=run_id,
                 )
 

@@ -175,7 +175,7 @@ export interface SentimentIngestParams {
 export interface SentimentIngestRun {
   task_id: string
   run_id: string
-  sync_type: 'sentiment'
+  sync_type: 'sentiment' | 'sentiment_thread'
   status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
   total: number
   current: number
@@ -229,6 +229,9 @@ export const sentimentApi = {
 
   ingest: (payload: SentimentIngestParams) =>
     request.post<SentimentIngestRun>('/sentiment/ingest/run', payload),
+
+  ingestThread: (url: string) =>
+    request.post<SentimentIngestRun>('/sentiment/ingest/thread', { url }),
 
   ingestRun: (runId: string) =>
     request.get<SentimentIngestRun>(`/sentiment/ingest/runs/${runId}`),
