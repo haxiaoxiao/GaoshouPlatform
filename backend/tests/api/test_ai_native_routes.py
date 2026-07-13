@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 
 import pytest
@@ -169,6 +170,29 @@ def test_workflow_resume_is_claimed_once(monkeypatch):
     assert resume_ai_workflows() == 1
     assert resume_ai_workflows() == 0
     assert scheduled == [run_id]
+
+
+def test_workflow_owned_by_live_process_is_not_resumed(monkeypatch):
+    run_id = "ai-workflow-live-owner"
+    register_task(
+        task_id=run_id,
+        kind="ai_workflow",
+        title="quant_research",
+        status="running",
+        meta={
+            "workflow": "quant_research",
+            "initial_state": {"question": "still running"},
+            "owner_pid": os.getpid(),
+        },
+    )
+    scheduled: list[str] = []
+    monkeypatch.setattr(
+        "app.api.ai._schedule_graph",
+        lambda task_id, *_args, **_kwargs: scheduled.append(task_id),
+    )
+
+    assert resume_ai_workflows() == 0
+    assert scheduled == []
 
 
 @pytest.mark.asyncio
