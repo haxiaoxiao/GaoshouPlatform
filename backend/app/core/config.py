@@ -79,6 +79,15 @@ class Settings(BaseSettings):
     redis_db: int = 0
     redis_password: str = ""
 
+    # AI Native / OpenAI-compatible LiteLLM gateway
+    llm_api_base: str = "https://api.0029.org/v1"
+    llm_api_key: str = ""
+    llm_default_model: str = ""
+    llm_timeout_seconds: int = 120
+    llm_max_output_tokens: int = 8192
+    ai_conversation_retention_days: int = 30
+    ai_checkpoint_db_path: str = str(_DATA_DIR / "ai-checkpoints.sqlite")
+
     # 行情数据存储配置
     market_data_backend: str = "parquet"
     parquet_data_dir: str = str(_DATA_DIR / "parquet")

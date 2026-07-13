@@ -23,6 +23,10 @@ dependencies = [
     "akquant>=0.2.40",
     "tushare>=1.4.0",
     "alembic>=1.13.0",
+    "litellm>=1.74.0",
+    "langgraph>=0.6.0",
+    "langgraph-checkpoint-sqlite>=2.0.0",
+    "mcp>=1.10.0",
 ]
 
 [project.optional-dependencies]
