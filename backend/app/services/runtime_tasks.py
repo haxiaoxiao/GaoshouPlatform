@@ -167,7 +167,12 @@ def _load_persistent_task(task_id: str) -> RuntimeTask | None:
         connection.close()
 
 
-def _load_persistent_tasks(*, kinds: set[str] | None = None, limit: int | None = _MAX_TASKS) -> list[RuntimeTask]:
+def _load_persistent_tasks(
+    *,
+    kinds: set[str] | None = None,
+    limit: int | None = _MAX_TASKS,
+    unfinished_only: bool = False,
+) -> list[RuntimeTask]:
     connection = _connect()
     if connection is None:
         return []
@@ -178,6 +183,10 @@ def _load_persistent_tasks(*, kinds: set[str] | None = None, limit: int | None =
             placeholders = ",".join("?" for _ in kinds)
             clauses.append(f"kind IN ({placeholders})")
             params.extend(sorted(kinds))
+        if unfinished_only:
+            placeholders = ",".join("?" for _ in TERMINAL_STATUSES)
+            clauses.append(f"status NOT IN ({placeholders})")
+            params.extend(sorted(TERMINAL_STATUSES))
         query = "SELECT * FROM jobs"
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
@@ -347,10 +356,13 @@ def list_tasks(
     limit: int | None = _MAX_TASKS,
 ) -> list[dict[str, Any]]:
     _cleanup()
-    persistent_limit = None if not include_finished else limit
     merged = {
         task.task_id: task
-        for task in _load_persistent_tasks(kinds=kinds, limit=persistent_limit)
+        for task in _load_persistent_tasks(
+            kinds=kinds,
+            limit=limit,
+            unfinished_only=not include_finished,
+        )
     }
     merged.update({
         task_id: task

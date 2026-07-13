@@ -196,7 +196,7 @@ async def _run_graph(graph_name: str, initial_state: dict[str, Any]) -> dict[str
         kind="ai_workflow",
         title=graph_name,
         status="queued",
-        meta={"workflow": graph_name, "initial_state": initial_state},
+        meta={"workflow": graph_name, "initial_state": initial_state, "owner_pid": os.getpid()},
     )
     _schedule_graph(run_id, graph_name, initial_state)
     return {"run_id": run_id, "status": "queued", "result_ref": f"/api/ai/runs/{run_id}"}
@@ -229,7 +229,7 @@ def resume_ai_workflows() -> int:
         if task.get("kind") != "ai_workflow" or status not in {"queued", "running", "resuming"}:
             continue
         meta = dict(task.get("meta") or {})
-        if status == "resuming" and _process_is_running(int(meta.get("recovery_pid") or 0)):
+        if _process_is_running(int(meta.get("owner_pid") or 0)):
             continue
         workflow = str(meta.get("workflow") or "")
         initial_state = dict(meta.get("initial_state") or {})
@@ -240,7 +240,7 @@ def resume_ai_workflows() -> int:
             expected_kind="ai_workflow",
             expected_status=status,
             status="resuming",
-            meta={"recovery_pid": os.getpid()},
+            meta={"owner_pid": os.getpid()},
             expected_updated_at=float(task["updated_at"]),
         )
         if claimed is None:
