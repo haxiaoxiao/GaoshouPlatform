@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -58,6 +59,7 @@ class RuntimeTask:
 
 
 _tasks: dict[str, RuntimeTask] = {}
+_task_lock = threading.RLock()
 
 
 def _normalize_status(status: str) -> str:
@@ -165,15 +167,25 @@ def _load_persistent_task(task_id: str) -> RuntimeTask | None:
         connection.close()
 
 
-def _load_persistent_tasks() -> list[RuntimeTask]:
+def _load_persistent_tasks(*, kinds: set[str] | None = None, limit: int | None = _MAX_TASKS) -> list[RuntimeTask]:
     connection = _connect()
     if connection is None:
         return []
     try:
-        rows = connection.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
-            (_MAX_TASKS,),
-        ).fetchall()
+        clauses: list[str] = []
+        params: list[Any] = []
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            clauses.append(f"kind IN ({placeholders})")
+            params.extend(sorted(kinds))
+        query = "SELECT * FROM jobs"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY created_at DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(max(int(limit), 1))
+        rows = connection.execute(query, tuple(params)).fetchall()
         return [_row_to_task(row) for row in rows]
     except sqlite3.OperationalError as exc:
         logger.debug("Runtime task persistence unavailable: {}", exc)
@@ -253,14 +265,103 @@ def update_task(
     _persist_task(task, event_type="updated")
 
 
-def list_tasks(include_finished: bool = True) -> list[dict[str, Any]]:
+def claim_task(
+    task_id: str,
+    *,
+    expected_kind: str,
+    expected_status: str,
+    status: str,
+    meta: dict[str, Any] | None = None,
+    expected_updated_at: float | None = None,
+) -> dict[str, Any] | None:
+    """Atomically transition one persistent task before a side effect."""
+    with _task_lock:
+        connection = _connect()
+        if connection is None:
+            task = _tasks.get(task_id)
+            if task is None or task.kind != expected_kind or task.status != expected_status:
+                return None
+            if expected_updated_at is not None and abs(task.updated_at - expected_updated_at) > 1e-6:
+                return None
+            task.status = _normalize_status(status)
+            if meta:
+                task.meta.update(meta)
+            task.updated_at = time.time()
+            if task.status in TERMINAL_STATUSES:
+                task.finished_at = task.updated_at
+            return task.to_dict()
+
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT * FROM jobs WHERE id = ?", (task_id,)).fetchone()
+            if row is None or str(row["kind"]) != expected_kind or _normalize_status(str(row["status"])) != expected_status:
+                connection.rollback()
+                return None
+            task = _row_to_task(row)
+            if expected_updated_at is not None and abs(task.updated_at - expected_updated_at) > 1e-6:
+                connection.rollback()
+                return None
+            task.status = _normalize_status(status)
+            if meta:
+                task.meta.update(meta)
+            task.updated_at = time.time()
+            if task.status in TERMINAL_STATUSES:
+                task.finished_at = task.updated_at
+            now = datetime.fromtimestamp(task.updated_at).isoformat(sep=" ")
+            connection.execute(
+                """
+                UPDATE jobs
+                SET status = ?, payload = ?, heartbeat_at = ?, finished_at = ?, updated_at = ?
+                WHERE id = ? AND kind = ? AND status = ?
+                """,
+                (
+                    task.status,
+                    json.dumps(task.meta, ensure_ascii=False),
+                    now,
+                    datetime.fromtimestamp(task.finished_at).isoformat(sep=" ") if task.finished_at else None,
+                    now,
+                    task_id,
+                    expected_kind,
+                    expected_status,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO job_events (job_id, event_type, data, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "claimed", json.dumps(task.to_dict(), ensure_ascii=False), now),
+            )
+            connection.commit()
+            _tasks[task_id] = task
+            return task.to_dict()
+        except sqlite3.OperationalError as exc:
+            connection.rollback()
+            logger.warning("Runtime task claim unavailable for {}: {}", task_id, exc)
+            return None
+        finally:
+            connection.close()
+
+
+def list_tasks(
+    include_finished: bool = True,
+    *,
+    kinds: set[str] | None = None,
+    limit: int | None = _MAX_TASKS,
+) -> list[dict[str, Any]]:
     _cleanup()
-    merged = {task.task_id: task for task in _load_persistent_tasks()}
-    merged.update(_tasks)
+    persistent_limit = None if not include_finished else limit
+    merged = {
+        task.task_id: task
+        for task in _load_persistent_tasks(kinds=kinds, limit=persistent_limit)
+    }
+    merged.update({
+        task_id: task
+        for task_id, task in _tasks.items()
+        if not kinds or task.kind in kinds
+    })
     tasks = merged.values()
     if not include_finished:
         tasks = [task for task in tasks if task.status not in TERMINAL_STATUSES]
-    return [task.to_dict() for task in sorted(tasks, key=lambda task: task.created_at, reverse=True)]
+    rows = [task.to_dict() for task in sorted(tasks, key=lambda task: task.created_at, reverse=True)]
+    return rows if limit is None else rows[:limit]
 
 
 def get_task(task_id: str) -> dict[str, Any] | None:
@@ -296,10 +397,19 @@ def mark_stale_runtime_tasks_failed(
     connection = _connect()
     if connection is None or not kinds:
         return 0
-    cutoff = datetime.fromtimestamp(time.time() - max(older_than_seconds, 60)).isoformat(sep=" ")
+    cutoff = datetime.fromtimestamp(time.time() - max(older_than_seconds, 0)).isoformat(sep=" ")
     placeholders = ",".join("?" for _ in kinds)
     now = datetime.now().isoformat(sep=" ")
     try:
+        rows = connection.execute(
+            f"""
+            SELECT id FROM jobs
+            WHERE kind IN ({placeholders})
+              AND status IN ('queued', 'running')
+              AND updated_at < ?
+            """,
+            (*sorted(kinds), cutoff),
+        ).fetchall()
         cursor = connection.execute(
             f"""
             UPDATE jobs
@@ -310,6 +420,13 @@ def mark_stale_runtime_tasks_failed(
             """,
             (JobStatus.FAILED.value, message, now, now, *sorted(kinds), cutoff),
         )
+        for row in rows:
+            task_id = str(row["id"])
+            connection.execute(
+                "INSERT INTO job_events (job_id, event_type, data, created_at) VALUES (?, ?, ?, ?)",
+                (task_id, "interrupted", json.dumps({"status": JobStatus.FAILED.value, "error": message}), now),
+            )
+            _tasks.pop(task_id, None)
         connection.commit()
         return int(cursor.rowcount or 0)
     except sqlite3.OperationalError as exc:

@@ -30,6 +30,28 @@ async def lifespan(app: FastAPI):
     stale_sentiment_tasks = mark_stale_runtime_tasks_failed(kinds={"sentiment_ingest"})
     if stale_sentiment_tasks:
         logger.warning("Marked {} legacy sentiment task(s) as failed", stale_sentiment_tasks)
+    interrupted_ai_approvals = mark_stale_runtime_tasks_failed(
+        kinds={"ai_approval"},
+        older_than_seconds=0,
+        message="Write outcome is indeterminate after application restart",
+    )
+    if interrupted_ai_approvals:
+        logger.warning("Marked {} interrupted AI approval(s) as failed", interrupted_ai_approvals)
+    from app.api.ai import resume_ai_workflows
+    from app.db.sqlite import async_session_factory
+    from app.services.ai_native import AINativeService
+
+    async with async_session_factory() as session:
+        ai_service = AINativeService(session)
+        expired_ai_conversations = await ai_service.cleanup_expired()
+        reconciled_ai_conversations = await ai_service.reconcile_approval_states()
+    if expired_ai_conversations:
+        logger.info("Removed {} expired AI conversation(s)", expired_ai_conversations)
+    if reconciled_ai_conversations:
+        logger.info("Reconciled approval state in {} AI conversation(s)", reconciled_ai_conversations)
+    resumed_ai_workflows = resume_ai_workflows()
+    if resumed_ai_workflows:
+        logger.info("Resumed {} AI workflow(s)", resumed_ai_workflows)
 
     # 启动调度器
     logger.info("Sync scheduler is owned by the isolated sync service")
@@ -78,7 +100,11 @@ async def add_contract_headers(request: Request, call_next):
     with logger.contextualize(request_id=request_id):
         response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    if request.url.path.startswith("/api/") and not request.url.path.startswith("/api/v1"):
+    if (
+        request.url.path.startswith("/api/")
+        and not request.url.path.startswith("/api/v1")
+        and not request.url.path.startswith("/api/ai")
+    ):
         response.headers["Deprecation"] = "true"
         response.headers["Sunset"] = "Thu, 10 Sep 2026 00:00:00 GMT"
         response.headers["Link"] = '</api/v1>; rel="successor-version"'

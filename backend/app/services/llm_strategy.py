@@ -9,9 +9,9 @@ import json
 import re
 import uuid
 
-from anthropic import Anthropic
 from loguru import logger
 
+from app.ai.gateway import LLMResult, complete_sync
 from app.cache.redis_cache import get_redis_client
 
 SESSION_TTL = 3600  # 1 小时，秒
@@ -118,17 +118,8 @@ class MyStrategy(aq.Strategy):
 """
 
 
-def _get_llm() -> Anthropic:
-    return Anthropic()
-
-
-def _extract_text(response) -> str:
-    """从 LLM response 提取文本，跳过 ThinkingBlock"""
-    parts = []
-    for block in response.content:
-        if hasattr(block, "text"):
-            parts.append(block.text)
-    return "\n".join(parts)
+def _extract_text(response: LLMResult) -> str:
+    return response.content
 
 
 def _extract_code(content: str) -> str | None:
@@ -147,18 +138,11 @@ def _extract_code(content: str) -> str | None:
 
 def convert_to_akquant(source_code: str) -> str:
     """单次调用：将任意策略代码转为 akquant 格式"""
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
+    response = complete_sync(
+        [{"role": "user", "content": f"把以下代码按照akquant的格式转化:\n\n{source_code[:8000]}"}],
+        max_tokens=8192,
         temperature=0.2,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CONVERT_SYSTEM,
-        messages=[{
-            "role": "user",
-            "content": f"把以下代码按照akquant的格式转化:\n\n{source_code[:8000]}",
-        }],
     )
     content = _extract_text(response)
     logger.info("LLM raw response (first 300 chars): {}", content[:300])
@@ -184,21 +168,19 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
     """创建对话会话，返回首次 LLM 回复"""
     session_id = str(uuid.uuid4())[:12]
     redis = get_redis_client()
+    if not redis.available:
+        raise RuntimeError("Redis is unavailable; use the persistent AI Native conversation API")
 
     # 初始化会话
     messages: list[dict] = [
         {"role": "user", "content": f"我正在阅读一份研报 ({report_filename})。请理解其中的策略逻辑。\n\n研报内容:\n{report_text[:12000]}\n\n请总结研报中的选股逻辑、调仓频率和风控规则，然后询问我是否需要调整或补充。如果逻辑已经清晰，可以直接生成策略代码。"}
     ]
 
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
+    response = complete_sync(
+        messages,
+        max_tokens=8192,
         temperature=0.3,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CHAT_SYSTEM,
-        messages=messages,
     )
     reply = _extract_text(response)
 
@@ -222,6 +204,8 @@ def create_chat_session(report_text: str, report_filename: str = "") -> dict:
 def send_chat_message(session_id: str, message: str) -> dict:
     """发送消息到已有会话，返回 LLM 回复"""
     redis = get_redis_client()
+    if not redis.available:
+        raise RuntimeError("Redis is unavailable; use the persistent AI Native conversation API")
     raw = redis.get(_session_key(session_id))
     if not raw:
         raise ValueError(f"会话 {session_id} 不存在或已过期（1小时有效）")
@@ -232,15 +216,11 @@ def send_chat_message(session_id: str, message: str) -> dict:
     # 追加用户消息
     messages.append({"role": "user", "content": message})
 
-    client = _get_llm()
-    response = client.messages.create(
-        model="deepseek-v4-pro",
-        max_tokens=1000000,
+    response = complete_sync(
+        messages,
+        max_tokens=8192,
         temperature=0.3,
-        timeout=300.0,
-        thinking={"type": "enabled", "budget_tokens": 32000},
         system=CHAT_SYSTEM,
-        messages=messages,
     )
     reply = _extract_text(response)
 

@@ -107,6 +107,9 @@
         </label>
 
         <div class="topbar__right">
+          <button class="action-btn" title="AI Copilot" type="button" @click="copilotOpen = !copilotOpen">
+            <el-icon><ChatDotRound /></el-icon>
+          </button>
           <div class="notification-wrapper">
             <button class="action-btn" title="通知" type="button" @click="toggleNotificationPanel">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -131,13 +134,14 @@
         </router-view>
       </div>
     </main>
+    <AICopilotDrawer :open="copilotOpen" @close="copilotOpen = false" />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { Close, Menu } from '@element-plus/icons-vue'
+import { ChatDotRound, Close, Menu } from '@element-plus/icons-vue'
 import {
   NAV_SECTIONS,
   navItemsForSection,
@@ -147,6 +151,7 @@ import {
 import { useNotificationStore } from '@/stores/notification'
 import NotificationPanel from '@/components/NotificationPanel.vue'
 import StatusBar from '@/components/StatusBar.vue'
+import AICopilotDrawer from '@/components/AICopilotDrawer.vue'
 
 const notificationStore = useNotificationStore()
 const route = useRoute()
@@ -157,6 +162,7 @@ const mobileNavOpen = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
 const showNotifications = ref(false)
+const copilotOpen = ref(false)
 let mobileMediaQuery: MediaQueryList | null = null
 
 const navSections = NAV_SECTIONS

@@ -13,6 +13,7 @@ from .live_trading import (
     LiveTradingRun,
 )
 from .research_lineage import (
+    AIConversation,
     DataSnapshot,
     JobEvent,
     PersistentJob,
@@ -51,6 +52,7 @@ __all__ = [
     "ResearchArtifact",
     "PersistentJob",
     "JobEvent",
+    "AIConversation",
     "SentimentPost",
     "SentimentThread",
     "SentimentMention",
