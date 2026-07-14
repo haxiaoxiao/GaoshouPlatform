@@ -46,9 +46,9 @@ class XueqiuSession:
 
     @staticmethod
     def _default_login_verifier(crawler: Any) -> dict[str, Any]:
-        from app.services.sentiment import _inject_xueqiu_cookie, _verify_xueqiu_login
+        from app.services.sentiment import _resolve_xueqiu_auth
 
-        return _verify_xueqiu_login(crawler, _inject_xueqiu_cookie(crawler))
+        return _resolve_xueqiu_auth(crawler)
 
     @staticmethod
     def _default_disconnector(crawler: Any) -> None:

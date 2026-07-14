@@ -1808,6 +1808,56 @@ def test_verify_xueqiu_login_requires_enabled_login_cookie():
     assert auth["server_verified"] is False
 
 
+def test_resolve_xueqiu_auth_preserves_authenticated_profile(monkeypatch):
+    crawler = object()
+    injected = []
+    monkeypatch.setattr(
+        sentiment_module,
+        "_verify_xueqiu_login",
+        lambda value, injected_auth=None: {
+            "server_verified": True,
+            "verification_source": "login_cookies",
+        },
+    )
+    monkeypatch.setattr(
+        sentiment_module,
+        "_inject_xueqiu_cookie",
+        lambda value: injected.append(value),
+    )
+
+    auth = sentiment_module._resolve_xueqiu_auth(crawler)
+
+    assert auth["server_verified"] is True
+    assert injected == []
+
+
+def test_resolve_xueqiu_auth_injects_configured_cookie_only_when_needed(monkeypatch):
+    crawler = object()
+    verify_results = iter(
+        [
+            {"server_verified": False, "verification_source": "unverified"},
+            {"server_verified": True, "verification_source": "login_cookies"},
+        ]
+    )
+    injected_auth = {"cookie_present": True, "cookie_count": 3}
+    injected = []
+    monkeypatch.setattr(
+        sentiment_module,
+        "_verify_xueqiu_login",
+        lambda value, auth=None: next(verify_results),
+    )
+    monkeypatch.setattr(
+        sentiment_module,
+        "_inject_xueqiu_cookie",
+        lambda value: injected.append(value) or injected_auth,
+    )
+
+    auth = sentiment_module._resolve_xueqiu_auth(crawler)
+
+    assert auth["server_verified"] is True
+    assert injected == [crawler]
+
+
 def test_disconnect_leaves_external_chrome_open():
     class Browser:
         def __init__(self):
@@ -1852,7 +1902,7 @@ def test_collect_xueqiu_does_not_disconnect_injected_crawler(monkeypatch):
     monkeypatch.setattr(
         sentiment_module,
         "_verify_xueqiu_login",
-        lambda value, auth: {"server_verified": True},
+        lambda value, auth=None: {"server_verified": True},
     )
 
     posts, stats = owner._collect_xueqiu(

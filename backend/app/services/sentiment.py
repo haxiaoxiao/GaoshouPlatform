@@ -1718,6 +1718,17 @@ def _verify_xueqiu_login(crawler: Any, injected_auth: dict[str, Any] | None = No
     return auth
 
 
+def _resolve_xueqiu_auth(crawler: Any) -> dict[str, Any]:
+    auth = _verify_xueqiu_login(crawler)
+    if auth.get("server_verified"):
+        return auth
+
+    injected_auth = _inject_xueqiu_cookie(crawler)
+    if not injected_auth.get("cookie_present"):
+        return auth
+    return _verify_xueqiu_login(crawler, injected_auth)
+
+
 @contextmanager
 def _temporary_project_imports(project_dir: Path, module_names: list[str]):
     """Import external projects that use generic module names such as config.py."""
@@ -2523,7 +2534,7 @@ class SentimentIngestService:
         crawler = crawler or _BuiltinXueqiuCrawler()
         try:
             xq_symbol = _to_xueqiu_symbol(symbol)
-            auth = _inject_xueqiu_cookie(crawler)
+            auth = _resolve_xueqiu_auth(crawler)
             _open_xueqiu_stock_page(crawler, xq_symbol)
             auth = _verify_xueqiu_login(crawler, auth)
             raw_posts: list[dict[str, Any]] = []
