@@ -1,0 +1,309 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from pathlib import Path
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from app.ai.gateway import LLMResult
+from app.api.llm_endpoints import LlmEndpointCreate, LlmEndpointUpdate
+from app.core.config import settings
+from app.db.models.base import Base
+from app.db.models.llm_endpoint import LlmEndpoint
+from app.db.sqlite import get_async_session
+from app.main import app
+
+
+@pytest.fixture
+async def endpoint_api(tmp_path: Path, monkeypatch) -> AsyncIterator[tuple[AsyncClient, async_sessionmaker]]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{(tmp_path / 'routes.db').as_posix()}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def session_override():
+        async with sessions() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+
+    monkeypatch.setattr(settings, "gaoshou_data_dir", str(tmp_path))
+    app.dependency_overrides[get_async_session] = session_override
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            yield client, sessions
+    finally:
+        app.dependency_overrides.clear()
+        await engine.dispose()
+
+
+def _payload(**overrides):
+    return {
+        "name": "Primary",
+        "api_base": "https://llm.example.test/v1",
+        "api_key": "top-secret-1234",
+        "model": "openai/test-model",
+        **overrides,
+    }
+
+
+def test_llm_endpoint_operations_routes_are_registered():
+    paths = app.openapi()["paths"]
+    assert "/api/system/llm-endpoints" in paths
+    assert "/api/system/llm-endpoints/{endpoint_id}" in paths
+    assert "/api/system/llm-endpoints/reorder" in paths
+    assert "/api/system/llm-endpoints/{endpoint_id}/test" in paths
+
+
+def test_llm_endpoint_request_schemas_have_planned_limits_and_no_priority():
+    create_schema = LlmEndpointCreate.model_json_schema()
+    update_schema = LlmEndpointUpdate.model_json_schema()
+
+    assert create_schema["additionalProperties"] is False
+    assert create_schema["properties"]["name"] == {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Name",
+        "type": "string",
+    }
+    assert create_schema["properties"]["api_base"]["minLength"] == 8
+    assert create_schema["properties"]["api_base"]["maxLength"] == 500
+    assert create_schema["properties"]["api_key"]["minLength"] == 1
+    assert create_schema["properties"]["api_key"]["maxLength"] == 2000
+    assert create_schema["properties"]["model"]["minLength"] == 1
+    assert create_schema["properties"]["model"]["maxLength"] == 200
+    assert "priority" not in create_schema["properties"]
+    assert "priority" not in update_schema["properties"]
+
+
+@pytest.mark.asyncio
+async def test_create_and_update_reject_priority(endpoint_api):
+    client, _ = endpoint_api
+    create_response = await client.post(
+        "/api/system/llm-endpoints",
+        json=_payload(priority=0),
+    )
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    update_response = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json={"priority": 0},
+    )
+
+    assert create_response.status_code == 422
+    assert update_response.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_list_update_and_delete_never_expose_api_key(endpoint_api):
+    client, _ = endpoint_api
+    created = await client.post("/api/system/llm-endpoints", json=_payload())
+    assert created.status_code == 201
+    endpoint = created.json()
+    assert endpoint["api_key_hint"] == "********1234"
+    assert "api_key" not in endpoint
+    assert "api_key_encrypted" not in endpoint
+    assert "top-secret" not in created.text
+
+    listed = await client.get("/api/system/llm-endpoints")
+    assert listed.status_code == 200
+    assert listed.json() == [endpoint]
+    assert "top-secret" not in listed.text
+
+    updated = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json={"name": "Renamed", "api_key": ""},
+    )
+    assert updated.status_code == 200
+    assert updated.json()["name"] == "Renamed"
+    assert updated.json()["api_key_hint"] == "********1234"
+
+    deleted = await client.delete(f"/api/system/llm-endpoints/{endpoint['id']}")
+    assert deleted.status_code == 204
+    assert (await client.get("/api/system/llm-endpoints")).json() == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_url_and_missing_endpoint_have_clear_client_errors(endpoint_api):
+    client, _ = endpoint_api
+    invalid = await client.post(
+        "/api/system/llm-endpoints",
+        json=_payload(api_base="not-a-provider-url"),
+    )
+    missing = await client.patch(
+        "/api/system/llm-endpoints/missing",
+        json={"name": "No endpoint"},
+    )
+
+    assert invalid.status_code == 422
+    assert "api_base" in invalid.json()["detail"]
+    assert missing.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replacement_key", [None, ""])
+async def test_api_base_destination_change_requires_replacement_key(
+    endpoint_api,
+    monkeypatch,
+    replacement_key,
+):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    update_payload = {"api_base": "https://redirect.example.test/v1"}
+    if replacement_key is not None:
+        update_payload["api_key"] = replacement_key
+
+    rejected = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json=update_payload,
+    )
+    captured = {}
+
+    async def fake_complete_candidate(candidate, *_args, **_kwargs):
+        captured["candidate"] = candidate
+        return LLMResult(content="ok", model=candidate.model)
+
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fake_complete_candidate)
+    tested = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert rejected.status_code == 422
+    assert "replacement api_key" in rejected.json()["detail"]
+    assert tested.status_code == 200
+    assert captured["candidate"].api_base == "https://llm.example.test/v1"
+    assert captured["candidate"].api_key == "top-secret-1234"
+
+
+@pytest.mark.asyncio
+async def test_reorder_requires_every_endpoint_exactly_once(endpoint_api):
+    client, _ = endpoint_api
+    first = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    second = (
+        await client.post(
+            "/api/system/llm-endpoints",
+            json=_payload(name="Backup", api_key="backup-secret-5678"),
+        )
+    ).json()
+
+    incomplete = await client.post(
+        "/api/system/llm-endpoints/reorder",
+        json={"endpoint_ids": [first["id"]]},
+    )
+    reordered = await client.post(
+        "/api/system/llm-endpoints/reorder",
+        json={"endpoint_ids": [second["id"], first["id"]]},
+    )
+
+    assert incomplete.status_code == 409
+    assert "every endpoint exactly once" in incomplete.json()["detail"]
+    assert [item["id"] for item in reordered.json()] == [second["id"], first["id"]]
+    assert [item["priority"] for item in reordered.json()] == [0, 1]
+
+
+@pytest.mark.asyncio
+async def test_connection_uses_decrypted_selected_candidate_and_records_success(endpoint_api, monkeypatch):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    captured = {}
+
+    async def fake_complete_candidate(candidate, messages, **kwargs):
+        captured["candidate"] = candidate
+        captured["messages"] = messages
+        captured["kwargs"] = kwargs
+        return LLMResult(content="ok", model="provider/returned-model")
+
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fake_complete_candidate)
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["model"] == "provider/returned-model"
+    assert isinstance(response.json()["latency_ms"], int)
+    assert response.json()["latency_ms"] >= 0
+    assert "api_key" not in response.json()
+    assert captured["candidate"].endpoint_id == endpoint["id"]
+    assert captured["candidate"].api_key == "top-secret-1234"
+    assert captured["messages"] == [{"role": "user", "content": "Reply with OK."}]
+    assert captured["kwargs"]["max_tokens"] == 1
+
+    listed = (await client.get("/api/system/llm-endpoints")).json()[0]
+    assert listed["last_success_at"] is not None
+    assert listed["consecutive_failures"] == 0
+
+
+@pytest.mark.asyncio
+async def test_connection_failure_is_sanitized_and_records_health(endpoint_api, monkeypatch):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+
+    async def fail_candidate(*_args, **_kwargs):
+        raise RuntimeError("authorization: Bearer top-secret-1234")
+
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_candidate)
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert "top-secret-1234" not in response.text
+    assert "REDACTED" in response.json()["error"]
+    listed = (await client.get("/api/system/llm-endpoints")).json()[0]
+    assert listed["consecutive_failures"] == 1
+    assert "top-secret-1234" not in listed["last_error"]
+
+
+@pytest.mark.asyncio
+async def test_connection_failure_survives_health_write_failure(endpoint_api, monkeypatch):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    health_errors = []
+
+    async def fail_candidate(*_args, **_kwargs):
+        raise RuntimeError("authorization: Bearer top-secret-1234")
+
+    async def fail_health_write(_service, _endpoint_id, error):
+        health_errors.append(str(error))
+        raise RuntimeError("health database unavailable for top-secret-1234")
+
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.LlmEndpointService.mark_failure", fail_health_write)
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert "REDACTED" in response.json()["error"]
+    assert health_errors == [response.json()["error"]]
+    assert "top-secret-1234" not in response.text
+
+
+@pytest.mark.asyncio
+async def test_connection_success_survives_health_write_failure_and_rolls_back(
+    endpoint_api,
+    monkeypatch,
+    caplog,
+):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+
+    async def succeed_candidate(candidate, *_args, **_kwargs):
+        return LLMResult(content="ok", model=candidate.model)
+
+    async def fail_success_write(service, endpoint_id):
+        stored = await service.session.get(LlmEndpoint, endpoint_id)
+        stored.last_error = "uncommitted health change"
+        await service.session.flush()
+        raise RuntimeError("health write failed with top-secret-1234")
+
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", succeed_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.LlmEndpointService.mark_success", fail_success_write)
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+    listed = (await client.get("/api/system/llm-endpoints")).json()[0]
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert listed["last_error"] is None
+    assert "top-secret-1234" not in response.text
+    assert "top-secret-1234" not in caplog.text
+    assert "REDACTED" in caplog.text

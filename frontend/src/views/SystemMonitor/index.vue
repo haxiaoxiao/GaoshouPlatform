@@ -143,6 +143,24 @@
         </div>
       </section>
 
+      <section class="dock-group ai-gateway-group">
+        <div class="dock-row">
+          <strong>AI Gateway</strong>
+          <el-tag :type="llmSummary.readiness === 'ready' ? 'success' : ['degraded', 'unknown'].includes(llmSummary.readiness) ? 'warning' : 'danger'" effect="plain" size="small">
+            {{ llmSummary.readiness }}
+          </el-tag>
+        </div>
+        <div class="gateway-summary">
+          <span><small>可用端点</small><strong>{{ llmSummary.enabled ?? '未知' }} / {{ llmSummary.total ?? '未知' }}</strong></span>
+          <span><small>主端点</small><strong>{{ llmSummary.primary || (llmSummary.readiness === 'unknown' ? '未知' : '未配置') }}</strong></span>
+        </div>
+        <p v-if="llmSummary.recentError" class="gateway-error">{{ llmSummary.recentError }}</p>
+        <p v-else-if="llmEndpointLoadState === 'loading'">正在读取端点状态...</p>
+        <p v-else-if="llmSummary.readiness === 'error' || llmSummary.readiness === 'unknown'">端点状态读取失败，当前显示上次成功数据。</p>
+        <p v-else>{{ llmSummary.total ? '最近未记录端点错误。' : '添加端点后，AI 请求将按优先级自动路由。' }}</p>
+        <el-button :icon="Cpu" @click="llmManagerOpen = true">管理 AI endpoints</el-button>
+      </section>
+
       <section v-if="devDataMode?.enabled" class="dock-group" :class="{ 'dock-group--warning': devDataMode.use_prod_data }">
         <div class="dock-row">
           <strong>开发数据模式</strong>
@@ -224,16 +242,22 @@
         </el-button>
       </section>
     </aside>
+
+    <LLMEndpointManager
+      v-model="llmManagerOpen"
+      @changed="handleLlmEndpointsChanged"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { Refresh } from '@element-plus/icons-vue'
+import { Cpu, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { usePageContext } from '@/app/pageContext'
-import { systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type LiveTradingGuardrails, type SystemStatus } from '@/api/system'
+import LLMEndpointManager from '@/components/LLMEndpointManager.vue'
+import { getLlmGatewayView, systemApi, type DataSummary, type DataSummaryItem, type DevDataMode, type LiveTradingGuardrails, type LlmEndpoint, type LlmEndpointLoadState, type SystemStatus } from '@/api/system'
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
 import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
@@ -316,12 +340,16 @@ const dataSummary = ref<DataSummary | null>(null)
 const liveStatus = ref<LiveTradingStatus | null>(null)
 const devDataMode = ref<DevDataMode | null>(null)
 const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
+const llmEndpoints = ref<LlmEndpoint[]>([])
+const llmEndpointLoadState = ref<LlmEndpointLoadState>('loading')
+const llmManagerOpen = ref(false)
 const guardrailDraft = ref({
   enable_order_submit: false,
   auto_execute_enabled: false,
 })
 const switchingDataMode = ref(false)
 const savingGuardrails = ref(false)
+const llmSummary = computed(() => getLlmGatewayView(llmEndpoints.value, llmEndpointLoadState.value))
 
 const summaryMap = computed<Record<string, DataSummaryItem>>(() => dataSummary.value?.by_key || {})
 const activeTasks = computed(() => runtimeTasks.value.filter(task => ['queued', 'running'].includes(String(task.status))))
@@ -778,7 +806,7 @@ const logPreviewLines = computed(() => {
 async function loadOps() {
   loading.value = true
   try {
-    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult] = await Promise.allSettled([
+    const [systemResult, syncStatusResult, tasksResult, logsResult, summaryResult, liveTradingResult, devModeResult, guardrailsResult, llmEndpointsResult] = await Promise.allSettled([
       systemApi.getStatus(),
       syncApi.getStatus(),
       runtimeTaskApi.list(true),
@@ -787,6 +815,7 @@ async function loadOps() {
       liveTradingApi.status(),
       systemApi.getDevDataMode(),
       systemApi.getLiveTradingGuardrails(),
+      systemApi.listLlmEndpoints(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -799,9 +828,20 @@ async function loadOps() {
       liveGuardrails.value = guardrailsResult.value
       resetLiveGuardrailDraft()
     }
+    if (llmEndpointsResult.status === 'fulfilled') {
+      llmEndpoints.value = llmEndpointsResult.value
+      llmEndpointLoadState.value = 'ready'
+    } else {
+      llmEndpointLoadState.value = 'error'
+    }
   } finally {
     loading.value = false
   }
+}
+
+function handleLlmEndpointsChanged(endpoints: LlmEndpoint[]) {
+  llmEndpoints.value = endpoints
+  llmEndpointLoadState.value = 'ready'
 }
 
 async function cancelAllSync() {
@@ -1493,6 +1533,36 @@ onMounted(loadOps)
   border-color: rgba(168, 50, 50, 0.36);
 }
 
+.ai-gateway-group {
+  border-left: 3px solid var(--accent-secondary);
+}
+
+.gateway-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.gateway-summary span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+}
+
+.gateway-summary strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gateway-error {
+  color: var(--accent-danger) !important;
+  overflow-wrap: anywhere;
+}
+
 .dock-row,
 .dock-actions {
   display: flex;
@@ -1658,6 +1728,10 @@ onMounted(loadOps)
 
 @media (max-width: 620px) {
   .dock-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .gateway-summary {
     grid-template-columns: 1fr;
   }
 
