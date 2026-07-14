@@ -88,15 +88,23 @@ class LlmEndpointService:
         priority: int | None = None,
         enabled: bool | None = None,
     ) -> LlmEndpoint:
-        if priority is not None:
-            await self._begin_write()
-        endpoint = await self._get(endpoint_id)
+        await self._begin_write()
+        endpoint = await self._get_fresh(endpoint_id)
         next_name = endpoint.name if name is None else name
         next_api_base = endpoint.api_base if api_base is None else api_base
         next_model = endpoint.model if model is None else model
-        endpoint.name, endpoint.api_base, endpoint.model = self._validate_fields(
+        validated_name, validated_api_base, validated_model = self._validate_fields(
             name=next_name, api_base=next_api_base, model=next_model
         )
+        if (
+            self._normalized_destination(validated_api_base)
+            != self._normalized_destination(endpoint.api_base)
+            and not str(api_key or "").strip()
+        ):
+            raise ValueError("A nonblank replacement api_key is required when api_base destination changes")
+        endpoint.name = validated_name
+        endpoint.api_base = validated_api_base
+        endpoint.model = validated_model
         if api_key is not None and api_key.strip():
             endpoint.api_key_encrypted = self._encrypt(api_key)
             endpoint.api_key_hint = self._key_hint(api_key)
@@ -209,6 +217,16 @@ class LlmEndpointService:
 
     async def _get(self, endpoint_id: str) -> LlmEndpoint:
         endpoint = await self.session.get(LlmEndpoint, endpoint_id)
+        if endpoint is None:
+            raise ValueError(f"LLM endpoint {endpoint_id} not found")
+        return endpoint
+
+    async def _get_fresh(self, endpoint_id: str) -> LlmEndpoint:
+        endpoint = await self.session.scalar(
+            select(LlmEndpoint)
+            .where(LlmEndpoint.id == endpoint_id)
+            .execution_options(populate_existing=True)
+        )
         if endpoint is None:
             raise ValueError(f"LLM endpoint {endpoint_id} not found")
         return endpoint
@@ -356,6 +374,10 @@ class LlmEndpointService:
         if not isinstance(api_base, str) or not (normalized_url := api_base.strip()):
             raise ValueError("api_base is required")
         parsed = urlparse(normalized_url)
+        try:
+            _parsed_port = parsed.port
+        except ValueError:
+            raise ValueError("api_base must be an http or https URL with a host and valid port") from None
         if (
             parsed.scheme not in {"http", "https"}
             or not parsed.hostname
@@ -366,6 +388,12 @@ class LlmEndpointService:
         ):
             raise ValueError("api_base must be an http or https URL with a host")
         return normalized_name, normalized_url, normalized_model
+
+    @staticmethod
+    def _normalized_destination(api_base: str) -> tuple[str, str, int]:
+        parsed = urlparse(api_base)
+        default_port = 443 if parsed.scheme.lower() == "https" else 80
+        return parsed.scheme.lower(), str(parsed.hostname).lower(), parsed.port or default_port
 
     @staticmethod
     def _validate_priority(priority: int, endpoint_count: int) -> int:

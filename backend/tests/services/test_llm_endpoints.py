@@ -231,6 +231,61 @@ async def test_update_preserves_blank_key_and_replaces_nonblank_key(endpoint_ser
 
 
 @pytest.mark.asyncio
+async def test_update_requires_replacement_key_for_destination_change(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await _create(service, name="Primary")
+
+    with pytest.raises(ValueError, match="replacement api_key"):
+        await service.update(endpoint.id, api_base="https://redirect.example.test/v1", api_key="")
+
+    assert endpoint.api_base == "https://llm.example.test/v1"
+    assert await service.decrypt_api_key(endpoint.id) == "super-secret-1234"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_key_and_destination_updates_cannot_cross_authorize(tmp_path: Path):
+    database_path = tmp_path / "endpoint-binding.db"
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database_path.as_posix()}",
+        connect_args={"timeout": 10},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as seed_session:
+        seed_service = LlmEndpointService(seed_session, data_dir=tmp_path)
+        endpoint = await _create(seed_service, name="Primary")
+        await seed_session.commit()
+        endpoint_id = endpoint.id
+
+    async with sessions() as key_session, sessions() as destination_session:
+        key_service = LlmEndpointService(key_session, data_dir=tmp_path)
+        destination_service = LlmEndpointService(destination_session, data_dir=tmp_path)
+        await key_service.update(endpoint_id, api_key="independent-key-5678")
+        destination_update = asyncio.create_task(
+            destination_service.update(
+                endpoint_id,
+                api_base="https://redirect.example.test/v1",
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert not destination_update.done()
+
+        await key_session.commit()
+        with pytest.raises(ValueError, match="replacement api_key"):
+            await destination_update
+        await destination_session.rollback()
+
+    async with sessions() as verify_session:
+        verify_service = LlmEndpointService(verify_session, data_dir=tmp_path)
+        stored = await verify_session.get(LlmEndpoint, endpoint_id)
+        assert stored is not None
+        assert stored.api_base == "https://llm.example.test/v1"
+        assert await verify_service.decrypt_api_key(endpoint_id) == "independent-key-5678"
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
@@ -248,6 +303,42 @@ async def test_create_rejects_invalid_required_values(endpoint_service, kwargs, 
 
     with pytest.raises(ValueError, match=message):
         await service.create(api_key="secret", **kwargs)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "malformed_url",
+    [
+        "https://llm.example.test:not-a-port/v1",
+        "https://llm.example.test:70000/v1",
+    ],
+)
+async def test_malformed_port_is_validation_error_and_valid_endpoint_remains_editable(
+    endpoint_service,
+    malformed_url,
+):
+    service, _, _ = endpoint_service
+
+    with pytest.raises(ValueError, match="api_base"):
+        await service.create(
+            name="Invalid",
+            api_base=malformed_url,
+            api_key="invalid-key",
+            model="provider/model",
+        )
+
+    endpoint = await _create(service, name="Primary")
+    with pytest.raises(ValueError, match="api_base"):
+        await service.update(
+            endpoint.id,
+            api_base=malformed_url,
+            api_key="replacement-key",
+        )
+
+    edited = await service.update(endpoint.id, name="Still editable")
+    assert edited.name == "Still editable"
+    assert edited.api_base == "https://llm.example.test/v1"
+    assert await service.decrypt_api_key(endpoint.id) == "super-secret-1234"
 
 
 @pytest.mark.asyncio

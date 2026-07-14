@@ -19,6 +19,7 @@ from .data_skill import router as data_skill_router
 from .evaluation import router as evaluation_router
 from .factor import router as factor_router
 from .indicator import router as indicator_router
+from .llm_endpoints import router as llm_endpoints_router
 from .parquet_explorer import router as parquet_explorer_router
 from .strategy import router as strategy_router
 from .system import router as system_router
@@ -28,6 +29,11 @@ api_router = APIRouter()
 api_router.include_router(v1_router, prefix="/v1")
 
 api_router.include_router(system_router, prefix="/system", tags=["系统"])
+api_router.include_router(
+    llm_endpoints_router,
+    prefix="/system/llm-endpoints",
+    tags=["LLM endpoints"],
+)
 api_router.include_router(ai_router, prefix="/ai", tags=["AI Native"])
 api_router.include_router(data_router, prefix="/data", tags=["数据"])
 api_router.include_router(data_explorer_router, prefix="/explorer", tags=["数据浏览器"])

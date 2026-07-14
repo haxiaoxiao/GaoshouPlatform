@@ -139,7 +139,7 @@ def _require_config() -> None:
         raise RuntimeError(str(status["reason"]))
 
 
-def _sanitize_error(error: object, api_key: str) -> str:
+def sanitize_error(error: object, api_key: str = "") -> str:
     message = LlmEndpointService._sanitize_error(error, secret=api_key)
     message = _URL_CREDENTIALS.sub(r"\g<scheme>[REDACTED]@", message)
     return _URL_SECRET_QUERY.sub(r"\1[REDACTED]", message)
@@ -185,7 +185,7 @@ def _write_health(
                             else_=LlmEndpoint.cooldown_until,
                         ),
                         last_failure_at=now,
-                        last_error=_sanitize_error(error, api_key),
+                        last_error=sanitize_error(error, api_key),
                     )
                 )
             session.execute(statement)
@@ -217,7 +217,7 @@ def _try_write_health(
             endpoint_id,
             safe_name,
             source,
-            _sanitize_error(health_error, api_key),
+            sanitize_error(health_error, api_key),
         )
 
 
@@ -252,6 +252,39 @@ def _normalize_response(response: Any) -> LLMResult:
     )
 
 
+def complete_candidate_sync(
+    candidate: GatewayCandidate,
+    messages: list[dict[str, Any]],
+    *,
+    system: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+) -> LLMResult:
+    """Call one explicit candidate without selection, failover, or health writes."""
+    from litellm import completion
+
+    payload = ([{"role": "system", "content": system}] if system else []) + messages
+    kwargs: dict[str, Any] = {
+        "model": candidate.model,
+        "api_base": candidate.api_base,
+        "api_key": candidate.api_key,
+        "messages": payload,
+        "temperature": temperature,
+        "max_tokens": min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens),
+        "timeout": settings.llm_timeout_seconds,
+        "num_retries": 0,
+    }
+    if tools:
+        kwargs["tools"] = tools
+        kwargs["tool_choice"] = "auto"
+    return _normalize_response(completion(**kwargs))
+
+
+async def complete_candidate(*args: Any, **kwargs: Any) -> LLMResult:
+    return await asyncio.to_thread(complete_candidate_sync, *args, **kwargs)
+
+
 def complete_sync(
     messages: list[dict[str, Any]],
     *,
@@ -264,29 +297,20 @@ def complete_sync(
     if not candidates:
         _require_config()
         raise RuntimeError("All enabled LLM endpoints are in cooldown")
-    from litellm import completion
-
-    payload = ([{"role": "system", "content": system}] if system else []) + messages
     failures: list[tuple[str, str]] = []
     for candidate in candidates:
-        kwargs: dict[str, Any] = {
-            "model": candidate.model,
-            "api_base": candidate.api_base,
-            "api_key": candidate.api_key,
-            "messages": payload,
-            "temperature": temperature,
-            "max_tokens": min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens),
-            "timeout": settings.llm_timeout_seconds,
-            "num_retries": 0,
-        }
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
         attempt_started_at = datetime.now()
         terminal_error: str | None = None
         should_failover = False
         try:
-            result = _normalize_response(completion(**kwargs))
+            result = complete_candidate_sync(
+                candidate,
+                messages,
+                system=system,
+                tools=tools,
+                temperature=temperature,
+                max_tokens=max_tokens,
+            )
         except Exception as exc:
             if candidate.endpoint_id:
                 _try_write_health(
@@ -296,7 +320,7 @@ def complete_sync(
                     error=exc,
                     api_key=candidate.api_key,
                 )
-            sanitized_error = _sanitize_error(exc, candidate.api_key)
+            sanitized_error = sanitize_error(exc, candidate.api_key)
             if _is_failover_error(exc):
                 failures.append((candidate.name, sanitized_error))
                 should_failover = True
