@@ -6,6 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from typing import Any, Literal
 
 from sqlalchemy import case, create_engine, or_, select, update
@@ -49,9 +50,10 @@ class GatewayCandidate:
     endpoint_id: str | None
     name: str
     api_base: str
-    api_key: str
+    api_key: str | None
     model: str
     source: Literal["database", "environment"]
+    api_key_encrypted: str | None = field(default=None, repr=False)
 
 
 def _sync_database_url() -> str:
@@ -90,15 +92,15 @@ def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
         return [], endpoints
 
     now = datetime.now()
-    key_service = LlmEndpointService(None)
     candidates = [
         GatewayCandidate(
             endpoint_id=endpoint.id,
             name=endpoint.name,
             api_base=endpoint.api_base,
-            api_key=key_service._decrypt_endpoint_key(endpoint),
+            api_key=None,
             model=endpoint.model,
             source="database",
+            api_key_encrypted=endpoint.api_key_encrypted,
         )
         for endpoint in endpoints
         if endpoint.cooldown_until is None or endpoint.cooldown_until <= now
@@ -281,6 +283,13 @@ def complete_candidate_sync(
     return _normalize_response(completion(**kwargs))
 
 
+def _decrypt_candidate_key(candidate: GatewayCandidate) -> str:
+    if candidate.api_key is not None:
+        return candidate.api_key
+    endpoint = SimpleNamespace(api_key_encrypted=candidate.api_key_encrypted or "")
+    return LlmEndpointService(None)._decrypt_endpoint_key(endpoint)
+
+
 async def complete_candidate(*args: Any, **kwargs: Any) -> LLMResult:
     return await asyncio.to_thread(complete_candidate_sync, *args, **kwargs)
 
@@ -300,11 +309,31 @@ def complete_sync(
     failures: list[tuple[str, str]] = []
     for candidate in candidates:
         attempt_started_at = datetime.now()
+        try:
+            api_key = _decrypt_candidate_key(candidate)
+        except ValueError as exc:
+            if candidate.endpoint_id:
+                _try_write_health(
+                    candidate.endpoint_id,
+                    endpoint_name=candidate.name,
+                    source=candidate.source,
+                    error=exc,
+                )
+            failures.append((candidate.name, sanitize_error(exc)))
+            continue
+        resolved_candidate = GatewayCandidate(
+            endpoint_id=candidate.endpoint_id,
+            name=candidate.name,
+            api_base=candidate.api_base,
+            api_key=api_key,
+            model=candidate.model,
+            source=candidate.source,
+        )
         terminal_error: str | None = None
         should_failover = False
         try:
             result = complete_candidate_sync(
-                candidate,
+                resolved_candidate,
                 messages,
                 system=system,
                 tools=tools,
@@ -312,16 +341,16 @@ def complete_sync(
                 max_tokens=max_tokens,
             )
         except Exception as exc:
-            if candidate.endpoint_id:
-                _try_write_health(
-                    candidate.endpoint_id,
-                    endpoint_name=candidate.name,
-                    source=candidate.source,
-                    error=exc,
-                    api_key=candidate.api_key,
-                )
-            sanitized_error = sanitize_error(exc, candidate.api_key)
+            sanitized_error = sanitize_error(exc, api_key)
             if _is_failover_error(exc):
+                if candidate.endpoint_id:
+                    _try_write_health(
+                        candidate.endpoint_id,
+                        endpoint_name=candidate.name,
+                        source=candidate.source,
+                        error=exc,
+                        api_key=api_key,
+                    )
                 failures.append((candidate.name, sanitized_error))
                 should_failover = True
             else:

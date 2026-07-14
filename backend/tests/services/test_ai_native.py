@@ -353,8 +353,8 @@ def test_gateway_candidate_not_found_fails_over(monkeypatch, tmp_path):
 
 def test_gateway_request_wide_client_error_stops_failover(monkeypatch, tmp_path):
     engine = _gateway_test_database(monkeypatch, tmp_path)
-    _add_endpoint(engine, name="primary", key="primary-key", priority=0)
-    _add_endpoint(engine, name="backup", key="backup-key", priority=1)
+    primary_id = _add_endpoint(engine, name="primary", key="primary-key", priority=0)
+    backup_id = _add_endpoint(engine, name="backup", key="backup-key", priority=1)
     attempts = []
 
     class BadRequestError(Exception):
@@ -372,6 +372,45 @@ def test_gateway_request_wide_client_error_stops_failover(monkeypatch, tmp_path)
     assert attempts == ["openai/primary"]
     assert caught.value.__cause__ is None
     assert caught.value.__context__ is None
+    with Session(engine) as session:
+        primary = session.get(LlmEndpoint, primary_id)
+        backup = session.get(LlmEndpoint, backup_id)
+        assert primary.consecutive_failures == 0
+        assert primary.cooldown_until is None
+        assert primary.last_failure_at is None
+        assert primary.last_error is None
+        assert backup.consecutive_failures == 0
+        assert backup.last_failure_at is None
+
+
+def test_gateway_corrupt_primary_key_records_failure_and_uses_healthy_backup(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    primary_id = _add_endpoint(engine, name="primary", key="primary-key", priority=0)
+    backup_id = _add_endpoint(engine, name="backup", key="backup-key", priority=1)
+    with Session(engine) as session:
+        session.get(LlmEndpoint, primary_id).api_key_encrypted = "corrupt-primary-ciphertext"
+        session.commit()
+    attempts = []
+
+    def completion(**kwargs):
+        attempts.append(kwargs["model"])
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = complete_sync([{"role": "user", "content": "hello"}])
+
+    assert result.model == "openai/backup"
+    assert attempts == ["openai/backup"]
+    with Session(engine) as session:
+        primary = session.get(LlmEndpoint, primary_id)
+        backup = session.get(LlmEndpoint, backup_id)
+        assert primary.consecutive_failures == 1
+        assert primary.last_failure_at is not None
+        assert primary.last_error == "LLM endpoint API key cannot be decrypted"
+        assert "corrupt-primary-ciphertext" not in primary.last_error
+        assert backup.consecutive_failures == 0
+        assert backup.last_success_at is not None
 
 
 def test_gateway_uses_fixed_db_priority_skips_cooldown_and_updates_health(monkeypatch, tmp_path):
