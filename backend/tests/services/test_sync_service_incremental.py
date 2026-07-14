@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -15,6 +17,14 @@ class FakeSession:
 
 class FakeAsyncSession(FakeSession):
     pass
+
+
+class FakeSessionContext:
+    async def __aenter__(self):
+        return FakeAsyncSession()
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
 
 
 async def noop_persist_sync_progress(self, *args, **kwargs) -> None:
@@ -87,6 +97,187 @@ async def test_sync_sentiment_nga_tracks_flocktrader_progress(monkeypatch):
     assert progress.details["scan_time_basis"] == "last_reply_time"
     assert progress.details["cache_partition"] == "last_reply_time"
     assert progress.details["result"]["upserted"] == 3
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_gates_xueqiu_once_for_all_symbols(monkeypatch):
+    instances = []
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            self.symbols = []
+            self.wait_calls = 0
+            self.disconnect_calls = 0
+            instances.append(self)
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            self.wait_calls += 1
+            return SimpleNamespace(status="authenticated", auth={"server_verified": True})
+
+        async def collect(self, symbol, **kwargs):
+            self.symbols.append(symbol)
+            return [], {"raw_count": 0, "auth": {"server_verified": True}}
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("fake session handles collection")
+
+        async def upsert_posts(self, posts):
+            return len(posts)
+
+        async def run(self, *args, **kwargs):
+            raise AssertionError("scheduled Xueqiu must use the shared session")
+
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession, raising=False)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        symbols=["600519.SH", "000001.SZ"],
+        max_pages=1,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert len(instances) == 1
+    assert instances[0].wait_calls == 1
+    assert instances[0].symbols == ["600519.SH", "000001.SZ"]
+    assert instances[0].disconnect_calls == 1
+    assert progress.success_count == 2
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_login_timeout_skips_all_xueqiu_symbols(monkeypatch):
+    instances = []
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            self.symbols = []
+            self.disconnect_calls = 0
+            instances.append(self)
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="login_timeout", auth={"server_verified": False})
+
+        async def collect(self, symbol, **kwargs):
+            self.symbols.append(symbol)
+            raise AssertionError("timed-out session must not collect")
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("timed-out session must not collect")
+
+        async def run(self, *args, **kwargs):
+            raise AssertionError("scheduled Xueqiu must use the shared session")
+
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession, raising=False)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        symbols=["600519.SH", "000001.SZ"],
+        max_pages=1,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert instances[0].symbols == []
+    assert instances[0].disconnect_calls == 1
+    assert progress.failed_count == 1
+    assert progress.details["results"] == [
+        {
+            "ok": False,
+            "source": "xueqiu_spyder",
+            "symbol": None,
+            "error_code": "xueqiu_login_timeout",
+            "error": "Xueqiu login timed out; Chrome remains open for manual login",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_cancellation_disconnects_xueqiu_session(monkeypatch):
+    collect_started = asyncio.Event()
+    release_collect = asyncio.Event()
+    instance = None
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            nonlocal instance
+            self.symbols = []
+            self.disconnect_calls = 0
+            instance = self
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="authenticated", auth={"server_verified": True})
+
+        async def collect(self, symbol, **kwargs):
+            self.symbols.append(symbol)
+            collect_started.set()
+            await release_collect.wait()
+            return [], {"raw_count": 0}
+
+        async def disconnect(self):
+            self.disconnect_calls += 1
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("fake session handles collection")
+
+        async def upsert_posts(self, posts):
+            return 0
+
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    task = asyncio.create_task(
+        SyncService(FakeAsyncSession()).sync_sentiment(
+            sources=["xueqiu_spyder"],
+            symbols=["600519.SH", "000001.SZ"],
+            max_pages=1,
+            min_reply=0,
+            sync_mode="full",
+        )
+    )
+    await collect_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert instance is not None
+    assert instance.symbols == ["600519.SH"]
+    assert instance.disconnect_calls == 1
 
 
 @pytest.mark.asyncio

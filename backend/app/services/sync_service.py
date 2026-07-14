@@ -24,6 +24,7 @@ from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
 from app.services.index_components import ensure_index_components
 from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
+from app.services.xueqiu_session import XueqiuSession
 
 QMT_MINUTE_BATCH_SIZE = int(os.getenv("QMT_MINUTE_BATCH_SIZE", "100"))
 QMT_DAILY_BATCH_SIZE = int(os.getenv("QMT_DAILY_BATCH_SIZE", "50"))
@@ -3243,9 +3244,11 @@ class SyncService:
                 )
             )
         work_items: list[tuple[str, str | None]] = []
+        xueqiu_targets: list[str] = []
         for source in requested_sources:
             if source == "xueqiu_spyder":
-                targets: list[str | None] = symbol_list or [None]
+                xueqiu_targets = symbol_list
+                continue
             else:
                 targets = symbol_list if explicit_symbols else [None]
             work_items.extend((source, target) for target in targets)
@@ -3254,7 +3257,7 @@ class SyncService:
             sync_type="sentiment",
             status="running",
             start_time=datetime.now(),
-            total=len(work_items),
+            total=len(work_items) + len(xueqiu_targets),
             details={
                 "run_id": run_id,
                 "sources": requested_sources,
@@ -3289,11 +3292,99 @@ class SyncService:
         try:
             results: list[dict[str, Any]] = []
             source_semaphore = asyncio.Semaphore(3)
-            browser_semaphore = asyncio.Semaphore(1)
+
+            async def run_xueqiu_batch() -> list[dict[str, Any]]:
+                if not xueqiu_targets:
+                    return []
+
+                async with async_session_factory() as ingest_session:
+                    ingest = SentimentIngestService(ingest_session, progress_callback=on_progress)
+
+                    def collect(crawler: Any, symbol: str, **options: Any) -> Any:
+                        return ingest._collect_xueqiu(symbol, crawler=crawler, **options)
+
+                    xueqiu_session = XueqiuSession(
+                        collector=collect,
+                        progress_callback=on_progress,
+                    )
+                    batch_results: list[dict[str, Any]] = []
+                    try:
+                        await xueqiu_session.start()
+                        login = await xueqiu_session.wait_for_login()
+                        if login.status != "authenticated":
+                            return [
+                                {
+                                    "ok": False,
+                                    "source": "xueqiu_spyder",
+                                    "symbol": None,
+                                    "error_code": "xueqiu_login_timeout",
+                                    "error": "Xueqiu login timed out; Chrome remains open for manual login",
+                                }
+                            ]
+
+                        for symbol in xueqiu_targets:
+                            try:
+                                effective_start = start_date
+                                effective_end = end_date
+                                if sync_mode == "incremental":
+                                    from app.db.models.sentiment import SentimentPost
+                                    from app.services.sentiment import _source_storage_values
+
+                                    source_values = _source_storage_values(["xueqiu_spyder"]) or ["xueqiu_spyder"]
+                                    latest_stmt = select(func.max(SentimentPost.published_at)).where(
+                                        SentimentPost.source.in_(source_values),
+                                        SentimentPost.symbol == symbol,
+                                    )
+                                    latest_value = (await ingest_session.execute(latest_stmt)).scalar_one_or_none()
+                                    if latest_value is not None and effective_start is None:
+                                        effective_start = latest_value.date() - td(days=1)
+                                    effective_end = effective_end or date.today()
+
+                                posts, stats = await xueqiu_session.collect(
+                                    symbol,
+                                    max_pages=max_pages,
+                                    min_reply=min_reply,
+                                    start_date=effective_start,
+                                    end_date=effective_end,
+                                )
+                                inserted = await ingest.service.upsert_posts(posts)
+                                await ingest_session.commit()
+                                raw_count = int(stats.get("raw_count") or len(posts))
+                                batch_results.append(
+                                    {
+                                        "ok": True,
+                                        "source": "xueqiu_spyder",
+                                        "symbol": symbol,
+                                        "mode": "stock_page",
+                                        "collected": raw_count,
+                                        "matched": len(posts),
+                                        "fetched": raw_count,
+                                        "parsed": raw_count,
+                                        "rejected": max(0, raw_count - len(posts)),
+                                        "deduplicated": 0,
+                                        "retry_count": 0,
+                                        "upserted": inserted,
+                                        **stats,
+                                    }
+                                )
+                            except Exception as exc:
+                                await ingest_session.rollback()
+                                batch_results.append(
+                                    {
+                                        "ok": False,
+                                        "source": "xueqiu_spyder",
+                                        "symbol": symbol,
+                                        "error": str(exc),
+                                    }
+                                )
+                                if failure_strategy == "stop":
+                                    break
+                        return batch_results
+                    finally:
+                        await xueqiu_session.disconnect()
 
             async def run_item(source: str, symbol: str | None) -> dict[str, Any]:
-                semaphore = browser_semaphore if source == "xueqiu_spyder" else source_semaphore
-                async with semaphore:
+                async with source_semaphore:
                     async with async_session_factory() as ingest_session:
                         ingest = SentimentIngestService(ingest_session, progress_callback=on_progress)
                         try:
@@ -3333,9 +3424,14 @@ class SyncService:
                                 "error": str(exc),
                             }
 
+            xueqiu_results = await run_xueqiu_batch()
             pending = [asyncio.create_task(run_item(source, symbol)) for source, symbol in work_items]
-            for index, completed in enumerate(asyncio.as_completed(pending), start=1):
-                result = await completed
+            completed_results = list(xueqiu_results)
+            for completed in asyncio.as_completed(pending):
+                completed_results.append(await completed)
+
+            current = 0
+            for result in completed_results:
                 source = str(result.get("source") or "")
                 symbol = result.get("symbol")
                 progress.details["current_source"] = source
@@ -3350,7 +3446,11 @@ class SyncService:
                         if not task.done():
                             task.cancel()
                     raise RuntimeError(str(result.get("error") or f"{source} sentiment ingest failed"))
-                progress.current = index
+                if result.get("error_code") == "xueqiu_login_timeout":
+                    current += len(xueqiu_targets)
+                else:
+                    current += 1
+                progress.current = current
                 progress.details["results"] = results
                 progress.details["outcome"] = (
                     "partial" if progress.success_count and progress.failed_count else "running"
