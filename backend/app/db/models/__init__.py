@@ -12,6 +12,7 @@ from .live_trading import (
     LiveTradeRecord,
     LiveTradingRun,
 )
+from .llm_endpoint import LlmEndpoint
 from .research_lineage import (
     AIConversation,
     DataSnapshot,
@@ -47,6 +48,7 @@ __all__ = [
     "LiveTradeRecord",
     "LivePositionState",
     "LivePaperAccount",
+    "LlmEndpoint",
     "DataSnapshot",
     "StrategyRelease",
     "ResearchArtifact",
