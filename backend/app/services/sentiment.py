@@ -1633,11 +1633,22 @@ def _verify_xueqiu_login(crawler: Any, injected_auth: dict[str, Any] | None = No
         context_cookies = []
         auth["context_cookie_error"] = str(exc)
 
-    cookie_names = {str(cookie.get("name")) for cookie in context_cookies if isinstance(cookie, dict)}
+    cookies_by_name = {
+        str(cookie.get("name")): cookie
+        for cookie in context_cookies
+        if isinstance(cookie, dict) and cookie.get("name")
+    }
     auth["context_cookie_count"] = len(context_cookies)
-    auth["context_login_cookie_present"] = bool(
-        {"xq_a_token", "xqat", "xq_id_token", "u"} & cookie_names
-    ) and "xq_is_login" in cookie_names
+    token_present = any(
+        bool(cookies_by_name.get(name, {}).get("value"))
+        for name in ("xq_a_token", "xqat", "xq_id_token")
+    )
+    cookie_authenticated = (
+        cookies_by_name.get("xq_is_login", {}).get("value") == "1"
+        and token_present
+        and bool(cookies_by_name.get("u", {}).get("value"))
+    )
+    auth["context_login_cookie_present"] = cookie_authenticated
 
     try:
         result = page.evaluate(
@@ -1683,14 +1694,25 @@ def _verify_xueqiu_login(crawler: Any, injected_auth: dict[str, Any] | None = No
                 return {ok: false, status: null, endpoint: null};
             }"""
         )
-        auth["server_verified"] = bool(result.get("ok")) if isinstance(result, dict) else False
+        probe_ok = bool(result.get("ok")) if isinstance(result, dict) else False
+        probe_status = result.get("status") if isinstance(result, dict) else None
+        if probe_ok:
+            auth["server_verified"] = True
+            auth["verification_source"] = "server_probe"
+        elif probe_status in (401, 403):
+            auth["server_verified"] = False
+            auth["verification_source"] = "server_rejected"
+        else:
+            auth["server_verified"] = cookie_authenticated
+            auth["verification_source"] = "login_cookies" if cookie_authenticated else "unverified"
         auth["server_status"] = result.get("status") if isinstance(result, dict) else None
         auth["server_endpoint"] = result.get("endpoint") if isinstance(result, dict) else None
         if isinstance(result, dict) and result.get("error_code"):
             auth["server_error_code"] = result.get("error_code")
             auth["server_error_description"] = result.get("error_description")
     except Exception as exc:
-        auth["server_verified"] = False
+        auth["server_verified"] = cookie_authenticated
+        auth["verification_source"] = "login_cookies" if cookie_authenticated else "unverified"
         auth["server_error"] = str(exc)
 
     return auth

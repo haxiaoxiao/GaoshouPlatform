@@ -1721,6 +1721,93 @@ def test_verify_xueqiu_login_reports_sanitized_status():
     assert "secret" not in str(auth)
 
 
+def test_verify_xueqiu_login_accepts_complete_cookies_when_probe_is_inconclusive():
+    class Page:
+        def evaluate(self, script):
+            return {
+                "ok": False,
+                "status": 400,
+                "endpoint": "/statuses/home_timeline.json",
+                "error_code": "400016",
+                "error_description": "probe endpoint rejected request",
+            }
+
+    class Context:
+        def cookies(self, url=None):
+            return [
+                {"name": "xq_a_token", "value": "secret"},
+                {"name": "xq_is_login", "value": "1"},
+                {"name": "u", "value": "123"},
+            ]
+
+    class Browser:
+        contexts = [Context()]
+
+    class Crawler:
+        _browser = Browser()
+        _page = Page()
+
+    auth = _verify_xueqiu_login(Crawler())
+
+    assert auth["context_login_cookie_present"] is True
+    assert auth["server_verified"] is True
+    assert auth["verification_source"] == "login_cookies"
+    assert "secret" not in str(auth)
+
+
+def test_verify_xueqiu_login_rejects_complete_cookies_on_explicit_unauthorized():
+    class Page:
+        def evaluate(self, script):
+            return {"ok": False, "status": 401, "endpoint": "/auth/check"}
+
+    class Context:
+        def cookies(self, url=None):
+            return [
+                {"name": "xqat", "value": "secret"},
+                {"name": "xq_is_login", "value": "1"},
+                {"name": "u", "value": "123"},
+            ]
+
+    class Browser:
+        contexts = [Context()]
+
+    class Crawler:
+        _browser = Browser()
+        _page = Page()
+
+    auth = _verify_xueqiu_login(Crawler())
+
+    assert auth["context_login_cookie_present"] is True
+    assert auth["server_verified"] is False
+    assert auth["verification_source"] == "server_rejected"
+
+
+def test_verify_xueqiu_login_requires_enabled_login_cookie():
+    class Page:
+        def evaluate(self, script):
+            return {"ok": False, "status": 404, "endpoint": "/users/self.json"}
+
+    class Context:
+        def cookies(self, url=None):
+            return [
+                {"name": "xq_a_token", "value": "secret"},
+                {"name": "xq_is_login", "value": "0"},
+                {"name": "u", "value": "123"},
+            ]
+
+    class Browser:
+        contexts = [Context()]
+
+    class Crawler:
+        _browser = Browser()
+        _page = Page()
+
+    auth = _verify_xueqiu_login(Crawler())
+
+    assert auth["context_login_cookie_present"] is False
+    assert auth["server_verified"] is False
+
+
 def test_disconnect_leaves_external_chrome_open():
     class Browser:
         def __init__(self):
