@@ -1,5 +1,132 @@
 import request from './request'
 
+export interface LlmEndpoint {
+  id: string
+  name: string
+  api_base: string
+  api_key_hint: string
+  model: string
+  priority: number
+  enabled: boolean
+  consecutive_failures: number
+  cooldown_until: string | null
+  last_success_at: string | null
+  last_failure_at: string | null
+  last_error: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface LlmEndpointCreatePayload {
+  name: string
+  api_base: string
+  api_key: string
+  model: string
+  enabled: boolean
+}
+
+export interface LlmEndpointUpdatePayload {
+  name?: string
+  api_base?: string
+  api_key?: string
+  model?: string
+  enabled?: boolean
+}
+
+export interface LlmEndpointDraft {
+  name: string
+  api_base: string
+  api_key: string
+  model: string
+  enabled: boolean
+}
+
+export interface LlmEndpointTestResult {
+  status: 'ok' | 'error'
+  latency_ms: number
+  model: string | null
+  error: string | null
+}
+
+export interface LlmGatewaySummary {
+  readiness: 'ready' | 'degraded' | 'blocked'
+  enabled: number
+  total: number
+  primary: string | null
+  recentError: string | null
+}
+
+export type LlmEndpointLoadState = 'loading' | 'ready' | 'error'
+
+export interface LlmGatewayView {
+  readiness: LlmGatewaySummary['readiness'] | 'unknown' | 'error'
+  enabled: number | null
+  total: number | null
+  primary: string | null
+  recentError: string | null
+}
+
+export function buildLlmEndpointUpdate(current: LlmEndpoint, draft: LlmEndpointDraft): LlmEndpointUpdatePayload {
+  const apiBase = draft.api_base.trim()
+  const apiKey = draft.api_key.trim()
+  const payload: LlmEndpointUpdatePayload = {
+    name: draft.name.trim(),
+    api_base: apiBase,
+    model: draft.model.trim(),
+    enabled: draft.enabled,
+  }
+  if (apiKey || apiBase !== current.api_base) payload.api_key = apiKey
+  return payload
+}
+
+export function moveLlmEndpointIds(ids: string[], endpointId: string, offset: -1 | 1): string[] {
+  const currentIndex = ids.indexOf(endpointId)
+  const nextIndex = currentIndex + offset
+  if (currentIndex < 0 || nextIndex < 0 || nextIndex >= ids.length) return [...ids]
+  const next = [...ids]
+  ;[next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]]
+  return next
+}
+
+export function sanitizeRecentEndpointError(error: string | null | undefined): string | null {
+  if (!error) return null
+  const compact = error
+    .replace(/\b(?:sk|key|token)-[A-Za-z0-9._-]{6,}\b/gi, '[redacted]')
+    .replace(/\s+/g, ' ')
+    .trim()
+  return compact.length > 160 ? `${compact.slice(0, 160)}...` : compact
+}
+
+export function isLlmEndpointCooldownActive(endpoint: Pick<LlmEndpoint, 'cooldown_until'>, now = Date.now()): boolean {
+  if (!endpoint.cooldown_until) return false
+  const cooldownUntil = Date.parse(endpoint.cooldown_until)
+  return Number.isFinite(cooldownUntil) && cooldownUntil > now
+}
+
+export function summarizeLlmEndpoints(endpoints: LlmEndpoint[]): LlmGatewaySummary {
+  const ordered = [...endpoints].sort((a, b) => a.priority - b.priority)
+  const enabled = ordered.filter(endpoint => endpoint.enabled)
+  const latestFailure = ordered
+    .filter(endpoint => endpoint.last_error && endpoint.last_failure_at)
+    .sort((a, b) => String(b.last_failure_at).localeCompare(String(a.last_failure_at)))[0]
+  const unhealthy = enabled.some(endpoint => endpoint.consecutive_failures > 0 || isLlmEndpointCooldownActive(endpoint))
+  return {
+    readiness: enabled.length === 0 ? 'blocked' : unhealthy ? 'degraded' : 'ready',
+    enabled: enabled.length,
+    total: ordered.length,
+    primary: enabled[0]?.name || null,
+    recentError: sanitizeRecentEndpointError(latestFailure?.last_error),
+  }
+}
+
+export function getLlmGatewayView(endpoints: LlmEndpoint[], loadState: LlmEndpointLoadState): LlmGatewayView {
+  if (loadState !== 'ready' && endpoints.length === 0) {
+    return { readiness: 'unknown', enabled: null, total: null, primary: null, recentError: null }
+  }
+  const summary = summarizeLlmEndpoints(endpoints)
+  return { ...summary, readiness: loadState === 'error' ? 'error' : summary.readiness }
+}
+
 export interface SystemStatus {
   status: string
   database: string
@@ -162,4 +289,21 @@ export const systemApi = {
     acknowledge_risk?: boolean
     confirm_text?: string | null
   }) => request.put<LiveTradingGuardrails>('/system/live-trading-guardrails', payload),
+
+  listLlmEndpoints: () => request.get<LlmEndpoint[]>('/system/llm-endpoints'),
+
+  createLlmEndpoint: (payload: LlmEndpointCreatePayload) =>
+    request.post<LlmEndpoint>('/system/llm-endpoints', payload),
+
+  updateLlmEndpoint: (endpointId: string, payload: LlmEndpointUpdatePayload) =>
+    request.patch<LlmEndpoint>(`/system/llm-endpoints/${endpointId}`, payload),
+
+  deleteLlmEndpoint: (endpointId: string) =>
+    request.delete<void>(`/system/llm-endpoints/${endpointId}`),
+
+  reorderLlmEndpoints: (endpointIds: string[]) =>
+    request.post<LlmEndpoint[]>('/system/llm-endpoints/reorder', { endpoint_ids: endpointIds }),
+
+  testLlmEndpoint: (endpointId: string) =>
+    request.post<LlmEndpointTestResult>(`/system/llm-endpoints/${endpointId}/test`),
 }

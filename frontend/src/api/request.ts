@@ -44,6 +44,9 @@ const request = {
   put: <T>(url: string, data?: unknown, config?: object): Promise<T> =>
     instance.put(url, data, config) as Promise<T>,
 
+  patch: <T>(url: string, data?: unknown, config?: object): Promise<T> =>
+    instance.patch(url, data, config) as Promise<T>,
+
   delete: <T>(url: string, config?: object): Promise<T> =>
     instance.delete(url, config) as Promise<T>,
 }
