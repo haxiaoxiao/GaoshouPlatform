@@ -1531,13 +1531,12 @@ class _BuiltinXueqiuCrawler:
         payload = result.get("data") or {}
         return list(payload.get("list") or [])
 
+    def disconnect(self) -> None:
+        if self._playwright is not None:
+            self._playwright.stop()
+
     def close(self) -> None:
-        try:
-            if self._browser is not None:
-                self._browser.close()
-        finally:
-            if self._playwright is not None:
-                self._playwright.stop()
+        self.disconnect()
 
 
 def _open_xueqiu_stock_page(crawler: Any, xq_symbol: str) -> None:
@@ -2496,8 +2495,10 @@ class SentimentIngestService:
         min_reply: int,
         start_date: date | None = None,
         end_date: date | None = None,
+        crawler: Any | None = None,
     ) -> tuple[list[SentimentPostInput], dict[str, Any]]:
-        crawler = _BuiltinXueqiuCrawler()
+        owns_crawler = crawler is None
+        crawler = crawler or _BuiltinXueqiuCrawler()
         try:
             xq_symbol = _to_xueqiu_symbol(symbol)
             auth = _inject_xueqiu_cookie(crawler)
@@ -2540,7 +2541,8 @@ class SentimentIngestService:
                 "raw_count": len(raw_posts),
             }
         finally:
-            crawler.close()
+            if owns_crawler:
+                crawler.disconnect()
 
     def _collect_eastmoney_guba(
         self,

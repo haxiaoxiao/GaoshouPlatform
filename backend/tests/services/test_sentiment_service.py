@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.services.sentiment as sentiment_module
 from app.db.models.base import Base
 from app.db.models.sentiment import SentimentAnalysis, SentimentMention, SentimentPost
 from app.db.models.stock import Stock
@@ -14,6 +15,7 @@ from app.services.sentiment import (
     SentimentIngestService,
     SentimentPostInput,
     SentimentService,
+    _BuiltinXueqiuCrawler,
     _inject_xueqiu_cookie,
     _finance_sentiment_v2,
     _parse_jisilu_detail,
@@ -1717,6 +1719,65 @@ def test_verify_xueqiu_login_reports_sanitized_status():
     assert auth["context_login_cookie_present"] is True
     assert auth["server_verified"] is True
     assert "secret" not in str(auth)
+
+
+def test_disconnect_leaves_external_chrome_open():
+    class Browser:
+        def __init__(self):
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+
+    class Playwright:
+        def __init__(self):
+            self.stop_calls = 0
+
+        def stop(self):
+            self.stop_calls += 1
+
+    crawler = object.__new__(_BuiltinXueqiuCrawler)
+    crawler._browser = Browser()
+    crawler._playwright = Playwright()
+
+    crawler.disconnect()
+
+    assert crawler._browser.close_calls == 0
+    assert crawler._playwright.stop_calls == 1
+
+
+def test_collect_xueqiu_does_not_disconnect_injected_crawler(monkeypatch):
+    class Crawler:
+        def __init__(self):
+            self.disconnect_calls = 0
+
+        def get_stock_posts(self, symbol, *, page, **kwargs):
+            return []
+
+        def disconnect(self):
+            self.disconnect_calls += 1
+
+    crawler = Crawler()
+    owner = object.__new__(SentimentIngestService)
+    owner.progress_callback = None
+    monkeypatch.setattr(sentiment_module, "_inject_xueqiu_cookie", lambda value: {})
+    monkeypatch.setattr(sentiment_module, "_open_xueqiu_stock_page", lambda value, symbol: None)
+    monkeypatch.setattr(
+        sentiment_module,
+        "_verify_xueqiu_login",
+        lambda value, auth: {"server_verified": True},
+    )
+
+    posts, stats = owner._collect_xueqiu(
+        "600519.SH",
+        max_pages=1,
+        min_reply=0,
+        crawler=crawler,
+    )
+
+    assert posts == []
+    assert stats["raw_count"] == 0
+    assert crawler.disconnect_calls == 0
 
 
 def test_resolve_chrome_path_prefers_env(monkeypatch, tmp_path):
