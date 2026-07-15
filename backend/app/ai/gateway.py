@@ -322,12 +322,10 @@ def _responses_input(
                 instructions.append(content)
             elif content is not None and content != "":
                 raise _malformed_responses_history()
-        elif role in {"user", "assistant"}:
+        elif role in {"user", "assistant", "developer"}:
             content = message.get("content")
             if content is not None and content != "":
-                if not isinstance(content, (str, list)):
-                    raise _malformed_responses_history()
-                response_input.append({"type": "message", "role": role, "content": content})
+                response_input.append(_responses_message(message, role, content))
             tool_calls = message.get("tool_calls")
             if tool_calls is not None:
                 if role != "assistant" or not isinstance(tool_calls, list):
@@ -349,6 +347,81 @@ def _responses_input(
 
 def _malformed_responses_history() -> ValueError:
     return ValueError("Malformed Responses tool history")
+
+
+def _malformed_responses_content() -> ValueError:
+    return ValueError("Malformed Responses message content")
+
+
+def _responses_message(
+    message: dict[str, Any], role: Literal["user", "assistant", "developer"], content: Any
+) -> dict[str, Any]:
+    if isinstance(content, str):
+        return {"type": "message", "role": role, "content": content}
+    if not isinstance(content, list) or not content:
+        raise _malformed_responses_content()
+    normalized = [_responses_content_part(role, part) for part in content]
+    has_output_text = any(part["type"] == "output_text" for part in normalized)
+    if has_output_text:
+        if role != "assistant" or any(part["type"] != "output_text" for part in normalized):
+            raise _malformed_responses_content()
+        message_id = message.get("id")
+        status = message.get("status")
+        if not isinstance(message_id, str) or not message_id or status not in {
+            "in_progress",
+            "completed",
+            "incomplete",
+        }:
+            raise _malformed_responses_content()
+        return {
+            "type": "message",
+            "id": message_id,
+            "status": status,
+            "role": "assistant",
+            "content": normalized,
+        }
+    return {"type": "message", "role": role, "content": normalized}
+
+
+def _responses_content_part(
+    role: Literal["user", "assistant", "developer"], part: Any
+) -> dict[str, Any]:
+    if not isinstance(part, dict):
+        raise _malformed_responses_content()
+    part_type = part.get("type")
+    if part_type in {"text", "input_text"}:
+        text = part.get("text")
+        if not isinstance(text, str):
+            raise _malformed_responses_content()
+        return {"type": "input_text", "text": text}
+    if part_type in {"image_url", "input_image"}:
+        if role != "user":
+            raise _malformed_responses_content()
+        return _responses_image_part(part)
+    if part_type == "output_text":
+        if role != "assistant" or not isinstance(part.get("text"), str):
+            raise _malformed_responses_content()
+        annotations = part.get("annotations", [])
+        if not isinstance(annotations, list):
+            raise _malformed_responses_content()
+        return {"type": "output_text", "text": part["text"], "annotations": annotations}
+    raise _malformed_responses_content()
+
+
+def _responses_image_part(part: dict[str, Any]) -> dict[str, Any]:
+    image_value = part.get("image_url")
+    detail = part.get("detail")
+    if isinstance(image_value, dict):
+        detail = image_value.get("detail", detail)
+        image_value = image_value.get("url")
+    if not isinstance(image_value, str) or not image_value:
+        raise _malformed_responses_content()
+    if detail is not None and detail not in {"low", "high", "auto", "original"}:
+        raise _malformed_responses_content()
+    normalized = {"type": "input_image", "image_url": image_value}
+    if detail is not None:
+        normalized["detail"] = detail
+    return normalized
 
 
 def _json_text(value: Any) -> str:

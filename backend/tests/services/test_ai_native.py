@@ -397,6 +397,141 @@ def test_gateway_responses_preserves_existing_items_idempotently(monkeypatch):
     ]
 
 
+def test_gateway_responses_normalizes_developer_text(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "developer", "content": "Follow policy", "local": "omit"}])
+
+    assert captured["input"] == [
+        {"type": "message", "role": "developer", "content": "Follow policy"}
+    ]
+
+
+def test_gateway_responses_normalizes_user_text_and_image_parts(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "inspect", "cache_control": "omit"},
+                {"type": "input_text", "text": "this"},
+                {"type": "image_url", "image_url": {"url": "https://example/image.png", "detail": "high"}},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc", "unknown": "omit"},
+            ],
+        }],
+    )
+
+    assert captured["input"] == [{
+        "type": "message",
+        "role": "user",
+        "content": [
+            {"type": "input_text", "text": "inspect"},
+            {"type": "input_text", "text": "this"},
+            {"type": "input_image", "image_url": "https://example/image.png", "detail": "high"},
+            {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+        ],
+    }]
+
+
+def test_gateway_responses_preserves_valid_assistant_output_text(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{
+        "type": "message",
+        "id": "msg-1",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "done", "annotations": [], "unknown": "omit"}],
+    }])
+
+    assert captured["input"] == [{
+        "type": "message",
+        "id": "msg-1",
+        "status": "completed",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "done", "annotations": []}],
+    }]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": [{"type": "audio", "data": "private"}]},
+        {"role": "assistant", "content": [{"type": "image_url", "image_url": "https://private"}]},
+        {"role": "user", "content": [{"type": "text", "text": 123}]},
+    ],
+)
+def test_gateway_responses_rejects_unsupported_or_malformed_content_parts(monkeypatch, message):
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=lambda **_kwargs: None))
+
+    with pytest.raises(ValueError, match="Malformed Responses message content") as caught:
+        complete_candidate_sync(candidate, [message])
+
+    assert "private" not in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "message",
     [
