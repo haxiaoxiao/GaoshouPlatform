@@ -175,20 +175,25 @@ def _extract_and_redact_key(document: dict[str, Any], *, allow_placeholder: bool
     if "OPENAI_API_KEY" in document:
         locations.append(document)
 
-    selected: str | None = None
-    if locations:
-        candidate = locations[0]["OPENAI_API_KEY"]
+    plaintext_keys: set[str] = set()
+    has_placeholder = False
+    for location in locations:
+        candidate = location["OPENAI_API_KEY"]
         if not isinstance(candidate, str) or not candidate.strip():
             raise ValueError("OPENAI_API_KEY must be a nonblank string")
         candidate = candidate.strip()
         if candidate == API_KEY_PLACEHOLDER:
-            if not allow_placeholder:
-                raise ValueError("OPENAI_API_KEY placeholder is only valid when updating")
+            has_placeholder = True
         else:
-            selected = candidate
+            plaintext_keys.add(candidate)
+
+    if len(plaintext_keys) > 1:
+        raise ValueError("conflicting OPENAI_API_KEY credentials")
+    if has_placeholder and not plaintext_keys and not allow_placeholder:
+        raise ValueError("OPENAI_API_KEY placeholder is only valid when updating")
     for location in locations:
         location["OPENAI_API_KEY"] = API_KEY_PLACEHOLDER
-    return selected
+    return next(iter(plaintext_keys), None)
 
 
 def _preserved_fields(document: Mapping[str, Any], provider: str) -> tuple[str, ...]:

@@ -91,17 +91,48 @@ def test_parse_normalizes_chat_wire_api_aliases(alias: str) -> None:
     assert parse_llm_config(config).wire_api == "chat_completions"
 
 
-def test_parse_prefers_nested_key_and_redacts_every_recognized_location() -> None:
-    config = _config(OPENAI_API_KEY="root-secret")
+def test_parse_uses_root_replacement_when_nested_key_is_placeholder() -> None:
+    config = _config(
+        env={"OPENAI_API_KEY": API_KEY_PLACEHOLDER},
+        OPENAI_API_KEY="root-secret",
+    )
+
+    parsed = parse_llm_config(config)
+
+    assert parsed.api_key == "root-secret"
+    assert parsed.sanitized_config["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+    assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+    assert "root-secret" not in json.dumps(parsed.sanitized_config)
+
+
+def test_parse_uses_nested_replacement_when_root_key_is_placeholder() -> None:
+    config = _config(OPENAI_API_KEY=API_KEY_PLACEHOLDER)
 
     parsed = parse_llm_config(config)
 
     assert parsed.api_key == "secret-key"
     assert parsed.sanitized_config["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
     assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
-    serialized = json.dumps(parsed.sanitized_config)
-    assert "root-secret" not in serialized
-    assert "secret-key" not in serialized
+    assert "secret-key" not in json.dumps(parsed.sanitized_config)
+
+
+def test_parse_rejects_conflicting_plaintext_credentials() -> None:
+    config = _config(OPENAI_API_KEY="different-secret")
+
+    with pytest.raises(ValueError, match="conflicting OPENAI_API_KEY") as error:
+        parse_llm_config(config)
+
+    assert "secret-key" not in str(error.value)
+    assert "different-secret" not in str(error.value)
+
+
+def test_parse_rejects_invalid_non_selected_credential_type() -> None:
+    config = _config(OPENAI_API_KEY=123)
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY") as error:
+        parse_llm_config(config)
+
+    assert "secret-key" not in str(error.value)
 
 
 def test_parse_placeholder_requires_explicit_update_mode() -> None:
