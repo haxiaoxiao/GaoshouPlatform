@@ -322,6 +322,8 @@ class LlmEndpointService:
 
     @staticmethod
     def _load_config(endpoint: LlmEndpoint) -> ParsedLlmConfig:
+        is_legacy_row = endpoint.config_json is None and endpoint.provider is None
+        requires_openai_auth = True if is_legacy_row else endpoint.requires_openai_auth
         config: dict[str, Any] | None = None
         if endpoint.config_json is not None:
             try:
@@ -366,7 +368,7 @@ class LlmEndpointService:
         provider_config["name"] = endpoint.name
         provider_config["base_url"] = endpoint.api_base
         provider_config["wire_api"] = endpoint.wire_api
-        provider_config["requires_openai_auth"] = endpoint.requires_openai_auth
+        provider_config["requires_openai_auth"] = requires_openai_auth
         env = config.get("env")
         if not isinstance(env, dict):
             env = {}

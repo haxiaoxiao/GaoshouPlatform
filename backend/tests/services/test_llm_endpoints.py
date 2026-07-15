@@ -283,6 +283,41 @@ async def test_non_object_stored_config_falls_back_without_breaking_serializatio
 
 
 @pytest.mark.asyncio
+async def test_migrated_legacy_row_preserves_synthesized_auth_on_serialize_and_update(
+    endpoint_service,
+):
+    service, session, _ = endpoint_service
+    endpoint = LlmEndpoint(
+        name="Migrated legacy",
+        api_base="https://legacy.example.com/v1",
+        api_key_encrypted="encrypted-looking-ciphertext",
+        api_key_hint="********text",
+        model="legacy/model",
+        provider=None,
+        config_json=None,
+        wire_api="chat_completions",
+        disable_response_storage=False,
+        requires_openai_auth=False,
+        priority=0,
+    )
+    session.add(endpoint)
+    await session.commit()
+
+    serialized = service.serialize(endpoint)
+
+    assert serialized["requires_openai_auth"] is True
+    assert serialized["config"]["model_providers"]["Migrated legacy"][
+        "requires_openai_auth"
+    ] is True
+
+    updated = await service.update(endpoint.id, enabled=False)
+    persisted = json.loads(updated.config_json)
+    assert updated.enabled is False
+    assert updated.requires_openai_auth is True
+    assert persisted["model_providers"]["Migrated legacy"]["requires_openai_auth"] is True
+
+
+@pytest.mark.asyncio
 async def test_valid_stale_config_uses_canonical_columns_and_preserves_local_fields(
     endpoint_service,
 ):

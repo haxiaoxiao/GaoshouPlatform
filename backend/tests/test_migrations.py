@@ -6,6 +6,10 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import Session
+
+from app.db.models.llm_endpoint import LlmEndpoint
+from app.services.llm_endpoints import LlmEndpointService
 
 
 def test_lineage_migration_upgrades_and_downgrades_legacy_database(tmp_path):
@@ -104,6 +108,10 @@ def test_llm_json_config_migration_preserves_legacy_row_across_roundtrip(tmp_pat
         assert upgraded["disable_response_storage"] == 0
         assert upgraded["requires_openai_auth"] == 0
         assert upgraded["config_json"] is None
+    with Session(engine) as session:
+        migrated = session.get(LlmEndpoint, original["id"])
+        assert migrated is not None
+        assert LlmEndpointService.serialize(migrated)["requires_openai_auth"] is True
 
     command.downgrade(config, "20260713_0001")
     with engine.connect() as connection:
