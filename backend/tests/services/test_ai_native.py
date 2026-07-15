@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -8,6 +9,7 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal, get_type_hints
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
@@ -21,6 +23,8 @@ from app.ai.gateway import (
     complete_candidate_sync,
     complete_sync,
     gateway_status,
+    probe_pinned_llm_connection,
+    resolve_public_http_destination,
 )
 from app.ai.mcp_server import mcp
 from app.ai.tools import get_tool, list_tools
@@ -259,6 +263,105 @@ def test_gateway_direct_candidate_can_disable_redirects(monkeypatch):
     )
 
     assert captured["client"]._client.follow_redirects is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+async def test_pinned_connection_uses_validated_ip_host_sni_and_minimal_payload(
+    monkeypatch,
+    wire_api,
+):
+    resolutions = []
+    requests = []
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"model": "returned-model"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    destination = resolve_public_http_destination("https://provider.example:8443/v1")
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://provider.example:8443/v1",
+        api_key="top-secret",
+        model="openai/test-model",
+        source="database",
+        wire_api=wire_api,
+    )
+
+    result = await probe_pinned_llm_connection(
+        candidate,
+        destination,
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert resolutions == [("provider.example", 8443)]
+    assert result.model == "returned-model"
+    assert len(requests) == 1
+    request = requests[0]
+    suffix = "/responses" if wire_api == "responses" else "/chat/completions"
+    assert str(request.url) == f"https://93.184.216.34:8443/v1{suffix}"
+    assert request.headers["host"] == "provider.example:8443"
+    assert request.headers["authorization"] == "Bearer top-secret"
+    assert request.extensions["sni_hostname"] == "provider.example"
+    payload = json.loads(request.content)
+    assert payload["model"] == "test-model"
+    if wire_api == "responses":
+        assert payload == {
+            "model": "test-model",
+            "input": "Reply with OK.",
+            "max_output_tokens": 1,
+        }
+    else:
+        assert payload == {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 1,
+        }
+
+
+@pytest.mark.asyncio
+async def test_pinned_connection_does_not_follow_redirect_or_resolve_again(monkeypatch):
+    resolutions = []
+    requests = []
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        if len(resolutions) > 1:
+            raise AssertionError("pinned connection must not resolve DNS twice")
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    async def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    destination = resolve_public_http_destination("https://provider.example/v1")
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://provider.example/v1",
+        api_key="must-not-leak",
+        model="openai/test-model",
+        source="database",
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 302") as error:
+        await probe_pinned_llm_connection(
+            candidate,
+            destination,
+            transport=httpx.MockTransport(redirect),
+        )
+
+    assert resolutions == [("provider.example", 443)]
+    assert len(requests) == 1
+    assert "must-not-leak" not in str(error.value)
+    assert "127.0.0.1" not in str(error.value)
 
 
 @pytest.mark.asyncio

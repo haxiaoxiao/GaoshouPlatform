@@ -136,8 +136,7 @@ def test_llm_endpoint_request_schemas_require_complete_legacy_create_and_sparse_
     assert update_adapter.validate_python({"name": "Renamed"}).name == "Renamed"
     assert update_adapter.validate_python({"enabled": False}).enabled is False
 
-    with pytest.raises(ValueError, match="update must not be empty"):
-        update_adapter.validate_python({})
+    assert update_adapter.validate_python({}).model_dump(exclude_unset=True) == {}
     with pytest.raises(ValueError, match="Extra inputs are not permitted"):
         update_adapter.validate_python({"config": _config(), "model": "mixed"})
 
@@ -290,7 +289,7 @@ async def test_legacy_update_accepts_enabled_only_for_current_ui(endpoint_api):
 
 
 @pytest.mark.asyncio
-async def test_update_rejects_empty_and_mixed_payloads_clearly(endpoint_api):
+async def test_update_accepts_empty_legacy_noop_and_rejects_mixed_payload(endpoint_api):
     client, _ = endpoint_api
     endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
 
@@ -300,8 +299,8 @@ async def test_update_rejects_empty_and_mixed_payloads_clearly(endpoint_api):
         json={"config": endpoint["config"], "name": "Mixed"},
     )
 
-    assert empty.status_code == 422
-    assert "update must not be empty" in empty.text
+    assert empty.status_code == 200
+    assert empty.json() == endpoint
     assert mixed.status_code == 422
     assert "Extra inputs are not permitted" in mixed.text
     assert "LlmEndpointJsonUpdate" in mixed.text
@@ -384,11 +383,12 @@ async def test_api_base_destination_change_requires_replacement_key(endpoint_api
     )
     captured = {}
 
-    async def fake_complete_candidate(candidate, *_args, **_kwargs):
+    async def fake_pinned_connection(candidate, destination):
         captured["candidate"] = candidate
+        captured["destination"] = destination
         return LLMResult(content="ok", model=candidate.model)
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fake_complete_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fake_pinned_connection)
     tested = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
     assert rejected.status_code == 422
@@ -396,6 +396,7 @@ async def test_api_base_destination_change_requires_replacement_key(endpoint_api
     assert tested.status_code == 200
     assert captured["candidate"].api_base == "https://llm.example.test/v1"
     assert captured["candidate"].api_key == "top-secret-1234"
+    assert captured["destination"].url == "https://93.184.216.34/v1"
 
 
 @pytest.mark.asyncio
@@ -404,13 +405,12 @@ async def test_connection_uses_json_responses_candidate_options(endpoint_api, mo
     endpoint = (await client.post("/api/system/llm-endpoints", json={"config": _config()})).json()
     captured = {}
 
-    async def fake_complete_candidate(candidate, messages, **kwargs):
+    async def fake_pinned_connection(candidate, destination):
         captured["candidate"] = candidate
-        captured["messages"] = messages
-        captured["kwargs"] = kwargs
+        captured["destination"] = destination
         return LLMResult(content="ok", model=candidate.model)
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fake_complete_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fake_pinned_connection)
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
     assert response.status_code == 200
@@ -421,12 +421,9 @@ async def test_connection_uses_json_responses_candidate_options(endpoint_api, mo
     assert candidate.reasoning_effort == "high"
     assert candidate.disable_response_storage is True
     assert candidate.requires_openai_auth is True
-    assert captured["messages"] == [{"role": "user", "content": "Reply with OK."}]
-    assert captured["kwargs"] == {
-        "temperature": 0,
-        "max_tokens": 1,
-        "follow_redirects": False,
-    }
+    assert captured["destination"].url == "https://93.184.216.34/v1"
+    assert captured["destination"].host_header == "responses.example.test"
+    assert captured["destination"].sni_hostname == "responses.example.test"
 
 
 @pytest.mark.asyncio
@@ -468,7 +465,7 @@ async def test_connection_rejects_any_nonpublic_dns_result_before_key_decryption
         "app.api.llm_endpoints.LlmEndpointService.decrypt_api_key",
         fail_if_decrypted,
     )
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_if_called)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fail_if_called)
 
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
@@ -541,13 +538,12 @@ async def test_connection_uses_decrypted_selected_candidate_and_records_success(
     endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
     captured = {}
 
-    async def fake_complete_candidate(candidate, messages, **kwargs):
+    async def fake_pinned_connection(candidate, destination):
         captured["candidate"] = candidate
-        captured["messages"] = messages
-        captured["kwargs"] = kwargs
+        captured["destination"] = destination
         return LLMResult(content="ok", model="provider/returned-model")
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fake_complete_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fake_pinned_connection)
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
     assert response.status_code == 200
@@ -558,9 +554,9 @@ async def test_connection_uses_decrypted_selected_candidate_and_records_success(
     assert "api_key" not in response.json()
     assert captured["candidate"].endpoint_id == endpoint["id"]
     assert captured["candidate"].api_key == "top-secret-1234"
-    assert captured["messages"] == [{"role": "user", "content": "Reply with OK."}]
-    assert captured["kwargs"]["max_tokens"] == 1
-    assert captured["kwargs"]["follow_redirects"] is False
+    assert captured["destination"].url == "https://93.184.216.34/v1"
+    assert captured["destination"].host_header == "llm.example.test"
+    assert captured["destination"].sni_hostname == "llm.example.test"
 
     listed = (await client.get("/api/system/llm-endpoints")).json()[0]
     assert listed["last_success_at"] is not None
@@ -575,7 +571,7 @@ async def test_connection_failure_is_sanitized_and_records_health(endpoint_api, 
     async def fail_candidate(*_args, **_kwargs):
         raise RuntimeError("authorization: Bearer top-secret-1234")
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fail_candidate)
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
     assert response.status_code == 200
@@ -600,7 +596,7 @@ async def test_connection_failure_survives_health_write_failure(endpoint_api, mo
         health_errors.append(str(error))
         raise RuntimeError("health database unavailable for top-secret-1234")
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", fail_candidate)
     monkeypatch.setattr("app.api.llm_endpoints.LlmEndpointService.mark_failure", fail_health_write)
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
 
@@ -629,7 +625,7 @@ async def test_connection_success_survives_health_write_failure_and_rolls_back(
         await service.session.flush()
         raise RuntimeError("health write failed with top-secret-1234")
 
-    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", succeed_candidate)
+    monkeypatch.setattr("app.api.llm_endpoints.probe_pinned_llm_connection", succeed_candidate)
     monkeypatch.setattr("app.api.llm_endpoints.LlmEndpointService.mark_success", fail_success_write)
     response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
     listed = (await client.get("/api/system/llm-endpoints")).json()[0]

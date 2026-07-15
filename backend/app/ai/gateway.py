@@ -4,12 +4,16 @@ import asyncio
 import json
 import logging
 import re
+import socket
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from ipaddress import ip_address
 from types import SimpleNamespace
 from typing import Any, Literal
+from urllib.parse import urlparse, urlunparse
 
+import httpx
 from sqlalchemy import case, create_engine, or_, select, update
 from sqlalchemy.orm import Session
 
@@ -62,6 +66,106 @@ class GatewayCandidate:
     disable_response_storage: bool = False
     requires_openai_auth: bool = False
     api_key_encrypted: str | None = field(default=None, repr=False)
+
+
+@dataclass(frozen=True)
+class PinnedHttpDestination:
+    url: str
+    host_header: str
+    sni_hostname: str
+
+
+def resolve_public_http_destination(url: str) -> PinnedHttpDestination:
+    parsed = urlparse(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
+    try:
+        default_port = 443 if parsed.scheme == "https" else 80
+        port = parsed.port or default_port
+        addresses = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
+        resolved_addresses = []
+        for address in addresses:
+            resolved = ip_address(address[4][0])
+            if resolved.version == 6 and resolved.ipv4_mapped is not None:
+                resolved = resolved.ipv4_mapped
+            if not resolved.is_global or resolved.is_multicast:
+                raise ValueError
+            resolved_addresses.append(resolved)
+    except (OSError, TypeError, ValueError):
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination") from None
+    if not resolved_addresses:
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
+
+    selected = resolved_addresses[0]
+    ip_host = f"[{selected}]" if selected.version == 6 else str(selected)
+    pinned_netloc = f"{ip_host}:{port}" if parsed.port is not None else ip_host
+    original_host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    host_header = f"{original_host}:{port}" if parsed.port is not None else original_host
+    return PinnedHttpDestination(
+        url=urlunparse((parsed.scheme, pinned_netloc, parsed.path, "", parsed.query, "")),
+        host_header=host_header,
+        sni_hostname=parsed.hostname,
+    )
+
+
+def _health_model_name(model: str) -> str:
+    return model.removeprefix("openai/")
+
+
+async def probe_pinned_llm_connection(
+    candidate: GatewayCandidate,
+    destination: PinnedHttpDestination,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> LLMResult:
+    suffix = "/responses" if candidate.wire_api == "responses" else "/chat/completions"
+    request_url = f"{destination.url.rstrip('/')}{suffix}"
+    model = _health_model_name(candidate.model)
+    if candidate.wire_api == "responses":
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": "Reply with OK.",
+            "max_output_tokens": 1,
+        }
+    else:
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 1,
+        }
+    headers = {
+        "Authorization": f"Bearer {candidate.api_key or ''}",
+        "Content-Type": "application/json",
+        "Host": destination.host_header,
+    }
+    async with httpx.AsyncClient(
+        transport=transport,
+        timeout=settings.llm_timeout_seconds,
+        follow_redirects=False,
+        trust_env=False,
+    ) as client:
+        request = client.build_request("POST", request_url, headers=headers, json=payload)
+        request.extensions["sni_hostname"] = destination.sni_hostname
+        try:
+            response = await client.send(request)
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"LLM endpoint connection failed: {type(exc).__name__}") from None
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(f"LLM endpoint test returned HTTP {response.status_code}")
+    try:
+        response_data = response.json()
+    except ValueError:
+        response_data = {}
+    returned_model = response_data.get("model") if isinstance(response_data, dict) else None
+    return LLMResult(
+        content="",
+        model=returned_model if isinstance(returned_model, str) else candidate.model,
+    )
 
 
 def _sync_database_url() -> str:

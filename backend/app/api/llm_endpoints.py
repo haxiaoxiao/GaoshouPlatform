@@ -1,18 +1,20 @@
 from __future__ import annotations
 
 import logging
-import socket
 from datetime import datetime
-from ipaddress import ip_address
 from time import perf_counter
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.ai.gateway import GatewayCandidate, complete_candidate, sanitize_error
+from app.ai.gateway import (
+    GatewayCandidate,
+    probe_pinned_llm_connection,
+    resolve_public_http_destination,
+    sanitize_error,
+)
 from app.db.models.llm_endpoint import LlmEndpoint
 from app.db.sqlite import get_async_session
 from app.services.llm_endpoints import LlmEndpointService
@@ -59,12 +61,6 @@ class LlmEndpointLegacyUpdate(BaseModel):
     api_key: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool | None = None
-
-    @model_validator(mode="after")
-    def validate_nonempty_update(self) -> LlmEndpointLegacyUpdate:
-        if not self.model_fields_set:
-            raise ValueError("update must not be empty")
-        return self
 
 
 LlmEndpointUpdate = Annotated[
@@ -123,25 +119,6 @@ def _service_error(error: ValueError, *, conflict: bool = False) -> HTTPExceptio
         status_code=status.HTTP_409_CONFLICT if conflict else status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=detail,
     )
-
-
-def _validate_public_http_destination(url: str) -> None:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
-    try:
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        addresses = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
-    except (OSError, ValueError):
-        raise ValueError("LLM endpoint test requires a public HTTP(S) destination") from None
-    if not addresses:
-        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
-    for address in addresses:
-        resolved = ip_address(address[4][0])
-        if resolved.version == 6 and resolved.ipv4_mapped is not None:
-            resolved = resolved.ipv4_mapped
-        if not resolved.is_global or resolved.is_multicast:
-            raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
 
 
 async def _rollback_failed_health_write(
@@ -253,6 +230,10 @@ async def update_llm_endpoint(
                 payload.config,
                 enabled=payload.enabled,
             )
+        elif not payload.model_fields_set:
+            endpoint = await session.get(LlmEndpoint, endpoint_id)
+            if endpoint is None:
+                raise ValueError(f"LLM endpoint {endpoint_id} not found")
         else:
             endpoint = await service.update(
                 endpoint_id,
@@ -285,7 +266,7 @@ async def test_llm_endpoint(
         endpoint = await session.get(LlmEndpoint, endpoint_id)
         if endpoint is None:
             raise ValueError(f"LLM endpoint {endpoint_id} not found")
-        _validate_public_http_destination(endpoint.api_base)
+        destination = resolve_public_http_destination(endpoint.api_base)
         api_key = await service.decrypt_api_key(endpoint_id)
     except ValueError as error:
         raise _service_error(error) from None
@@ -308,13 +289,7 @@ async def test_llm_endpoint(
     result = None
     safe_error = None
     try:
-        result = await complete_candidate(
-            candidate,
-            [{"role": "user", "content": "Reply with OK."}],
-            temperature=0,
-            max_tokens=1,
-            follow_redirects=False,
-        )
+        result = await probe_pinned_llm_connection(candidate, destination)
     except Exception as error:
         safe_error = sanitize_error(error, api_key)
 
