@@ -302,14 +302,116 @@ def _responses_input(
 ) -> tuple[list[dict[str, Any]], str | None]:
     instructions = [system] if system else []
     response_input: list[dict[str, Any]] = []
+    pending_calls: set[str] = set()
     for message in messages:
-        if message.get("role") == "system":
+        item_type = message.get("type")
+        role = message.get("role")
+        if item_type == "function_call":
+            item = _responses_function_call(message)
+            if item["call_id"] in pending_calls:
+                raise _malformed_responses_history()
+            pending_calls.add(item["call_id"])
+            response_input.append(item)
+        elif item_type == "function_call_output":
+            item = _responses_function_call_output(message, pending_calls)
+            pending_calls.remove(item["call_id"])
+            response_input.append(item)
+        elif role == "system":
             content = message.get("content")
             if isinstance(content, str) and content:
                 instructions.append(content)
+            elif content is not None and content != "":
+                raise _malformed_responses_history()
+        elif role in {"user", "assistant"}:
+            content = message.get("content")
+            if content is not None and content != "":
+                if not isinstance(content, (str, list)):
+                    raise _malformed_responses_history()
+                response_input.append({"type": "message", "role": role, "content": content})
+            tool_calls = message.get("tool_calls")
+            if tool_calls is not None:
+                if role != "assistant" or not isinstance(tool_calls, list):
+                    raise _malformed_responses_history()
+                for tool_call in tool_calls:
+                    item = _chat_tool_call(tool_call)
+                    if item["call_id"] in pending_calls:
+                        raise _malformed_responses_history()
+                    pending_calls.add(item["call_id"])
+                    response_input.append(item)
+        elif role == "tool":
+            item = _chat_tool_output(message, pending_calls)
+            pending_calls.remove(item["call_id"])
+            response_input.append(item)
         else:
-            response_input.append(dict(message))
+            raise _malformed_responses_history()
     return response_input, "\n\n".join(instructions) or None
+
+
+def _malformed_responses_history() -> ValueError:
+    return ValueError("Malformed Responses tool history")
+
+
+def _json_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        raise _malformed_responses_history() from None
+
+
+def _responses_function_call(item: dict[str, Any]) -> dict[str, Any]:
+    call_id = item.get("call_id")
+    name = item.get("name")
+    arguments = item.get("arguments")
+    if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+        raise _malformed_responses_history()
+    if not isinstance(arguments, (str, dict)):
+        raise _malformed_responses_history()
+    return {
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": _json_text(arguments),
+    }
+
+
+def _responses_function_call_output(
+    item: dict[str, Any], pending_calls: set[str]
+) -> dict[str, Any]:
+    call_id = item.get("call_id")
+    if not isinstance(call_id, str) or call_id not in pending_calls or "output" not in item:
+        raise _malformed_responses_history()
+    return {
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": _json_text(item["output"]),
+    }
+
+
+def _chat_tool_call(tool_call: Any) -> dict[str, Any]:
+    if not isinstance(tool_call, dict):
+        raise _malformed_responses_history()
+    function = tool_call.get("function")
+    if not isinstance(function, dict):
+        raise _malformed_responses_history()
+    return _responses_function_call({
+        "call_id": tool_call.get("id") or tool_call.get("call_id"),
+        "name": function.get("name"),
+        "arguments": function.get("arguments"),
+    })
+
+
+def _chat_tool_output(message: dict[str, Any], pending_calls: set[str]) -> dict[str, Any]:
+    if "content" not in message:
+        raise _malformed_responses_history()
+    return _responses_function_call_output(
+        {
+            "call_id": message.get("tool_call_id") or message.get("call_id"),
+            "output": message.get("content"),
+        },
+        pending_calls,
+    )
 
 
 def _responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -412,6 +514,10 @@ def complete_sync(
     model_role: Literal["primary", "review"] = "primary",
 ) -> LLMResult:
     candidates, _ = _load_candidates()
+    if model_role == "review":
+        candidates = [candidate for candidate in candidates if candidate.review_model] + [
+            candidate for candidate in candidates if not candidate.review_model
+        ]
     if not candidates:
         _require_config()
         raise RuntimeError("All enabled LLM endpoints are in cooldown")

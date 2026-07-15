@@ -293,7 +293,7 @@ def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
     )
 
     assert captured["model"] == "openai/reviewer"
-    assert captured["input"] == [{"role": "user", "content": "hello"}]
+    assert captured["input"] == [{"type": "message", "role": "user", "content": "hello"}]
     assert captured["instructions"] == "explicit instruction\n\nmessage instruction"
     assert captured["tools"] == [{"type": "function", "name": "lookup", "description": "Lookup", "parameters": {"type": "object"}}]
     assert captured["max_output_tokens"] == 123
@@ -304,6 +304,131 @@ def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
     assert result.tool_calls == [{"id": "call-1", "name": "lookup", "arguments": '{"x": 1}'}]
     assert result.model == "openai/actual"
     assert result.usage == {"input_tokens": 4, "output_tokens": 2}
+
+
+def test_gateway_responses_strips_application_fields_and_correlates_tool_history(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="database",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [
+            {"role": "user", "content": "first", "approvals": [{"secret": "omit"}]},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": {"symbol": "600519.SH"}},
+                    }
+                ],
+                "tool_results": [{"secret": "omit"}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": {"price": 123}},
+            {"role": "assistant", "content": "done", "approvals": [], "tool_results": []},
+        ],
+    )
+
+    assert captured["input"] == [
+        {"type": "message", "role": "user", "content": "first"},
+        {"type": "message", "role": "assistant", "content": "checking"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"symbol": "600519.SH"}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": '{"price": 123}'},
+        {"type": "message", "role": "assistant", "content": "done"},
+    ]
+    assert "approvals" not in str(captured["input"])
+    assert "tool_results" not in str(captured["input"])
+
+
+def test_gateway_responses_preserves_existing_items_idempotently(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: captured.update(kwargs)
+            or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+        ),
+    )
+    items = [
+        {"type": "message", "role": "user", "content": "hello", "approvals": ["omit"]},
+        {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+
+    complete_candidate_sync(candidate, items)
+
+    assert captured["input"] == [
+        {"type": "message", "role": "user", "content": "hello"},
+        {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "call-1", "function": {"arguments": "{}"}}]},
+        {"role": "tool", "content": "orphaned"},
+        {"type": "function_call", "call_id": "", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1"},
+    ],
+)
+def test_gateway_responses_rejects_malformed_tool_history(monkeypatch, message):
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    called = False
+
+    def responses(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=responses))
+
+    with pytest.raises(ValueError, match="Malformed Responses tool history") as caught:
+        complete_candidate_sync(candidate, [message])
+
+    assert called is False
+    assert "lookup" not in str(caught.value)
 
 
 def test_gateway_review_model_failover(monkeypatch, tmp_path):
@@ -324,6 +449,27 @@ def test_gateway_review_model_failover(monkeypatch, tmp_path):
 
     assert result.model == "openai/review-two"
     assert calls == ["openai/review-one", "openai/review-two"]
+
+
+def test_gateway_review_role_prioritizes_review_capable_candidates(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary-only", key="zero", priority=0)
+    _add_endpoint(engine, name="review-one", key="one", priority=1, review_model="openai/review-one")
+    _add_endpoint(engine, name="review-two", key="two", priority=2, review_model="openai/review-two")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) < 3:
+            raise ConnectionError("offline")
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = complete_sync([{"role": "user", "content": "review"}], model_role="review")
+
+    assert calls == ["openai/review-one", "openai/review-two", "openai/primary-only"]
+    assert result.model == "openai/primary-only"
 
 
 @pytest.mark.asyncio
