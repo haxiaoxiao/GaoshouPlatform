@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
 from app.db.models.llm_endpoint import LlmEndpoint
+from app.services.llm_config import API_KEY_PLACEHOLDER
 from app.services.llm_endpoints import LlmEndpointService
 
 
@@ -43,6 +44,128 @@ async def _create(
         priority=priority,
         enabled=enabled,
     )
+
+
+def _json_config(**overrides: object) -> dict[str, object]:
+    config: dict[str, object] = {
+        "model_provider": "OpenAI",
+        "model": "gpt-5.5",
+        "review_model": "gpt-5.5-review",
+        "model_reasoning_effort": "xhigh",
+        "disable_response_storage": True,
+        "model_providers": {
+            "OpenAI": {
+                "name": "OpenAI primary",
+                "base_url": "https://api.example.com/v1",
+                "wire_api": "responses",
+                "requires_openai_auth": True,
+                "vendor_option": {"mode": "keep"},
+            }
+        },
+        "env": {"OPENAI_API_KEY": "secret-key", "REGION": "east"},
+        "future_option": {"items": [1]},
+    }
+    config.update(overrides)
+    return config
+
+
+@pytest.mark.asyncio
+async def test_json_config_is_normalized_and_secret_is_encrypted(endpoint_service):
+    service, session, _ = endpoint_service
+
+    endpoint = await service.create_from_config(_json_config())
+    await session.commit()
+    serialized = service.serialize(endpoint)
+
+    assert endpoint.provider == "OpenAI"
+    assert endpoint.name == "OpenAI primary"
+    assert endpoint.wire_api == "responses"
+    assert endpoint.review_model == "gpt-5.5-review"
+    assert endpoint.reasoning_effort == "xhigh"
+    assert endpoint.disable_response_storage is True
+    assert endpoint.requires_openai_auth is True
+    assert "secret-key" not in endpoint.config_json
+    assert "secret-key" not in endpoint.api_key_encrypted
+    assert serialized["config"]["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+    assert serialized["preserved_fields"] == [
+        "env.REGION",
+        "future_option",
+        "model_providers.OpenAI.vendor_option",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_placeholder_update_preserves_key_for_same_provider_and_destination(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    original_ciphertext = endpoint.api_key_encrypted
+
+    sanitized = service.serialize(endpoint)["config"]
+    sanitized["future_option"] = {"items": [2]}
+    updated = await service.update_from_config(endpoint.id, sanitized)
+
+    assert updated.api_key_encrypted == original_ciphertext
+    assert await service.decrypt_api_key(endpoint.id) == "secret-key"
+    assert service.serialize(updated)["config"]["future_option"] == {"items": [2]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["provider", "destination"])
+async def test_placeholder_update_requires_replacement_key_when_binding_changes(
+    endpoint_service, change: str
+):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    config = service.serialize(endpoint)["config"]
+    if change == "provider":
+        config["model_providers"]["Other"] = config["model_providers"].pop("OpenAI")
+        config["model_provider"] = "Other"
+    else:
+        config["model_providers"]["OpenAI"]["base_url"] = "https://other.example.com/v1"
+
+    with pytest.raises(ValueError, match="replacement OPENAI_API_KEY"):
+        await service.update_from_config(endpoint.id, config)
+
+    assert endpoint.provider == "OpenAI"
+    assert endpoint.api_base == "https://api.example.com/v1"
+    assert await service.decrypt_api_key(endpoint.id) == "secret-key"
+
+
+@pytest.mark.asyncio
+async def test_json_update_rebinds_provider_and_destination_with_replacement_key(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    config = service.serialize(endpoint)["config"]
+    provider_config = config["model_providers"].pop("OpenAI")
+    provider_config["base_url"] = "https://other.example.com/v1"
+    config["model_providers"]["Other"] = provider_config
+    config["model_provider"] = "Other"
+    config["env"]["OPENAI_API_KEY"] = "replacement-key"
+
+    updated = await service.update_from_config(endpoint.id, config)
+
+    assert updated.provider == "Other"
+    assert updated.api_base == "https://other.example.com/v1"
+    assert await service.decrypt_api_key(endpoint.id) == "replacement-key"
+
+
+@pytest.mark.asyncio
+async def test_legacy_create_update_and_serialization_synthesize_normalized_config(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await _create(service, name="Legacy")
+
+    serialized = service.serialize(endpoint)
+
+    assert endpoint.provider is None
+    assert serialized["provider"] == "Legacy"
+    assert serialized["wire_api"] == "chat_completions"
+    assert serialized["requires_openai_auth"] is True
+    assert serialized["config"]["model_provider"] == "Legacy"
+    assert serialized["config"]["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+    assert serialized["preserved_fields"] == []
+
+    updated = await service.update(endpoint.id, model="legacy-model-2")
+    assert service.serialize(updated)["config"]["model"] == "legacy-model-2"
 
 
 @pytest.mark.asyncio

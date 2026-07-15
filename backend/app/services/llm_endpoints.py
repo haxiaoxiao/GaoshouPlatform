@@ -21,6 +21,7 @@ from sqlalchemy.orm import SessionTransactionOrigin
 
 from app.core.config import settings
 from app.db.models.llm_endpoint import LlmEndpoint
+from app.services.llm_config import ParsedLlmConfig, parse_llm_config, synthesize_legacy_config
 
 _COOLDOWN_FAILURES = 3
 _COOLDOWN_SECONDS = 60
@@ -60,9 +61,53 @@ class LlmEndpointService:
         name, api_base, model = self._validate_fields(name=name, api_base=api_base, model=model)
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("api_key is required")
+        return await self._create_endpoint(
+            name=name,
+            api_base=api_base,
+            api_key=api_key,
+            model=model,
+            priority=priority,
+            enabled=enabled,
+        )
 
+    async def create_from_config(
+        self,
+        config: dict[str, Any] | str,
+        *,
+        enabled: bool = True,
+        priority: int | None = None,
+    ) -> LlmEndpoint:
+        await self._begin_write()
+        parsed = parse_llm_config(config)
+        if parsed.api_key is None:
+            raise ValueError("OPENAI_API_KEY is required")
+        return await self._create_endpoint(
+            name=parsed.name,
+            api_base=parsed.api_base,
+            api_key=parsed.api_key,
+            model=parsed.model,
+            priority=priority,
+            enabled=enabled,
+            parsed=parsed,
+        )
+
+    async def _create_endpoint(
+        self,
+        *,
+        name: str,
+        api_base: str,
+        api_key: str,
+        model: str,
+        priority: int | None,
+        enabled: bool,
+        parsed: ParsedLlmConfig | None = None,
+    ) -> LlmEndpoint:
         endpoints = await self.list()
-        insertion_index = len(endpoints) if priority is None else self._validate_priority(priority, len(endpoints))
+        insertion_index = (
+            len(endpoints)
+            if priority is None
+            else self._validate_priority(priority, len(endpoints))
+        )
         endpoint = LlmEndpoint(
             name=name,
             api_base=api_base,
@@ -72,6 +117,8 @@ class LlmEndpointService:
             priority=insertion_index,
             enabled=bool(enabled),
         )
+        if parsed is not None:
+            self._apply_parsed_config(endpoint, parsed)
         endpoints.insert(insertion_index, endpoint)
         self.session.add(endpoint)
         await self._reindex(endpoints)
@@ -115,6 +162,35 @@ class LlmEndpointService:
             endpoints.remove(endpoint)
             endpoints.insert(self._validate_priority(priority, len(endpoints)), endpoint)
             await self._reindex(endpoints)
+        await self.session.flush()
+        return endpoint
+
+    async def update_from_config(
+        self,
+        endpoint_id: str,
+        config: dict[str, Any] | str,
+        *,
+        enabled: bool | None = None,
+    ) -> LlmEndpoint:
+        await self._begin_write()
+        endpoint = await self._get_fresh(endpoint_id)
+        parsed = parse_llm_config(config, allow_placeholder=True)
+        destination_changed = (
+            parsed.provider != (endpoint.provider or endpoint.name)
+            or self._normalized_destination(parsed.api_base)
+            != self._normalized_destination(endpoint.api_base)
+        )
+        if destination_changed and parsed.api_key is None:
+            raise ValueError(
+                "A replacement OPENAI_API_KEY is required when provider or destination changes"
+            )
+
+        self._apply_parsed_config(endpoint, parsed)
+        if parsed.api_key is not None:
+            endpoint.api_key_encrypted = self._encrypt(parsed.api_key)
+            endpoint.api_key_hint = self._key_hint(parsed.api_key)
+        if enabled is not None:
+            endpoint.enabled = bool(enabled)
         await self.session.flush()
         return endpoint
 
@@ -198,12 +274,26 @@ class LlmEndpointService:
 
     @staticmethod
     def serialize(endpoint: LlmEndpoint) -> dict[str, Any]:
+        config = (
+            json.loads(endpoint.config_json)
+            if endpoint.config_json is not None
+            else synthesize_legacy_config(endpoint)
+        )
+        parsed = parse_llm_config(config, allow_placeholder=True)
         return {
             "id": endpoint.id,
             "name": endpoint.name,
             "api_base": endpoint.api_base,
             "api_key_hint": endpoint.api_key_hint,
             "model": endpoint.model,
+            "provider": parsed.provider,
+            "review_model": parsed.review_model,
+            "wire_api": parsed.wire_api,
+            "reasoning_effort": parsed.reasoning_effort,
+            "disable_response_storage": parsed.disable_response_storage,
+            "requires_openai_auth": parsed.requires_openai_auth,
+            "config": parsed.to_json_config(),
+            "preserved_fields": list(parsed.preserved_fields),
             "priority": endpoint.priority,
             "enabled": endpoint.enabled,
             "consecutive_failures": endpoint.consecutive_failures,
@@ -214,6 +304,21 @@ class LlmEndpointService:
             "created_at": endpoint.created_at,
             "updated_at": endpoint.updated_at,
         }
+
+    @staticmethod
+    def _apply_parsed_config(endpoint: LlmEndpoint, parsed: ParsedLlmConfig) -> None:
+        endpoint.provider = parsed.provider
+        endpoint.name = parsed.name
+        endpoint.api_base = parsed.api_base
+        endpoint.model = parsed.model
+        endpoint.review_model = parsed.review_model
+        endpoint.wire_api = parsed.wire_api
+        endpoint.reasoning_effort = parsed.reasoning_effort
+        endpoint.disable_response_storage = parsed.disable_response_storage
+        endpoint.requires_openai_auth = parsed.requires_openai_auth
+        endpoint.config_json = json.dumps(
+            parsed.to_json_config(), ensure_ascii=False, sort_keys=True
+        )
 
     async def _get(self, endpoint_id: str) -> LlmEndpoint:
         endpoint = await self.session.get(LlmEndpoint, endpoint_id)
