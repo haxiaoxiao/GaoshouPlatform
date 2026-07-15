@@ -55,7 +55,7 @@ def test_parse_json_extracts_runtime_fields_and_removes_key() -> None:
     assert parsed.requires_openai_auth is True
     assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
     assert parsed.preserved_fields == ("future_option", "network_access")
-    assert "secret-key" not in json.dumps(parsed.sanitized_config)
+    assert "secret-key" not in json.dumps(parsed.to_json_config())
 
 
 def test_parse_uses_selected_provider_and_preserves_unselected_provider_fields() -> None:
@@ -102,7 +102,7 @@ def test_parse_uses_root_replacement_when_nested_key_is_placeholder() -> None:
     assert parsed.api_key == "root-secret"
     assert parsed.sanitized_config["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
     assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
-    assert "root-secret" not in json.dumps(parsed.sanitized_config)
+    assert "root-secret" not in json.dumps(parsed.to_json_config())
 
 
 def test_parse_uses_nested_replacement_when_root_key_is_placeholder() -> None:
@@ -113,7 +113,7 @@ def test_parse_uses_nested_replacement_when_root_key_is_placeholder() -> None:
     assert parsed.api_key == "secret-key"
     assert parsed.sanitized_config["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
     assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
-    assert "secret-key" not in json.dumps(parsed.sanitized_config)
+    assert "secret-key" not in json.dumps(parsed.to_json_config())
 
 
 def test_parse_rejects_conflicting_plaintext_credentials() -> None:
@@ -156,15 +156,94 @@ def test_parse_create_requires_plaintext_api_key() -> None:
     assert "must-not-leak" not in str(error.value)
 
 
-def test_parse_deep_copies_sanitized_config() -> None:
+def test_parsed_config_repr_never_contains_api_key() -> None:
+    parsed = parse_llm_config(_config())
+
+    assert "secret-key" not in repr(parsed)
+    assert "api_key=" not in repr(parsed)
+
+
+def test_parse_recursively_sanitizes_unselected_provider_and_nested_secrets() -> None:
+    config = _config(
+        env={
+            "OPENAI_API_KEY": "secret-key",
+            "VENDOR_TOKEN": "env-token",
+            "CLIENT_SECRET": "env-secret",
+            "DB_PASSWORD": "env-password",
+            "HARMLESS_MODE": "keep",
+        },
+        nested={
+            "Authorization": "Bearer nested-auth",
+            "credentials": {"token": "nested-token", "label": "keep"},
+            "requires_openai_auth": True,
+        },
+    )
+    config["model_providers"]["Unused"] = {
+        "name": "Unused",
+        "base_url": "https://unused.example.com/v1",
+        "api_key": "unused-key",
+        "metadata": {"PASSWORD": "unused-password", "region": "keep"},
+    }
+
+    parsed = parse_llm_config(config)
+    sanitized = parsed.to_json_config()
+
+    assert sanitized["env"] == {
+        "OPENAI_API_KEY": API_KEY_PLACEHOLDER,
+        "VENDOR_TOKEN": API_KEY_PLACEHOLDER,
+        "CLIENT_SECRET": API_KEY_PLACEHOLDER,
+        "DB_PASSWORD": API_KEY_PLACEHOLDER,
+        "HARMLESS_MODE": "keep",
+    }
+    assert sanitized["nested"]["Authorization"] == API_KEY_PLACEHOLDER
+    assert sanitized["nested"]["credentials"] == {
+        "token": API_KEY_PLACEHOLDER,
+        "label": "keep",
+    }
+    assert sanitized["nested"]["requires_openai_auth"] is True
+    assert sanitized["model_providers"]["Unused"]["api_key"] == API_KEY_PLACEHOLDER
+    assert sanitized["model_providers"]["Unused"]["metadata"] == {
+        "PASSWORD": API_KEY_PLACEHOLDER,
+        "region": "keep",
+    }
+    serialized = json.dumps(sanitized)
+    for secret in ("env-token", "env-secret", "env-password", "nested-auth", "nested-token", "unused-key", "unused-password"):
+        assert secret not in serialized
+
+
+def test_parse_secret_sanitization_does_not_leak_values_in_later_errors() -> None:
+    config = _config(
+        nested={"token": "nested-token"},
+        disable_response_storage="invalid",
+    )
+
+    with pytest.raises(ValueError, match="disable_response_storage") as error:
+        parse_llm_config(config)
+
+    assert "nested-token" not in str(error.value)
+    assert "secret-key" not in str(error.value)
+
+
+def test_parse_exposes_deeply_immutable_config_with_json_conversion() -> None:
     config = _config(future_option={"items": [1]})
 
     parsed = parse_llm_config(config)
     config["future_option"]["items"].append(2)
 
-    assert parsed.sanitized_config["future_option"] == {"items": [1]}
+    assert parsed.to_json_config()["future_option"] == {"items": [1]}
+    with pytest.raises(TypeError):
+        parsed.sanitized_config["future_option"] = {"items": []}
+    with pytest.raises(TypeError):
+        parsed.sanitized_config["future_option"]["items"][0] = 2
+    with pytest.raises(AttributeError):
+        parsed.sanitized_config["future_option"]["items"].append(2)
     with pytest.raises(AttributeError):
         parsed.model = "changed"
+
+    mutable = parsed.to_json_config()
+    mutable["future_option"]["items"].append(2)
+    assert parsed.to_json_config()["future_option"] == {"items": [1]}
+    assert json.loads(json.dumps(mutable))["future_option"] == {"items": [1, 2]}
 
 
 @pytest.mark.parametrize(

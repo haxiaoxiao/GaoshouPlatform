@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 API_KEY_PLACEHOLDER = "__GAOSHOU_STORED_SECRET__"
@@ -29,6 +30,18 @@ _ROOT_RUNTIME_FIELDS = {
     "review_model",
 }
 _PROVIDER_RUNTIME_FIELDS = {"base_url", "name", "requires_openai_auth", "wire_api"}
+_SECRET_FIELD_NAMES = {
+    "api_key",
+    "authorization",
+    "credential",
+    "credentials",
+    "password",
+    "secret",
+    "token",
+}
+_ENV_SECRET_SUFFIXES = ("api_key", "secret", "token", "password")
+
+ImmutableJson = Mapping[str, "ImmutableJson"] | tuple["ImmutableJson", ...] | str | int | float | bool | None
 
 
 @dataclass(frozen=True)
@@ -36,15 +49,19 @@ class ParsedLlmConfig:
     provider: str
     name: str
     api_base: str
-    api_key: str | None
+    api_key: str | None = field(repr=False)
     model: str
     review_model: str | None
     wire_api: WireApi
     reasoning_effort: ReasoningEffort | None
     disable_response_storage: bool
     requires_openai_auth: bool
-    sanitized_config: dict[str, Any]
+    sanitized_config: Mapping[str, ImmutableJson]
     preserved_fields: tuple[str, ...]
+
+    def to_json_config(self) -> dict[str, Any]:
+        """Return a fresh mutable JSON-compatible copy for persistence."""
+        return _thaw_json(self.sanitized_config)
 
 
 class LegacyLlmEndpoint(Protocol):
@@ -76,6 +93,7 @@ def parse_llm_config(
     disable_response_storage = _boolean(document, "disable_response_storage", default=False)
     requires_openai_auth = _boolean(provider_config, "requires_openai_auth", default=False)
     api_key = _extract_and_redact_key(document, allow_placeholder=allow_placeholder)
+    sanitized_document = _sanitize_secrets(document)
 
     return ParsedLlmConfig(
         provider=provider,
@@ -88,7 +106,7 @@ def parse_llm_config(
         reasoning_effort=reasoning_effort,
         disable_response_storage=disable_response_storage,
         requires_openai_auth=requires_openai_auth,
-        sanitized_config=document,
+        sanitized_config=_freeze_json(sanitized_document),
         preserved_fields=_preserved_fields(document, provider),
     )
 
@@ -214,6 +232,43 @@ def _preserved_fields(document: Mapping[str, Any], provider: str) -> tuple[str, 
                 if key not in _PROVIDER_RUNTIME_FIELDS
             )
     return tuple(sorted(preserved))
+
+
+def _sanitize_secrets(value: Any, *, in_env: bool = False) -> Any:
+    if isinstance(value, dict):
+        sanitized: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized_key = key.casefold()
+            secret_field = normalized_key in _SECRET_FIELD_NAMES or (
+                in_env and normalized_key.endswith(_ENV_SECRET_SUFFIXES)
+            )
+            if secret_field and not isinstance(item, (dict, list)):
+                sanitized[key] = API_KEY_PLACEHOLDER
+            else:
+                sanitized[key] = _sanitize_secrets(
+                    item,
+                    in_env=normalized_key == "env",
+                )
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_secrets(item, in_env=in_env) for item in value]
+    return value
+
+
+def _freeze_json(value: Any) -> ImmutableJson:
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: ImmutableJson) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
 
 
 def _validate_url(*, name: str, api_base: str, model: str) -> None:
