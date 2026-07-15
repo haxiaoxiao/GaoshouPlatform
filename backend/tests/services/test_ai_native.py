@@ -464,7 +464,7 @@ def test_gateway_responses_normalizes_user_text_and_image_parts(monkeypatch):
             {"type": "input_text", "text": "inspect"},
             {"type": "input_text", "text": "this"},
             {"type": "input_image", "image_url": "https://example/image.png", "detail": "high"},
-            {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+            {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "auto"},
         ],
     }]
 
@@ -512,6 +512,7 @@ def test_gateway_responses_preserves_valid_assistant_output_text(monkeypatch):
         {"role": "user", "content": [{"type": "audio", "data": "private"}]},
         {"role": "assistant", "content": [{"type": "image_url", "image_url": "https://private"}]},
         {"role": "user", "content": [{"type": "text", "text": 123}]},
+        {"role": "user", "content": [{"type": "input_image", "image_url": "https://private", "detail": "full"}]},
     ],
 )
 def test_gateway_responses_rejects_unsupported_or_malformed_content_parts(monkeypatch, message):

@@ -410,18 +410,15 @@ def _responses_content_part(
 
 def _responses_image_part(part: dict[str, Any]) -> dict[str, Any]:
     image_value = part.get("image_url")
-    detail = part.get("detail")
+    detail = part.get("detail", "auto")
     if isinstance(image_value, dict):
         detail = image_value.get("detail", detail)
         image_value = image_value.get("url")
     if not isinstance(image_value, str) or not image_value:
         raise _malformed_responses_content()
-    if detail is not None and detail not in {"low", "high", "auto", "original"}:
+    if detail not in {"low", "high", "auto", "original"}:
         raise _malformed_responses_content()
-    normalized = {"type": "input_image", "image_url": image_value}
-    if detail is not None:
-        normalized["detail"] = detail
-    return normalized
+    return {"type": "input_image", "image_url": image_value, "detail": detail}
 
 
 def _json_text(value: Any) -> str:
