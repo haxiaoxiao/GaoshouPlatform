@@ -32,14 +32,20 @@ _ROOT_RUNTIME_FIELDS = {
 _PROVIDER_RUNTIME_FIELDS = {"base_url", "name", "requires_openai_auth", "wire_api"}
 _SECRET_FIELD_NAMES = {
     "api_key",
+    "api_secret",
+    "access_token",
     "authorization",
+    "auth_token",
+    "client_secret",
     "credential",
-    "credentials",
     "password",
+    "private_key",
+    "refresh_token",
     "secret",
     "token",
 }
-_ENV_SECRET_SUFFIXES = ("api_key", "secret", "token", "password")
+_SECRET_CONTAINER_NAMES = {"auth", "credentials", "secrets"}
+_SECRET_FIELD_SUFFIXES = ("_api_key", "_password", "_secret", "_token")
 
 ImmutableJson = Mapping[str, "ImmutableJson"] | tuple["ImmutableJson", ...] | str | int | float | bool | None
 
@@ -234,24 +240,32 @@ def _preserved_fields(document: Mapping[str, Any], provider: str) -> tuple[str, 
     return tuple(sorted(preserved))
 
 
-def _sanitize_secrets(value: Any, *, in_env: bool = False) -> Any:
+def _sanitize_secrets(value: Any, *, redact_scalar_leaves: bool = False) -> Any:
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
             normalized_key = key.casefold()
-            secret_field = normalized_key in _SECRET_FIELD_NAMES or (
-                in_env and normalized_key.endswith(_ENV_SECRET_SUFFIXES)
+            secret_field = normalized_key in _SECRET_FIELD_NAMES or normalized_key.endswith(
+                _SECRET_FIELD_SUFFIXES
             )
-            if secret_field and not isinstance(item, (dict, list)):
+            secret_container = normalized_key in _SECRET_CONTAINER_NAMES
+            if (secret_field or secret_container) and not isinstance(item, (dict, list)):
+                sanitized[key] = API_KEY_PLACEHOLDER
+            elif redact_scalar_leaves and not isinstance(item, (dict, list, bool)):
                 sanitized[key] = API_KEY_PLACEHOLDER
             else:
                 sanitized[key] = _sanitize_secrets(
                     item,
-                    in_env=normalized_key == "env",
+                    redact_scalar_leaves=redact_scalar_leaves or secret_container,
                 )
         return sanitized
     if isinstance(value, list):
-        return [_sanitize_secrets(item, in_env=in_env) for item in value]
+        return [
+            API_KEY_PLACEHOLDER
+            if redact_scalar_leaves and not isinstance(item, (dict, list, bool))
+            else _sanitize_secrets(item, redact_scalar_leaves=redact_scalar_leaves)
+            for item in value
+        ]
     return value
 
 

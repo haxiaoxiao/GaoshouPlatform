@@ -198,7 +198,7 @@ def test_parse_recursively_sanitizes_unselected_provider_and_nested_secrets() ->
     assert sanitized["nested"]["Authorization"] == API_KEY_PLACEHOLDER
     assert sanitized["nested"]["credentials"] == {
         "token": API_KEY_PLACEHOLDER,
-        "label": "keep",
+        "label": API_KEY_PLACEHOLDER,
     }
     assert sanitized["nested"]["requires_openai_auth"] is True
     assert sanitized["model_providers"]["Unused"]["api_key"] == API_KEY_PLACEHOLDER
@@ -209,6 +209,69 @@ def test_parse_recursively_sanitizes_unselected_provider_and_nested_secrets() ->
     serialized = json.dumps(sanitized)
     for secret in ("env-token", "env-secret", "env-password", "nested-auth", "nested-token", "unused-key", "unused-password"):
         assert secret not in serialized
+
+
+def test_parse_sanitizes_composite_names_and_credential_containers_at_any_depth() -> None:
+    secrets = {
+        "access_token": "access-value",
+        "REFRESH_TOKEN": "refresh-value",
+        "client_secret": "client-value",
+        "Api_Secret": "api-secret-value",
+        "private_key": "private-value",
+        "auth_token": "auth-value",
+        "service_TOKEN": "service-value",
+        "service_SECRET": "service-secret-value",
+        "service_PASSWORD": "password-value",
+        "service_API_KEY": "api-key-value",
+    }
+    config = _config(
+        nested={
+            "level": secrets,
+            "env": {"nested": {"DEEP_TOKEN": "deep-value"}},
+            "auth": {
+                "username": "user-value",
+                "session": {"value": "session-value"},
+                "requires_openai_auth": True,
+                "enabled": False,
+            },
+            "secrets": ["list-value", {"label": "object-value"}],
+            "credentials": {"account": "account-value", "port": 443},
+        }
+    )
+
+    parsed = parse_llm_config(config)
+    sanitized = parsed.to_json_config()
+    nested = sanitized["nested"]
+
+    assert set(nested["level"].values()) == {API_KEY_PLACEHOLDER}
+    assert nested["env"]["nested"]["DEEP_TOKEN"] == API_KEY_PLACEHOLDER
+    assert nested["auth"] == {
+        "username": API_KEY_PLACEHOLDER,
+        "session": {"value": API_KEY_PLACEHOLDER},
+        "requires_openai_auth": True,
+        "enabled": False,
+    }
+    assert nested["secrets"] == [
+        API_KEY_PLACEHOLDER,
+        {"label": API_KEY_PLACEHOLDER},
+    ]
+    assert nested["credentials"] == {
+        "account": API_KEY_PLACEHOLDER,
+        "port": API_KEY_PLACEHOLDER,
+    }
+    serialized = json.dumps(sanitized)
+    rendered = repr(parsed)
+    for value in (
+        *secrets.values(),
+        "deep-value",
+        "user-value",
+        "session-value",
+        "list-value",
+        "object-value",
+        "account-value",
+    ):
+        assert value not in serialized
+        assert value not in rendered
 
 
 def test_parse_secret_sanitization_does_not_leak_values_in_later_errors() -> None:
