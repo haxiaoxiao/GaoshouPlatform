@@ -189,8 +189,10 @@ def _extract_and_redact_key(document: dict[str, Any], *, allow_placeholder: bool
 
     if len(plaintext_keys) > 1:
         raise ValueError("conflicting OPENAI_API_KEY credentials")
-    if has_placeholder and not plaintext_keys and not allow_placeholder:
-        raise ValueError("OPENAI_API_KEY placeholder is only valid when updating")
+    if not plaintext_keys and not allow_placeholder:
+        if has_placeholder:
+            raise ValueError("OPENAI_API_KEY placeholder is only valid when updating")
+        raise ValueError("OPENAI_API_KEY is required")
     for location in locations:
         location["OPENAI_API_KEY"] = API_KEY_PLACEHOLDER
     return next(iter(plaintext_keys), None)

@@ -146,6 +146,16 @@ def test_parse_placeholder_requires_explicit_update_mode() -> None:
     assert parsed.sanitized_config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
 
 
+def test_parse_create_requires_plaintext_api_key() -> None:
+    config = _config(future_option="must-not-leak")
+    config.pop("env")
+
+    with pytest.raises(ValueError, match="OPENAI_API_KEY is required") as error:
+        parse_llm_config(config)
+
+    assert "must-not-leak" not in str(error.value)
+
+
 def test_parse_deep_copies_sanitized_config() -> None:
     config = _config(future_option={"items": [1]})
 
