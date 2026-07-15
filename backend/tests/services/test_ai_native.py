@@ -211,8 +211,9 @@ def test_gateway_does_not_send_store_when_storage_is_enabled(monkeypatch):
 
 
 @pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
-def test_gateway_routes_bare_db_model_through_openai_compatible_provider(
-    monkeypatch, wire_api
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-235B", "deepseek-ai/DeepSeek-V3", "openai/gpt-5.5"])
+def test_gateway_routes_db_model_through_openai_compatible_provider(
+    monkeypatch, wire_api, model
 ):
     captured = {}
     candidate = GatewayCandidate(
@@ -220,16 +221,16 @@ def test_gateway_routes_bare_db_model_through_openai_compatible_provider(
         name="cloud-bridge",
         api_base="https://cloud-bridge.example/v1",
         api_key="secret",
-        model="GPT-5.5",
+        model=model,
         source="database",
         provider="云桥/OpenAI",
         wire_api=wire_api,
         requires_openai_auth=True,
     )
     response = (
-        SimpleNamespace(model="GPT-5.5", output_text="ok", output=[], usage={})
+        SimpleNamespace(model=model, output_text="ok", output=[], usage={})
         if wire_api == "responses"
-        else _response("GPT-5.5")
+        else _response(model)
     )
     function_name = "responses" if wire_api == "responses" else "completion"
     monkeypatch.setitem(
@@ -240,24 +241,23 @@ def test_gateway_routes_bare_db_model_through_openai_compatible_provider(
 
     result = complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
 
-    assert captured["model"] == "GPT-5.5"
+    assert captured["model"] == model
     assert captured["custom_llm_provider"] == "openai"
-    assert result.model == "GPT-5.5"
+    assert result.model == model
 
 
 @pytest.mark.parametrize(
-    ("source", "model"),
-    [("database", "anthropic/claude-sonnet-4"), ("environment", "GPT-5.5")],
+    "model", ["Qwen/Qwen3-235B", "deepseek-ai/DeepSeek-V3", "openai/gpt-5.5"]
 )
-def test_gateway_does_not_override_explicit_or_environment_provider(monkeypatch, source, model):
+def test_gateway_environment_keeps_litellm_provider_inference(monkeypatch, model):
     captured = {}
     candidate = GatewayCandidate(
-        endpoint_id="endpoint" if source == "database" else None,
+        endpoint_id=None,
         name="configured",
         api_base="https://configured.example/v1",
         api_key="secret",
         model=model,
-        source=source,
+        source="environment",
         provider="Arbitrary label",
     )
     monkeypatch.setitem(
@@ -332,9 +332,19 @@ def test_gateway_direct_candidate_can_disable_redirects(monkeypatch):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.parametrize(
+    ("model", "wire_model"),
+    [
+        ("Qwen/Qwen3-235B", "Qwen/Qwen3-235B"),
+        ("deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-V3"),
+        ("openai/gpt-5.5", "gpt-5.5"),
+    ],
+)
 async def test_pinned_connection_uses_validated_ip_host_sni_and_minimal_payload(
     monkeypatch,
     wire_api,
+    model,
+    wire_model,
 ):
     resolutions = []
     requests = []
@@ -354,7 +364,7 @@ async def test_pinned_connection_uses_validated_ip_host_sni_and_minimal_payload(
         name="primary",
         api_base="https://provider.example:8443/v1",
         api_key="top-secret",
-        model="openai/test-model",
+        model=model,
         source="database",
         wire_api=wire_api,
     )
@@ -375,16 +385,16 @@ async def test_pinned_connection_uses_validated_ip_host_sni_and_minimal_payload(
     assert request.headers["authorization"] == "Bearer top-secret"
     assert request.extensions["sni_hostname"] == "provider.example"
     payload = json.loads(request.content)
-    assert payload["model"] == "test-model"
+    assert payload["model"] == wire_model
     if wire_api == "responses":
         assert payload == {
-            "model": "test-model",
+            "model": wire_model,
             "input": "Reply with OK.",
             "max_output_tokens": 1,
         }
     else:
         assert payload == {
-            "model": "test-model",
+            "model": wire_model,
             "messages": [{"role": "user", "content": "Reply with OK."}],
             "max_tokens": 1,
         }
