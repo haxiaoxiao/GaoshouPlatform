@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -244,7 +245,7 @@ def _sanitize_secrets(value: Any, *, redact_scalar_leaves: bool = False) -> Any:
     if isinstance(value, dict):
         sanitized: dict[str, Any] = {}
         for key, item in value.items():
-            normalized_key = key.casefold()
+            normalized_key = _normalize_field_name(key)
             secret_field = normalized_key in _SECRET_FIELD_NAMES or normalized_key.endswith(
                 _SECRET_FIELD_SUFFIXES
             )
@@ -256,7 +257,9 @@ def _sanitize_secrets(value: Any, *, redact_scalar_leaves: bool = False) -> Any:
             else:
                 sanitized[key] = _sanitize_secrets(
                     item,
-                    redact_scalar_leaves=redact_scalar_leaves or secret_container,
+                    redact_scalar_leaves=(
+                        redact_scalar_leaves or secret_field or secret_container
+                    ),
                 )
         return sanitized
     if isinstance(value, list):
@@ -267,6 +270,13 @@ def _sanitize_secrets(value: Any, *, redact_scalar_leaves: bool = False) -> Any:
             for item in value
         ]
     return value
+
+
+def _normalize_field_name(value: str) -> str:
+    value = re.sub(r"(.)([A-Z][a-z]+)", r"\1_\2", value)
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    value = re.sub(r"[-.\s]+", "_", value)
+    return re.sub(r"_+", "_", value).strip("_").casefold()
 
 
 def _freeze_json(value: Any) -> ImmutableJson:

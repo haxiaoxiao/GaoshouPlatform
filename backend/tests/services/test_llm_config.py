@@ -274,6 +274,57 @@ def test_parse_sanitizes_composite_names_and_credential_containers_at_any_depth(
         assert value not in rendered
 
 
+def test_parse_normalizes_secret_key_styles_and_redacts_secret_object_leaves() -> None:
+    config = _config(
+        nested={
+            "apiKey": "camel-api-key",
+            "ClientSecret": "pascal-client-secret",
+            "client-secret": "hyphen-client-secret",
+            "auth.token": "dot-auth-token",
+            "private key": "space-private-key",
+            "access_token": {
+                "value": "object-access-token",
+                "nested": {"label": "nested-access-value"},
+                "requires_openai_auth": True,
+            },
+            "privateKey": [
+                "list-private-key",
+                {"part": "nested-private-part", "enabled": False},
+            ],
+        }
+    )
+
+    parsed = parse_llm_config(config)
+    nested = parsed.to_json_config()["nested"]
+
+    for key in ("apiKey", "ClientSecret", "client-secret", "auth.token", "private key"):
+        assert nested[key] == API_KEY_PLACEHOLDER
+    assert nested["access_token"] == {
+        "value": API_KEY_PLACEHOLDER,
+        "nested": {"label": API_KEY_PLACEHOLDER},
+        "requires_openai_auth": True,
+    }
+    assert nested["privateKey"] == [
+        API_KEY_PLACEHOLDER,
+        {"part": API_KEY_PLACEHOLDER, "enabled": False},
+    ]
+    serialized = json.dumps(parsed.to_json_config())
+    rendered = repr(parsed)
+    for secret in (
+        "camel-api-key",
+        "pascal-client-secret",
+        "hyphen-client-secret",
+        "dot-auth-token",
+        "space-private-key",
+        "object-access-token",
+        "nested-access-value",
+        "list-private-key",
+        "nested-private-part",
+    ):
+        assert secret not in serialized
+        assert secret not in rendered
+
+
 def test_parse_secret_sanitization_does_not_leak_values_in_later_errors() -> None:
     config = _config(
         nested={"token": "nested-token"},
