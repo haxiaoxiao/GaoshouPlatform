@@ -12,7 +12,14 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from app.ai.gateway import GatewayCandidate, _normalize_response, complete_sync, gateway_status
+from app.ai.gateway import (
+    GatewayCandidate,
+    _load_candidates,
+    _normalize_response,
+    complete_candidate_sync,
+    complete_sync,
+    gateway_status,
+)
 from app.ai.mcp_server import mcp
 from app.ai.tools import get_tool, list_tools
 from app.core.config import settings
@@ -62,6 +69,7 @@ def _add_endpoint(
     created_at=None,
     consecutive_failures=0,
     last_error=None,
+    **config,
 ):
     service = LlmEndpointService(SimpleNamespace())
     endpoint = LlmEndpoint(
@@ -76,6 +84,7 @@ def _add_endpoint(
         created_at=created_at or datetime.now(),
         consecutive_failures=consecutive_failures,
         last_error=last_error,
+        **config,
     )
     with Session(engine) as session:
         session.add(endpoint)
@@ -94,6 +103,188 @@ def _response(model):
 
 def test_gateway_candidate_has_explicit_source_literal():
     assert get_type_hints(GatewayCandidate)["source"] == Literal["database", "environment"]
+
+
+def test_gateway_loads_normalized_db_runtime_fields(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(
+        engine,
+        name="primary",
+        key="secret",
+        priority=0,
+        provider="Canonical",
+        review_model="openai/reviewer",
+        wire_api="responses",
+        reasoning_effort="high",
+        disable_response_storage=True,
+        requires_openai_auth=True,
+        config_json='{"preserved_local":{"region":"us"}}',
+    )
+
+    candidates, _ = _load_candidates(model_role="review")
+
+    assert candidates[0].model == "openai/reviewer"
+    assert candidates[0].model_role == "review"
+    assert candidates[0].provider == "Canonical"
+    assert candidates[0].wire_api == "responses"
+    assert candidates[0].reasoning_effort == "high"
+    assert candidates[0].disable_response_storage is True
+    assert candidates[0].requires_openai_auth is True
+
+
+def test_gateway_environment_candidate_keeps_chat_defaults(monkeypatch, tmp_path):
+    _gateway_test_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "llm_api_base", "https://environment.example/v1")
+    monkeypatch.setattr(settings, "llm_api_key", "environment-secret")
+    monkeypatch.setattr(settings, "llm_default_model", "openai/environment")
+
+    candidates, _ = _load_candidates(model_role="review")
+
+    assert candidates[0].model == "openai/environment"
+    assert candidates[0].model_role == "review"
+    assert candidates[0].wire_api == "chat_completions"
+    assert candidates[0].reasoning_effort is None
+    assert candidates[0].disable_response_storage is False
+
+
+def test_gateway_chat_maps_runtime_fields_and_omits_local_only(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/model",
+        source="database",
+        provider="Canonical",
+        model_role="primary",
+        reasoning_effort="medium",
+        disable_response_storage=True,
+        requires_openai_auth=True,
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["reasoning_effort"] == "medium"
+    assert captured["store"] is False
+    assert captured["num_retries"] == 0
+    assert "provider" not in captured
+    assert "model_role" not in captured
+    assert "requires_openai_auth" not in captured
+
+
+def test_gateway_does_not_send_store_when_storage_is_enabled(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/model",
+        source="environment",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert "store" not in captured
+
+
+def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/model",
+        source="database",
+        wire_api="responses",
+        reasoning_effort="high",
+        disable_response_storage=True,
+    )
+    response = SimpleNamespace(
+        model="openai/actual",
+        output_text="answer",
+        output=[SimpleNamespace(type="function_call", id="item-1", call_id="call-1", name="lookup", arguments={"x": 1})],
+        usage=SimpleNamespace(model_dump=lambda: {"input_tokens": 4, "output_tokens": 2}),
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(responses=lambda **kwargs: captured.update(kwargs) or response),
+    )
+
+    result = complete_candidate_sync(
+        candidate,
+        [{"role": "system", "content": "message instruction"}, {"role": "user", "content": "hello"}],
+        system="explicit instruction",
+        tools=[{"type": "function", "function": {"name": "lookup", "description": "Lookup", "parameters": {"type": "object"}}}],
+        max_tokens=123,
+    )
+
+    assert captured["input"] == [{"role": "user", "content": "hello"}]
+    assert captured["instructions"] == "explicit instruction\n\nmessage instruction"
+    assert captured["tools"] == [{"type": "function", "name": "lookup", "description": "Lookup", "parameters": {"type": "object"}}]
+    assert captured["max_output_tokens"] == 123
+    assert captured["reasoning"] == {"effort": "high"}
+    assert captured["store"] is False
+    assert captured["num_retries"] == 0
+    assert result.content == "answer"
+    assert result.tool_calls == [{"id": "call-1", "name": "lookup", "arguments": '{"x": 1}'}]
+    assert result.model == "openai/actual"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 2}
+
+
+def test_gateway_review_model_failover(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary", key="one", priority=0, review_model="openai/review-one")
+    _add_endpoint(engine, name="backup", key="two", priority=1, review_model="openai/review-two")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "openai/review-one":
+            raise ConnectionError("offline")
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = complete_sync([{"role": "user", "content": "review"}], model_role="review")
+
+    assert result.model == "openai/review-two"
+    assert calls == ["openai/review-one", "openai/review-two"]
+
+
+def test_gateway_responses_api_uses_standard_failover(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary", key="one", priority=0, wire_api="responses")
+    _add_endpoint(engine, name="backup", key="two", priority=1, wire_api="responses")
+    calls = []
+
+    def responses(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "openai/primary":
+            raise TimeoutError("offline")
+        return SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=responses))
+
+    result = complete_sync([{"role": "user", "content": "hello"}])
+
+    assert result.content == "ok"
+    assert calls == ["openai/primary", "openai/backup"]
 
 
 def test_gateway_first_healthy_endpoint_wins(monkeypatch, tmp_path):

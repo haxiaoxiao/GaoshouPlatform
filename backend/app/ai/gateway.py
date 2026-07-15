@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.db.models.llm_endpoint import LlmEndpoint
+from app.services.llm_config import ReasoningEffort, WireApi
 from app.services.llm_endpoints import LlmEndpointService
 
 logger = logging.getLogger(__name__)
@@ -53,6 +54,12 @@ class GatewayCandidate:
     api_key: str | None
     model: str
     source: Literal["database", "environment"]
+    provider: str | None = None
+    model_role: Literal["primary", "review"] = "primary"
+    wire_api: WireApi = "chat_completions"
+    reasoning_effort: ReasoningEffort | None = None
+    disable_response_storage: bool = False
+    requires_openai_auth: bool = False
     api_key_encrypted: str | None = field(default=None, repr=False)
 
 
@@ -75,7 +82,9 @@ def _load_enabled_endpoints() -> list[LlmEndpoint]:
         engine.dispose()
 
 
-def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
+def _load_candidates(
+    *, model_role: Literal["primary", "review"] = "primary"
+) -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
     endpoints = _load_enabled_endpoints()
     if not endpoints:
         if settings.llm_api_key.strip() and settings.llm_default_model.strip():
@@ -87,6 +96,7 @@ def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
                     api_key=settings.llm_api_key,
                     model=settings.llm_default_model,
                     source="environment",
+                    model_role=model_role,
                 )
             ], endpoints)
         return [], endpoints
@@ -98,8 +108,14 @@ def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
             name=endpoint.name,
             api_base=endpoint.api_base,
             api_key=None,
-            model=endpoint.model,
+            model=(endpoint.review_model if model_role == "review" and endpoint.review_model else endpoint.model),
             source="database",
+            provider=endpoint.provider,
+            model_role=model_role,
+            wire_api=endpoint.wire_api,
+            reasoning_effort=endpoint.reasoning_effort,
+            disable_response_storage=endpoint.disable_response_storage,
+            requires_openai_auth=endpoint.requires_openai_auth,
             api_key_encrypted=endpoint.api_key_encrypted,
         )
         for endpoint in endpoints
@@ -254,6 +270,62 @@ def _normalize_response(response: Any) -> LLMResult:
     )
 
 
+def _value(item: Any, name: str, default: Any = None) -> Any:
+    return item.get(name, default) if isinstance(item, dict) else getattr(item, name, default)
+
+
+def _usage_data(response: Any) -> dict[str, Any]:
+    usage = _value(response, "usage")
+    if isinstance(usage, dict):
+        return usage
+    return usage.model_dump() if hasattr(usage, "model_dump") else {}
+
+
+def _normalize_responses_response(response: Any) -> LLMResult:
+    calls: list[dict[str, Any]] = []
+    for item in _value(response, "output", []) or []:
+        if _value(item, "type") != "function_call":
+            continue
+        arguments = _value(item, "arguments", "{}")
+        calls.append({
+            "id": _value(item, "call_id") or _value(item, "id", ""),
+            "name": _value(item, "name", ""),
+            "arguments": json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else arguments,
+        })
+    return LLMResult(
+        content=str(_value(response, "output_text", "") or ""),
+        tool_calls=calls,
+        model=str(_value(response, "model", settings.llm_default_model) or ""),
+        usage=_usage_data(response),
+    )
+
+
+def _responses_input(
+    messages: list[dict[str, Any]], system: str | None
+) -> tuple[list[dict[str, Any]], str | None]:
+    instructions = [system] if system else []
+    response_input: list[dict[str, Any]] = []
+    for message in messages:
+        if message.get("role") == "system":
+            content = message.get("content")
+            if isinstance(content, str) and content:
+                instructions.append(content)
+        else:
+            response_input.append(dict(message))
+    return response_input, "\n\n".join(instructions) or None
+
+
+def _responses_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for tool in tools:
+        function = tool.get("function")
+        if tool.get("type") == "function" and isinstance(function, dict):
+            normalized.append({"type": "function", **function})
+        else:
+            normalized.append(dict(tool))
+    return normalized
+
+
 def complete_candidate_sync(
     candidate: GatewayCandidate,
     messages: list[dict[str, Any]],
@@ -264,19 +336,38 @@ def complete_candidate_sync(
     max_tokens: int | None = None,
 ) -> LLMResult:
     """Call one explicit candidate without selection, failover, or health writes."""
-    from litellm import completion
-
-    payload = ([{"role": "system", "content": system}] if system else []) + messages
-    kwargs: dict[str, Any] = {
+    common_kwargs: dict[str, Any] = {
         "model": candidate.model,
         "api_base": candidate.api_base,
         "api_key": candidate.api_key,
-        "messages": payload,
         "temperature": temperature,
-        "max_tokens": min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens),
         "timeout": settings.llm_timeout_seconds,
         "num_retries": 0,
     }
+    output_tokens = min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens)
+    if candidate.disable_response_storage:
+        common_kwargs["store"] = False
+
+    if candidate.wire_api == "responses":
+        from litellm import responses
+
+        response_input, instructions = _responses_input(messages, system)
+        kwargs = {**common_kwargs, "input": response_input, "max_output_tokens": output_tokens}
+        if instructions:
+            kwargs["instructions"] = instructions
+        if candidate.reasoning_effort:
+            kwargs["reasoning"] = {"effort": candidate.reasoning_effort}
+        if tools:
+            kwargs["tools"] = _responses_tools(tools)
+            kwargs["tool_choice"] = "auto"
+        return _normalize_responses_response(responses(**kwargs))
+
+    from litellm import completion
+
+    payload = ([{"role": "system", "content": system}] if system else []) + messages
+    kwargs = {**common_kwargs, "messages": payload, "max_tokens": output_tokens}
+    if candidate.reasoning_effort:
+        kwargs["reasoning_effort"] = candidate.reasoning_effort
     if tools:
         kwargs["tools"] = tools
         kwargs["tool_choice"] = "auto"
@@ -301,8 +392,9 @@ def complete_sync(
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
+    model_role: Literal["primary", "review"] = "primary",
 ) -> LLMResult:
-    candidates, _ = _load_candidates()
+    candidates, _ = _load_candidates(model_role=model_role)
     if not candidates:
         _require_config()
         raise RuntimeError("All enabled LLM endpoints are in cooldown")
@@ -328,6 +420,12 @@ def complete_sync(
             api_key=api_key,
             model=candidate.model,
             source=candidate.source,
+            provider=candidate.provider,
+            model_role=candidate.model_role,
+            wire_api=candidate.wire_api,
+            reasoning_effort=candidate.reasoning_effort,
+            disable_response_storage=candidate.disable_response_storage,
+            requires_openai_auth=candidate.requires_openai_auth,
         )
         terminal_error: str | None = None
         should_failover = False
