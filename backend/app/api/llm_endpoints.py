@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import logging
+import socket
 from datetime import datetime
+from ipaddress import ip_address
 from time import perf_counter
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -18,32 +21,39 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-class LlmEndpointCreate(BaseModel):
+class LlmEndpointJsonCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    config: dict[str, Any] | None = None
-    name: str | None = Field(default=None, min_length=1, max_length=100)
-    api_base: str | None = Field(default=None, min_length=8, max_length=500)
-    api_key: str | None = Field(default=None, min_length=1, max_length=2000)
-    model: str | None = Field(default=None, min_length=1, max_length=200)
+    config: dict[str, Any]
     enabled: bool = True
 
-    @model_validator(mode="after")
-    def validate_request_shape(self) -> LlmEndpointCreate:
-        legacy = (self.name, self.api_base, self.api_key, self.model)
-        if self.config is not None:
-            if any(value is not None for value in legacy):
-                raise ValueError("provide config or all legacy fields, not both")
-            return self
-        if any(value is None for value in legacy):
-            raise ValueError("provide config or all legacy fields")
-        return self
 
-
-class LlmEndpointUpdate(BaseModel):
+class LlmEndpointLegacyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    config: dict[str, Any] | None = None
+    name: str = Field(min_length=1, max_length=100)
+    api_base: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(min_length=1, max_length=2000)
+    model: str = Field(min_length=1, max_length=200)
+    enabled: bool = True
+
+
+LlmEndpointCreate = Annotated[
+    LlmEndpointJsonCreate | LlmEndpointLegacyCreate,
+    Field(union_mode="left_to_right"),
+]
+
+
+class LlmEndpointJsonUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any]
+    enabled: bool | None = None
+
+
+class LlmEndpointLegacyUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str | None = Field(default=None, min_length=1, max_length=100)
     api_base: str | None = Field(default=None, min_length=8, max_length=500)
     api_key: str | None = Field(default=None, max_length=2000)
@@ -51,16 +61,16 @@ class LlmEndpointUpdate(BaseModel):
     enabled: bool | None = None
 
     @model_validator(mode="after")
-    def validate_request_shape(self) -> LlmEndpointUpdate:
-        discrete_fields = {"name", "api_base", "api_key", "model"}
-        supplied_discrete_fields = self.model_fields_set & discrete_fields
-        if self.config is not None:
-            if supplied_discrete_fields:
-                raise ValueError("config cannot be mixed with legacy fields")
-            return self
-        if not (self.model_fields_set - {"config"}):
+    def validate_nonempty_update(self) -> LlmEndpointLegacyUpdate:
+        if not self.model_fields_set:
             raise ValueError("update must not be empty")
         return self
+
+
+LlmEndpointUpdate = Annotated[
+    LlmEndpointJsonUpdate | LlmEndpointLegacyUpdate,
+    Field(union_mode="left_to_right"),
+]
 
 
 class LlmEndpointRead(BaseModel):
@@ -74,7 +84,7 @@ class LlmEndpointRead(BaseModel):
     provider: str
     review_model: str | None
     wire_api: Literal["responses", "chat_completions"]
-    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None
     disable_response_storage: bool
     requires_openai_auth: bool
     config: dict[str, Any]
@@ -113,6 +123,25 @@ def _service_error(error: ValueError, *, conflict: bool = False) -> HTTPExceptio
         status_code=status.HTTP_409_CONFLICT if conflict else status.HTTP_422_UNPROCESSABLE_CONTENT,
         detail=detail,
     )
+
+
+def _validate_public_http_destination(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        addresses = socket.getaddrinfo(parsed.hostname, port, proto=socket.IPPROTO_TCP)
+    except (OSError, ValueError):
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination") from None
+    if not addresses:
+        raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
+    for address in addresses:
+        resolved = ip_address(address[4][0])
+        if resolved.version == 6 and resolved.ipv4_mapped is not None:
+            resolved = resolved.ipv4_mapped
+        if not resolved.is_global or resolved.is_multicast:
+            raise ValueError("LLM endpoint test requires a public HTTP(S) destination")
 
 
 async def _rollback_failed_health_write(
@@ -189,10 +218,10 @@ async def create_llm_endpoint(
 ):
     service = LlmEndpointService(session)
     try:
-        if payload.config is not None:
+        if isinstance(payload, LlmEndpointJsonCreate):
             endpoint = await service.create_from_config(payload.config, enabled=payload.enabled)
         else:
-            endpoint = await service.create(**payload.model_dump(exclude={"config"}))
+            endpoint = await service.create(**payload.model_dump())
     except ValueError as error:
         raise _service_error(error) from None
     return _read(endpoint)
@@ -218,7 +247,7 @@ async def update_llm_endpoint(
 ):
     service = LlmEndpointService(session)
     try:
-        if payload.config is not None:
+        if isinstance(payload, LlmEndpointJsonUpdate):
             endpoint = await service.update_from_config(
                 endpoint_id,
                 payload.config,
@@ -227,7 +256,7 @@ async def update_llm_endpoint(
         else:
             endpoint = await service.update(
                 endpoint_id,
-                **payload.model_dump(exclude={"config"}, exclude_unset=True),
+                **payload.model_dump(exclude_unset=True),
             )
     except ValueError as error:
         raise _service_error(error) from None
@@ -256,6 +285,7 @@ async def test_llm_endpoint(
         endpoint = await session.get(LlmEndpoint, endpoint_id)
         if endpoint is None:
             raise ValueError(f"LLM endpoint {endpoint_id} not found")
+        _validate_public_http_destination(endpoint.api_base)
         api_key = await service.decrypt_api_key(endpoint_id)
     except ValueError as error:
         raise _service_error(error) from None
@@ -283,6 +313,7 @@ async def test_llm_endpoint(
             [{"role": "user", "content": "Reply with OK."}],
             temperature=0,
             max_tokens=1,
+            follow_redirects=False,
         )
     except Exception as error:
         safe_error = sanitize_error(error, api_key)

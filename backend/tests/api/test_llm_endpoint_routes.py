@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.ai.gateway import LLMResult
@@ -35,6 +36,10 @@ async def endpoint_api(
                 raise
 
     monkeypatch.setattr(settings, "gaoshou_data_dir", str(tmp_path))
+    monkeypatch.setattr(
+        "litellm.litellm_core_utils.url_utils.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", 443))],
+    )
     app.dependency_overrides[get_async_session] = session_override
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
@@ -86,38 +91,55 @@ def test_llm_endpoint_operations_routes_are_registered():
 
 
 def test_llm_endpoint_request_schemas_have_planned_limits_and_no_priority():
-    create_schema = LlmEndpointCreate.model_json_schema()
-    update_schema = LlmEndpointUpdate.model_json_schema()
+    create_schema = TypeAdapter(LlmEndpointCreate).json_schema()
+    update_schema = TypeAdapter(LlmEndpointUpdate).json_schema()
 
-    assert create_schema["additionalProperties"] is False
-    name_schema = create_schema["properties"]["name"]["anyOf"][0]
-    assert name_schema == {"maxLength": 100, "minLength": 1, "type": "string"}
-    api_base_schema = create_schema["properties"]["api_base"]["anyOf"][0]
-    api_key_schema = create_schema["properties"]["api_key"]["anyOf"][0]
-    model_schema = create_schema["properties"]["model"]["anyOf"][0]
+    assert len(create_schema["anyOf"]) == 2
+    assert len(update_schema["anyOf"]) == 2
+    legacy_create = create_schema["$defs"]["LlmEndpointLegacyCreate"]
+    legacy_update = update_schema["$defs"]["LlmEndpointLegacyUpdate"]
+    assert legacy_create["additionalProperties"] is False
+    assert set(legacy_create["required"]) == {"name", "api_base", "api_key", "model"}
+    name_schema = legacy_create["properties"]["name"]
+    assert name_schema == {
+        "maxLength": 100,
+        "minLength": 1,
+        "title": "Name",
+        "type": "string",
+    }
+    api_base_schema = legacy_create["properties"]["api_base"]
+    api_key_schema = legacy_create["properties"]["api_key"]
+    model_schema = legacy_create["properties"]["model"]
     assert api_base_schema["minLength"] == 8
     assert api_base_schema["maxLength"] == 500
     assert api_key_schema["minLength"] == 1
     assert api_key_schema["maxLength"] == 2000
     assert model_schema["minLength"] == 1
     assert model_schema["maxLength"] == 200
-    assert "priority" not in create_schema["properties"]
-    assert "priority" not in update_schema["properties"]
+    assert "priority" not in legacy_create["properties"]
+    assert "priority" not in legacy_update["properties"]
+
+    request_schema = app.openapi()["paths"]["/api/system/llm-endpoints"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]
+    assert len(request_schema["anyOf"]) == 2
 
 
 def test_llm_endpoint_request_schemas_require_complete_legacy_create_and_sparse_update():
-    assert LlmEndpointCreate.model_validate({"config": _config()}).config == _config()
-    assert LlmEndpointUpdate.model_validate({"config": _config()}).config == _config()
+    create_adapter = TypeAdapter(LlmEndpointCreate)
+    update_adapter = TypeAdapter(LlmEndpointUpdate)
+    assert create_adapter.validate_python({"config": _config()}).config == _config()
+    assert update_adapter.validate_python({"config": _config()}).config == _config()
 
-    with pytest.raises(ValueError, match="config or all legacy fields"):
-        LlmEndpointCreate.model_validate({"name": "Incomplete"})
-    assert LlmEndpointUpdate.model_validate({"name": "Renamed"}).name == "Renamed"
-    assert LlmEndpointUpdate.model_validate({"enabled": False}).enabled is False
+    with pytest.raises(ValueError, match="Field required"):
+        create_adapter.validate_python({"name": "Incomplete"})
+    assert update_adapter.validate_python({"name": "Renamed"}).name == "Renamed"
+    assert update_adapter.validate_python({"enabled": False}).enabled is False
 
     with pytest.raises(ValueError, match="update must not be empty"):
-        LlmEndpointUpdate.model_validate({})
-    with pytest.raises(ValueError, match="config cannot be mixed with legacy fields"):
-        LlmEndpointUpdate.model_validate({"config": _config(), "model": "mixed"})
+        update_adapter.validate_python({})
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        update_adapter.validate_python({"config": _config(), "model": "mixed"})
 
 
 @pytest.mark.asyncio
@@ -161,6 +183,55 @@ async def test_json_create_list_and_update_preserve_config_without_secrets(endpo
     assert updated["model"] == "gpt-5.6"
     assert updated["enabled"] is True
     assert updated["api_key_hint"] == "********5678"
+
+
+@pytest.mark.asyncio
+async def test_json_response_supports_reasoning_effort_none(endpoint_api):
+    client, _ = endpoint_api
+    config = _config(model_reasoning_effort="none")
+
+    response = await client.post("/api/system/llm-endpoints", json={"config": config})
+
+    assert response.status_code == 201
+    assert response.json()["reasoning_effort"] == "none"
+
+
+@pytest.mark.asyncio
+async def test_json_response_recursively_sanitizes_custom_credentials(endpoint_api):
+    client, _ = endpoint_api
+    config = _config(
+        transport={
+            "headers": {
+                "X-Custom-Authorization": "Bearer api-header-secret",
+                "X-Trace": "api-trace-secret",
+            },
+            "cookies": {"session": "api-cookie-secret"},
+            "proxy_url": "http://api-user:api-pass@proxy.example.test:8080",
+            "public_url": "https://public.example.test/path",
+            "region": "us-east-1",
+        }
+    )
+
+    response = await client.post("/api/system/llm-endpoints", json={"config": config})
+
+    assert response.status_code == 201
+    transport = response.json()["config"]["transport"]
+    assert transport["headers"] == {
+        "X-Custom-Authorization": "__GAOSHOU_STORED_SECRET__",
+        "X-Trace": "__GAOSHOU_STORED_SECRET__",
+    }
+    assert transport["cookies"] == {"session": "__GAOSHOU_STORED_SECRET__"}
+    assert transport["proxy_url"] == "__GAOSHOU_STORED_SECRET__"
+    assert transport["public_url"] == "https://public.example.test/path"
+    assert transport["region"] == "us-east-1"
+    for secret in (
+        "api-header-secret",
+        "api-trace-secret",
+        "api-cookie-secret",
+        "api-user",
+        "api-pass",
+    ):
+        assert secret not in response.text
 
 
 @pytest.mark.asyncio
@@ -232,7 +303,8 @@ async def test_update_rejects_empty_and_mixed_payloads_clearly(endpoint_api):
     assert empty.status_code == 422
     assert "update must not be empty" in empty.text
     assert mixed.status_code == 422
-    assert "config cannot be mixed with legacy fields" in mixed.text
+    assert "Extra inputs are not permitted" in mixed.text
+    assert "LlmEndpointJsonUpdate" in mixed.text
 
 
 @pytest.mark.asyncio
@@ -350,7 +422,89 @@ async def test_connection_uses_json_responses_candidate_options(endpoint_api, mo
     assert candidate.disable_response_storage is True
     assert candidate.requires_openai_auth is True
     assert captured["messages"] == [{"role": "user", "content": "Reply with OK."}]
-    assert captured["kwargs"] == {"temperature": 0, "max_tokens": 1}
+    assert captured["kwargs"] == {
+        "temperature": 0,
+        "max_tokens": 1,
+        "follow_redirects": False,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "resolved_addresses",
+    [
+        ["127.0.0.1"],
+        ["10.0.0.8"],
+        ["169.254.169.254"],
+        ["224.0.0.1"],
+        ["0.0.0.0"],
+        ["::1"],
+        ["93.184.216.34", "10.0.0.8"],
+    ],
+)
+async def test_connection_rejects_any_nonpublic_dns_result_before_key_decryption_or_provider_call(
+    endpoint_api,
+    monkeypatch,
+    resolved_addresses,
+):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    calls = []
+
+    monkeypatch.setattr(
+        "litellm.litellm_core_utils.url_utils.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", (address, 443)) for address in resolved_addresses],
+    )
+
+    async def fail_if_decrypted(*_args, **_kwargs):
+        calls.append("decrypt")
+        raise AssertionError("private destination key must not be decrypted")
+
+    async def fail_if_called(*_args, **_kwargs):
+        calls.append("provider")
+        raise AssertionError("private destination provider must not be called")
+
+    monkeypatch.setattr(
+        "app.api.llm_endpoints.LlmEndpointService.decrypt_api_key",
+        fail_if_decrypted,
+    )
+    monkeypatch.setattr("app.api.llm_endpoints.complete_candidate", fail_if_called)
+
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert response.status_code == 422
+    assert "public HTTP(S)" in response.json()["detail"]
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_connection_rejects_private_destination_even_if_litellm_allowlists_host(
+    endpoint_api,
+    monkeypatch,
+):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+    calls = []
+    monkeypatch.setattr("litellm.user_url_allowed_hosts", ["llm.example.test"])
+    monkeypatch.setattr(
+        "litellm.litellm_core_utils.url_utils.socket.getaddrinfo",
+        lambda *_args, **_kwargs: [(2, 1, 6, "", ("10.0.0.8", 443))],
+    )
+
+    async def fail_if_decrypted(*_args, **_kwargs):
+        calls.append("decrypt")
+        raise AssertionError("allowlist must not bypass public destination policy")
+
+    monkeypatch.setattr(
+        "app.api.llm_endpoints.LlmEndpointService.decrypt_api_key",
+        fail_if_decrypted,
+    )
+
+    response = await client.post(f"/api/system/llm-endpoints/{endpoint['id']}/test")
+
+    assert response.status_code == 422
+    assert "public HTTP(S)" in response.json()["detail"]
+    assert calls == []
 
 
 @pytest.mark.asyncio
@@ -406,6 +560,7 @@ async def test_connection_uses_decrypted_selected_candidate_and_records_success(
     assert captured["candidate"].api_key == "top-secret-1234"
     assert captured["messages"] == [{"role": "user", "content": "Reply with OK."}]
     assert captured["kwargs"]["max_tokens"] == 1
+    assert captured["kwargs"]["follow_redirects"] is False
 
     listed = (await client.get("/api/system/llm-endpoints")).json()[0]
     assert listed["last_success_at"] is not None

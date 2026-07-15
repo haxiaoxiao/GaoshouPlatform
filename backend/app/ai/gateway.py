@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from types import SimpleNamespace
@@ -86,16 +87,19 @@ def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
     endpoints = _load_enabled_endpoints()
     if not endpoints:
         if settings.llm_api_key.strip() and settings.llm_default_model.strip():
-            return ([
-                GatewayCandidate(
-                    endpoint_id=None,
-                    name="environment",
-                    api_base=settings.llm_api_base,
-                    api_key=settings.llm_api_key,
-                    model=settings.llm_default_model,
-                    source="environment",
-                )
-            ], endpoints)
+            return (
+                [
+                    GatewayCandidate(
+                        endpoint_id=None,
+                        name="environment",
+                        api_base=settings.llm_api_base,
+                        api_key=settings.llm_api_key,
+                        model=settings.llm_default_model,
+                        source="environment",
+                    )
+                ],
+                endpoints,
+            )
         return [], endpoints
 
     now = datetime.now()
@@ -123,7 +127,9 @@ def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
 
 def gateway_status() -> dict[str, Any]:
     endpoints = _load_enabled_endpoints()
-    environment_configured = bool(settings.llm_api_key.strip() and settings.llm_default_model.strip())
+    environment_configured = bool(
+        settings.llm_api_key.strip() and settings.llm_default_model.strip()
+    )
     configured = bool(endpoints) or environment_configured
     primary = endpoints[0] if endpoints else None
     configuration_mode = "database" if endpoints else "environment"
@@ -196,7 +202,10 @@ def _write_health(
                     .values(
                         consecutive_failures=next_failures,
                         cooldown_until=case(
-                            (next_failures >= _COOLDOWN_FAILURES, now + timedelta(seconds=_COOLDOWN_SECONDS)),
+                            (
+                                next_failures >= _COOLDOWN_FAILURES,
+                                now + timedelta(seconds=_COOLDOWN_SECONDS),
+                            ),
                             else_=LlmEndpoint.cooldown_until,
                         ),
                         last_failure_at=now,
@@ -252,11 +261,15 @@ def _normalize_response(response: Any) -> LLMResult:
     for call in getattr(message, "tool_calls", None) or []:
         function = getattr(call, "function", None)
         arguments = getattr(function, "arguments", "{}")
-        calls.append({
-            "id": getattr(call, "id", ""),
-            "name": getattr(function, "name", ""),
-            "arguments": json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else arguments,
-        })
+        calls.append(
+            {
+                "id": getattr(call, "id", ""),
+                "name": getattr(function, "name", ""),
+                "arguments": json.dumps(arguments, ensure_ascii=False)
+                if isinstance(arguments, dict)
+                else arguments,
+            }
+        )
     usage = getattr(response, "usage", None)
     usage_data = usage.model_dump() if hasattr(usage, "model_dump") else {}
     return LLMResult(
@@ -284,11 +297,15 @@ def _normalize_responses_response(response: Any) -> LLMResult:
         if _value(item, "type") != "function_call":
             continue
         arguments = _value(item, "arguments", "{}")
-        calls.append({
-            "id": _value(item, "call_id") or _value(item, "id", ""),
-            "name": _value(item, "name", ""),
-            "arguments": json.dumps(arguments, ensure_ascii=False) if isinstance(arguments, dict) else arguments,
-        })
+        calls.append(
+            {
+                "id": _value(item, "call_id") or _value(item, "id", ""),
+                "name": _value(item, "name", ""),
+                "arguments": json.dumps(arguments, ensure_ascii=False)
+                if isinstance(arguments, dict)
+                else arguments,
+            }
+        )
     return LLMResult(
         content=str(_value(response, "output_text", "") or ""),
         tool_calls=calls,
@@ -367,11 +384,16 @@ def _responses_message(
             raise _malformed_responses_content()
         message_id = message.get("id")
         status = message.get("status")
-        if not isinstance(message_id, str) or not message_id or status not in {
-            "in_progress",
-            "completed",
-            "incomplete",
-        }:
+        if (
+            not isinstance(message_id, str)
+            or not message_id
+            or status
+            not in {
+                "in_progress",
+                "completed",
+                "incomplete",
+            }
+        ):
             raise _malformed_responses_content()
         return {
             "type": "message",
@@ -465,11 +487,13 @@ def _chat_tool_call(tool_call: Any) -> dict[str, Any]:
     function = tool_call.get("function")
     if not isinstance(function, dict):
         raise _malformed_responses_history()
-    return _responses_function_call({
-        "call_id": tool_call.get("id") or tool_call.get("call_id"),
-        "name": function.get("name"),
-        "arguments": function.get("arguments"),
-    })
+    return _responses_function_call(
+        {
+            "call_id": tool_call.get("id") or tool_call.get("call_id"),
+            "name": function.get("name"),
+            "arguments": function.get("arguments"),
+        }
+    )
 
 
 def _chat_tool_output(message: dict[str, Any], pending_calls: set[str]) -> dict[str, Any]:
@@ -504,9 +528,14 @@ def complete_candidate_sync(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     model_role: Literal["primary", "review"] = "primary",
+    follow_redirects: bool | None = None,
 ) -> LLMResult:
     """Call one explicit candidate without selection, failover, or health writes."""
-    selected_model = candidate.review_model if model_role == "review" and candidate.review_model else candidate.model
+    selected_model = (
+        candidate.review_model
+        if model_role == "review" and candidate.review_model
+        else candidate.model
+    )
     common_kwargs: dict[str, Any] = {
         "model": selected_model,
         "api_base": candidate.api_base,
@@ -515,34 +544,49 @@ def complete_candidate_sync(
         "timeout": settings.llm_timeout_seconds,
         "num_retries": 0,
     }
-    output_tokens = min(max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens)
+    output_tokens = min(
+        max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens
+    )
     if candidate.disable_response_storage:
         common_kwargs["store"] = False
 
-    if candidate.wire_api == "responses":
-        from litellm import responses
+    with ExitStack() as stack:
+        if follow_redirects is not None:
+            import httpx
+            from openai import OpenAI
 
-        response_input, instructions = _responses_input(messages, system)
-        kwargs = {**common_kwargs, "input": response_input, "max_output_tokens": output_tokens}
-        if instructions:
-            kwargs["instructions"] = instructions
+            http_client = stack.enter_context(httpx.Client(follow_redirects=follow_redirects))
+            common_kwargs["client"] = OpenAI(
+                api_key=candidate.api_key or "not-provided",
+                base_url=candidate.api_base,
+                http_client=http_client,
+                max_retries=0,
+            )
+
+        if candidate.wire_api == "responses":
+            from litellm import responses
+
+            response_input, instructions = _responses_input(messages, system)
+            kwargs = {**common_kwargs, "input": response_input, "max_output_tokens": output_tokens}
+            if instructions:
+                kwargs["instructions"] = instructions
+            if candidate.reasoning_effort:
+                kwargs["reasoning"] = {"effort": candidate.reasoning_effort}
+            if tools:
+                kwargs["tools"] = _responses_tools(tools)
+                kwargs["tool_choice"] = "auto"
+            return _normalize_responses_response(responses(**kwargs))
+
+        from litellm import completion
+
+        payload = ([{"role": "system", "content": system}] if system else []) + messages
+        kwargs = {**common_kwargs, "messages": payload, "max_tokens": output_tokens}
         if candidate.reasoning_effort:
-            kwargs["reasoning"] = {"effort": candidate.reasoning_effort}
+            kwargs["reasoning_effort"] = candidate.reasoning_effort
         if tools:
-            kwargs["tools"] = _responses_tools(tools)
+            kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
-        return _normalize_responses_response(responses(**kwargs))
-
-    from litellm import completion
-
-    payload = ([{"role": "system", "content": system}] if system else []) + messages
-    kwargs = {**common_kwargs, "messages": payload, "max_tokens": output_tokens}
-    if candidate.reasoning_effort:
-        kwargs["reasoning_effort"] = candidate.reasoning_effort
-    if tools:
-        kwargs["tools"] = tools
-        kwargs["tool_choice"] = "auto"
-    return _normalize_response(completion(**kwargs))
+        return _normalize_response(completion(**kwargs))
 
 
 def _decrypt_candidate_key(candidate: GatewayCandidate) -> str:
@@ -561,6 +605,7 @@ async def complete_candidate(
     temperature: float = 0.2,
     max_tokens: int | None = None,
     model_role: Literal["primary", "review"] = "primary",
+    follow_redirects: bool | None = None,
 ) -> LLMResult:
     return await asyncio.to_thread(
         complete_candidate_sync,
@@ -571,6 +616,7 @@ async def complete_candidate(
         temperature=temperature,
         max_tokens=max_tokens,
         model_role=model_role,
+        follow_redirects=follow_redirects,
     )
 
 

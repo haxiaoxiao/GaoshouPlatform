@@ -207,7 +207,15 @@ def test_parse_recursively_sanitizes_unselected_provider_and_nested_secrets() ->
         "region": "keep",
     }
     serialized = json.dumps(sanitized)
-    for secret in ("env-token", "env-secret", "env-password", "nested-auth", "nested-token", "unused-key", "unused-password"):
+    for secret in (
+        "env-token",
+        "env-secret",
+        "env-password",
+        "nested-auth",
+        "nested-token",
+        "unused-key",
+        "unused-password",
+    ):
         assert secret not in serialized
 
 
@@ -248,8 +256,8 @@ def test_parse_sanitizes_composite_names_and_credential_containers_at_any_depth(
     assert nested["auth"] == {
         "username": API_KEY_PLACEHOLDER,
         "session": {"value": API_KEY_PLACEHOLDER},
-        "requires_openai_auth": True,
-        "enabled": False,
+        "requires_openai_auth": API_KEY_PLACEHOLDER,
+        "enabled": API_KEY_PLACEHOLDER,
     }
     assert nested["secrets"] == [
         API_KEY_PLACEHOLDER,
@@ -272,6 +280,65 @@ def test_parse_sanitizes_composite_names_and_credential_containers_at_any_depth(
     ):
         assert value not in serialized
         assert value not in rendered
+
+
+def test_parse_sanitizes_headers_cookies_authorization_variants_and_credentialed_urls() -> None:
+    config = _config(
+        transport={
+            "headers": {
+                "X-Custom-Authorization": "Bearer header-secret",
+                "X-Trace": "trace-secret",
+                "nested": {"value": "nested-header-secret"},
+                "enabled": True,
+            },
+            "cookies": {"session": "cookie-secret", "flags": ["cookie-list-secret"]},
+            "cookie": "single-cookie-secret",
+            "Proxy-Authorization": "Basic proxy-auth-secret",
+            "proxy_url": "socks5://proxy-user:proxy-pass@proxy.example.test:1080",
+            "secondary_proxy": "second-user:second-pass@proxy.example.test:8080",
+            "callback_url": "https://url-user:url-pass@callback.example.test/path",
+            "public_url": "https://public.example.test/path",
+            "region": "us-east-1",
+        }
+    )
+
+    sanitized = parse_llm_config(config).to_json_config()["transport"]
+
+    assert sanitized["headers"] == {
+        "X-Custom-Authorization": API_KEY_PLACEHOLDER,
+        "X-Trace": API_KEY_PLACEHOLDER,
+        "nested": {"value": API_KEY_PLACEHOLDER},
+        "enabled": API_KEY_PLACEHOLDER,
+    }
+    assert sanitized["cookies"] == {
+        "session": API_KEY_PLACEHOLDER,
+        "flags": [API_KEY_PLACEHOLDER],
+    }
+    assert sanitized["cookie"] == API_KEY_PLACEHOLDER
+    assert sanitized["Proxy-Authorization"] == API_KEY_PLACEHOLDER
+    assert sanitized["proxy_url"] == API_KEY_PLACEHOLDER
+    assert sanitized["secondary_proxy"] == API_KEY_PLACEHOLDER
+    assert sanitized["callback_url"] == API_KEY_PLACEHOLDER
+    assert sanitized["public_url"] == "https://public.example.test/path"
+    assert sanitized["region"] == "us-east-1"
+
+    serialized = json.dumps(sanitized)
+    for secret in (
+        "header-secret",
+        "trace-secret",
+        "nested-header-secret",
+        "cookie-secret",
+        "cookie-list-secret",
+        "single-cookie-secret",
+        "proxy-auth-secret",
+        "proxy-user",
+        "proxy-pass",
+        "second-user",
+        "second-pass",
+        "url-user",
+        "url-pass",
+    ):
+        assert secret not in serialized
 
 
 def test_parse_normalizes_secret_key_styles_and_redacts_secret_object_leaves() -> None:
@@ -302,11 +369,11 @@ def test_parse_normalizes_secret_key_styles_and_redacts_secret_object_leaves() -
     assert nested["access_token"] == {
         "value": API_KEY_PLACEHOLDER,
         "nested": {"label": API_KEY_PLACEHOLDER},
-        "requires_openai_auth": True,
+        "requires_openai_auth": API_KEY_PLACEHOLDER,
     }
     assert nested["privateKey"] == [
         API_KEY_PLACEHOLDER,
-        {"part": API_KEY_PLACEHOLDER, "enabled": False},
+        {"part": API_KEY_PLACEHOLDER, "enabled": API_KEY_PLACEHOLDER},
     ]
     serialized = json.dumps(parsed.to_json_config())
     rendered = repr(parsed)

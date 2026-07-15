@@ -6,6 +6,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Literal, Protocol
+from urllib.parse import urlparse
 
 API_KEY_PLACEHOLDER = "__GAOSHOU_STORED_SECRET__"
 
@@ -45,10 +46,25 @@ _SECRET_FIELD_NAMES = {
     "secret",
     "token",
 }
-_SECRET_CONTAINER_NAMES = {"auth", "credentials", "secrets"}
-_SECRET_FIELD_SUFFIXES = ("_api_key", "_password", "_secret", "_token")
+_SECRET_CONTAINER_NAMES = {
+    "auth",
+    "cookie",
+    "cookies",
+    "credentials",
+    "headers",
+    "secrets",
+}
+_SECRET_FIELD_SUFFIXES = (
+    "_api_key",
+    "_authorization",
+    "_password",
+    "_secret",
+    "_token",
+)
 
-ImmutableJson = Mapping[str, "ImmutableJson"] | tuple["ImmutableJson", ...] | str | int | float | bool | None
+ImmutableJson = (
+    Mapping[str, "ImmutableJson"] | tuple["ImmutableJson", ...] | str | int | float | bool | None
+)
 
 
 @dataclass(frozen=True)
@@ -250,22 +266,25 @@ def _sanitize_secrets(value: Any, *, redact_scalar_leaves: bool = False) -> Any:
                 _SECRET_FIELD_SUFFIXES
             )
             secret_container = normalized_key in _SECRET_CONTAINER_NAMES
-            if (secret_field or secret_container) and not isinstance(item, (dict, list)):
+            credentialed_url = isinstance(item, str) and _has_url_credentials(
+                item, field_name=normalized_key
+            )
+            if (secret_field or secret_container or credentialed_url) and not isinstance(
+                item, (dict, list)
+            ):
                 sanitized[key] = API_KEY_PLACEHOLDER
-            elif redact_scalar_leaves and not isinstance(item, (dict, list, bool)):
+            elif redact_scalar_leaves and not isinstance(item, (dict, list)):
                 sanitized[key] = API_KEY_PLACEHOLDER
             else:
                 sanitized[key] = _sanitize_secrets(
                     item,
-                    redact_scalar_leaves=(
-                        redact_scalar_leaves or secret_field or secret_container
-                    ),
+                    redact_scalar_leaves=(redact_scalar_leaves or secret_field or secret_container),
                 )
         return sanitized
     if isinstance(value, list):
         return [
             API_KEY_PLACEHOLDER
-            if redact_scalar_leaves and not isinstance(item, (dict, list, bool))
+            if redact_scalar_leaves and not isinstance(item, (dict, list))
             else _sanitize_secrets(item, redact_scalar_leaves=redact_scalar_leaves)
             for item in value
         ]
@@ -277,6 +296,21 @@ def _normalize_field_name(value: str) -> str:
     value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
     value = re.sub(r"[-.\s]+", "_", value)
     return re.sub(r"_+", "_", value).strip("_").casefold()
+
+
+def _has_url_credentials(value: str, *, field_name: str) -> bool:
+    try:
+        parsed = urlparse(value)
+    except ValueError:
+        return False
+    if parsed.hostname is None and ("proxy" in field_name or field_name.endswith("url")):
+        try:
+            parsed = urlparse(f"//{value}")
+        except ValueError:
+            return False
+    return parsed.hostname is not None and (
+        parsed.username is not None or parsed.password is not None
+    )
 
 
 def _freeze_json(value: Any) -> ImmutableJson:
