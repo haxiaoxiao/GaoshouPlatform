@@ -4,6 +4,8 @@ import { describe, expect, it } from 'vitest'
 
 import {
   LLM_API_KEY_PLACEHOLDER,
+  LLM_TEMPLATE_API_KEY,
+  assertLlmEndpointCreateReady,
   buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
   createLlmEndpointTemplate,
@@ -14,6 +16,7 @@ import {
   createAsyncReentryGuard,
   createLatestRequestController,
   getLlmEndpointResetText,
+  getLlmEndpointResetState,
   getLlmEndpointErrorDetail,
   parseLlmEndpointConfig,
   previewLlmEndpointConfig,
@@ -169,6 +172,33 @@ describe('LLM endpoint JSON configuration', () => {
     expect(getLlmEndpointResetText(null)).toBe(createLlmEndpointTemplate())
   })
 
+  it('rejects the template API key at every backend-recognized create location', () => {
+    const nested = parseLlmEndpointConfig(createLlmEndpointTemplate()).config
+    expect(() => assertLlmEndpointCreateReady(nested)).toThrow('Replace template API key before saving.')
+
+    const root = { ...nested, env: {}, OPENAI_API_KEY: LLM_TEMPLATE_API_KEY }
+    expect(() => assertLlmEndpointCreateReady(root)).toThrow('Replace template API key before saving.')
+
+    const both = {
+      ...nested,
+      OPENAI_API_KEY: 'real-key',
+      env: { OPENAI_API_KEY: ` ${LLM_TEMPLATE_API_KEY} ` },
+    }
+    expect(() => assertLlmEndpointCreateReady(both)).toThrow('Replace template API key before saving.')
+
+    const ready = { ...nested, env: { OPENAI_API_KEY: 'real-key' } }
+    expect(() => assertLlmEndpointCreateReady(ready)).not.toThrow()
+  })
+
+  it('resets JSON and enabled state to the captured edit state or create defaults', () => {
+    const original = sanitizedLlmEndpointConfig(endpoint())
+    expect(getLlmEndpointResetState(original, false)).toEqual({ configText: original, enabled: false })
+    expect(getLlmEndpointResetState(null, null)).toEqual({
+      configText: createLlmEndpointTemplate(),
+      enabled: true,
+    })
+  })
+
   it('allows only the latest overlapping load to mutate state', async () => {
     const first = deferred<LlmEndpoint[]>()
     const second = deferred<LlmEndpoint[]>()
@@ -311,6 +341,8 @@ describe('LLM endpoint source contracts', () => {
     expect(managerSource).toContain('updateConfigInsights(config)')
     expect(managerSource).toContain('@click="resetConfig"')
     expect(managerSource).toContain("editing ? 'Reset to saved config' : 'Reset to template'")
+    expect(managerSource).toContain('assertLlmEndpointCreateReady(config)')
+    expect(managerSource).toContain('editorEnabled.value = resetState.enabled')
     expect(managerSource).toContain("ElMessage.success('JSON syntax is valid.')")
     expect(managerSource).not.toContain('Configuration JSON is valid.')
     expect(managerSource).toContain("ElMessageBox.confirm(")

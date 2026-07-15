@@ -51,7 +51,7 @@ export interface LlmEndpointConfigPreview {
 }
 
 export const LLM_API_KEY_PLACEHOLDER = '__GAOSHOU_STORED_SECRET__'
-const FAKE_API_KEY = 'replace-with-your-api-key'
+export const LLM_TEMPLATE_API_KEY = 'replace-with-your-api-key'
 const LLM_RUNTIME_ROOT_FIELDS = new Set([
   'OPENAI_API_KEY',
   'disable_response_storage',
@@ -121,7 +121,7 @@ export function createLlmEndpointTemplate(): string {
         requires_openai_auth: true,
       },
     },
-    env: { OPENAI_API_KEY: FAKE_API_KEY },
+    env: { OPENAI_API_KEY: LLM_TEMPLATE_API_KEY },
   }, null, 2)
 }
 
@@ -180,6 +180,24 @@ export function shouldConfirmLlmTemplateReset(text: string, resetText = createLl
 
 export function getLlmEndpointResetText(originalSanitizedConfig: string | null): string {
   return originalSanitizedConfig ?? createLlmEndpointTemplate()
+}
+
+export function getLlmEndpointResetState(
+  originalSanitizedConfig: string | null,
+  originalEnabled: boolean | null,
+): { configText: string; enabled: boolean } {
+  return {
+    configText: getLlmEndpointResetText(originalSanitizedConfig),
+    enabled: originalEnabled ?? true,
+  }
+}
+
+export function assertLlmEndpointCreateReady(config: LlmEndpointConfig): void {
+  const env = objectValue(config.env)
+  const candidates = [config.OPENAI_API_KEY, env.OPENAI_API_KEY]
+  if (candidates.some(value => typeof value === 'string' && value.trim() === LLM_TEMPLATE_API_KEY)) {
+    throw new Error('Replace template API key before saving.')
+  }
 }
 
 export function getLlmEndpointErrorDetail(reason: unknown): string {

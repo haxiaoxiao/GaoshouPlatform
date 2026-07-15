@@ -166,6 +166,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import CodeEditor from '@/components/CodeEditor.vue'
 import {
   LLM_API_KEY_PLACEHOLDER,
+  assertLlmEndpointCreateReady,
   buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
   createAsyncReentryGuard,
@@ -174,7 +175,7 @@ import {
   formatLlmEndpointConfig,
   getLlmEndpointConfigWarnings,
   getLlmEndpointErrorDetail,
-  getLlmEndpointResetText,
+  getLlmEndpointResetState,
   isLlmEndpointCooldownActive,
   moveLlmEndpointIds,
   parseLlmEndpointConfig,
@@ -203,6 +204,7 @@ const busyId = ref('')
 const busyAction = ref('')
 const configText = ref('')
 const originalSanitizedConfig = ref<string | null>(null)
+const originalEnabled = ref<boolean | null>(null)
 const editorEnabled = ref(true)
 const mutationsDisabled = computed(() => loading.value || loadState.value !== 'ready' || Boolean(busyId.value))
 const preview = ref<ReturnType<typeof previewLlmEndpointConfig> | null>(null)
@@ -250,6 +252,7 @@ function openCreate() {
   if (mutationsDisabled.value) return
   editing.value = null
   originalSanitizedConfig.value = null
+  originalEnabled.value = null
   configText.value = createLlmEndpointTemplate()
   editorEnabled.value = true
   editorError.value = ''
@@ -260,6 +263,7 @@ function openEdit(endpoint: LlmEndpoint) {
   if (mutationsDisabled.value) return
   editing.value = endpoint
   originalSanitizedConfig.value = sanitizedLlmEndpointConfig(endpoint)
+  originalEnabled.value = endpoint.enabled
   configText.value = originalSanitizedConfig.value
   editorEnabled.value = endpoint.enabled
   editorError.value = ''
@@ -272,6 +276,7 @@ async function save() {
   let config
   try {
     config = parseLlmEndpointConfig(configText.value).config
+    if (!editing.value) assertLlmEndpointCreateReady(config)
   } catch (reason) {
     editorError.value = getLlmEndpointErrorDetail(reason)
     return
@@ -313,8 +318,8 @@ function validateConfig() {
 }
 
 async function resetConfig() {
-  const resetText = getLlmEndpointResetText(originalSanitizedConfig.value)
-  if (shouldConfirmLlmTemplateReset(configText.value, resetText)) {
+  const resetState = getLlmEndpointResetState(originalSanitizedConfig.value, originalEnabled.value)
+  if (shouldConfirmLlmTemplateReset(configText.value, resetState.configText) || editorEnabled.value !== resetState.enabled) {
     const confirmed = await ElMessageBox.confirm(
       editing.value
         ? 'Discard current edits and restore the configuration loaded when this editor opened?'
@@ -324,7 +329,8 @@ async function resetConfig() {
     ).catch(() => false)
     if (!confirmed) return
   }
-  configText.value = resetText
+  configText.value = resetState.configText
+  editorEnabled.value = resetState.enabled
   editorError.value = ''
 }
 
