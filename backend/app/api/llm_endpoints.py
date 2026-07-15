@@ -1,24 +1,69 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Coroutine
 from datetime import datetime
 from time import perf_counter
-from typing import Literal
+from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
 
-from app.ai.gateway import GatewayCandidate, complete_candidate, sanitize_error
+from app.ai.gateway import (
+    GatewayCandidate,
+    probe_pinned_llm_connection,
+    resolve_public_http_destination,
+    sanitize_error,
+)
 from app.db.models.llm_endpoint import LlmEndpoint
 from app.db.sqlite import get_async_session
 from app.services.llm_endpoints import LlmEndpointService
 
-router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
-class LlmEndpointCreate(BaseModel):
+def _public_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
+    return [
+        {key: item[key] for key in ("loc", "msg", "type") if key in item}
+        for item in error.errors()
+    ]
+
+
+class CredentialSafeValidationRoute(APIRoute):
+    def get_route_handler(
+        self,
+    ) -> Callable[[Request], Coroutine[Any, Any, StarletteResponse]]:
+        route_handler = super().get_route_handler()
+
+        async def credential_safe_handler(request: Request) -> StarletteResponse:
+            try:
+                return await route_handler(request)
+            except RequestValidationError as error:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    content={"detail": _public_validation_errors(error)},
+                )
+
+        return credential_safe_handler
+
+
+router = APIRouter(route_class=CredentialSafeValidationRoute)
+
+
+class LlmEndpointJsonCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any]
+    enabled: bool = True
+
+
+class LlmEndpointLegacyCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(min_length=1, max_length=100)
@@ -28,7 +73,20 @@ class LlmEndpointCreate(BaseModel):
     enabled: bool = True
 
 
-class LlmEndpointUpdate(BaseModel):
+LlmEndpointCreate = Annotated[
+    LlmEndpointJsonCreate | LlmEndpointLegacyCreate,
+    Field(union_mode="left_to_right"),
+]
+
+
+class LlmEndpointJsonUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    config: dict[str, Any]
+    enabled: bool | None = None
+
+
+class LlmEndpointLegacyUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
@@ -36,6 +94,12 @@ class LlmEndpointUpdate(BaseModel):
     api_key: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool | None = None
+
+
+LlmEndpointUpdate = Annotated[
+    LlmEndpointJsonUpdate | LlmEndpointLegacyUpdate,
+    Field(union_mode="left_to_right"),
+]
 
 
 class LlmEndpointRead(BaseModel):
@@ -46,6 +110,14 @@ class LlmEndpointRead(BaseModel):
     api_base: str
     api_key_hint: str
     model: str
+    provider: str
+    review_model: str | None
+    wire_api: Literal["responses", "chat_completions"]
+    reasoning_effort: Literal["none", "minimal", "low", "medium", "high", "xhigh"] | None
+    disable_response_storage: bool
+    requires_openai_auth: bool
+    config: dict[str, Any]
+    preserved_fields: list[str]
     priority: int
     enabled: bool
     consecutive_failures: int
@@ -154,8 +226,12 @@ async def create_llm_endpoint(
     payload: LlmEndpointCreate,
     session: AsyncSession = Depends(get_async_session),
 ):
+    service = LlmEndpointService(session)
     try:
-        endpoint = await LlmEndpointService(session).create(**payload.model_dump())
+        if isinstance(payload, LlmEndpointJsonCreate):
+            endpoint = await service.create_from_config(payload.config, enabled=payload.enabled)
+        else:
+            endpoint = await service.create(**payload.model_dump())
     except ValueError as error:
         raise _service_error(error) from None
     return _read(endpoint)
@@ -181,10 +257,21 @@ async def update_llm_endpoint(
 ):
     service = LlmEndpointService(session)
     try:
-        endpoint = await service.update(
-            endpoint_id,
-            **payload.model_dump(exclude_unset=True),
-        )
+        if isinstance(payload, LlmEndpointJsonUpdate):
+            endpoint = await service.update_from_config(
+                endpoint_id,
+                payload.config,
+                enabled=payload.enabled,
+            )
+        elif not payload.model_fields_set:
+            endpoint = await session.get(LlmEndpoint, endpoint_id)
+            if endpoint is None:
+                raise ValueError(f"LLM endpoint {endpoint_id} not found")
+        else:
+            endpoint = await service.update(
+                endpoint_id,
+                **payload.model_dump(exclude_unset=True),
+            )
     except ValueError as error:
         raise _service_error(error) from None
     return _read(endpoint)
@@ -212,6 +299,7 @@ async def test_llm_endpoint(
         endpoint = await session.get(LlmEndpoint, endpoint_id)
         if endpoint is None:
             raise ValueError(f"LLM endpoint {endpoint_id} not found")
+        destination = resolve_public_http_destination(endpoint.api_base)
         api_key = await service.decrypt_api_key(endpoint_id)
     except ValueError as error:
         raise _service_error(error) from None
@@ -223,17 +311,18 @@ async def test_llm_endpoint(
         api_key=api_key,
         model=endpoint.model,
         source="database",
+        review_model=endpoint.review_model,
+        provider=endpoint.provider,
+        wire_api=endpoint.wire_api,
+        reasoning_effort=endpoint.reasoning_effort,
+        disable_response_storage=endpoint.disable_response_storage,
+        requires_openai_auth=endpoint.requires_openai_auth,
     )
     started = perf_counter()
     result = None
     safe_error = None
     try:
-        result = await complete_candidate(
-            candidate,
-            [{"role": "user", "content": "Reply with OK."}],
-            temperature=0,
-            max_tokens=1,
-        )
+        result = await probe_pinned_llm_connection(candidate, destination)
     except Exception as error:
         safe_error = sanitize_error(error, api_key)
 

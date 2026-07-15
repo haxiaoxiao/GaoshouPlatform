@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import sys
 import time
@@ -8,11 +9,23 @@ from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Literal, get_type_hints
 
+import httpx
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
-from app.ai.gateway import GatewayCandidate, _normalize_response, complete_sync, gateway_status
+from app.ai.gateway import (
+    GatewayCandidate,
+    _load_candidates,
+    _normalize_response,
+    complete,
+    complete_candidate,
+    complete_candidate_sync,
+    complete_sync,
+    gateway_status,
+    probe_pinned_llm_connection,
+    resolve_public_http_destination,
+)
 from app.ai.mcp_server import mcp
 from app.ai.tools import get_tool, list_tools
 from app.core.config import settings
@@ -62,20 +75,23 @@ def _add_endpoint(
     created_at=None,
     consecutive_failures=0,
     last_error=None,
+    **config,
 ):
     service = LlmEndpointService(SimpleNamespace())
+    model = config.pop("model", f"openai/{name}")
     endpoint = LlmEndpoint(
         name=name,
         api_base=f"https://{name}.example/v1",
         api_key_encrypted=service._encrypt(key),
         api_key_hint=f"********{key[-4:]}",
-        model=f"openai/{name}",
+        model=model,
         priority=priority,
         enabled=enabled,
         cooldown_until=cooldown_until,
         created_at=created_at or datetime.now(),
         consecutive_failures=consecutive_failures,
         last_error=last_error,
+        **config,
     )
     with Session(engine) as session:
         session.add(endpoint)
@@ -94,6 +110,840 @@ def _response(model):
 
 def test_gateway_candidate_has_explicit_source_literal():
     assert get_type_hints(GatewayCandidate)["source"] == Literal["database", "environment"]
+
+
+def test_gateway_loads_normalized_db_runtime_fields(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(
+        engine,
+        name="primary",
+        key="secret",
+        priority=0,
+        provider="Canonical",
+        review_model="openai/reviewer",
+        wire_api="responses",
+        reasoning_effort="high",
+        disable_response_storage=True,
+        requires_openai_auth=True,
+        config_json='{"preserved_local":{"region":"us"}}',
+    )
+
+    candidates, _ = _load_candidates()
+
+    assert candidates[0].model == "openai/primary"
+    assert candidates[0].review_model == "openai/reviewer"
+    assert candidates[0].provider == "Canonical"
+    assert candidates[0].wire_api == "responses"
+    assert candidates[0].reasoning_effort == "high"
+    assert candidates[0].disable_response_storage is True
+    assert candidates[0].requires_openai_auth is True
+
+
+def test_gateway_environment_candidate_keeps_chat_defaults(monkeypatch, tmp_path):
+    _gateway_test_database(monkeypatch, tmp_path)
+    monkeypatch.setattr(settings, "llm_api_base", "https://environment.example/v1")
+    monkeypatch.setattr(settings, "llm_api_key", "environment-secret")
+    monkeypatch.setattr(settings, "llm_default_model", "openai/environment")
+
+    candidates, _ = _load_candidates()
+
+    assert candidates[0].model == "openai/environment"
+    assert candidates[0].review_model is None
+    assert candidates[0].wire_api == "chat_completions"
+    assert candidates[0].reasoning_effort is None
+    assert candidates[0].disable_response_storage is False
+
+
+def test_gateway_chat_maps_runtime_fields_and_omits_local_only(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/model",
+        source="database",
+        provider="Canonical",
+        reasoning_effort="medium",
+        disable_response_storage=True,
+        requires_openai_auth=True,
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["reasoning_effort"] == "medium"
+    assert captured["store"] is False
+    assert captured["num_retries"] == 0
+    assert "provider" not in captured
+    assert "model_role" not in captured
+    assert "requires_openai_auth" not in captured
+
+
+def test_gateway_does_not_send_store_when_storage_is_enabled(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/model",
+        source="environment",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert "store" not in captured
+
+
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-235B", "deepseek-ai/DeepSeek-V3", "openai/gpt-5.5"])
+def test_gateway_routes_db_model_through_openai_compatible_provider(
+    monkeypatch, wire_api, model
+):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="cloud-bridge",
+        api_base="https://cloud-bridge.example/v1",
+        api_key="secret",
+        model=model,
+        source="database",
+        provider="云桥/OpenAI",
+        wire_api=wire_api,
+        requires_openai_auth=True,
+    )
+    response = (
+        SimpleNamespace(model=model, output_text="ok", output=[], usage={})
+        if wire_api == "responses"
+        else _response(model)
+    )
+    function_name = "responses" if wire_api == "responses" else "completion"
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(**{function_name: lambda **kwargs: captured.update(kwargs) or response}),
+    )
+
+    result = complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["model"] == model
+    assert captured["custom_llm_provider"] == "openai"
+    assert result.model == model
+
+
+@pytest.mark.parametrize(
+    "model", ["Qwen/Qwen3-235B", "deepseek-ai/DeepSeek-V3", "openai/gpt-5.5"]
+)
+def test_gateway_environment_keeps_litellm_provider_inference(monkeypatch, model):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="configured",
+        api_base="https://configured.example/v1",
+        api_key="secret",
+        model=model,
+        source="environment",
+        provider="Arbitrary label",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["model"] == model
+    assert "custom_llm_provider" not in captured
+
+
+def test_gateway_direct_chat_candidate_selects_review_model(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        review_model="openai/reviewer",
+        source="database",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    result = complete_candidate_sync(
+        candidate,
+        [{"role": "user", "content": "review"}],
+        model_role="review",
+    )
+
+    assert captured["model"] == "openai/reviewer"
+    assert result.model == "openai/reviewer"
+
+
+def test_gateway_direct_candidate_can_disable_redirects(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="database",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [{"role": "user", "content": "health"}],
+        follow_redirects=False,
+    )
+
+    assert captured["client"]._client.follow_redirects is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+@pytest.mark.parametrize(
+    ("model", "wire_model"),
+    [
+        ("Qwen/Qwen3-235B", "Qwen/Qwen3-235B"),
+        ("deepseek-ai/DeepSeek-V3", "deepseek-ai/DeepSeek-V3"),
+        ("openai/gpt-5.5", "gpt-5.5"),
+    ],
+)
+async def test_pinned_connection_uses_validated_ip_host_sni_and_minimal_payload(
+    monkeypatch,
+    wire_api,
+    model,
+    wire_model,
+):
+    resolutions = []
+    requests = []
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"model": "returned-model"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    destination = resolve_public_http_destination("https://provider.example:8443/v1")
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://provider.example:8443/v1",
+        api_key="top-secret",
+        model=model,
+        source="database",
+        wire_api=wire_api,
+    )
+
+    result = await probe_pinned_llm_connection(
+        candidate,
+        destination,
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert resolutions == [("provider.example", 8443)]
+    assert result.model == "returned-model"
+    assert len(requests) == 1
+    request = requests[0]
+    suffix = "/responses" if wire_api == "responses" else "/chat/completions"
+    assert str(request.url) == f"https://93.184.216.34:8443/v1{suffix}"
+    assert request.headers["host"] == "provider.example:8443"
+    assert request.headers["authorization"] == "Bearer top-secret"
+    assert request.extensions["sni_hostname"] == "provider.example"
+    payload = json.loads(request.content)
+    assert payload["model"] == wire_model
+    if wire_api == "responses":
+        assert payload == {
+            "model": wire_model,
+            "input": "Reply with OK.",
+            "max_output_tokens": 1,
+        }
+    else:
+        assert payload == {
+            "model": wire_model,
+            "messages": [{"role": "user", "content": "Reply with OK."}],
+            "max_tokens": 1,
+        }
+
+
+@pytest.mark.asyncio
+async def test_pinned_connection_does_not_follow_redirect_or_resolve_again(monkeypatch):
+    resolutions = []
+    requests = []
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        if len(resolutions) > 1:
+            raise AssertionError("pinned connection must not resolve DNS twice")
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    async def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    destination = resolve_public_http_destination("https://provider.example/v1")
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://provider.example/v1",
+        api_key="must-not-leak",
+        model="openai/test-model",
+        source="database",
+    )
+
+    with pytest.raises(RuntimeError, match="HTTP 302") as error:
+        await probe_pinned_llm_connection(
+            candidate,
+            destination,
+            transport=httpx.MockTransport(redirect),
+        )
+
+    assert resolutions == [("provider.example", 443)]
+    assert len(requests) == 1
+    assert "must-not-leak" not in str(error.value)
+    assert "127.0.0.1" not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_gateway_direct_async_candidate_falls_back_to_primary_model(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        review_model=None,
+        source="database",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    result = await complete_candidate(
+        candidate,
+        [{"role": "user", "content": "review"}],
+        model_role="review",
+    )
+
+    assert captured["model"] == "openai/primary"
+    assert result.model == "openai/primary"
+
+
+def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        review_model="openai/reviewer",
+        source="database",
+        wire_api="responses",
+        reasoning_effort="high",
+        disable_response_storage=True,
+    )
+    response = SimpleNamespace(
+        model="openai/actual",
+        output_text="answer",
+        output=[
+            SimpleNamespace(
+                type="function_call",
+                id="item-1",
+                call_id="call-1",
+                name="lookup",
+                arguments={"x": 1},
+            )
+        ],
+        usage=SimpleNamespace(model_dump=lambda: {"input_tokens": 4, "output_tokens": 2}),
+    )
+
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(responses=lambda **kwargs: captured.update(kwargs) or response),
+    )
+
+    result = complete_candidate_sync(
+        candidate,
+        [
+            {"role": "system", "content": "message instruction"},
+            {"role": "user", "content": "hello"},
+        ],
+        system="explicit instruction",
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "description": "Lookup",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        max_tokens=123,
+        model_role="review",
+    )
+
+    assert captured["model"] == "openai/reviewer"
+    assert captured["input"] == [{"type": "message", "role": "user", "content": "hello"}]
+    assert captured["instructions"] == "explicit instruction\n\nmessage instruction"
+    assert captured["tools"] == [
+        {
+            "type": "function",
+            "name": "lookup",
+            "description": "Lookup",
+            "parameters": {"type": "object"},
+        }
+    ]
+    assert captured["max_output_tokens"] == 123
+    assert captured["reasoning"] == {"effort": "high"}
+    assert captured["store"] is False
+    assert captured["num_retries"] == 0
+    assert result.content == "answer"
+    assert result.tool_calls == [{"id": "call-1", "name": "lookup", "arguments": '{"x": 1}'}]
+    assert result.model == "openai/actual"
+    assert result.usage == {"input_tokens": 4, "output_tokens": 2}
+
+
+def test_gateway_responses_strips_application_fields_and_correlates_tool_history(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="database",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: (
+                captured.update(kwargs)
+                or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+            )
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [
+            {"role": "user", "content": "first", "approvals": [{"secret": "omit"}]},
+            {
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "lookup", "arguments": {"symbol": "600519.SH"}},
+                    }
+                ],
+                "tool_results": [{"secret": "omit"}],
+            },
+            {"role": "tool", "tool_call_id": "call-1", "content": {"price": 123}},
+            {"role": "assistant", "content": "done", "approvals": [], "tool_results": []},
+        ],
+    )
+
+    assert captured["input"] == [
+        {"type": "message", "role": "user", "content": "first"},
+        {"type": "message", "role": "assistant", "content": "checking"},
+        {
+            "type": "function_call",
+            "call_id": "call-1",
+            "name": "lookup",
+            "arguments": '{"symbol": "600519.SH"}',
+        },
+        {"type": "function_call_output", "call_id": "call-1", "output": '{"price": 123}'},
+        {"type": "message", "role": "assistant", "content": "done"},
+    ]
+    assert "approvals" not in str(captured["input"])
+    assert "tool_results" not in str(captured["input"])
+
+
+def test_gateway_responses_preserves_existing_items_idempotently(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: (
+                captured.update(kwargs)
+                or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+            )
+        ),
+    )
+    items = [
+        {"type": "message", "role": "user", "content": "hello", "approvals": ["omit"]},
+        {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+
+    complete_candidate_sync(candidate, items)
+
+    assert captured["input"] == [
+        {"type": "message", "role": "user", "content": "hello"},
+        {"type": "function_call", "call_id": "call-1", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1", "output": "ok"},
+    ]
+
+
+def test_gateway_responses_normalizes_developer_text(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: (
+                captured.update(kwargs)
+                or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+            )
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate, [{"role": "developer", "content": "Follow policy", "local": "omit"}]
+    )
+
+    assert captured["input"] == [
+        {"type": "message", "role": "developer", "content": "Follow policy"}
+    ]
+
+
+def test_gateway_responses_normalizes_user_text_and_image_parts(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: (
+                captured.update(kwargs)
+                or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+            )
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "inspect", "cache_control": "omit"},
+                    {"type": "input_text", "text": "this"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example/image.png", "detail": "high"},
+                    },
+                    {
+                        "type": "input_image",
+                        "image_url": "data:image/png;base64,abc",
+                        "unknown": "omit",
+                    },
+                ],
+            }
+        ],
+    )
+
+    assert captured["input"] == [
+        {
+            "type": "message",
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "inspect"},
+                {"type": "input_text", "text": "this"},
+                {"type": "input_image", "image_url": "https://example/image.png", "detail": "high"},
+                {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "auto"},
+            ],
+        }
+    ]
+
+
+def test_gateway_responses_preserves_valid_assistant_output_text(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            responses=lambda **kwargs: (
+                captured.update(kwargs)
+                or SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+            )
+        ),
+    )
+
+    complete_candidate_sync(
+        candidate,
+        [
+            {
+                "type": "message",
+                "id": "msg-1",
+                "status": "completed",
+                "role": "assistant",
+                "content": [
+                    {"type": "output_text", "text": "done", "annotations": [], "unknown": "omit"}
+                ],
+            }
+        ],
+    )
+
+    assert captured["input"] == [
+        {
+            "type": "message",
+            "id": "msg-1",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "done", "annotations": []}],
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"role": "user", "content": [{"type": "audio", "data": "private"}]},
+        {"role": "assistant", "content": [{"type": "image_url", "image_url": "https://private"}]},
+        {"role": "user", "content": [{"type": "text", "text": 123}]},
+        {
+            "role": "user",
+            "content": [{"type": "input_image", "image_url": "https://private", "detail": "full"}],
+        },
+    ],
+)
+def test_gateway_responses_rejects_unsupported_or_malformed_content_parts(monkeypatch, message):
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=lambda **_kwargs: None))
+
+    with pytest.raises(ValueError, match="Malformed Responses message content") as caught:
+        complete_candidate_sync(candidate, [message])
+
+    assert "private" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1", "function": {"arguments": "{}"}}],
+        },
+        {"role": "tool", "content": "orphaned"},
+        {"type": "function_call", "call_id": "", "name": "lookup", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "call-1"},
+    ],
+)
+def test_gateway_responses_rejects_malformed_tool_history(monkeypatch, message):
+    candidate = GatewayCandidate(
+        endpoint_id=None,
+        name="environment",
+        api_base="https://environment.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        source="environment",
+        wire_api="responses",
+    )
+    called = False
+
+    def responses(**_kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=responses))
+
+    with pytest.raises(ValueError, match="Malformed Responses tool history") as caught:
+        complete_candidate_sync(candidate, [message])
+
+    assert called is False
+    assert "lookup" not in str(caught.value)
+
+
+def test_gateway_review_model_failover(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary", key="one", priority=0, review_model="openai/review-one")
+    _add_endpoint(engine, name="backup", key="two", priority=1, review_model="openai/review-two")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        if kwargs["model"] == "openai/review-one":
+            raise ConnectionError("offline")
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = complete_sync([{"role": "user", "content": "review"}], model_role="review")
+
+    assert result.model == "openai/review-two"
+    assert calls == ["openai/review-one", "openai/review-two"]
+
+
+def test_gateway_review_role_prioritizes_review_capable_candidates(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary-only", key="zero", priority=0)
+    _add_endpoint(
+        engine, name="review-one", key="one", priority=1, review_model="openai/review-one"
+    )
+    _add_endpoint(
+        engine, name="review-two", key="two", priority=2, review_model="openai/review-two"
+    )
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        if len(calls) < 3:
+            raise ConnectionError("offline")
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = complete_sync([{"role": "user", "content": "review"}], model_role="review")
+
+    assert calls == ["openai/review-one", "openai/review-two", "openai/primary-only"]
+    assert result.model == "openai/primary-only"
+
+
+@pytest.mark.asyncio
+async def test_gateway_async_complete_passes_review_role(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary", key="one", priority=0, review_model="openai/reviewer")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = await complete([{"role": "user", "content": "review"}], model_role="review")
+
+    assert result.model == "openai/reviewer"
+    assert calls == ["openai/reviewer"]
+
+
+def test_gateway_responses_api_uses_standard_failover(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(
+        engine,
+        name="primary",
+        key="one",
+        priority=0,
+        model="GPT-5.5-primary",
+        provider="云桥/OpenAI",
+        wire_api="responses",
+    )
+    _add_endpoint(
+        engine,
+        name="backup",
+        key="two",
+        priority=1,
+        model="GPT-5.5-backup",
+        provider="Other arbitrary label",
+        wire_api="responses",
+    )
+    calls = []
+
+    def responses(**kwargs):
+        calls.append((kwargs["model"], kwargs.get("custom_llm_provider")))
+        if kwargs["model"] == "GPT-5.5-primary":
+            raise TimeoutError("offline")
+        return SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(responses=responses))
+
+    result = complete_sync([{"role": "user", "content": "hello"}])
+
+    assert result.content == "ok"
+    assert result.model == "GPT-5.5-backup"
+    assert calls == [("GPT-5.5-primary", "openai"), ("GPT-5.5-backup", "openai")]
 
 
 def test_gateway_first_healthy_endpoint_wins(monkeypatch, tmp_path):
@@ -156,7 +1006,9 @@ def test_gateway_three_failures_create_sixty_second_cooldown(monkeypatch, tmp_pa
         endpoint = session.get(LlmEndpoint, endpoint_id)
         assert endpoint.consecutive_failures == 3
         assert endpoint.cooldown_until is not None
-        assert timedelta(seconds=55) <= endpoint.cooldown_until - started_at <= timedelta(seconds=65)
+        assert (
+            timedelta(seconds=55) <= endpoint.cooldown_until - started_at <= timedelta(seconds=65)
+        )
 
 
 def test_gateway_success_clears_existing_failure_health(monkeypatch, tmp_path):
@@ -455,7 +1307,9 @@ def test_gateway_uses_fixed_db_priority_skips_cooldown_and_updates_health(monkey
 
 
 @pytest.mark.asyncio
-async def test_complete_sync_needs_no_asyncio_bridge_and_env_is_only_empty_db_fallback(monkeypatch, tmp_path):
+async def test_complete_sync_needs_no_asyncio_bridge_and_env_is_only_empty_db_fallback(
+    monkeypatch, tmp_path
+):
     engine = _gateway_test_database(monkeypatch, tmp_path)
     _add_endpoint(engine, name="disabled", key="disabled-secret", priority=0, enabled=False)
     monkeypatch.setattr(settings, "llm_api_base", "https://environment.example/v1")
@@ -505,10 +1359,21 @@ def test_gateway_normalizes_tool_calls():
     response = SimpleNamespace(
         model="openai/codex",
         usage=SimpleNamespace(model_dump=lambda: {"total_tokens": 12}),
-        choices=[SimpleNamespace(message=SimpleNamespace(
-            content="",
-            tool_calls=[SimpleNamespace(id="call-1", function=SimpleNamespace(name="stock_snapshot", arguments='{"symbol":"600519.SH"}'))],
-        ))],
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(
+                    content="",
+                    tool_calls=[
+                        SimpleNamespace(
+                            id="call-1",
+                            function=SimpleNamespace(
+                                name="stock_snapshot", arguments='{"symbol":"600519.SH"}'
+                            ),
+                        )
+                    ],
+                )
+            )
+        ],
     )
     result = _normalize_response(response)
     assert result.tool_calls[0]["name"] == "stock_snapshot"
@@ -602,7 +1467,9 @@ async def test_reconcile_approval_states_updates_persisted_conversation():
             owner_meta={"conversation_id": conversation.id},
             approval_id="approval-reconcile-test",
         )
-        conversation.messages = [{"role": "assistant", "content": "confirm", "approvals": [approval]}]
+        conversation.messages = [
+            {"role": "assistant", "content": "confirm", "approvals": [approval]}
+        ]
         await session.commit()
         claim_task(
             approval["approval_id"],

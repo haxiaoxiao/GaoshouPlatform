@@ -6,6 +6,14 @@ export interface LlmEndpoint {
   api_base: string
   api_key_hint: string
   model: string
+  provider: string
+  review_model: string | null
+  wire_api: 'responses' | 'chat_completions'
+  reasoning_effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | null
+  disable_response_storage: boolean
+  requires_openai_auth: boolean
+  config: LlmEndpointConfig
+  preserved_fields: string[]
   priority: number
   enabled: boolean
   consecutive_failures: number
@@ -18,28 +26,43 @@ export interface LlmEndpoint {
 }
 
 export interface LlmEndpointCreatePayload {
-  name: string
-  api_base: string
-  api_key: string
-  model: string
+  config: LlmEndpointConfig
   enabled: boolean
 }
 
 export interface LlmEndpointUpdatePayload {
-  name?: string
-  api_base?: string
-  api_key?: string
-  model?: string
+  config?: LlmEndpointConfig
   enabled?: boolean
 }
 
-export interface LlmEndpointDraft {
+export type LlmJsonValue = string | number | boolean | null | LlmJsonValue[] | { [key: string]: LlmJsonValue }
+export type LlmEndpointConfig = { [key: string]: LlmJsonValue }
+
+export interface LlmEndpointConfigPreview {
+  provider: string
   name: string
-  api_base: string
-  api_key: string
   model: string
-  enabled: boolean
+  reviewModel: string | null
+  apiBase: string
+  wireApi: string
+  reasoningEffort: string | null
+  disableResponseStorage: boolean
+  requiresOpenaiAuth: boolean
 }
+
+export const LLM_API_KEY_PLACEHOLDER = '__GAOSHOU_STORED_SECRET__'
+export const LLM_TEMPLATE_API_KEY = 'replace-with-your-api-key'
+const LLM_RUNTIME_ROOT_FIELDS = new Set([
+  'OPENAI_API_KEY',
+  'disable_response_storage',
+  'env',
+  'model',
+  'model_provider',
+  'model_providers',
+  'model_reasoning_effort',
+  'review_model',
+])
+const LLM_RUNTIME_PROVIDER_FIELDS = new Set(['base_url', 'name', 'requires_openai_auth', 'wire_api'])
 
 export interface LlmEndpointTestResult {
   status: 'ok' | 'error'
@@ -66,17 +89,181 @@ export interface LlmGatewayView {
   recentError: string | null
 }
 
-export function buildLlmEndpointUpdate(current: LlmEndpoint, draft: LlmEndpointDraft): LlmEndpointUpdatePayload {
-  const apiBase = draft.api_base.trim()
-  const apiKey = draft.api_key.trim()
-  const payload: LlmEndpointUpdatePayload = {
-    name: draft.name.trim(),
-    api_base: apiBase,
-    model: draft.model.trim(),
-    enabled: draft.enabled,
+export function parseLlmEndpointConfig(text: string): { config: LlmEndpointConfig } {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error('Configuration must contain valid JSON.')
   }
-  if (apiKey || apiBase !== current.api_base) payload.api_key = apiKey
-  return payload
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Configuration must be a JSON object.')
+  }
+  return { config: value as LlmEndpointConfig }
+}
+
+export function formatLlmEndpointConfig(text: string): string {
+  return JSON.stringify(parseLlmEndpointConfig(text).config, null, 2)
+}
+
+export function createLlmEndpointTemplate(): string {
+  return JSON.stringify({
+    model_provider: 'openai',
+    model: 'gpt-5',
+    review_model: 'gpt-5',
+    model_reasoning_effort: 'medium',
+    disable_response_storage: true,
+    model_providers: {
+      openai: {
+        name: 'OpenAI',
+        base_url: 'https://api.openai.com/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+      },
+    },
+    env: { OPENAI_API_KEY: LLM_TEMPLATE_API_KEY },
+  }, null, 2)
+}
+
+export function sanitizedLlmEndpointConfig(endpoint: Pick<LlmEndpoint, 'config'>): string {
+  return JSON.stringify(endpoint.config, null, 2)
+}
+
+function objectValue(value: LlmJsonValue | undefined): Record<string, LlmJsonValue> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+export function previewLlmEndpointConfig(config: LlmEndpointConfig): LlmEndpointConfigPreview {
+  const provider = typeof config.model_provider === 'string' ? config.model_provider : ''
+  const selected = objectValue(objectValue(config.model_providers)[provider])
+  return {
+    provider,
+    name: typeof selected.name === 'string' ? selected.name : provider,
+    model: typeof config.model === 'string' ? config.model : '',
+    reviewModel: typeof config.review_model === 'string' ? config.review_model : null,
+    apiBase: typeof selected.base_url === 'string' ? selected.base_url : '',
+    wireApi: typeof selected.wire_api === 'string' ? selected.wire_api : 'chat_completions',
+    reasoningEffort: typeof config.model_reasoning_effort === 'string' ? config.model_reasoning_effort : null,
+    disableResponseStorage: config.disable_response_storage === true,
+    requiresOpenaiAuth: selected.requires_openai_auth === true,
+  }
+}
+
+export function getLlmEndpointPreservedFields(config: LlmEndpointConfig): string[] {
+  const provider = typeof config.model_provider === 'string' ? config.model_provider : ''
+  const preserved = Object.keys(config).filter(key => !LLM_RUNTIME_ROOT_FIELDS.has(key))
+  const env = objectValue(config.env)
+  preserved.push(...Object.keys(env).filter(key => key !== 'OPENAI_API_KEY').map(key => `env.${key}`))
+
+  const providers = objectValue(config.model_providers)
+  preserved.push(...Object.keys(providers).filter(key => key !== provider).map(key => `model_providers.${key}`))
+  const selected = objectValue(providers[provider])
+  preserved.push(...Object.keys(selected)
+    .filter(key => !LLM_RUNTIME_PROVIDER_FIELDS.has(key))
+    .map(key => `model_providers.${provider}.${key}`))
+  return preserved.sort()
+}
+
+export function getLlmEndpointConfigWarnings(config: LlmEndpointConfig): string[] {
+  const preservedFields = getLlmEndpointPreservedFields(config)
+  if (!preservedFields.length) return []
+  return [`These fields are preserved but not interpreted by the gateway: ${preservedFields.join(', ')}`]
+}
+
+export function shouldConfirmLlmTemplateReset(text: string, resetText = createLlmEndpointTemplate()): boolean {
+  try {
+    return formatLlmEndpointConfig(text) !== formatLlmEndpointConfig(resetText)
+  } catch {
+    return Boolean(text.trim())
+  }
+}
+
+export function getLlmEndpointResetText(originalSanitizedConfig: string | null): string {
+  return originalSanitizedConfig ?? createLlmEndpointTemplate()
+}
+
+export function getLlmEndpointResetState(
+  originalSanitizedConfig: string | null,
+  originalEnabled: boolean | null,
+): { configText: string; enabled: boolean } {
+  return {
+    configText: getLlmEndpointResetText(originalSanitizedConfig),
+    enabled: originalEnabled ?? true,
+  }
+}
+
+export function assertLlmEndpointCreateReady(config: LlmEndpointConfig): void {
+  const env = objectValue(config.env)
+  const candidates = [config.OPENAI_API_KEY, env.OPENAI_API_KEY]
+  if (candidates.some(value => typeof value === 'string' && value.trim() === LLM_TEMPLATE_API_KEY)) {
+    throw new Error('Replace template API key before saving.')
+  }
+}
+
+export function getLlmEndpointErrorDetail(reason: unknown): string {
+  if (reason && typeof reason === 'object' && 'response' in reason) {
+    const response = (reason as { response?: { data?: { detail?: unknown } } }).response
+    if (typeof response?.data?.detail === 'string') return response.data.detail
+  }
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
+export interface LatestRequestHandlers<T> {
+  started: () => void
+  succeeded: (value: T) => void
+  failed: (reason: unknown) => void
+  finished: () => void
+}
+
+export function createLatestRequestController<T>(
+  request: () => Promise<T>,
+  handlers: LatestRequestHandlers<T>,
+) {
+  let generation = 0
+  return {
+    async run(): Promise<boolean> {
+      const requestGeneration = ++generation
+      handlers.started()
+      try {
+        const value = await request()
+        if (requestGeneration !== generation) return false
+        handlers.succeeded(value)
+        return true
+      } catch (reason) {
+        if (requestGeneration !== generation) return false
+        handlers.failed(reason)
+        return false
+      } finally {
+        if (requestGeneration === generation) handlers.finished()
+      }
+    },
+  }
+}
+
+export function createAsyncReentryGuard(onActiveChange: (active: boolean) => void) {
+  let active = false
+  return {
+    async run(action: () => Promise<void>): Promise<boolean> {
+      if (active) return false
+      active = true
+      onActiveChange(true)
+      try {
+        await action()
+        return true
+      } finally {
+        active = false
+        onActiveChange(false)
+      }
+    },
+  }
+}
+
+export function buildLlmEndpointCreate(config: LlmEndpointConfig, enabled: boolean): LlmEndpointCreatePayload {
+  return { config, enabled }
+}
+
+export function buildLlmEndpointUpdate(config: LlmEndpointConfig, enabled: boolean): LlmEndpointUpdatePayload {
+  return { config, enabled }
 }
 
 export function moveLlmEndpointIds(ids: string[], endpointId: string, offset: -1 | 1): string[] {

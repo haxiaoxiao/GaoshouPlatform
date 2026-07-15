@@ -3,7 +3,24 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import {
+  LLM_API_KEY_PLACEHOLDER,
+  LLM_TEMPLATE_API_KEY,
+  assertLlmEndpointCreateReady,
+  buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
+  createLlmEndpointTemplate,
+  formatLlmEndpointConfig,
+  getLlmEndpointConfigWarnings,
+  getLlmEndpointPreservedFields,
+  shouldConfirmLlmTemplateReset,
+  createAsyncReentryGuard,
+  createLatestRequestController,
+  getLlmEndpointResetText,
+  getLlmEndpointResetState,
+  getLlmEndpointErrorDetail,
+  parseLlmEndpointConfig,
+  previewLlmEndpointConfig,
+  sanitizedLlmEndpointConfig,
   isLlmEndpointCooldownActive,
   getLlmGatewayView,
   moveLlmEndpointIds,
@@ -14,12 +31,42 @@ import {
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url))
 const readSource = (path: string) => readFileSync(`${sourceRoot}/${path}`, 'utf-8')
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
+
 const endpoint = (overrides: Partial<LlmEndpoint> = {}): LlmEndpoint => ({
   id: 'primary',
   name: 'Primary',
   api_base: 'https://llm.example.test/v1',
   api_key_hint: '********1234',
   model: 'provider/model',
+  provider: 'provider',
+  review_model: null,
+  wire_api: 'responses',
+  reasoning_effort: 'medium',
+  disable_response_storage: true,
+  requires_openai_auth: true,
+  config: {
+    model_provider: 'provider',
+    model: 'provider/model',
+    model_providers: {
+      provider: {
+        name: 'Primary',
+        base_url: 'https://llm.example.test/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+      },
+    },
+    env: { OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER },
+  },
+  preserved_fields: [],
   priority: 0,
   enabled: true,
   consecutive_failures: 0,
@@ -32,37 +79,181 @@ const endpoint = (overrides: Partial<LlmEndpoint> = {}): LlmEndpoint => ({
   ...overrides,
 })
 
-describe('LLM endpoint edit payloads', () => {
-  it('never models a readable API key and omits a blank key when destination is unchanged', () => {
-    const current = endpoint()
-    expect('api_key' in current).toBe(false)
+describe('LLM endpoint JSON configuration', () => {
+  it('creates a safe template with an obviously fake key', () => {
+    const text = createLlmEndpointTemplate()
+    expect(text).toContain('replace-with-your-api-key')
+    expect(text).not.toContain(LLM_API_KEY_PLACEHOLDER)
+    expect(parseLlmEndpointConfig(text).config).toMatchObject({
+      model_provider: 'openai',
+      env: { OPENAI_API_KEY: 'replace-with-your-api-key' },
+    })
+  })
 
-    expect(buildLlmEndpointUpdate(current, {
-      name: 'Primary renamed',
-      api_base: current.api_base,
-      api_key: '',
-      model: current.model,
-      enabled: current.enabled,
-    })).toEqual({
-      name: 'Primary renamed',
-      api_base: current.api_base,
-      model: current.model,
+  it('rejects invalid JSON and non-object JSON with useful local errors', () => {
+    expect(() => parseLlmEndpointConfig('{')).toThrow('valid JSON')
+    expect(() => parseLlmEndpointConfig('[]')).toThrow('JSON object')
+  })
+
+  it('formats valid JSON deterministically', () => {
+    expect(formatLlmEndpointConfig('{"model":"gpt-5","model_provider":"openai"}'))
+      .toBe('{\n  "model": "gpt-5",\n  "model_provider": "openai"\n}')
+  })
+
+  it('loads sanitized edit JSON with the stored-secret placeholder', () => {
+    const text = sanitizedLlmEndpointConfig(endpoint())
+    expect(text).toContain(LLM_API_KEY_PLACEHOLDER)
+    expect(text).not.toContain('********1234')
+  })
+
+  it('builds JSON-only create and update payloads', () => {
+    const config = parseLlmEndpointConfig(createLlmEndpointTemplate()).config
+    expect(buildLlmEndpointCreate(config, true)).toEqual({ config, enabled: true })
+    expect(buildLlmEndpointUpdate(config, false)).toEqual({ config, enabled: false })
+  })
+
+  it('extracts a preview and derives preserved fields from the current JSON', () => {
+    const current = endpoint()
+    expect(previewLlmEndpointConfig(current.config)).toEqual({
+      provider: 'provider',
+      name: 'Primary',
+      model: 'provider/model',
+      reviewModel: null,
+      apiBase: 'https://llm.example.test/v1',
+      wireApi: 'responses',
+      reasoningEffort: null,
+      disableResponseStorage: false,
+      requiresOpenaiAuth: true,
+    })
+    current.config.custom_root = true
+    current.config.network_access = 'enabled'
+    current.config.windows_wsl_setup_acknowledged = true
+    current.config.env = { OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER, REGION: 'us' }
+    current.config.model_providers = {
+      provider: {
+        name: 'Primary',
+        base_url: 'https://llm.example.test/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+        vendor_option: 'kept',
+      },
+      backup: { base_url: 'https://backup.example.test/v1' },
+    }
+    expect(getLlmEndpointPreservedFields(current.config)).toEqual([
+      'custom_root',
+      'env.REGION',
+      'model_providers.backup',
+      'model_providers.provider.vendor_option',
+      'network_access',
+      'windows_wsl_setup_acknowledged',
+    ])
+    expect(getLlmEndpointConfigWarnings(current.config)).toEqual([
+      'These fields are preserved but not interpreted by the gateway: custom_root, env.REGION, model_providers.backup, model_providers.provider.vendor_option, network_access, windows_wsl_setup_acknowledged',
+    ])
+
+    delete current.config.custom_root
+    expect(getLlmEndpointConfigWarnings(current.config)[0]).not.toContain('custom_root')
+  })
+
+  it('requires confirmation only when reset would discard non-template content', () => {
+    const template = createLlmEndpointTemplate()
+    expect(shouldConfirmLlmTemplateReset(template)).toBe(false)
+    expect(shouldConfirmLlmTemplateReset(`${template}\n`)).toBe(false)
+    expect(shouldConfirmLlmTemplateReset(sanitizedLlmEndpointConfig(endpoint()))).toBe(true)
+    expect(shouldConfirmLlmTemplateReset('{"custom":true}')).toBe(true)
+  })
+
+  it('resets an edit to its original sanitized config and preserves the stored-key placeholder in payload', () => {
+    const original = sanitizedLlmEndpointConfig(endpoint())
+    const resetText = getLlmEndpointResetText(original)
+    const payload = buildLlmEndpointUpdate(parseLlmEndpointConfig(resetText).config, true)
+    expect(payload.config.env).toEqual({ OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER })
+    expect(resetText).not.toContain('replace-with-your-api-key')
+    expect(getLlmEndpointResetText(null)).toBe(createLlmEndpointTemplate())
+  })
+
+  it('rejects the template API key at every backend-recognized create location', () => {
+    const nested = parseLlmEndpointConfig(createLlmEndpointTemplate()).config
+    expect(() => assertLlmEndpointCreateReady(nested)).toThrow('Replace template API key before saving.')
+
+    const root = { ...nested, env: {}, OPENAI_API_KEY: LLM_TEMPLATE_API_KEY }
+    expect(() => assertLlmEndpointCreateReady(root)).toThrow('Replace template API key before saving.')
+
+    const both = {
+      ...nested,
+      OPENAI_API_KEY: 'real-key',
+      env: { OPENAI_API_KEY: ` ${LLM_TEMPLATE_API_KEY} ` },
+    }
+    expect(() => assertLlmEndpointCreateReady(both)).toThrow('Replace template API key before saving.')
+
+    const ready = { ...nested, env: { OPENAI_API_KEY: 'real-key' } }
+    expect(() => assertLlmEndpointCreateReady(ready)).not.toThrow()
+  })
+
+  it('resets JSON and enabled state to the captured edit state or create defaults', () => {
+    const original = sanitizedLlmEndpointConfig(endpoint())
+    expect(getLlmEndpointResetState(original, false)).toEqual({ configText: original, enabled: false })
+    expect(getLlmEndpointResetState(null, null)).toEqual({
+      configText: createLlmEndpointTemplate(),
       enabled: true,
     })
   })
 
-  it('sends a blank key when the destination changes so backend validation is visible', () => {
+  it('allows only the latest overlapping load to mutate state', async () => {
+    const first = deferred<LlmEndpoint[]>()
+    const second = deferred<LlmEndpoint[]>()
+    const requests = [first, second]
+    const state = { endpoints: [] as LlmEndpoint[], error: '', loading: false, loadState: 'loading' }
+    const controller = createLatestRequestController(
+      () => requests.shift()!.promise,
+      {
+        started: () => { state.loading = true; state.error = ''; state.loadState = 'loading' },
+        succeeded: value => { state.endpoints = value; state.loadState = 'ready' },
+        failed: reason => { state.error = String(reason); state.loadState = 'error' },
+        finished: () => { state.loading = false },
+      },
+    )
+
+    const olderRun = controller.run()
+    const latestRun = controller.run()
+    first.resolve([endpoint({ id: 'stale', name: 'Stale' })])
+    await olderRun
+    expect(state).toMatchObject({ loading: true, loadState: 'loading', error: '' })
+    expect(state.endpoints).toEqual([])
+
+    second.resolve([endpoint({ id: 'latest', name: 'Latest' })])
+    await latestRun
+
+    expect(state).toMatchObject({ loading: false, loadState: 'ready', error: '' })
+    expect(state.endpoints.map(item => item.id)).toEqual(['latest'])
+  })
+
+  it('prevents save reentry until the active save settles', async () => {
+    const pending = deferred<void>()
+    let calls = 0
+    const activeStates: boolean[] = []
+    const guard = createAsyncReentryGuard(active => activeStates.push(active))
+    const first = guard.run(async () => { calls += 1; await pending.promise })
+    const second = await guard.run(async () => { calls += 1 })
+    expect(second).toBe(false)
+    expect(calls).toBe(1)
+    pending.resolve()
+    expect(await first).toBe(true)
+    expect(activeStates).toEqual([true, false])
+  })
+
+  it('preserves backend semantic validation details for save feedback', () => {
+    const reason = { response: { data: { detail: 'model_provider must exist in model_providers' } } }
+    expect(getLlmEndpointErrorDetail(reason)).toBe('model_provider must exist in model_providers')
+    expect(getLlmEndpointErrorDetail(new Error('network failed'))).toBe('network failed')
+  })
+
+  it('never models or reads a plaintext API key', () => {
     const current = endpoint()
-    expect(buildLlmEndpointUpdate(current, {
-      name: current.name,
-      api_base: 'https://other.example.test/v1',
-      api_key: '   ',
-      model: current.model,
-      enabled: true,
-    })).toMatchObject({
-      api_base: 'https://other.example.test/v1',
-      api_key: '',
-    })
+    expect('api_key' in current).toBe(false)
+    const apiSource = readSource('api/system.ts')
+    const readType = apiSource.slice(apiSource.indexOf('export interface LlmEndpoint {'), apiSource.indexOf('export interface LlmEndpointCreatePayload'))
+    expect(readType).not.toMatch(/\bapi_key\s*:/)
   })
 })
 
@@ -142,7 +333,22 @@ describe('LLM endpoint source contracts', () => {
     expect(monitorSource).toContain("import LLMEndpointManager from '@/components/LLMEndpointManager.vue'")
     expect(monitorSource).toContain('<LLMEndpointManager')
     expect(monitorSource).toContain("llmEndpointLoadState === 'loading'")
-    expect(managerSource).toContain('type="password"')
+    expect(managerSource).toContain("import CodeEditor from '@/components/CodeEditor.vue'")
+    expect(managerSource).toContain('language="json"')
+    expect(managerSource).toContain('aria-label="LLM endpoint configuration JSON"')
+    expect(managerSource).toContain('@click="formatConfig"')
+    expect(managerSource).toContain('@click="validateConfig"')
+    expect(managerSource).toContain('updateConfigInsights(config)')
+    expect(managerSource).toContain('@click="resetConfig"')
+    expect(managerSource).toContain("editing ? 'Reset to saved config' : 'Reset to template'")
+    expect(managerSource).toContain('assertLlmEndpointCreateReady(config)')
+    expect(managerSource).toContain('editorEnabled.value = resetState.enabled')
+    expect(managerSource).toContain("ElMessage.success('JSON syntax is valid.')")
+    expect(managerSource).not.toContain('Configuration JSON is valid.')
+    expect(managerSource).toContain("ElMessageBox.confirm(")
+    expect(managerSource).toContain('The API key is encrypted at rest and is never shown after saving.')
+    expect(managerSource).toContain('endpoint.api_key_hint')
+    expect(managerSource).toContain('preservedWarnings')
     expect(managerSource).toContain('v-if="!loading && !error && !endpoints.length"')
     expect(managerSource).toContain("loadState === 'error' && endpoints.length")
     expect(managerSource).toContain(':class="{ \'endpoint-row--stale\': mutationsDisabled }"')
@@ -162,5 +368,16 @@ describe('LLM endpoint source contracts', () => {
     expect(managerSource).toContain('ElMessageBox.confirm')
     expect(managerSource).toContain('CirclePlus')
     expect(managerSource).not.toMatch(/\bPlus\b/)
+  })
+
+  it('passes an accessible name through to CodeMirror content attributes', () => {
+    const editorSource = readSource('components/CodeEditor.vue')
+    expect(editorSource).toContain("EditorView.contentAttributes.of({ 'aria-label': props.ariaLabel })")
+    expect(editorSource).toContain('contentAttributesCompartment.reconfigure')
+  })
+
+  it('retains the responsive single-column layout contract', () => {
+    const managerSource = readSource('components/LLMEndpointManager.vue')
+    expect(managerSource).toMatch(/@media \(max-width: 760px\)[\s\S]*\.json-editor-layout\s*\{[\s\S]*grid-template-columns: 1fr/)
   })
 })

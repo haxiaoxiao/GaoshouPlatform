@@ -91,38 +91,66 @@
     <el-dialog
       v-model="editorOpen"
       :title="editing ? 'Edit endpoint' : 'Add endpoint'"
-      width="min(560px, calc(100vw - 32px))"
+      width="min(820px, calc(100vw - 32px))"
+      class="llm-json-editor-dialog"
       append-to-body
       destroy-on-close
     >
       <el-alert v-if="editorError" :title="editorError" type="error" show-icon :closable="false" />
-      <el-form label-position="top" @submit.prevent="save">
-        <div class="form-grid">
-          <el-form-item label="Name" required>
-            <el-input v-model="draft.name" maxlength="100" autocomplete="off" />
-          </el-form-item>
-          <el-form-item label="Model" required>
-            <el-input v-model="draft.model" maxlength="200" autocomplete="off" />
-          </el-form-item>
-        </div>
-        <el-form-item label="API base URL" required>
-          <el-input v-model="draft.api_base" maxlength="500" autocomplete="url" placeholder="https://provider.example/v1" />
-        </el-form-item>
-        <el-form-item :label="editing ? 'Replacement API key' : 'API key'" :required="!editing">
-          <el-input
-            v-model="draft.api_key"
-            type="password"
-            show-password
-            maxlength="2000"
-            autocomplete="new-password"
-            :placeholder="editing ? 'Leave blank to preserve current key' : 'Required'"
+      <div class="json-editor-layout">
+        <section class="json-editor-main" aria-label="Endpoint JSON configuration">
+          <div class="json-editor-heading">
+            <div class="json-editor-copy">
+              <strong>Configuration JSON</strong>
+              <small>The API key is encrypted at rest and is never shown after saving.</small>
+            </div>
+            <div class="json-editor-actions">
+              <el-button :icon="MagicStick" :disabled="saving" @click="formatConfig">Format JSON</el-button>
+              <el-button :icon="CircleCheck" :disabled="saving" @click="validateConfig">Validate</el-button>
+              <el-button :icon="RefreshLeft" :disabled="saving" @click="resetConfig">
+                {{ editing ? 'Reset to saved config' : 'Reset to template' }}
+              </el-button>
+            </div>
+          </div>
+          <CodeEditor
+            v-model="configText"
+            language="json"
+            aria-label="LLM endpoint configuration JSON"
+            :readonly="saving"
+            :min-height="360"
           />
-          <small v-if="editing">Current key is never loaded into this form. Changing the URL requires a replacement key.</small>
-        </el-form-item>
-        <el-form-item label="Enabled">
-          <el-switch v-model="draft.enabled" />
-        </el-form-item>
-      </el-form>
+          <small v-if="editing" class="key-hint">Stored key: {{ editing.api_key_hint }}. Keep {{ LLM_API_KEY_PLACEHOLDER }} to preserve it.</small>
+        </section>
+
+        <aside class="config-preview" aria-live="polite" aria-label="Local extracted endpoint preview">
+          <strong>Local extracted preview</strong>
+          <template v-if="preview">
+            <dl>
+              <dt>Provider</dt><dd>{{ preview.provider || 'Not set' }}</dd>
+              <dt>Name</dt><dd>{{ preview.name || 'Not set' }}</dd>
+              <dt>Model</dt><dd>{{ preview.model || 'Not set' }}</dd>
+              <dt>Review model</dt><dd>{{ preview.reviewModel || 'None' }}</dd>
+              <dt>API base</dt><dd>{{ preview.apiBase || 'Not set' }}</dd>
+              <dt>Wire API</dt><dd>{{ preview.wireApi }}</dd>
+              <dt>Reasoning</dt><dd>{{ preview.reasoningEffort || 'Default' }}</dd>
+              <dt>Storage</dt><dd>{{ preview.disableResponseStorage ? 'Disabled' : 'Enabled' }}</dd>
+              <dt>OpenAI auth</dt><dd>{{ preview.requiresOpenaiAuth ? 'Required' : 'Not required' }}</dd>
+            </dl>
+          </template>
+          <small v-else>Preview appears when the JSON is valid.</small>
+          <el-alert
+            v-for="warning in preservedWarnings"
+            :key="warning"
+            :title="warning"
+            type="warning"
+            :closable="false"
+          />
+          <div class="enabled-control">
+            <span>Enabled</span>
+            <el-switch v-model="editorEnabled" aria-label="Enable endpoint" />
+          </div>
+        </aside>
+      </div>
       <template #footer>
         <el-button :disabled="saving" @click="editorOpen = false">Cancel</el-button>
         <el-button type="primary" :loading="saving" :disabled="mutationsDisabled" @click="save">Save endpoint</el-button>
@@ -132,16 +160,30 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { ArrowDown, ArrowUp, CirclePlus, Connection, Delete, Edit, Refresh } from '@element-plus/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { ArrowDown, ArrowUp, CircleCheck, CirclePlus, Connection, Delete, Edit, MagicStick, Refresh, RefreshLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import CodeEditor from '@/components/CodeEditor.vue'
 import {
+  LLM_API_KEY_PLACEHOLDER,
+  assertLlmEndpointCreateReady,
+  buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
+  createAsyncReentryGuard,
+  createLatestRequestController,
+  createLlmEndpointTemplate,
+  formatLlmEndpointConfig,
+  getLlmEndpointConfigWarnings,
+  getLlmEndpointErrorDetail,
+  getLlmEndpointResetState,
   isLlmEndpointCooldownActive,
   moveLlmEndpointIds,
+  parseLlmEndpointConfig,
+  previewLlmEndpointConfig,
+  sanitizedLlmEndpointConfig,
+  shouldConfirmLlmTemplateReset,
   systemApi,
   type LlmEndpoint,
-  type LlmEndpointDraft,
 } from '@/api/system'
 
 defineProps<{ modelValue: boolean }>()
@@ -160,41 +202,59 @@ const editing = ref<LlmEndpoint | null>(null)
 const saving = ref(false)
 const busyId = ref('')
 const busyAction = ref('')
-const draft = reactive<LlmEndpointDraft>(emptyDraft())
+const configText = ref('')
+const originalSanitizedConfig = ref<string | null>(null)
+const originalEnabled = ref<boolean | null>(null)
+const editorEnabled = ref(true)
 const mutationsDisabled = computed(() => loading.value || loadState.value !== 'ready' || Boolean(busyId.value))
+const preview = ref<ReturnType<typeof previewLlmEndpointConfig> | null>(null)
+const preservedWarnings = ref<string[]>([])
+const endpointLoader = createLatestRequestController(
+  () => systemApi.listLlmEndpoints(),
+  {
+    started: () => {
+      loading.value = true
+      loadState.value = 'loading'
+      error.value = ''
+    },
+    succeeded: value => {
+      endpoints.value = value
+      loadState.value = 'ready'
+    },
+    failed: reason => {
+      loadState.value = 'error'
+      error.value = `Failed to load endpoints: ${getLlmEndpointErrorDetail(reason)}`
+    },
+    finished: () => { loading.value = false },
+  },
+)
+const saveGuard = createAsyncReentryGuard(active => { saving.value = active })
 
-function emptyDraft(): LlmEndpointDraft {
-  return { name: '', api_base: '', api_key: '', model: '', enabled: true }
+function updateConfigInsights(config: ReturnType<typeof parseLlmEndpointConfig>['config']) {
+  preview.value = previewLlmEndpointConfig(config)
+  preservedWarnings.value = getLlmEndpointConfigWarnings(config)
 }
 
-function errorDetail(reason: unknown): string {
-  if (reason && typeof reason === 'object' && 'response' in reason) {
-    const response = (reason as { response?: { data?: { detail?: unknown } } }).response
-    if (typeof response?.data?.detail === 'string') return response.data.detail
+watch(configText, (text) => {
+  try {
+    updateConfigInsights(parseLlmEndpointConfig(text).config)
+  } catch {
+    preview.value = null
+    preservedWarnings.value = []
   }
-  return reason instanceof Error ? reason.message : String(reason)
-}
+}, { immediate: true })
 
 async function loadEndpoints(): Promise<boolean> {
-  loading.value = true
-  error.value = ''
-  try {
-    endpoints.value = await systemApi.listLlmEndpoints()
-    loadState.value = 'ready'
-    return true
-  } catch (reason) {
-    loadState.value = 'error'
-    error.value = `Failed to load endpoints: ${errorDetail(reason)}`
-    return false
-  } finally {
-    loading.value = false
-  }
+  return endpointLoader.run()
 }
 
 function openCreate() {
   if (mutationsDisabled.value) return
   editing.value = null
-  Object.assign(draft, emptyDraft())
+  originalSanitizedConfig.value = null
+  originalEnabled.value = null
+  configText.value = createLlmEndpointTemplate()
+  editorEnabled.value = true
   editorError.value = ''
   editorOpen.value = true
 }
@@ -202,45 +262,76 @@ function openCreate() {
 function openEdit(endpoint: LlmEndpoint) {
   if (mutationsDisabled.value) return
   editing.value = endpoint
-  Object.assign(draft, {
-    name: endpoint.name,
-    api_base: endpoint.api_base,
-    api_key: '',
-    model: endpoint.model,
-    enabled: endpoint.enabled,
-  })
+  originalSanitizedConfig.value = sanitizedLlmEndpointConfig(endpoint)
+  originalEnabled.value = endpoint.enabled
+  configText.value = originalSanitizedConfig.value
+  editorEnabled.value = endpoint.enabled
   editorError.value = ''
   editorOpen.value = true
 }
 
 async function save() {
-  if (mutationsDisabled.value) return
+  if (mutationsDisabled.value || saving.value) return
   editorError.value = ''
-  if (!draft.name.trim() || !draft.api_base.trim() || !draft.model.trim() || (!editing.value && !draft.api_key.trim())) {
-    editorError.value = 'Complete all required fields.'
+  let config
+  try {
+    config = parseLlmEndpointConfig(configText.value).config
+    if (!editing.value) assertLlmEndpointCreateReady(config)
+  } catch (reason) {
+    editorError.value = getLlmEndpointErrorDetail(reason)
     return
   }
-  saving.value = true
-  try {
-    if (editing.value) {
-      await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(editing.value, draft))
-    } else {
-      await systemApi.createLlmEndpoint({
-        name: draft.name.trim(),
-        api_base: draft.api_base.trim(),
-        api_key: draft.api_key.trim(),
-        model: draft.model.trim(),
-        enabled: draft.enabled,
-      })
+  await saveGuard.run(async () => {
+    try {
+      if (editing.value) {
+        await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(config, editorEnabled.value))
+      } else {
+        await systemApi.createLlmEndpoint(buildLlmEndpointCreate(config, editorEnabled.value))
+      }
+      editorOpen.value = false
+      ElMessage.success(editing.value ? 'Endpoint updated' : 'Endpoint added')
+      await refreshAfterMutation()
+    } catch (reason) {
+      editorError.value = getLlmEndpointErrorDetail(reason)
     }
-    editorOpen.value = false
-    ElMessage.success(editing.value ? 'Endpoint updated' : 'Endpoint added')
-    await refreshAfterMutation()
+  })
+}
+
+function formatConfig() {
+  editorError.value = ''
+  try {
+    configText.value = formatLlmEndpointConfig(configText.value)
   } catch (reason) {
-    editorError.value = errorDetail(reason)
-  } finally {
-    saving.value = false
+    editorError.value = getLlmEndpointErrorDetail(reason)
   }
+}
+
+function validateConfig() {
+  editorError.value = ''
+  try {
+    const config = parseLlmEndpointConfig(configText.value).config
+    updateConfigInsights(config)
+    ElMessage.success('JSON syntax is valid.')
+  } catch (reason) {
+    editorError.value = getLlmEndpointErrorDetail(reason)
+  }
+}
+
+async function resetConfig() {
+  const resetState = getLlmEndpointResetState(originalSanitizedConfig.value, originalEnabled.value)
+  if (shouldConfirmLlmTemplateReset(configText.value, resetState.configText) || editorEnabled.value !== resetState.enabled) {
+    const confirmed = await ElMessageBox.confirm(
+      editing.value
+        ? 'Discard current edits and restore the configuration loaded when this editor opened?'
+        : 'Discard current edits and restore the safe create template?',
+      editing.value ? 'Reset to saved config' : 'Reset to template',
+      { confirmButtonText: 'Reset', cancelButtonText: 'Cancel', type: 'warning' },
+    ).catch(() => false)
+    if (!confirmed) return
+  }
+  configText.value = resetState.configText
+  editorEnabled.value = resetState.enabled
+  editorError.value = ''
 }
 
 async function refreshAfterMutation() {
@@ -256,7 +347,7 @@ async function runMutation(endpointId: string, action: string, operation: () => 
     await operation()
     await refreshAfterMutation()
   } catch (reason) {
-    error.value = errorDetail(reason)
+    error.value = getLlmEndpointErrorDetail(reason)
   } finally {
     busyId.value = ''
     busyAction.value = ''
@@ -283,7 +374,7 @@ async function testEndpoint(endpoint: LlmEndpoint) {
     else error.value = result.error || 'Connection test failed.'
     await refreshAfterMutation()
   } catch (reason) {
-    error.value = errorDetail(reason)
+    error.value = getLlmEndpointErrorDetail(reason)
   } finally {
     busyId.value = ''
     busyAction.value = ''
@@ -391,10 +482,75 @@ function healthTime(endpoint: LlmEndpoint): string {
   gap: 4px;
 }
 
-.form-grid {
+.json-editor-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 16px;
+  min-height: 470px;
+}
+
+.json-editor-main,
+.config-preview,
+.json-editor-copy {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.json-editor-heading,
+.json-editor-actions,
+.enabled-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
+}
+
+.json-editor-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.json-editor-heading small,
+.key-hint,
+.config-preview > small {
+  color: var(--text-muted);
+}
+
+.config-preview {
+  padding-left: 16px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.config-preview dl {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 7px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.config-preview dt {
+  color: var(--text-muted);
+}
+
+.config-preview dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.enabled-control {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+:global(.llm-json-editor-dialog .el-dialog__body) {
+  min-height: 500px;
+  max-height: calc(100vh - 180px);
+  overflow: auto;
 }
 
 @media (max-width: 760px) {
@@ -416,9 +572,28 @@ function healthTime(endpoint: LlmEndpoint): string {
     flex-wrap: wrap;
   }
 
-  .form-grid {
+  .json-editor-layout {
     grid-template-columns: 1fr;
-    gap: 0;
+    min-height: 0;
+  }
+
+  .config-preview {
+    padding: 14px 0 0;
+    border-top: 1px solid var(--border-subtle);
+    border-left: 0;
+  }
+
+  .json-editor-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .json-editor-actions {
+    justify-content: flex-start;
+  }
+
+  :global(.llm-json-editor-dialog .el-dialog__body) {
+    min-height: 0;
   }
 }
 </style>
