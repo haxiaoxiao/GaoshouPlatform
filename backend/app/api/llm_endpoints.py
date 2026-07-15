@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Coroutine
 from datetime import datetime
 from time import perf_counter
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.requests import Request
+from starlette.responses import Response as StarletteResponse
 
 from app.ai.gateway import (
     GatewayCandidate,
@@ -19,8 +25,35 @@ from app.db.models.llm_endpoint import LlmEndpoint
 from app.db.sqlite import get_async_session
 from app.services.llm_endpoints import LlmEndpointService
 
-router = APIRouter()
 logger = logging.getLogger(__name__)
+
+
+def _public_validation_errors(error: RequestValidationError) -> list[dict[str, Any]]:
+    return [
+        {key: item[key] for key in ("loc", "msg", "type") if key in item}
+        for item in error.errors()
+    ]
+
+
+class CredentialSafeValidationRoute(APIRoute):
+    def get_route_handler(
+        self,
+    ) -> Callable[[Request], Coroutine[Any, Any, StarletteResponse]]:
+        route_handler = super().get_route_handler()
+
+        async def credential_safe_handler(request: Request) -> StarletteResponse:
+            try:
+                return await route_handler(request)
+            except RequestValidationError as error:
+                return JSONResponse(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    content={"detail": _public_validation_errors(error)},
+                )
+
+        return credential_safe_handler
+
+
+router = APIRouter(route_class=CredentialSafeValidationRoute)
 
 
 class LlmEndpointJsonCreate(BaseModel):

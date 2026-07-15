@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -250,6 +251,63 @@ async def test_create_rejects_invalid_config_types_and_incomplete_legacy_payload
     client, _ = endpoint_api
     response = await client.post("/api/system/llm-endpoints", json=payload)
     assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "config": {"env": {"OPENAI_API_KEY": "validation-secret-mixed"}},
+            "api_key": "validation-secret-legacy",
+            "name": "Mixed",
+        },
+        {
+            "config": {"env": {"OPENAI_API_KEY": "validation-secret-enabled"}},
+            "enabled": "definitely",
+        },
+        {"config": "validation-secret-non-object"},
+        {
+            "config": {
+                "transport": {
+                    "headers": {"Authorization": "validation-secret-header"},
+                    "cookies": {"session": "validation-secret-cookie"},
+                    "proxy_url": "http://validation-secret-proxy@proxy.example.test",
+                    "custom": {"credentials": {"token": "validation-secret-nested"}},
+                }
+            },
+            "enabled": [],
+        },
+    ],
+)
+async def test_validation_errors_never_echo_rejected_credentials(
+    endpoint_api,
+    caplog,
+    payload,
+):
+    client, _ = endpoint_api
+    caplog.set_level(logging.DEBUG)
+
+    response = await client.post("/api/system/llm-endpoints", json=payload)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail
+    assert all("loc" in error and "msg" in error and "type" in error for error in detail)
+    assert any(error["loc"][0] == "body" for error in detail)
+    assert any(error["msg"] for error in detail)
+    combined_output = response.text + caplog.text
+    for marker in (
+        "validation-secret-mixed",
+        "validation-secret-legacy",
+        "validation-secret-enabled",
+        "validation-secret-non-object",
+        "validation-secret-header",
+        "validation-secret-cookie",
+        "validation-secret-proxy",
+        "validation-secret-nested",
+    ):
+        assert marker not in combined_output
 
 
 @pytest.mark.asyncio
