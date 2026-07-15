@@ -52,13 +52,14 @@ class LlmEndpointUpdate(BaseModel):
 
     @model_validator(mode="after")
     def validate_request_shape(self) -> LlmEndpointUpdate:
-        legacy = (self.name, self.api_base, self.api_key, self.model)
+        discrete_fields = {"name", "api_base", "api_key", "model"}
+        supplied_discrete_fields = self.model_fields_set & discrete_fields
         if self.config is not None:
-            if any(value is not None for value in legacy):
-                raise ValueError("provide config or all legacy fields, not both")
+            if supplied_discrete_fields:
+                raise ValueError("config cannot be mixed with legacy fields")
             return self
-        if any(value is None for value in legacy):
-            raise ValueError("provide config or all legacy fields")
+        if not (self.model_fields_set - {"config"}):
+            raise ValueError("update must not be empty")
         return self
 
 

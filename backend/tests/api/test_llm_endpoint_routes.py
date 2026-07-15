@@ -105,14 +105,19 @@ def test_llm_endpoint_request_schemas_have_planned_limits_and_no_priority():
     assert "priority" not in update_schema["properties"]
 
 
-def test_llm_endpoint_request_schemas_accept_config_or_complete_legacy_fields():
+def test_llm_endpoint_request_schemas_require_complete_legacy_create_and_sparse_update():
     assert LlmEndpointCreate.model_validate({"config": _config()}).config == _config()
     assert LlmEndpointUpdate.model_validate({"config": _config()}).config == _config()
 
     with pytest.raises(ValueError, match="config or all legacy fields"):
         LlmEndpointCreate.model_validate({"name": "Incomplete"})
-    with pytest.raises(ValueError, match="config or all legacy fields"):
-        LlmEndpointUpdate.model_validate({"name": "Incomplete"})
+    assert LlmEndpointUpdate.model_validate({"name": "Renamed"}).name == "Renamed"
+    assert LlmEndpointUpdate.model_validate({"enabled": False}).enabled is False
+
+    with pytest.raises(ValueError, match="update must not be empty"):
+        LlmEndpointUpdate.model_validate({})
+    with pytest.raises(ValueError, match="config cannot be mixed with legacy fields"):
+        LlmEndpointUpdate.model_validate({"config": _config(), "model": "mixed"})
 
 
 @pytest.mark.asyncio
@@ -168,19 +173,66 @@ async def test_json_create_list_and_update_preserve_config_without_secrets(endpo
         {"name": "partial"},
     ],
 )
-async def test_create_and_update_reject_invalid_config_types_and_incomplete_legacy_payload(
+async def test_create_rejects_invalid_config_types_and_incomplete_legacy_payload(
     endpoint_api,
     payload,
 ):
     client, _ = endpoint_api
-    created = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
-    create_response = await client.post("/api/system/llm-endpoints", json=payload)
-    update_response = await client.patch(
-        f"/api/system/llm-endpoints/{created['id']}",
-        json=payload,
+    response = await client.post("/api/system/llm-endpoints", json=payload)
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("patch", "field", "expected"),
+    [
+        ({"name": "Renamed"}, "name", "Renamed"),
+        ({"model": "openai/new-model"}, "model", "openai/new-model"),
+        ({"api_key": "replacement-secret-9999"}, "api_key_hint", "********9999"),
+    ],
+)
+async def test_legacy_update_accepts_sparse_discrete_fields(endpoint_api, patch, field, expected):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+
+    response = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json=patch,
     )
-    assert create_response.status_code == 422
-    assert update_response.status_code == 422
+
+    assert response.status_code == 200
+    assert response.json()[field] == expected
+
+
+@pytest.mark.asyncio
+async def test_legacy_update_accepts_enabled_only_for_current_ui(endpoint_api):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+
+    response = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_update_rejects_empty_and_mixed_payloads_clearly(endpoint_api):
+    client, _ = endpoint_api
+    endpoint = (await client.post("/api/system/llm-endpoints", json=_payload())).json()
+
+    empty = await client.patch(f"/api/system/llm-endpoints/{endpoint['id']}", json={})
+    mixed = await client.patch(
+        f"/api/system/llm-endpoints/{endpoint['id']}",
+        json={"config": endpoint["config"], "name": "Mixed"},
+    )
+
+    assert empty.status_code == 422
+    assert "update must not be empty" in empty.text
+    assert mixed.status_code == 422
+    assert "config cannot be mixed with legacy fields" in mixed.text
 
 
 @pytest.mark.asyncio
