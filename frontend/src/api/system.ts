@@ -6,6 +6,14 @@ export interface LlmEndpoint {
   api_base: string
   api_key_hint: string
   model: string
+  provider: string
+  review_model: string | null
+  wire_api: 'responses' | 'chat_completions'
+  reasoning_effort: 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | null
+  disable_response_storage: boolean
+  requires_openai_auth: boolean
+  config: LlmEndpointConfig
+  preserved_fields: string[]
   priority: number
   enabled: boolean
   consecutive_failures: number
@@ -18,28 +26,32 @@ export interface LlmEndpoint {
 }
 
 export interface LlmEndpointCreatePayload {
-  name: string
-  api_base: string
-  api_key: string
-  model: string
+  config: LlmEndpointConfig
   enabled: boolean
 }
 
 export interface LlmEndpointUpdatePayload {
-  name?: string
-  api_base?: string
-  api_key?: string
-  model?: string
+  config?: LlmEndpointConfig
   enabled?: boolean
 }
 
-export interface LlmEndpointDraft {
+export type LlmJsonValue = string | number | boolean | null | LlmJsonValue[] | { [key: string]: LlmJsonValue }
+export type LlmEndpointConfig = { [key: string]: LlmJsonValue }
+
+export interface LlmEndpointConfigPreview {
+  provider: string
   name: string
-  api_base: string
-  api_key: string
   model: string
-  enabled: boolean
+  reviewModel: string | null
+  apiBase: string
+  wireApi: string
+  reasoningEffort: string | null
+  disableResponseStorage: boolean
+  requiresOpenaiAuth: boolean
 }
+
+export const LLM_API_KEY_PLACEHOLDER = '__GAOSHOU_STORED_SECRET__'
+const FAKE_API_KEY = 'replace-with-your-api-key'
 
 export interface LlmEndpointTestResult {
   status: 'ok' | 'error'
@@ -66,17 +78,77 @@ export interface LlmGatewayView {
   recentError: string | null
 }
 
-export function buildLlmEndpointUpdate(current: LlmEndpoint, draft: LlmEndpointDraft): LlmEndpointUpdatePayload {
-  const apiBase = draft.api_base.trim()
-  const apiKey = draft.api_key.trim()
-  const payload: LlmEndpointUpdatePayload = {
-    name: draft.name.trim(),
-    api_base: apiBase,
-    model: draft.model.trim(),
-    enabled: draft.enabled,
+export function parseLlmEndpointConfig(text: string): { config: LlmEndpointConfig } {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error('Configuration must contain valid JSON.')
   }
-  if (apiKey || apiBase !== current.api_base) payload.api_key = apiKey
-  return payload
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('Configuration must be a JSON object.')
+  }
+  return { config: value as LlmEndpointConfig }
+}
+
+export function formatLlmEndpointConfig(text: string): string {
+  return JSON.stringify(parseLlmEndpointConfig(text).config, null, 2)
+}
+
+export function createLlmEndpointTemplate(): string {
+  return JSON.stringify({
+    model_provider: 'openai',
+    model: 'gpt-5',
+    review_model: 'gpt-5',
+    model_reasoning_effort: 'medium',
+    disable_response_storage: true,
+    model_providers: {
+      openai: {
+        name: 'OpenAI',
+        base_url: 'https://api.openai.com/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+      },
+    },
+    env: { OPENAI_API_KEY: FAKE_API_KEY },
+  }, null, 2)
+}
+
+export function sanitizedLlmEndpointConfig(endpoint: Pick<LlmEndpoint, 'config'>): string {
+  return JSON.stringify(endpoint.config, null, 2)
+}
+
+function objectValue(value: LlmJsonValue | undefined): Record<string, LlmJsonValue> {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+}
+
+export function previewLlmEndpointConfig(config: LlmEndpointConfig): LlmEndpointConfigPreview {
+  const provider = typeof config.model_provider === 'string' ? config.model_provider : ''
+  const selected = objectValue(objectValue(config.model_providers)[provider])
+  return {
+    provider,
+    name: typeof selected.name === 'string' ? selected.name : provider,
+    model: typeof config.model === 'string' ? config.model : '',
+    reviewModel: typeof config.review_model === 'string' ? config.review_model : null,
+    apiBase: typeof selected.base_url === 'string' ? selected.base_url : '',
+    wireApi: typeof selected.wire_api === 'string' ? selected.wire_api : 'chat_completions',
+    reasoningEffort: typeof config.model_reasoning_effort === 'string' ? config.model_reasoning_effort : null,
+    disableResponseStorage: config.disable_response_storage === true,
+    requiresOpenaiAuth: selected.requires_openai_auth === true,
+  }
+}
+
+export function getLlmEndpointConfigWarnings(endpoint: Pick<LlmEndpoint, 'preserved_fields'>): string[] {
+  if (!endpoint.preserved_fields.length) return []
+  return [`These fields are preserved but not interpreted by the gateway: ${endpoint.preserved_fields.join(', ')}`]
+}
+
+export function buildLlmEndpointCreate(config: LlmEndpointConfig, enabled: boolean): LlmEndpointCreatePayload {
+  return { config, enabled }
+}
+
+export function buildLlmEndpointUpdate(config: LlmEndpointConfig, enabled: boolean): LlmEndpointUpdatePayload {
+  return { config, enabled }
 }
 
 export function moveLlmEndpointIds(ids: string[], endpointId: string, offset: -1 | 1): string[] {

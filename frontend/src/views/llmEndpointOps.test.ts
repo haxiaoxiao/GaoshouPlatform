@@ -3,7 +3,15 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
 import {
+  LLM_API_KEY_PLACEHOLDER,
+  buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
+  createLlmEndpointTemplate,
+  formatLlmEndpointConfig,
+  getLlmEndpointConfigWarnings,
+  parseLlmEndpointConfig,
+  previewLlmEndpointConfig,
+  sanitizedLlmEndpointConfig,
   isLlmEndpointCooldownActive,
   getLlmGatewayView,
   moveLlmEndpointIds,
@@ -20,6 +28,26 @@ const endpoint = (overrides: Partial<LlmEndpoint> = {}): LlmEndpoint => ({
   api_base: 'https://llm.example.test/v1',
   api_key_hint: '********1234',
   model: 'provider/model',
+  provider: 'provider',
+  review_model: null,
+  wire_api: 'responses',
+  reasoning_effort: 'medium',
+  disable_response_storage: true,
+  requires_openai_auth: true,
+  config: {
+    model_provider: 'provider',
+    model: 'provider/model',
+    model_providers: {
+      provider: {
+        name: 'Primary',
+        base_url: 'https://llm.example.test/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+      },
+    },
+    env: { OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER },
+  },
+  preserved_fields: [],
   priority: 0,
   enabled: true,
   consecutive_failures: 0,
@@ -32,37 +60,63 @@ const endpoint = (overrides: Partial<LlmEndpoint> = {}): LlmEndpoint => ({
   ...overrides,
 })
 
-describe('LLM endpoint edit payloads', () => {
-  it('never models a readable API key and omits a blank key when destination is unchanged', () => {
-    const current = endpoint()
-    expect('api_key' in current).toBe(false)
-
-    expect(buildLlmEndpointUpdate(current, {
-      name: 'Primary renamed',
-      api_base: current.api_base,
-      api_key: '',
-      model: current.model,
-      enabled: current.enabled,
-    })).toEqual({
-      name: 'Primary renamed',
-      api_base: current.api_base,
-      model: current.model,
-      enabled: true,
+describe('LLM endpoint JSON configuration', () => {
+  it('creates a safe template with an obviously fake key', () => {
+    const text = createLlmEndpointTemplate()
+    expect(text).toContain('replace-with-your-api-key')
+    expect(text).not.toContain(LLM_API_KEY_PLACEHOLDER)
+    expect(parseLlmEndpointConfig(text).config).toMatchObject({
+      model_provider: 'openai',
+      env: { OPENAI_API_KEY: 'replace-with-your-api-key' },
     })
   })
 
-  it('sends a blank key when the destination changes so backend validation is visible', () => {
-    const current = endpoint()
-    expect(buildLlmEndpointUpdate(current, {
-      name: current.name,
-      api_base: 'https://other.example.test/v1',
-      api_key: '   ',
-      model: current.model,
-      enabled: true,
-    })).toMatchObject({
-      api_base: 'https://other.example.test/v1',
-      api_key: '',
+  it('rejects invalid JSON and non-object JSON with useful local errors', () => {
+    expect(() => parseLlmEndpointConfig('{')).toThrow('valid JSON')
+    expect(() => parseLlmEndpointConfig('[]')).toThrow('JSON object')
+  })
+
+  it('formats valid JSON deterministically', () => {
+    expect(formatLlmEndpointConfig('{"model":"gpt-5","model_provider":"openai"}'))
+      .toBe('{\n  "model": "gpt-5",\n  "model_provider": "openai"\n}')
+  })
+
+  it('loads sanitized edit JSON with the stored-secret placeholder', () => {
+    const text = sanitizedLlmEndpointConfig(endpoint())
+    expect(text).toContain(LLM_API_KEY_PLACEHOLDER)
+    expect(text).not.toContain('********1234')
+  })
+
+  it('builds JSON-only create and update payloads', () => {
+    const config = parseLlmEndpointConfig(createLlmEndpointTemplate()).config
+    expect(buildLlmEndpointCreate(config, true)).toEqual({ config, enabled: true })
+    expect(buildLlmEndpointUpdate(config, false)).toEqual({ config, enabled: false })
+  })
+
+  it('extracts a preview and flags preserved fields', () => {
+    const current = endpoint({ preserved_fields: ['custom_root', 'model_providers.backup'] })
+    expect(previewLlmEndpointConfig(current.config)).toEqual({
+      provider: 'provider',
+      name: 'Primary',
+      model: 'provider/model',
+      reviewModel: null,
+      apiBase: 'https://llm.example.test/v1',
+      wireApi: 'responses',
+      reasoningEffort: null,
+      disableResponseStorage: false,
+      requiresOpenaiAuth: true,
     })
+    expect(getLlmEndpointConfigWarnings(current)).toEqual([
+      'These fields are preserved but not interpreted by the gateway: custom_root, model_providers.backup',
+    ])
+  })
+
+  it('never models or reads a plaintext API key', () => {
+    const current = endpoint()
+    expect('api_key' in current).toBe(false)
+    const apiSource = readSource('api/system.ts')
+    const readType = apiSource.slice(apiSource.indexOf('export interface LlmEndpoint {'), apiSource.indexOf('export interface LlmEndpointCreatePayload'))
+    expect(readType).not.toMatch(/\bapi_key\s*:/)
   })
 })
 
@@ -142,7 +196,12 @@ describe('LLM endpoint source contracts', () => {
     expect(monitorSource).toContain("import LLMEndpointManager from '@/components/LLMEndpointManager.vue'")
     expect(monitorSource).toContain('<LLMEndpointManager')
     expect(monitorSource).toContain("llmEndpointLoadState === 'loading'")
-    expect(managerSource).toContain('type="password"')
+    expect(managerSource).toContain("import CodeEditor from '@/components/CodeEditor.vue'")
+    expect(managerSource).toContain('language="json"')
+    expect(managerSource).toContain('@click="formatConfig"')
+    expect(managerSource).toContain('The API key is encrypted at rest and is never shown after saving.')
+    expect(managerSource).toContain('endpoint.api_key_hint')
+    expect(managerSource).toContain('preservedWarnings')
     expect(managerSource).toContain('v-if="!loading && !error && !endpoints.length"')
     expect(managerSource).toContain("loadState === 'error' && endpoints.length")
     expect(managerSource).toContain(':class="{ \'endpoint-row--stale\': mutationsDisabled }"')

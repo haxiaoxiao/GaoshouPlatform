@@ -91,38 +91,54 @@
     <el-dialog
       v-model="editorOpen"
       :title="editing ? 'Edit endpoint' : 'Add endpoint'"
-      width="min(560px, calc(100vw - 32px))"
+      width="min(820px, calc(100vw - 32px))"
+      class="llm-json-editor-dialog"
       append-to-body
       destroy-on-close
     >
       <el-alert v-if="editorError" :title="editorError" type="error" show-icon :closable="false" />
-      <el-form label-position="top" @submit.prevent="save">
-        <div class="form-grid">
-          <el-form-item label="Name" required>
-            <el-input v-model="draft.name" maxlength="100" autocomplete="off" />
-          </el-form-item>
-          <el-form-item label="Model" required>
-            <el-input v-model="draft.model" maxlength="200" autocomplete="off" />
-          </el-form-item>
-        </div>
-        <el-form-item label="API base URL" required>
-          <el-input v-model="draft.api_base" maxlength="500" autocomplete="url" placeholder="https://provider.example/v1" />
-        </el-form-item>
-        <el-form-item :label="editing ? 'Replacement API key' : 'API key'" :required="!editing">
-          <el-input
-            v-model="draft.api_key"
-            type="password"
-            show-password
-            maxlength="2000"
-            autocomplete="new-password"
-            :placeholder="editing ? 'Leave blank to preserve current key' : 'Required'"
+      <div class="json-editor-layout">
+        <section class="json-editor-main" aria-label="Endpoint JSON configuration">
+          <div class="json-editor-heading">
+            <div>
+              <strong>Configuration JSON</strong>
+              <small>The API key is encrypted at rest and is never shown after saving.</small>
+            </div>
+            <el-button :icon="MagicStick" :disabled="saving" @click="formatConfig">Format JSON</el-button>
+          </div>
+          <CodeEditor v-model="configText" language="json" :readonly="saving" :min-height="360" />
+          <small v-if="editing" class="key-hint">Stored key: {{ editing.api_key_hint }}. Keep {{ LLM_API_KEY_PLACEHOLDER }} to preserve it.</small>
+        </section>
+
+        <aside class="config-preview" aria-live="polite" aria-label="Extracted endpoint preview">
+          <strong>Extracted preview</strong>
+          <template v-if="preview">
+            <dl>
+              <dt>Provider</dt><dd>{{ preview.provider || 'Not set' }}</dd>
+              <dt>Name</dt><dd>{{ preview.name || 'Not set' }}</dd>
+              <dt>Model</dt><dd>{{ preview.model || 'Not set' }}</dd>
+              <dt>Review model</dt><dd>{{ preview.reviewModel || 'None' }}</dd>
+              <dt>API base</dt><dd>{{ preview.apiBase || 'Not set' }}</dd>
+              <dt>Wire API</dt><dd>{{ preview.wireApi }}</dd>
+              <dt>Reasoning</dt><dd>{{ preview.reasoningEffort || 'Default' }}</dd>
+              <dt>Storage</dt><dd>{{ preview.disableResponseStorage ? 'Disabled' : 'Enabled' }}</dd>
+              <dt>OpenAI auth</dt><dd>{{ preview.requiresOpenaiAuth ? 'Required' : 'Not required' }}</dd>
+            </dl>
+          </template>
+          <small v-else>Preview appears when the JSON is valid.</small>
+          <el-alert
+            v-for="warning in preservedWarnings"
+            :key="warning"
+            :title="warning"
+            type="warning"
+            :closable="false"
           />
-          <small v-if="editing">Current key is never loaded into this form. Changing the URL requires a replacement key.</small>
-        </el-form-item>
-        <el-form-item label="Enabled">
-          <el-switch v-model="draft.enabled" />
-        </el-form-item>
-      </el-form>
+          <div class="enabled-control">
+            <span>Enabled</span>
+            <el-switch v-model="editorEnabled" aria-label="Enable endpoint" />
+          </div>
+        </aside>
+      </div>
       <template #footer>
         <el-button :disabled="saving" @click="editorOpen = false">Cancel</el-button>
         <el-button type="primary" :loading="saving" :disabled="mutationsDisabled" @click="save">Save endpoint</el-button>
@@ -132,16 +148,24 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
-import { ArrowDown, ArrowUp, CirclePlus, Connection, Delete, Edit, Refresh } from '@element-plus/icons-vue'
+import { computed, ref } from 'vue'
+import { ArrowDown, ArrowUp, CirclePlus, Connection, Delete, Edit, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import CodeEditor from '@/components/CodeEditor.vue'
 import {
+  LLM_API_KEY_PLACEHOLDER,
+  buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
+  createLlmEndpointTemplate,
+  formatLlmEndpointConfig,
+  getLlmEndpointConfigWarnings,
   isLlmEndpointCooldownActive,
   moveLlmEndpointIds,
+  parseLlmEndpointConfig,
+  previewLlmEndpointConfig,
+  sanitizedLlmEndpointConfig,
   systemApi,
   type LlmEndpoint,
-  type LlmEndpointDraft,
 } from '@/api/system'
 
 defineProps<{ modelValue: boolean }>()
@@ -160,12 +184,14 @@ const editing = ref<LlmEndpoint | null>(null)
 const saving = ref(false)
 const busyId = ref('')
 const busyAction = ref('')
-const draft = reactive<LlmEndpointDraft>(emptyDraft())
+const configText = ref('')
+const editorEnabled = ref(true)
 const mutationsDisabled = computed(() => loading.value || loadState.value !== 'ready' || Boolean(busyId.value))
-
-function emptyDraft(): LlmEndpointDraft {
-  return { name: '', api_base: '', api_key: '', model: '', enabled: true }
-}
+const parsedConfig = computed(() => {
+  try { return parseLlmEndpointConfig(configText.value).config } catch { return null }
+})
+const preview = computed(() => parsedConfig.value ? previewLlmEndpointConfig(parsedConfig.value) : null)
+const preservedWarnings = computed(() => editing.value ? getLlmEndpointConfigWarnings(editing.value) : [])
 
 function errorDetail(reason: unknown): string {
   if (reason && typeof reason === 'object' && 'response' in reason) {
@@ -194,7 +220,8 @@ async function loadEndpoints(): Promise<boolean> {
 function openCreate() {
   if (mutationsDisabled.value) return
   editing.value = null
-  Object.assign(draft, emptyDraft())
+  configText.value = createLlmEndpointTemplate()
+  editorEnabled.value = true
   editorError.value = ''
   editorOpen.value = true
 }
@@ -202,13 +229,8 @@ function openCreate() {
 function openEdit(endpoint: LlmEndpoint) {
   if (mutationsDisabled.value) return
   editing.value = endpoint
-  Object.assign(draft, {
-    name: endpoint.name,
-    api_base: endpoint.api_base,
-    api_key: '',
-    model: endpoint.model,
-    enabled: endpoint.enabled,
-  })
+  configText.value = sanitizedLlmEndpointConfig(endpoint)
+  editorEnabled.value = endpoint.enabled
   editorError.value = ''
   editorOpen.value = true
 }
@@ -216,22 +238,19 @@ function openEdit(endpoint: LlmEndpoint) {
 async function save() {
   if (mutationsDisabled.value) return
   editorError.value = ''
-  if (!draft.name.trim() || !draft.api_base.trim() || !draft.model.trim() || (!editing.value && !draft.api_key.trim())) {
-    editorError.value = 'Complete all required fields.'
+  let config
+  try {
+    config = parseLlmEndpointConfig(configText.value).config
+  } catch (reason) {
+    editorError.value = errorDetail(reason)
     return
   }
   saving.value = true
   try {
     if (editing.value) {
-      await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(editing.value, draft))
+      await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(config, editorEnabled.value))
     } else {
-      await systemApi.createLlmEndpoint({
-        name: draft.name.trim(),
-        api_base: draft.api_base.trim(),
-        api_key: draft.api_key.trim(),
-        model: draft.model.trim(),
-        enabled: draft.enabled,
-      })
+      await systemApi.createLlmEndpoint(buildLlmEndpointCreate(config, editorEnabled.value))
     }
     editorOpen.value = false
     ElMessage.success(editing.value ? 'Endpoint updated' : 'Endpoint added')
@@ -240,6 +259,15 @@ async function save() {
     editorError.value = errorDetail(reason)
   } finally {
     saving.value = false
+  }
+}
+
+function formatConfig() {
+  editorError.value = ''
+  try {
+    configText.value = formatLlmEndpointConfig(configText.value)
+  } catch (reason) {
+    editorError.value = errorDetail(reason)
   }
 }
 
@@ -391,10 +419,69 @@ function healthTime(endpoint: LlmEndpoint): string {
   gap: 4px;
 }
 
-.form-grid {
+.json-editor-layout {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) 220px;
+  gap: 16px;
+  min-height: 470px;
+}
+
+.json-editor-main,
+.config-preview,
+.json-editor-heading > div {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+}
+
+.json-editor-heading,
+.enabled-control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
+}
+
+.json-editor-heading small,
+.key-hint,
+.config-preview > small {
+  color: var(--text-muted);
+}
+
+.config-preview {
+  padding-left: 16px;
+  border-left: 1px solid var(--border-subtle);
+}
+
+.config-preview dl {
+  display: grid;
+  grid-template-columns: 82px minmax(0, 1fr);
+  gap: 7px 8px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.config-preview dt {
+  color: var(--text-muted);
+}
+
+.config-preview dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.enabled-control {
+  margin-top: 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+:global(.llm-json-editor-dialog .el-dialog__body) {
+  min-height: 500px;
+  max-height: calc(100vh - 180px);
+  overflow: auto;
 }
 
 @media (max-width: 760px) {
@@ -416,9 +503,24 @@ function healthTime(endpoint: LlmEndpoint): string {
     flex-wrap: wrap;
   }
 
-  .form-grid {
+  .json-editor-layout {
     grid-template-columns: 1fr;
-    gap: 0;
+    min-height: 0;
+  }
+
+  .config-preview {
+    padding: 14px 0 0;
+    border-top: 1px solid var(--border-subtle);
+    border-left: 0;
+  }
+
+  .json-editor-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  :global(.llm-json-editor-dialog .el-dialog__body) {
+    min-height: 0;
   }
 }
 </style>
