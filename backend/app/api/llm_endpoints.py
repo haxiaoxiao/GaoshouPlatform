@@ -3,10 +3,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from time import perf_counter
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai.gateway import GatewayCandidate, complete_candidate, sanitize_error
@@ -21,21 +21,45 @@ logger = logging.getLogger(__name__)
 class LlmEndpointCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str = Field(min_length=1, max_length=100)
-    api_base: str = Field(min_length=8, max_length=500)
-    api_key: str = Field(min_length=1, max_length=2000)
-    model: str = Field(min_length=1, max_length=200)
+    config: dict[str, Any] | None = None
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    api_base: str | None = Field(default=None, min_length=8, max_length=500)
+    api_key: str | None = Field(default=None, min_length=1, max_length=2000)
+    model: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_request_shape(self) -> LlmEndpointCreate:
+        legacy = (self.name, self.api_base, self.api_key, self.model)
+        if self.config is not None:
+            if any(value is not None for value in legacy):
+                raise ValueError("provide config or all legacy fields, not both")
+            return self
+        if any(value is None for value in legacy):
+            raise ValueError("provide config or all legacy fields")
+        return self
 
 
 class LlmEndpointUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    config: dict[str, Any] | None = None
     name: str | None = Field(default=None, min_length=1, max_length=100)
     api_base: str | None = Field(default=None, min_length=8, max_length=500)
     api_key: str | None = Field(default=None, max_length=2000)
     model: str | None = Field(default=None, min_length=1, max_length=200)
     enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def validate_request_shape(self) -> LlmEndpointUpdate:
+        legacy = (self.name, self.api_base, self.api_key, self.model)
+        if self.config is not None:
+            if any(value is not None for value in legacy):
+                raise ValueError("provide config or all legacy fields, not both")
+            return self
+        if any(value is None for value in legacy):
+            raise ValueError("provide config or all legacy fields")
+        return self
 
 
 class LlmEndpointRead(BaseModel):
@@ -46,6 +70,14 @@ class LlmEndpointRead(BaseModel):
     api_base: str
     api_key_hint: str
     model: str
+    provider: str
+    review_model: str | None
+    wire_api: Literal["responses", "chat_completions"]
+    reasoning_effort: Literal["minimal", "low", "medium", "high", "xhigh"] | None
+    disable_response_storage: bool
+    requires_openai_auth: bool
+    config: dict[str, Any]
+    preserved_fields: list[str]
     priority: int
     enabled: bool
     consecutive_failures: int
@@ -154,8 +186,12 @@ async def create_llm_endpoint(
     payload: LlmEndpointCreate,
     session: AsyncSession = Depends(get_async_session),
 ):
+    service = LlmEndpointService(session)
     try:
-        endpoint = await LlmEndpointService(session).create(**payload.model_dump())
+        if payload.config is not None:
+            endpoint = await service.create_from_config(payload.config, enabled=payload.enabled)
+        else:
+            endpoint = await service.create(**payload.model_dump(exclude={"config"}))
     except ValueError as error:
         raise _service_error(error) from None
     return _read(endpoint)
@@ -181,10 +217,17 @@ async def update_llm_endpoint(
 ):
     service = LlmEndpointService(session)
     try:
-        endpoint = await service.update(
-            endpoint_id,
-            **payload.model_dump(exclude_unset=True),
-        )
+        if payload.config is not None:
+            endpoint = await service.update_from_config(
+                endpoint_id,
+                payload.config,
+                enabled=payload.enabled,
+            )
+        else:
+            endpoint = await service.update(
+                endpoint_id,
+                **payload.model_dump(exclude={"config"}, exclude_unset=True),
+            )
     except ValueError as error:
         raise _service_error(error) from None
     return _read(endpoint)
@@ -223,6 +266,12 @@ async def test_llm_endpoint(
         api_key=api_key,
         model=endpoint.model,
         source="database",
+        review_model=endpoint.review_model,
+        provider=endpoint.provider,
+        wire_api=endpoint.wire_api,
+        reasoning_effort=endpoint.reasoning_effort,
+        disable_response_storage=endpoint.disable_response_storage,
+        requires_openai_auth=endpoint.requires_openai_auth,
     )
     started = perf_counter()
     result = None
