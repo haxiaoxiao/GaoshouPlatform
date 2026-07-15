@@ -107,7 +107,9 @@
             <div class="json-editor-actions">
               <el-button :icon="MagicStick" :disabled="saving" @click="formatConfig">Format JSON</el-button>
               <el-button :icon="CircleCheck" :disabled="saving" @click="validateConfig">Validate</el-button>
-              <el-button :icon="RefreshLeft" :disabled="saving" @click="resetToTemplate">Reset to template</el-button>
+              <el-button :icon="RefreshLeft" :disabled="saving" @click="resetConfig">
+                {{ editing ? 'Reset to saved config' : 'Reset to template' }}
+              </el-button>
             </div>
           </div>
           <CodeEditor
@@ -120,8 +122,8 @@
           <small v-if="editing" class="key-hint">Stored key: {{ editing.api_key_hint }}. Keep {{ LLM_API_KEY_PLACEHOLDER }} to preserve it.</small>
         </section>
 
-        <aside class="config-preview" aria-live="polite" aria-label="Extracted endpoint preview">
-          <strong>Extracted preview</strong>
+        <aside class="config-preview" aria-live="polite" aria-label="Local extracted endpoint preview">
+          <strong>Local extracted preview</strong>
           <template v-if="preview">
             <dl>
               <dt>Provider</dt><dd>{{ preview.provider || 'Not set' }}</dd>
@@ -166,9 +168,13 @@ import {
   LLM_API_KEY_PLACEHOLDER,
   buildLlmEndpointCreate,
   buildLlmEndpointUpdate,
+  createAsyncReentryGuard,
+  createLatestRequestController,
   createLlmEndpointTemplate,
   formatLlmEndpointConfig,
   getLlmEndpointConfigWarnings,
+  getLlmEndpointErrorDetail,
+  getLlmEndpointResetText,
   isLlmEndpointCooldownActive,
   moveLlmEndpointIds,
   parseLlmEndpointConfig,
@@ -196,10 +202,31 @@ const saving = ref(false)
 const busyId = ref('')
 const busyAction = ref('')
 const configText = ref('')
+const originalSanitizedConfig = ref<string | null>(null)
 const editorEnabled = ref(true)
 const mutationsDisabled = computed(() => loading.value || loadState.value !== 'ready' || Boolean(busyId.value))
 const preview = ref<ReturnType<typeof previewLlmEndpointConfig> | null>(null)
 const preservedWarnings = ref<string[]>([])
+const endpointLoader = createLatestRequestController(
+  () => systemApi.listLlmEndpoints(),
+  {
+    started: () => {
+      loading.value = true
+      loadState.value = 'loading'
+      error.value = ''
+    },
+    succeeded: value => {
+      endpoints.value = value
+      loadState.value = 'ready'
+    },
+    failed: reason => {
+      loadState.value = 'error'
+      error.value = `Failed to load endpoints: ${getLlmEndpointErrorDetail(reason)}`
+    },
+    finished: () => { loading.value = false },
+  },
+)
+const saveGuard = createAsyncReentryGuard(active => { saving.value = active })
 
 function updateConfigInsights(config: ReturnType<typeof parseLlmEndpointConfig>['config']) {
   preview.value = previewLlmEndpointConfig(config)
@@ -215,33 +242,14 @@ watch(configText, (text) => {
   }
 }, { immediate: true })
 
-function errorDetail(reason: unknown): string {
-  if (reason && typeof reason === 'object' && 'response' in reason) {
-    const response = (reason as { response?: { data?: { detail?: unknown } } }).response
-    if (typeof response?.data?.detail === 'string') return response.data.detail
-  }
-  return reason instanceof Error ? reason.message : String(reason)
-}
-
 async function loadEndpoints(): Promise<boolean> {
-  loading.value = true
-  error.value = ''
-  try {
-    endpoints.value = await systemApi.listLlmEndpoints()
-    loadState.value = 'ready'
-    return true
-  } catch (reason) {
-    loadState.value = 'error'
-    error.value = `Failed to load endpoints: ${errorDetail(reason)}`
-    return false
-  } finally {
-    loading.value = false
-  }
+  return endpointLoader.run()
 }
 
 function openCreate() {
   if (mutationsDisabled.value) return
   editing.value = null
+  originalSanitizedConfig.value = null
   configText.value = createLlmEndpointTemplate()
   editorEnabled.value = true
   editorError.value = ''
@@ -251,37 +259,37 @@ function openCreate() {
 function openEdit(endpoint: LlmEndpoint) {
   if (mutationsDisabled.value) return
   editing.value = endpoint
-  configText.value = sanitizedLlmEndpointConfig(endpoint)
+  originalSanitizedConfig.value = sanitizedLlmEndpointConfig(endpoint)
+  configText.value = originalSanitizedConfig.value
   editorEnabled.value = endpoint.enabled
   editorError.value = ''
   editorOpen.value = true
 }
 
 async function save() {
-  if (mutationsDisabled.value) return
+  if (mutationsDisabled.value || saving.value) return
   editorError.value = ''
   let config
   try {
     config = parseLlmEndpointConfig(configText.value).config
   } catch (reason) {
-    editorError.value = errorDetail(reason)
+    editorError.value = getLlmEndpointErrorDetail(reason)
     return
   }
-  saving.value = true
-  try {
-    if (editing.value) {
-      await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(config, editorEnabled.value))
-    } else {
-      await systemApi.createLlmEndpoint(buildLlmEndpointCreate(config, editorEnabled.value))
+  await saveGuard.run(async () => {
+    try {
+      if (editing.value) {
+        await systemApi.updateLlmEndpoint(editing.value.id, buildLlmEndpointUpdate(config, editorEnabled.value))
+      } else {
+        await systemApi.createLlmEndpoint(buildLlmEndpointCreate(config, editorEnabled.value))
+      }
+      editorOpen.value = false
+      ElMessage.success(editing.value ? 'Endpoint updated' : 'Endpoint added')
+      await refreshAfterMutation()
+    } catch (reason) {
+      editorError.value = getLlmEndpointErrorDetail(reason)
     }
-    editorOpen.value = false
-    ElMessage.success(editing.value ? 'Endpoint updated' : 'Endpoint added')
-    await refreshAfterMutation()
-  } catch (reason) {
-    editorError.value = errorDetail(reason)
-  } finally {
-    saving.value = false
-  }
+  })
 }
 
 function formatConfig() {
@@ -289,7 +297,7 @@ function formatConfig() {
   try {
     configText.value = formatLlmEndpointConfig(configText.value)
   } catch (reason) {
-    editorError.value = errorDetail(reason)
+    editorError.value = getLlmEndpointErrorDetail(reason)
   }
 }
 
@@ -298,22 +306,25 @@ function validateConfig() {
   try {
     const config = parseLlmEndpointConfig(configText.value).config
     updateConfigInsights(config)
-    ElMessage.success('Configuration JSON is valid.')
+    ElMessage.success('JSON syntax is valid.')
   } catch (reason) {
-    editorError.value = errorDetail(reason)
+    editorError.value = getLlmEndpointErrorDetail(reason)
   }
 }
 
-async function resetToTemplate() {
-  if (shouldConfirmLlmTemplateReset(configText.value)) {
+async function resetConfig() {
+  const resetText = getLlmEndpointResetText(originalSanitizedConfig.value)
+  if (shouldConfirmLlmTemplateReset(configText.value, resetText)) {
     const confirmed = await ElMessageBox.confirm(
-      'Resetting will discard the current JSON configuration.',
-      'Reset to template',
+      editing.value
+        ? 'Discard current edits and restore the configuration loaded when this editor opened?'
+        : 'Discard current edits and restore the safe create template?',
+      editing.value ? 'Reset to saved config' : 'Reset to template',
       { confirmButtonText: 'Reset', cancelButtonText: 'Cancel', type: 'warning' },
     ).catch(() => false)
     if (!confirmed) return
   }
-  configText.value = createLlmEndpointTemplate()
+  configText.value = resetText
   editorError.value = ''
 }
 
@@ -330,7 +341,7 @@ async function runMutation(endpointId: string, action: string, operation: () => 
     await operation()
     await refreshAfterMutation()
   } catch (reason) {
-    error.value = errorDetail(reason)
+    error.value = getLlmEndpointErrorDetail(reason)
   } finally {
     busyId.value = ''
     busyAction.value = ''
@@ -357,7 +368,7 @@ async function testEndpoint(endpoint: LlmEndpoint) {
     else error.value = result.error || 'Connection test failed.'
     await refreshAfterMutation()
   } catch (reason) {
-    error.value = errorDetail(reason)
+    error.value = getLlmEndpointErrorDetail(reason)
   } finally {
     busyId.value = ''
     busyAction.value = ''

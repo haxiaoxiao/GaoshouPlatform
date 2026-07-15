@@ -170,11 +170,73 @@ export function getLlmEndpointConfigWarnings(config: LlmEndpointConfig): string[
   return [`These fields are preserved but not interpreted by the gateway: ${preservedFields.join(', ')}`]
 }
 
-export function shouldConfirmLlmTemplateReset(text: string): boolean {
+export function shouldConfirmLlmTemplateReset(text: string, resetText = createLlmEndpointTemplate()): boolean {
   try {
-    return formatLlmEndpointConfig(text) !== createLlmEndpointTemplate()
+    return formatLlmEndpointConfig(text) !== formatLlmEndpointConfig(resetText)
   } catch {
     return Boolean(text.trim())
+  }
+}
+
+export function getLlmEndpointResetText(originalSanitizedConfig: string | null): string {
+  return originalSanitizedConfig ?? createLlmEndpointTemplate()
+}
+
+export function getLlmEndpointErrorDetail(reason: unknown): string {
+  if (reason && typeof reason === 'object' && 'response' in reason) {
+    const response = (reason as { response?: { data?: { detail?: unknown } } }).response
+    if (typeof response?.data?.detail === 'string') return response.data.detail
+  }
+  return reason instanceof Error ? reason.message : String(reason)
+}
+
+export interface LatestRequestHandlers<T> {
+  started: () => void
+  succeeded: (value: T) => void
+  failed: (reason: unknown) => void
+  finished: () => void
+}
+
+export function createLatestRequestController<T>(
+  request: () => Promise<T>,
+  handlers: LatestRequestHandlers<T>,
+) {
+  let generation = 0
+  return {
+    async run(): Promise<boolean> {
+      const requestGeneration = ++generation
+      handlers.started()
+      try {
+        const value = await request()
+        if (requestGeneration !== generation) return false
+        handlers.succeeded(value)
+        return true
+      } catch (reason) {
+        if (requestGeneration !== generation) return false
+        handlers.failed(reason)
+        return false
+      } finally {
+        if (requestGeneration === generation) handlers.finished()
+      }
+    },
+  }
+}
+
+export function createAsyncReentryGuard(onActiveChange: (active: boolean) => void) {
+  let active = false
+  return {
+    async run(action: () => Promise<void>): Promise<boolean> {
+      if (active) return false
+      active = true
+      onActiveChange(true)
+      try {
+        await action()
+        return true
+      } finally {
+        active = false
+        onActiveChange(false)
+      }
+    },
   }
 }
 

@@ -11,6 +11,10 @@ import {
   getLlmEndpointConfigWarnings,
   getLlmEndpointPreservedFields,
   shouldConfirmLlmTemplateReset,
+  createAsyncReentryGuard,
+  createLatestRequestController,
+  getLlmEndpointResetText,
+  getLlmEndpointErrorDetail,
   parseLlmEndpointConfig,
   previewLlmEndpointConfig,
   sanitizedLlmEndpointConfig,
@@ -23,6 +27,16 @@ import {
 } from '@/api/system'
 const sourceRoot = fileURLToPath(new URL('..', import.meta.url))
 const readSource = (path: string) => readFileSync(`${sourceRoot}/${path}`, 'utf-8')
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (reason: unknown) => void
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise
+    reject = rejectPromise
+  })
+  return { promise, resolve, reject }
+}
 
 const endpoint = (overrides: Partial<LlmEndpoint> = {}): LlmEndpoint => ({
   id: 'primary',
@@ -146,6 +160,64 @@ describe('LLM endpoint JSON configuration', () => {
     expect(shouldConfirmLlmTemplateReset('{"custom":true}')).toBe(true)
   })
 
+  it('resets an edit to its original sanitized config and preserves the stored-key placeholder in payload', () => {
+    const original = sanitizedLlmEndpointConfig(endpoint())
+    const resetText = getLlmEndpointResetText(original)
+    const payload = buildLlmEndpointUpdate(parseLlmEndpointConfig(resetText).config, true)
+    expect(payload.config.env).toEqual({ OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER })
+    expect(resetText).not.toContain('replace-with-your-api-key')
+    expect(getLlmEndpointResetText(null)).toBe(createLlmEndpointTemplate())
+  })
+
+  it('allows only the latest overlapping load to mutate state', async () => {
+    const first = deferred<LlmEndpoint[]>()
+    const second = deferred<LlmEndpoint[]>()
+    const requests = [first, second]
+    const state = { endpoints: [] as LlmEndpoint[], error: '', loading: false, loadState: 'loading' }
+    const controller = createLatestRequestController(
+      () => requests.shift()!.promise,
+      {
+        started: () => { state.loading = true; state.error = ''; state.loadState = 'loading' },
+        succeeded: value => { state.endpoints = value; state.loadState = 'ready' },
+        failed: reason => { state.error = String(reason); state.loadState = 'error' },
+        finished: () => { state.loading = false },
+      },
+    )
+
+    const olderRun = controller.run()
+    const latestRun = controller.run()
+    first.resolve([endpoint({ id: 'stale', name: 'Stale' })])
+    await olderRun
+    expect(state).toMatchObject({ loading: true, loadState: 'loading', error: '' })
+    expect(state.endpoints).toEqual([])
+
+    second.resolve([endpoint({ id: 'latest', name: 'Latest' })])
+    await latestRun
+
+    expect(state).toMatchObject({ loading: false, loadState: 'ready', error: '' })
+    expect(state.endpoints.map(item => item.id)).toEqual(['latest'])
+  })
+
+  it('prevents save reentry until the active save settles', async () => {
+    const pending = deferred<void>()
+    let calls = 0
+    const activeStates: boolean[] = []
+    const guard = createAsyncReentryGuard(active => activeStates.push(active))
+    const first = guard.run(async () => { calls += 1; await pending.promise })
+    const second = await guard.run(async () => { calls += 1 })
+    expect(second).toBe(false)
+    expect(calls).toBe(1)
+    pending.resolve()
+    expect(await first).toBe(true)
+    expect(activeStates).toEqual([true, false])
+  })
+
+  it('preserves backend semantic validation details for save feedback', () => {
+    const reason = { response: { data: { detail: 'model_provider must exist in model_providers' } } }
+    expect(getLlmEndpointErrorDetail(reason)).toBe('model_provider must exist in model_providers')
+    expect(getLlmEndpointErrorDetail(new Error('network failed'))).toBe('network failed')
+  })
+
   it('never models or reads a plaintext API key', () => {
     const current = endpoint()
     expect('api_key' in current).toBe(false)
@@ -237,8 +309,10 @@ describe('LLM endpoint source contracts', () => {
     expect(managerSource).toContain('@click="formatConfig"')
     expect(managerSource).toContain('@click="validateConfig"')
     expect(managerSource).toContain('updateConfigInsights(config)')
-    expect(managerSource).toContain('@click="resetToTemplate"')
-    expect(managerSource).toContain("ElMessage.success('Configuration JSON is valid.')")
+    expect(managerSource).toContain('@click="resetConfig"')
+    expect(managerSource).toContain("editing ? 'Reset to saved config' : 'Reset to template'")
+    expect(managerSource).toContain("ElMessage.success('JSON syntax is valid.')")
+    expect(managerSource).not.toContain('Configuration JSON is valid.')
     expect(managerSource).toContain("ElMessageBox.confirm(")
     expect(managerSource).toContain('The API key is encrypted at rest and is never shown after saving.')
     expect(managerSource).toContain('endpoint.api_key_hint')
@@ -264,10 +338,14 @@ describe('LLM endpoint source contracts', () => {
     expect(managerSource).not.toMatch(/\bPlus\b/)
   })
 
-  it('passes an accessible name through to the actual CodeMirror textbox', () => {
+  it('passes an accessible name through to CodeMirror content attributes', () => {
     const editorSource = readSource('components/CodeEditor.vue')
-    expect(editorSource).toContain('ariaLabel?: string')
     expect(editorSource).toContain("EditorView.contentAttributes.of({ 'aria-label': props.ariaLabel })")
     expect(editorSource).toContain('contentAttributesCompartment.reconfigure')
+  })
+
+  it('retains the responsive single-column layout contract', () => {
+    const managerSource = readSource('components/LLMEndpointManager.vue')
+    expect(managerSource).toMatch(/@media \(max-width: 760px\)[\s\S]*\.json-editor-layout\s*\{[\s\S]*grid-template-columns: 1fr/)
   })
 })
