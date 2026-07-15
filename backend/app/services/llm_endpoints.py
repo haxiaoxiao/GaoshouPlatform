@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from urllib.parse import urlparse
 
@@ -61,6 +62,11 @@ class LlmEndpointService:
         name, api_base, model = self._validate_fields(name=name, api_base=api_base, model=model)
         if not isinstance(api_key, str) or not api_key.strip():
             raise ValueError("api_key is required")
+        config = synthesize_legacy_config(
+            SimpleNamespace(name=name, api_base=api_base, model=model)
+        )
+        config["env"]["OPENAI_API_KEY"] = api_key
+        parsed = parse_llm_config(config)
         return await self._create_endpoint(
             name=name,
             api_base=api_base,
@@ -68,6 +74,7 @@ class LlmEndpointService:
             model=model,
             priority=priority,
             enabled=enabled,
+            parsed=parsed,
         )
 
     async def create_from_config(
@@ -149,12 +156,24 @@ class LlmEndpointService:
             and not str(api_key or "").strip()
         ):
             raise ValueError("A nonblank replacement api_key is required when api_base destination changes")
-        endpoint.name = validated_name
-        endpoint.api_base = validated_api_base
-        endpoint.model = validated_model
-        if api_key is not None and api_key.strip():
-            endpoint.api_key_encrypted = self._encrypt(api_key)
-            endpoint.api_key_hint = self._key_hint(api_key)
+        config = (
+            json.loads(endpoint.config_json)
+            if endpoint.config_json is not None
+            else synthesize_legacy_config(endpoint)
+        )
+        provider = endpoint.provider or str(config["model_provider"])
+        provider_config = config["model_providers"][provider]
+        config["model"] = validated_model
+        provider_config["name"] = validated_name
+        provider_config["base_url"] = validated_api_base
+        replacement_key = str(api_key or "").strip()
+        if replacement_key:
+            config.setdefault("env", {})["OPENAI_API_KEY"] = replacement_key
+        parsed = parse_llm_config(config, allow_placeholder=True)
+        self._apply_parsed_config(endpoint, parsed)
+        if replacement_key:
+            endpoint.api_key_encrypted = self._encrypt(replacement_key)
+            endpoint.api_key_hint = self._key_hint(replacement_key)
         if enabled is not None:
             endpoint.enabled = bool(enabled)
         if priority is not None:

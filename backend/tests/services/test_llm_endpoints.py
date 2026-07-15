@@ -150,13 +150,14 @@ async def test_json_update_rebinds_provider_and_destination_with_replacement_key
 
 
 @pytest.mark.asyncio
-async def test_legacy_create_update_and_serialization_synthesize_normalized_config(endpoint_service):
+async def test_discrete_create_persists_synthesized_normalized_config(endpoint_service):
     service, _, _ = endpoint_service
     endpoint = await _create(service, name="Legacy")
 
     serialized = service.serialize(endpoint)
 
-    assert endpoint.provider is None
+    assert endpoint.provider == "Legacy"
+    assert endpoint.config_json is not None
     assert serialized["provider"] == "Legacy"
     assert serialized["wire_api"] == "chat_completions"
     assert serialized["requires_openai_auth"] is True
@@ -166,6 +167,81 @@ async def test_legacy_create_update_and_serialization_synthesize_normalized_conf
 
     updated = await service.update(endpoint.id, model="legacy-model-2")
     assert service.serialize(updated)["config"]["model"] == "legacy-model-2"
+
+
+@pytest.mark.asyncio
+async def test_discrete_update_keeps_json_endpoint_config_and_normalized_columns_in_sync(
+    endpoint_service,
+):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+
+    updated = await service.update(
+        endpoint.id,
+        name="Renamed endpoint",
+        api_base="https://replacement.example.com/v2",
+        api_key="replacement-secret",
+        model="gpt-6",
+        enabled=False,
+    )
+    serialized = service.serialize(updated)
+
+    assert updated.provider == "OpenAI"
+    assert updated.name == "Renamed endpoint"
+    assert updated.api_base == "https://replacement.example.com/v2"
+    assert updated.model == "gpt-6"
+    assert updated.enabled is False
+    assert updated.wire_api == "responses"
+    assert updated.review_model == "gpt-5.5-review"
+    assert updated.reasoning_effort == "xhigh"
+    assert updated.disable_response_storage is True
+    assert updated.requires_openai_auth is True
+    assert await service.decrypt_api_key(endpoint.id) == "replacement-secret"
+    assert serialized["config"]["model"] == "gpt-6"
+    assert serialized["config"]["model_providers"]["OpenAI"]["name"] == "Renamed endpoint"
+    assert (
+        serialized["config"]["model_providers"]["OpenAI"]["base_url"]
+        == "https://replacement.example.com/v2"
+    )
+    assert serialized["config"]["model_providers"]["OpenAI"]["vendor_option"] == {
+        "mode": "keep"
+    }
+    assert serialized["config"]["future_option"] == {"items": [1]}
+    assert serialized["config"]["env"]["REGION"] == "east"
+    assert serialized["config"]["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_discrete_json_update_preserves_key_when_destination_is_unchanged(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    original_ciphertext = endpoint.api_key_encrypted
+
+    updated = await service.update(endpoint.id, name="Renamed", model="gpt-6", api_key="")
+
+    assert updated.api_key_encrypted == original_ciphertext
+    assert await service.decrypt_api_key(endpoint.id) == "secret-key"
+    assert service.serialize(updated)["config"]["future_option"] == {"items": [1]}
+
+
+@pytest.mark.asyncio
+async def test_discrete_json_update_rejects_destination_change_without_replacement_key(
+    endpoint_service,
+):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    original_config_json = endpoint.config_json
+
+    with pytest.raises(ValueError, match="replacement api_key"):
+        await service.update(
+            endpoint.id,
+            api_base="https://replacement.example.com/v1",
+            api_key="",
+        )
+
+    assert endpoint.api_base == "https://api.example.com/v1"
+    assert endpoint.config_json == original_config_json
+    assert await service.decrypt_api_key(endpoint.id) == "secret-key"
 
 
 @pytest.mark.asyncio
