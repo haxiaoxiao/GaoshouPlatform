@@ -22,7 +22,12 @@ from sqlalchemy.orm import SessionTransactionOrigin
 
 from app.core.config import settings
 from app.db.models.llm_endpoint import LlmEndpoint
-from app.services.llm_config import ParsedLlmConfig, parse_llm_config, synthesize_legacy_config
+from app.services.llm_config import (
+    API_KEY_PLACEHOLDER,
+    ParsedLlmConfig,
+    parse_llm_config,
+    synthesize_legacy_config,
+)
 
 _COOLDOWN_FAILURES = 3
 _COOLDOWN_SECONDS = 60
@@ -156,12 +161,8 @@ class LlmEndpointService:
             and not str(api_key or "").strip()
         ):
             raise ValueError("A nonblank replacement api_key is required when api_base destination changes")
-        config = (
-            json.loads(endpoint.config_json)
-            if endpoint.config_json is not None
-            else synthesize_legacy_config(endpoint)
-        )
-        provider = endpoint.provider or str(config["model_provider"])
+        config = self._load_config(endpoint).to_json_config()
+        provider = str(config["model_provider"])
         provider_config = config["model_providers"][provider]
         config["model"] = validated_model
         provider_config["name"] = validated_name
@@ -293,12 +294,7 @@ class LlmEndpointService:
 
     @staticmethod
     def serialize(endpoint: LlmEndpoint) -> dict[str, Any]:
-        config = (
-            json.loads(endpoint.config_json)
-            if endpoint.config_json is not None
-            else synthesize_legacy_config(endpoint)
-        )
-        parsed = parse_llm_config(config, allow_placeholder=True)
+        parsed = LlmEndpointService._load_config(endpoint)
         return {
             "id": endpoint.id,
             "name": endpoint.name,
@@ -323,6 +319,72 @@ class LlmEndpointService:
             "created_at": endpoint.created_at,
             "updated_at": endpoint.updated_at,
         }
+
+    @staticmethod
+    def _load_config(endpoint: LlmEndpoint) -> ParsedLlmConfig:
+        config: dict[str, Any] | None = None
+        if endpoint.config_json is not None:
+            try:
+                decoded = json.loads(endpoint.config_json)
+            except (TypeError, json.JSONDecodeError):
+                decoded = None
+            if isinstance(decoded, dict):
+                config = decoded
+
+        if config is None:
+            config = synthesize_legacy_config(endpoint)
+
+        original_provider = config.get("model_provider")
+        providers = config.get("model_providers")
+        if not isinstance(providers, dict):
+            providers = {}
+            config["model_providers"] = providers
+        original_provider_config = providers.get(original_provider)
+        provider = endpoint.provider or (
+            original_provider if isinstance(original_provider, str) and original_provider.strip() else endpoint.name
+        )
+        provider_config = providers.get(provider)
+        if not isinstance(provider_config, dict):
+            provider_config = (
+                json.loads(json.dumps(original_provider_config))
+                if isinstance(original_provider_config, dict)
+                else {}
+            )
+            providers[provider] = provider_config
+
+        config["model_provider"] = provider
+        config["model"] = endpoint.model
+        if endpoint.review_model is None:
+            config.pop("review_model", None)
+        else:
+            config["review_model"] = endpoint.review_model
+        if endpoint.reasoning_effort is None:
+            config.pop("model_reasoning_effort", None)
+        else:
+            config["model_reasoning_effort"] = endpoint.reasoning_effort
+        config["disable_response_storage"] = endpoint.disable_response_storage
+        provider_config["name"] = endpoint.name
+        provider_config["base_url"] = endpoint.api_base
+        provider_config["wire_api"] = endpoint.wire_api
+        provider_config["requires_openai_auth"] = endpoint.requires_openai_auth
+        env = config.get("env")
+        if not isinstance(env, dict):
+            env = {}
+            config["env"] = env
+        env["OPENAI_API_KEY"] = API_KEY_PLACEHOLDER
+
+        try:
+            return parse_llm_config(config, allow_placeholder=True)
+        except ValueError:
+            fallback = synthesize_legacy_config(endpoint)
+            fallback["model_provider"] = provider
+            fallback["model_providers"] = {provider: provider_config}
+            fallback["disable_response_storage"] = endpoint.disable_response_storage
+            if endpoint.review_model is not None:
+                fallback["review_model"] = endpoint.review_model
+            if endpoint.reasoning_effort is not None:
+                fallback["model_reasoning_effort"] = endpoint.reasoning_effort
+            return parse_llm_config(fallback, allow_placeholder=True)
 
     @staticmethod
     def _apply_parsed_config(endpoint: LlmEndpoint, parsed: ParsedLlmConfig) -> None:

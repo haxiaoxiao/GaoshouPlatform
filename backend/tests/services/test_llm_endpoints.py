@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -242,6 +243,98 @@ async def test_discrete_json_update_rejects_destination_change_without_replaceme
     assert endpoint.api_base == "https://api.example.com/v1"
     assert endpoint.config_json == original_config_json
     assert await service.decrypt_api_key(endpoint.id) == "secret-key"
+
+
+@pytest.mark.asyncio
+async def test_malformed_stored_config_falls_back_for_serialization_and_discrete_update(
+    endpoint_service,
+):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    endpoint.config_json = "{malformed"
+    await service.session.flush()
+
+    serialized = service.serialize(endpoint)
+
+    assert serialized["provider"] == "OpenAI"
+    assert serialized["config"]["model"] == "gpt-5.5"
+    assert serialized["config"]["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+
+    updated = await service.update(endpoint.id, model="gpt-6")
+    persisted = json.loads(updated.config_json)
+    assert persisted["model"] == "gpt-6"
+    assert persisted["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+
+
+@pytest.mark.asyncio
+async def test_non_object_stored_config_falls_back_without_breaking_serialization(endpoint_service):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    endpoint.config_json = '["not", "an", "object"]'
+    await service.session.flush()
+
+    serialized = service.serialize(endpoint)
+
+    assert serialized["provider"] == "OpenAI"
+    assert serialized["name"] == "OpenAI primary"
+    assert serialized["config"]["model_providers"]["OpenAI"]["base_url"] == (
+        "https://api.example.com/v1"
+    )
+
+
+@pytest.mark.asyncio
+async def test_valid_stale_config_uses_canonical_columns_and_preserves_local_fields(
+    endpoint_service,
+):
+    service, _, _ = endpoint_service
+    endpoint = await service.create_from_config(_json_config())
+    stale = service.serialize(endpoint)["config"]
+    stale["env"]["OPENAI_API_KEY"] = "stored-plaintext-must-not-leak"
+    endpoint.config_json = json.dumps(stale)
+    endpoint.provider = "Canonical"
+    endpoint.name = "Canonical endpoint"
+    endpoint.api_base = "https://canonical.example.com/v3"
+    endpoint.model = "canonical-model"
+    endpoint.review_model = None
+    endpoint.wire_api = "chat_completions"
+    endpoint.reasoning_effort = "medium"
+    endpoint.disable_response_storage = False
+    endpoint.requires_openai_auth = False
+    await service.session.flush()
+
+    serialized = service.serialize(endpoint)
+    config = serialized["config"]
+
+    assert serialized["provider"] == "Canonical"
+    assert serialized["name"] == "Canonical endpoint"
+    assert serialized["api_base"] == "https://canonical.example.com/v3"
+    assert serialized["model"] == "canonical-model"
+    assert serialized["review_model"] is None
+    assert serialized["wire_api"] == "chat_completions"
+    assert serialized["reasoning_effort"] == "medium"
+    assert serialized["disable_response_storage"] is False
+    assert serialized["requires_openai_auth"] is False
+    assert config["model_provider"] == "Canonical"
+    assert config["model"] == "canonical-model"
+    assert "review_model" not in config
+    assert config["model_reasoning_effort"] == "medium"
+    assert config["disable_response_storage"] is False
+    assert config["model_providers"]["Canonical"]["name"] == "Canonical endpoint"
+    assert config["model_providers"]["Canonical"]["base_url"] == (
+        "https://canonical.example.com/v3"
+    )
+    assert config["model_providers"]["Canonical"]["wire_api"] == "chat_completions"
+    assert config["model_providers"]["Canonical"]["requires_openai_auth"] is False
+    assert config["model_providers"]["Canonical"]["vendor_option"] == {"mode": "keep"}
+    assert config["future_option"] == {"items": [1]}
+    assert config["env"]["REGION"] == "east"
+    assert config["env"]["OPENAI_API_KEY"] == API_KEY_PLACEHOLDER
+    assert "stored-plaintext-must-not-leak" not in str(serialized)
+
+    updated = await service.update(endpoint.id, enabled=False)
+    persisted = json.loads(updated.config_json)
+    assert persisted == config
+    assert "stored-plaintext-must-not-leak" not in updated.config_json
 
 
 @pytest.mark.asyncio
