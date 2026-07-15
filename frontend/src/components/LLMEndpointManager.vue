@@ -100,13 +100,23 @@
       <div class="json-editor-layout">
         <section class="json-editor-main" aria-label="Endpoint JSON configuration">
           <div class="json-editor-heading">
-            <div>
+            <div class="json-editor-copy">
               <strong>Configuration JSON</strong>
               <small>The API key is encrypted at rest and is never shown after saving.</small>
             </div>
-            <el-button :icon="MagicStick" :disabled="saving" @click="formatConfig">Format JSON</el-button>
+            <div class="json-editor-actions">
+              <el-button :icon="MagicStick" :disabled="saving" @click="formatConfig">Format JSON</el-button>
+              <el-button :icon="CircleCheck" :disabled="saving" @click="validateConfig">Validate</el-button>
+              <el-button :icon="RefreshLeft" :disabled="saving" @click="resetToTemplate">Reset to template</el-button>
+            </div>
           </div>
-          <CodeEditor v-model="configText" language="json" :readonly="saving" :min-height="360" />
+          <CodeEditor
+            v-model="configText"
+            language="json"
+            aria-label="LLM endpoint configuration JSON"
+            :readonly="saving"
+            :min-height="360"
+          />
           <small v-if="editing" class="key-hint">Stored key: {{ editing.api_key_hint }}. Keep {{ LLM_API_KEY_PLACEHOLDER }} to preserve it.</small>
         </section>
 
@@ -148,8 +158,8 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
-import { ArrowDown, ArrowUp, CirclePlus, Connection, Delete, Edit, MagicStick, Refresh } from '@element-plus/icons-vue'
+import { computed, ref, watch } from 'vue'
+import { ArrowDown, ArrowUp, CircleCheck, CirclePlus, Connection, Delete, Edit, MagicStick, Refresh, RefreshLeft } from '@element-plus/icons-vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import CodeEditor from '@/components/CodeEditor.vue'
 import {
@@ -164,6 +174,7 @@ import {
   parseLlmEndpointConfig,
   previewLlmEndpointConfig,
   sanitizedLlmEndpointConfig,
+  shouldConfirmLlmTemplateReset,
   systemApi,
   type LlmEndpoint,
 } from '@/api/system'
@@ -187,11 +198,22 @@ const busyAction = ref('')
 const configText = ref('')
 const editorEnabled = ref(true)
 const mutationsDisabled = computed(() => loading.value || loadState.value !== 'ready' || Boolean(busyId.value))
-const parsedConfig = computed(() => {
-  try { return parseLlmEndpointConfig(configText.value).config } catch { return null }
-})
-const preview = computed(() => parsedConfig.value ? previewLlmEndpointConfig(parsedConfig.value) : null)
-const preservedWarnings = computed(() => editing.value ? getLlmEndpointConfigWarnings(editing.value) : [])
+const preview = ref<ReturnType<typeof previewLlmEndpointConfig> | null>(null)
+const preservedWarnings = ref<string[]>([])
+
+function updateConfigInsights(config: ReturnType<typeof parseLlmEndpointConfig>['config']) {
+  preview.value = previewLlmEndpointConfig(config)
+  preservedWarnings.value = getLlmEndpointConfigWarnings(config)
+}
+
+watch(configText, (text) => {
+  try {
+    updateConfigInsights(parseLlmEndpointConfig(text).config)
+  } catch {
+    preview.value = null
+    preservedWarnings.value = []
+  }
+}, { immediate: true })
 
 function errorDetail(reason: unknown): string {
   if (reason && typeof reason === 'object' && 'response' in reason) {
@@ -269,6 +291,30 @@ function formatConfig() {
   } catch (reason) {
     editorError.value = errorDetail(reason)
   }
+}
+
+function validateConfig() {
+  editorError.value = ''
+  try {
+    const config = parseLlmEndpointConfig(configText.value).config
+    updateConfigInsights(config)
+    ElMessage.success('Configuration JSON is valid.')
+  } catch (reason) {
+    editorError.value = errorDetail(reason)
+  }
+}
+
+async function resetToTemplate() {
+  if (shouldConfirmLlmTemplateReset(configText.value)) {
+    const confirmed = await ElMessageBox.confirm(
+      'Resetting will discard the current JSON configuration.',
+      'Reset to template',
+      { confirmButtonText: 'Reset', cancelButtonText: 'Cancel', type: 'warning' },
+    ).catch(() => false)
+    if (!confirmed) return
+  }
+  configText.value = createLlmEndpointTemplate()
+  editorError.value = ''
 }
 
 async function refreshAfterMutation() {
@@ -428,7 +474,7 @@ function healthTime(endpoint: LlmEndpoint): string {
 
 .json-editor-main,
 .config-preview,
-.json-editor-heading > div {
+.json-editor-copy {
   display: grid;
   align-content: start;
   gap: 10px;
@@ -436,11 +482,17 @@ function healthTime(endpoint: LlmEndpoint): string {
 }
 
 .json-editor-heading,
+.json-editor-actions,
 .enabled-control {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
+}
+
+.json-editor-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .json-editor-heading small,
@@ -517,6 +569,10 @@ function healthTime(endpoint: LlmEndpoint): string {
   .json-editor-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .json-editor-actions {
+    justify-content: flex-start;
   }
 
   :global(.llm-json-editor-dialog .el-dialog__body) {

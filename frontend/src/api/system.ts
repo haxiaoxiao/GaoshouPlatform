@@ -52,6 +52,17 @@ export interface LlmEndpointConfigPreview {
 
 export const LLM_API_KEY_PLACEHOLDER = '__GAOSHOU_STORED_SECRET__'
 const FAKE_API_KEY = 'replace-with-your-api-key'
+const LLM_RUNTIME_ROOT_FIELDS = new Set([
+  'OPENAI_API_KEY',
+  'disable_response_storage',
+  'env',
+  'model',
+  'model_provider',
+  'model_providers',
+  'model_reasoning_effort',
+  'review_model',
+])
+const LLM_RUNTIME_PROVIDER_FIELDS = new Set(['base_url', 'name', 'requires_openai_auth', 'wire_api'])
 
 export interface LlmEndpointTestResult {
   status: 'ok' | 'error'
@@ -138,9 +149,33 @@ export function previewLlmEndpointConfig(config: LlmEndpointConfig): LlmEndpoint
   }
 }
 
-export function getLlmEndpointConfigWarnings(endpoint: Pick<LlmEndpoint, 'preserved_fields'>): string[] {
-  if (!endpoint.preserved_fields.length) return []
-  return [`These fields are preserved but not interpreted by the gateway: ${endpoint.preserved_fields.join(', ')}`]
+export function getLlmEndpointPreservedFields(config: LlmEndpointConfig): string[] {
+  const provider = typeof config.model_provider === 'string' ? config.model_provider : ''
+  const preserved = Object.keys(config).filter(key => !LLM_RUNTIME_ROOT_FIELDS.has(key))
+  const env = objectValue(config.env)
+  preserved.push(...Object.keys(env).filter(key => key !== 'OPENAI_API_KEY').map(key => `env.${key}`))
+
+  const providers = objectValue(config.model_providers)
+  preserved.push(...Object.keys(providers).filter(key => key !== provider).map(key => `model_providers.${key}`))
+  const selected = objectValue(providers[provider])
+  preserved.push(...Object.keys(selected)
+    .filter(key => !LLM_RUNTIME_PROVIDER_FIELDS.has(key))
+    .map(key => `model_providers.${provider}.${key}`))
+  return preserved.sort()
+}
+
+export function getLlmEndpointConfigWarnings(config: LlmEndpointConfig): string[] {
+  const preservedFields = getLlmEndpointPreservedFields(config)
+  if (!preservedFields.length) return []
+  return [`These fields are preserved but not interpreted by the gateway: ${preservedFields.join(', ')}`]
+}
+
+export function shouldConfirmLlmTemplateReset(text: string): boolean {
+  try {
+    return formatLlmEndpointConfig(text) !== createLlmEndpointTemplate()
+  } catch {
+    return Boolean(text.trim())
+  }
 }
 
 export function buildLlmEndpointCreate(config: LlmEndpointConfig, enabled: boolean): LlmEndpointCreatePayload {

@@ -9,6 +9,8 @@ import {
   createLlmEndpointTemplate,
   formatLlmEndpointConfig,
   getLlmEndpointConfigWarnings,
+  getLlmEndpointPreservedFields,
+  shouldConfirmLlmTemplateReset,
   parseLlmEndpointConfig,
   previewLlmEndpointConfig,
   sanitizedLlmEndpointConfig,
@@ -93,8 +95,8 @@ describe('LLM endpoint JSON configuration', () => {
     expect(buildLlmEndpointUpdate(config, false)).toEqual({ config, enabled: false })
   })
 
-  it('extracts a preview and flags preserved fields', () => {
-    const current = endpoint({ preserved_fields: ['custom_root', 'model_providers.backup'] })
+  it('extracts a preview and derives preserved fields from the current JSON', () => {
+    const current = endpoint()
     expect(previewLlmEndpointConfig(current.config)).toEqual({
       provider: 'provider',
       name: 'Primary',
@@ -106,9 +108,42 @@ describe('LLM endpoint JSON configuration', () => {
       disableResponseStorage: false,
       requiresOpenaiAuth: true,
     })
-    expect(getLlmEndpointConfigWarnings(current)).toEqual([
-      'These fields are preserved but not interpreted by the gateway: custom_root, model_providers.backup',
+    current.config.custom_root = true
+    current.config.network_access = 'enabled'
+    current.config.windows_wsl_setup_acknowledged = true
+    current.config.env = { OPENAI_API_KEY: LLM_API_KEY_PLACEHOLDER, REGION: 'us' }
+    current.config.model_providers = {
+      provider: {
+        name: 'Primary',
+        base_url: 'https://llm.example.test/v1',
+        wire_api: 'responses',
+        requires_openai_auth: true,
+        vendor_option: 'kept',
+      },
+      backup: { base_url: 'https://backup.example.test/v1' },
+    }
+    expect(getLlmEndpointPreservedFields(current.config)).toEqual([
+      'custom_root',
+      'env.REGION',
+      'model_providers.backup',
+      'model_providers.provider.vendor_option',
+      'network_access',
+      'windows_wsl_setup_acknowledged',
     ])
+    expect(getLlmEndpointConfigWarnings(current.config)).toEqual([
+      'These fields are preserved but not interpreted by the gateway: custom_root, env.REGION, model_providers.backup, model_providers.provider.vendor_option, network_access, windows_wsl_setup_acknowledged',
+    ])
+
+    delete current.config.custom_root
+    expect(getLlmEndpointConfigWarnings(current.config)[0]).not.toContain('custom_root')
+  })
+
+  it('requires confirmation only when reset would discard non-template content', () => {
+    const template = createLlmEndpointTemplate()
+    expect(shouldConfirmLlmTemplateReset(template)).toBe(false)
+    expect(shouldConfirmLlmTemplateReset(`${template}\n`)).toBe(false)
+    expect(shouldConfirmLlmTemplateReset(sanitizedLlmEndpointConfig(endpoint()))).toBe(true)
+    expect(shouldConfirmLlmTemplateReset('{"custom":true}')).toBe(true)
   })
 
   it('never models or reads a plaintext API key', () => {
@@ -198,7 +233,13 @@ describe('LLM endpoint source contracts', () => {
     expect(monitorSource).toContain("llmEndpointLoadState === 'loading'")
     expect(managerSource).toContain("import CodeEditor from '@/components/CodeEditor.vue'")
     expect(managerSource).toContain('language="json"')
+    expect(managerSource).toContain('aria-label="LLM endpoint configuration JSON"')
     expect(managerSource).toContain('@click="formatConfig"')
+    expect(managerSource).toContain('@click="validateConfig"')
+    expect(managerSource).toContain('updateConfigInsights(config)')
+    expect(managerSource).toContain('@click="resetToTemplate"')
+    expect(managerSource).toContain("ElMessage.success('Configuration JSON is valid.')")
+    expect(managerSource).toContain("ElMessageBox.confirm(")
     expect(managerSource).toContain('The API key is encrypted at rest and is never shown after saving.')
     expect(managerSource).toContain('endpoint.api_key_hint')
     expect(managerSource).toContain('preservedWarnings')
@@ -221,5 +262,12 @@ describe('LLM endpoint source contracts', () => {
     expect(managerSource).toContain('ElMessageBox.confirm')
     expect(managerSource).toContain('CirclePlus')
     expect(managerSource).not.toMatch(/\bPlus\b/)
+  })
+
+  it('passes an accessible name through to the actual CodeMirror textbox', () => {
+    const editorSource = readSource('components/CodeEditor.vue')
+    expect(editorSource).toContain('ariaLabel?: string')
+    expect(editorSource).toContain("EditorView.contentAttributes.of({ 'aria-label': props.ariaLabel })")
+    expect(editorSource).toContain('contentAttributesCompartment.reconfigure')
   })
 })

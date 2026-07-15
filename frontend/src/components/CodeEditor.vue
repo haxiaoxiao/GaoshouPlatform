@@ -50,11 +50,13 @@ const props = withDefaults(defineProps<{
   readonly?: boolean
   minHeight?: string | number
   placeholder?: string
+  ariaLabel?: string
 }>(), {
   language: 'text',
   readonly: false,
   minHeight: 220,
   placeholder: '',
+  ariaLabel: 'Code editor',
 })
 
 const emit = defineEmits<{ (event: 'update:modelValue', value: string): void }>()
@@ -78,6 +80,7 @@ const editableCompartment = new Compartment()
 const wrapCompartment = new Compartment()
 const fontCompartment = new Compartment()
 const semanticCompartment = new Compartment()
+const contentAttributesCompartment = new Compartment()
 
 const expressionLanguage = StreamLanguage.define({
   token(stream) {
@@ -199,6 +202,7 @@ function buildExtensions() {
       ...completionKeymap,
     ]),
     placeholder(props.placeholder),
+    contentAttributesCompartment.of(EditorView.contentAttributes.of({ 'aria-label': props.ariaLabel })),
     languageCompartment.of(languageExtension(props.language)),
     semanticCompartment.of(semanticExtension(props.language)),
     editableCompartment.of(EditorView.editable.of(!props.readonly)),
@@ -287,6 +291,7 @@ function dispatchConfig() {
       editableCompartment.reconfigure(EditorView.editable.of(!props.readonly)),
       wrapCompartment.reconfigure(wrapLines.value ? EditorView.lineWrapping : []),
       fontCompartment.reconfigure(EditorView.theme({ '&': { fontSize: `${fontSize.value}px` } })),
+      contentAttributesCompartment.reconfigure(EditorView.contentAttributes.of({ 'aria-label': props.ariaLabel })),
     ],
   })
 }
@@ -316,7 +321,7 @@ watch(() => props.modelValue, (value) => {
   }
 })
 
-watch(() => [props.language, props.readonly], dispatchConfig)
+watch(() => [props.language, props.readonly, props.ariaLabel], dispatchConfig)
 
 onMounted(() => {
   if (!editorHost.value) return
