@@ -54,8 +54,8 @@ class GatewayCandidate:
     api_key: str | None
     model: str
     source: Literal["database", "environment"]
+    review_model: str | None = None
     provider: str | None = None
-    model_role: Literal["primary", "review"] = "primary"
     wire_api: WireApi = "chat_completions"
     reasoning_effort: ReasoningEffort | None = None
     disable_response_storage: bool = False
@@ -82,9 +82,7 @@ def _load_enabled_endpoints() -> list[LlmEndpoint]:
         engine.dispose()
 
 
-def _load_candidates(
-    *, model_role: Literal["primary", "review"] = "primary"
-) -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
+def _load_candidates() -> tuple[list[GatewayCandidate], list[LlmEndpoint]]:
     endpoints = _load_enabled_endpoints()
     if not endpoints:
         if settings.llm_api_key.strip() and settings.llm_default_model.strip():
@@ -96,7 +94,6 @@ def _load_candidates(
                     api_key=settings.llm_api_key,
                     model=settings.llm_default_model,
                     source="environment",
-                    model_role=model_role,
                 )
             ], endpoints)
         return [], endpoints
@@ -108,10 +105,10 @@ def _load_candidates(
             name=endpoint.name,
             api_base=endpoint.api_base,
             api_key=None,
-            model=(endpoint.review_model if model_role == "review" and endpoint.review_model else endpoint.model),
+            model=endpoint.model,
             source="database",
+            review_model=endpoint.review_model,
             provider=endpoint.provider,
-            model_role=model_role,
             wire_api=endpoint.wire_api,
             reasoning_effort=endpoint.reasoning_effort,
             disable_response_storage=endpoint.disable_response_storage,
@@ -334,10 +331,12 @@ def complete_candidate_sync(
     tools: list[dict[str, Any]] | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
+    model_role: Literal["primary", "review"] = "primary",
 ) -> LLMResult:
     """Call one explicit candidate without selection, failover, or health writes."""
+    selected_model = candidate.review_model if model_role == "review" and candidate.review_model else candidate.model
     common_kwargs: dict[str, Any] = {
-        "model": candidate.model,
+        "model": selected_model,
         "api_base": candidate.api_base,
         "api_key": candidate.api_key,
         "temperature": temperature,
@@ -381,8 +380,26 @@ def _decrypt_candidate_key(candidate: GatewayCandidate) -> str:
     return LlmEndpointService(None)._decrypt_endpoint_key(endpoint)
 
 
-async def complete_candidate(*args: Any, **kwargs: Any) -> LLMResult:
-    return await asyncio.to_thread(complete_candidate_sync, *args, **kwargs)
+async def complete_candidate(
+    candidate: GatewayCandidate,
+    messages: list[dict[str, Any]],
+    *,
+    system: str | None = None,
+    tools: list[dict[str, Any]] | None = None,
+    temperature: float = 0.2,
+    max_tokens: int | None = None,
+    model_role: Literal["primary", "review"] = "primary",
+) -> LLMResult:
+    return await asyncio.to_thread(
+        complete_candidate_sync,
+        candidate,
+        messages,
+        system=system,
+        tools=tools,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        model_role=model_role,
+    )
 
 
 def complete_sync(
@@ -394,7 +411,7 @@ def complete_sync(
     max_tokens: int | None = None,
     model_role: Literal["primary", "review"] = "primary",
 ) -> LLMResult:
-    candidates, _ = _load_candidates(model_role=model_role)
+    candidates, _ = _load_candidates()
     if not candidates:
         _require_config()
         raise RuntimeError("All enabled LLM endpoints are in cooldown")
@@ -420,8 +437,8 @@ def complete_sync(
             api_key=api_key,
             model=candidate.model,
             source=candidate.source,
+            review_model=candidate.review_model,
             provider=candidate.provider,
-            model_role=candidate.model_role,
             wire_api=candidate.wire_api,
             reasoning_effort=candidate.reasoning_effort,
             disable_response_storage=candidate.disable_response_storage,
@@ -437,6 +454,7 @@ def complete_sync(
                 tools=tools,
                 temperature=temperature,
                 max_tokens=max_tokens,
+                model_role=model_role,
             )
         except Exception as exc:
             sanitized_error = sanitize_error(exc, api_key)

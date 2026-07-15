@@ -16,6 +16,8 @@ from app.ai.gateway import (
     GatewayCandidate,
     _load_candidates,
     _normalize_response,
+    complete,
+    complete_candidate,
     complete_candidate_sync,
     complete_sync,
     gateway_status,
@@ -121,10 +123,10 @@ def test_gateway_loads_normalized_db_runtime_fields(monkeypatch, tmp_path):
         config_json='{"preserved_local":{"region":"us"}}',
     )
 
-    candidates, _ = _load_candidates(model_role="review")
+    candidates, _ = _load_candidates()
 
-    assert candidates[0].model == "openai/reviewer"
-    assert candidates[0].model_role == "review"
+    assert candidates[0].model == "openai/primary"
+    assert candidates[0].review_model == "openai/reviewer"
     assert candidates[0].provider == "Canonical"
     assert candidates[0].wire_api == "responses"
     assert candidates[0].reasoning_effort == "high"
@@ -138,10 +140,10 @@ def test_gateway_environment_candidate_keeps_chat_defaults(monkeypatch, tmp_path
     monkeypatch.setattr(settings, "llm_api_key", "environment-secret")
     monkeypatch.setattr(settings, "llm_default_model", "openai/environment")
 
-    candidates, _ = _load_candidates(model_role="review")
+    candidates, _ = _load_candidates()
 
     assert candidates[0].model == "openai/environment"
-    assert candidates[0].model_role == "review"
+    assert candidates[0].review_model is None
     assert candidates[0].wire_api == "chat_completions"
     assert candidates[0].reasoning_effort is None
     assert candidates[0].disable_response_storage is False
@@ -157,7 +159,6 @@ def test_gateway_chat_maps_runtime_fields_and_omits_local_only(monkeypatch):
         model="openai/model",
         source="database",
         provider="Canonical",
-        model_role="primary",
         reasoning_effort="medium",
         disable_response_storage=True,
         requires_openai_auth=True,
@@ -200,6 +201,61 @@ def test_gateway_does_not_send_store_when_storage_is_enabled(monkeypatch):
     assert "store" not in captured
 
 
+def test_gateway_direct_chat_candidate_selects_review_model(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        review_model="openai/reviewer",
+        source="database",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])),
+    )
+
+    result = complete_candidate_sync(
+        candidate,
+        [{"role": "user", "content": "review"}],
+        model_role="review",
+    )
+
+    assert captured["model"] == "openai/reviewer"
+    assert result.model == "openai/reviewer"
+
+
+@pytest.mark.asyncio
+async def test_gateway_direct_async_candidate_falls_back_to_primary_model(monkeypatch):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="primary",
+        api_base="https://primary.example/v1",
+        api_key="secret",
+        model="openai/primary",
+        review_model=None,
+        source="database",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])),
+    )
+
+    result = await complete_candidate(
+        candidate,
+        [{"role": "user", "content": "review"}],
+        model_role="review",
+    )
+
+    assert captured["model"] == "openai/primary"
+    assert result.model == "openai/primary"
+
+
 def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
     captured = {}
     candidate = GatewayCandidate(
@@ -207,7 +263,8 @@ def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
         name="primary",
         api_base="https://primary.example/v1",
         api_key="secret",
-        model="openai/model",
+        model="openai/primary",
+        review_model="openai/reviewer",
         source="database",
         wire_api="responses",
         reasoning_effort="high",
@@ -232,8 +289,10 @@ def test_gateway_responses_maps_request_and_normalizes_result(monkeypatch):
         system="explicit instruction",
         tools=[{"type": "function", "function": {"name": "lookup", "description": "Lookup", "parameters": {"type": "object"}}}],
         max_tokens=123,
+        model_role="review",
     )
 
+    assert captured["model"] == "openai/reviewer"
     assert captured["input"] == [{"role": "user", "content": "hello"}]
     assert captured["instructions"] == "explicit instruction\n\nmessage instruction"
     assert captured["tools"] == [{"type": "function", "name": "lookup", "description": "Lookup", "parameters": {"type": "object"}}]
@@ -265,6 +324,24 @@ def test_gateway_review_model_failover(monkeypatch, tmp_path):
 
     assert result.model == "openai/review-two"
     assert calls == ["openai/review-one", "openai/review-two"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_async_complete_passes_review_role(monkeypatch, tmp_path):
+    engine = _gateway_test_database(monkeypatch, tmp_path)
+    _add_endpoint(engine, name="primary", key="one", priority=0, review_model="openai/reviewer")
+    calls = []
+
+    def completion(**kwargs):
+        calls.append(kwargs["model"])
+        return _response(kwargs["model"])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+
+    result = await complete([{"role": "user", "content": "review"}], model_role="review")
+
+    assert result.model == "openai/reviewer"
+    assert calls == ["openai/reviewer"]
 
 
 def test_gateway_responses_api_uses_standard_failover(monkeypatch, tmp_path):
