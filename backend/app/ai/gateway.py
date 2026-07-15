@@ -648,6 +648,8 @@ def complete_candidate_sync(
         "timeout": settings.llm_timeout_seconds,
         "num_retries": 0,
     }
+    if candidate.source == "database" and "/" not in selected_model:
+        common_kwargs["custom_llm_provider"] = "openai"
     output_tokens = min(
         max_tokens or settings.llm_max_output_tokens, settings.llm_max_output_tokens
     )

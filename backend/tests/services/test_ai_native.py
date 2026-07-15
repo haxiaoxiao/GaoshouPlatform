@@ -78,12 +78,13 @@ def _add_endpoint(
     **config,
 ):
     service = LlmEndpointService(SimpleNamespace())
+    model = config.pop("model", f"openai/{name}")
     endpoint = LlmEndpoint(
         name=name,
         api_base=f"https://{name}.example/v1",
         api_key_encrypted=service._encrypt(key),
         api_key_hint=f"********{key[-4:]}",
-        model=f"openai/{name}",
+        model=model,
         priority=priority,
         enabled=enabled,
         cooldown_until=cooldown_until,
@@ -207,6 +208,70 @@ def test_gateway_does_not_send_store_when_storage_is_enabled(monkeypatch):
     complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
 
     assert "store" not in captured
+
+
+@pytest.mark.parametrize("wire_api", ["chat_completions", "responses"])
+def test_gateway_routes_bare_db_model_through_openai_compatible_provider(
+    monkeypatch, wire_api
+):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint",
+        name="cloud-bridge",
+        api_base="https://cloud-bridge.example/v1",
+        api_key="secret",
+        model="GPT-5.5",
+        source="database",
+        provider="云桥/OpenAI",
+        wire_api=wire_api,
+        requires_openai_auth=True,
+    )
+    response = (
+        SimpleNamespace(model="GPT-5.5", output_text="ok", output=[], usage={})
+        if wire_api == "responses"
+        else _response("GPT-5.5")
+    )
+    function_name = "responses" if wire_api == "responses" else "completion"
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(**{function_name: lambda **kwargs: captured.update(kwargs) or response}),
+    )
+
+    result = complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["model"] == "GPT-5.5"
+    assert captured["custom_llm_provider"] == "openai"
+    assert result.model == "GPT-5.5"
+
+
+@pytest.mark.parametrize(
+    ("source", "model"),
+    [("database", "anthropic/claude-sonnet-4"), ("environment", "GPT-5.5")],
+)
+def test_gateway_does_not_override_explicit_or_environment_provider(monkeypatch, source, model):
+    captured = {}
+    candidate = GatewayCandidate(
+        endpoint_id="endpoint" if source == "database" else None,
+        name="configured",
+        api_base="https://configured.example/v1",
+        api_key="secret",
+        model=model,
+        source=source,
+        provider="Arbitrary label",
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=lambda **kwargs: captured.update(kwargs) or _response(kwargs["model"])
+        ),
+    )
+
+    complete_candidate_sync(candidate, [{"role": "user", "content": "hello"}])
+
+    assert captured["model"] == model
+    assert "custom_llm_provider" not in captured
 
 
 def test_gateway_direct_chat_candidate_selects_review_model(monkeypatch):
@@ -836,13 +901,29 @@ async def test_gateway_async_complete_passes_review_role(monkeypatch, tmp_path):
 
 def test_gateway_responses_api_uses_standard_failover(monkeypatch, tmp_path):
     engine = _gateway_test_database(monkeypatch, tmp_path)
-    _add_endpoint(engine, name="primary", key="one", priority=0, wire_api="responses")
-    _add_endpoint(engine, name="backup", key="two", priority=1, wire_api="responses")
+    _add_endpoint(
+        engine,
+        name="primary",
+        key="one",
+        priority=0,
+        model="GPT-5.5-primary",
+        provider="云桥/OpenAI",
+        wire_api="responses",
+    )
+    _add_endpoint(
+        engine,
+        name="backup",
+        key="two",
+        priority=1,
+        model="GPT-5.5-backup",
+        provider="Other arbitrary label",
+        wire_api="responses",
+    )
     calls = []
 
     def responses(**kwargs):
-        calls.append(kwargs["model"])
-        if kwargs["model"] == "openai/primary":
+        calls.append((kwargs["model"], kwargs.get("custom_llm_provider")))
+        if kwargs["model"] == "GPT-5.5-primary":
             raise TimeoutError("offline")
         return SimpleNamespace(model=kwargs["model"], output_text="ok", output=[], usage={})
 
@@ -851,7 +932,8 @@ def test_gateway_responses_api_uses_standard_failover(monkeypatch, tmp_path):
     result = complete_sync([{"role": "user", "content": "hello"}])
 
     assert result.content == "ok"
-    assert calls == ["openai/primary", "openai/backup"]
+    assert result.model == "GPT-5.5-backup"
+    assert calls == [("GPT-5.5-primary", "openai"), ("GPT-5.5-backup", "openai")]
 
 
 def test_gateway_first_healthy_endpoint_wins(monkeypatch, tmp_path):
