@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections import deque
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
@@ -143,8 +144,9 @@ def calculate_breadth(
     minimum_coverage: float = 0.8,
 ) -> BreadthResult:
     """Calculate a fresh-tick market breadth distribution in percentage points."""
-    if max_age_seconds < 0:
-        raise ValueError("max_age_seconds must be non-negative")
+    normalized_max_age = _finite_float(max_age_seconds)
+    if normalized_max_age is None or normalized_max_age < 0:
+        raise ValueError("max_age_seconds must be finite and non-negative")
     if not 0 <= minimum_coverage <= 1:
         raise ValueError("minimum_coverage must be between 0 and 1")
 
@@ -164,7 +166,7 @@ def calculate_breadth(
         if tick is None:
             missing += 1
             continue
-        if tick.stock_status not in (None, 0):
+        if tick.stock_status == 1:
             suspended += 1
             continue
 
@@ -172,7 +174,7 @@ def calculate_breadth(
         if age_seconds is None or age_seconds < 0:
             invalid += 1
             continue
-        if age_seconds > max_age_seconds:
+        if age_seconds > normalized_max_age:
             stale += 1
             continue
         if not _is_valid_price(tick.last_price) or not _is_valid_price(tick.previous_close):
@@ -182,8 +184,7 @@ def calculate_breadth(
         return_percentage = _return_percentage(tick.last_price, tick.previous_close)
         if return_percentage == 0:
             flat_count += 1
-        else:
-            counts[_bucket_key(return_percentage)] += 1
+        counts[_bucket_key(return_percentage)] += 1
         valid += 1
 
     requested = len(universe)
@@ -230,6 +231,40 @@ def calculate_breadth(
     )
 
 
+def serialize_breadth_result(result: BreadthResult) -> dict[str, object]:
+    """Convert an immutable breadth result into a JSON-ready API payload."""
+    coverage = result.coverage
+    return {
+        "status": result.status,
+        "flat_count": result.flat_count,
+        "coverage": {
+            "requested": coverage.requested,
+            "eligible": coverage.eligible,
+            "valid": coverage.valid,
+            "excluded": coverage.excluded,
+            "coverage": coverage.coverage,
+            "status": coverage.status,
+            "missing": coverage.missing,
+            "stale": coverage.stale,
+            "invalid": coverage.invalid,
+            "suspended": coverage.suspended,
+        },
+        "buckets": {
+            key: {
+                "key": bucket.key,
+                "label": bucket.label,
+                "lower_bound": bucket.lower_bound,
+                "upper_bound": bucket.upper_bound,
+                "lower_inclusive": bucket.lower_inclusive,
+                "upper_inclusive": bucket.upper_inclusive,
+                "count": bucket.count,
+                "percentage": bucket.percentage,
+            }
+            for key, bucket in result.buckets.items()
+        },
+    }
+
+
 def robust_percentile_rank(
     value: float | None,
     history: Iterable[float],
@@ -243,7 +278,7 @@ def robust_percentile_rank(
     current = _finite_float(value)
     if current is None:
         return None
-    window = tuple(history)[-lookback:]
+    window = history[-lookback:] if isinstance(history, Sequence) else deque(history, maxlen=lookback)
     valid_history = [number for item in window if (number := _finite_float(item)) is not None]
     if not valid_history:
         return None

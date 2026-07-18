@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import gc
 from datetime import datetime, timedelta
+from weakref import ref
 
 import pytest
+from fastapi.encoders import jsonable_encoder
 
+from app.services import market_radar_calculator as calculator
 from app.services.market_radar_calculator import (
     CROWDING_COMPONENT_WEIGHTS,
     EMOTION_COMPONENT_WEIGHTS,
@@ -77,6 +81,7 @@ def test_calculate_breadth_uses_exact_percentage_point_boundaries(
     assert result.status == "fresh"
     assert result.buckets[expected_bucket].count == 1
     assert sum(bucket.count for bucket in result.buckets.values()) == 1
+    assert sum(bucket.percentage for bucket in result.buckets.values()) == pytest.approx(100.0)
     assert result.flat_count == 0
 
 
@@ -86,7 +91,9 @@ def test_calculate_breadth_keeps_flat_quotes_separate() -> None:
     result = calculate_breadth([_tick(symbol, 0.0)], [symbol], now=NOW)
 
     assert result.flat_count == 1
-    assert sum(bucket.count for bucket in result.buckets.values()) == 0
+    assert result.buckets["pos_0_to_2"].count == 1
+    assert sum(bucket.count for bucket in result.buckets.values()) == result.coverage.valid
+    assert sum(bucket.percentage for bucket in result.buckets.values()) == pytest.approx(100.0)
 
 
 def test_calculate_breadth_exposes_an_immutable_bucket_mapping() -> None:
@@ -97,12 +104,46 @@ def test_calculate_breadth_exposes_an_immutable_bucket_mapping() -> None:
         result.buckets["pos_0_to_2"] = result.buckets["pos_0_to_2"]  # type: ignore[index]
 
 
+def test_serialize_breadth_result_returns_a_fastapi_json_payload() -> None:
+    symbol = "600000.SH"
+    result = calculate_breadth([_tick(symbol, 0.0)], [symbol], now=NOW)
+
+    payload = calculator.serialize_breadth_result(result)
+    encoded = jsonable_encoder(payload)
+
+    assert encoded == payload
+    assert encoded["status"] == "fresh"
+    assert encoded["flat_count"] == 1
+    assert encoded["coverage"] == {
+        "requested": 1,
+        "eligible": 1,
+        "valid": 1,
+        "excluded": 0,
+        "coverage": 1.0,
+        "status": "fresh",
+        "missing": 0,
+        "stale": 0,
+        "invalid": 0,
+        "suspended": 0,
+    }
+    assert encoded["buckets"]["pos_0_to_2"]["count"] == 1
+
+
 def test_calculate_breadth_accepts_documented_positional_options() -> None:
     symbol = "600000.SH"
 
     result = calculate_breadth([_tick(symbol, 1.0)], [symbol], NOW, 5, 0.8)
 
     assert result.status == "fresh"
+
+
+@pytest.mark.parametrize(
+    "max_age_seconds",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_calculate_breadth_rejects_non_finite_max_age(max_age_seconds: float) -> None:
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        calculate_breadth([], [], NOW, max_age_seconds)
 
 
 def test_calculate_breadth_excludes_suspended_stale_invalid_and_missing_quotes() -> None:
@@ -176,6 +217,23 @@ def test_suspended_quotes_do_not_reduce_coverage_denominator() -> None:
     assert result.status == "fresh"
 
 
+def test_qmt_normal_stock_status_three_is_eligible_and_valid() -> None:
+    symbol = "600000.SH"
+
+    result = calculate_breadth(
+        [_tick(symbol, 1.0, stock_status=3)],
+        [symbol],
+        now=NOW,
+    )
+
+    assert result.coverage.requested == 1
+    assert result.coverage.eligible == 1
+    assert result.coverage.valid == 1
+    assert result.coverage.suspended == 0
+    assert result.buckets["pos_0_to_2"].count == 1
+    assert result.status == "fresh"
+
+
 @pytest.mark.parametrize(
     "contract",
     [QuoteTick, Coverage, BreadthBucket, BreadthResult, ScoreComponent, CompositeScore],
@@ -211,6 +269,35 @@ def test_robust_percentile_rank_uses_only_latest_120_observations() -> None:
     history = [10_000.0, *(float(value) for value in range(120))]
 
     result = robust_percentile_rank(119.0, history)
+
+    assert result == pytest.approx((119.5 / 120.0) * 100.0)
+
+
+def test_robust_percentile_rank_bounds_generator_retention_to_lookback() -> None:
+    class TrackedNumber:
+        __slots__ = ("value", "__weakref__")
+
+        def __init__(self, value: float) -> None:
+            self.value = value
+
+        def __float__(self) -> float:
+            return self.value
+
+    oldest_reference = None
+
+    def history():
+        nonlocal oldest_reference
+        oldest = TrackedNumber(10_000.0)
+        oldest_reference = ref(oldest)
+        yield oldest
+        del oldest
+        for value in range(121):
+            if value == 120:
+                gc.collect()
+                assert oldest_reference() is None
+            yield TrackedNumber(float(value))
+
+    result = robust_percentile_rank(120.0, history())
 
     assert result == pytest.approx((119.5 / 120.0) * 100.0)
 
@@ -277,6 +364,41 @@ def test_composite_score_reweights_missing_components_and_explains_contributions
     assert by_name["limit_ladder"].effective_weight == 0.0
     assert by_name["limit_ladder"].contribution == 0.0
     assert by_name["limit_ladder"].excluded_reason == "missing_value"
+
+
+def test_crowding_composite_reweights_a_missing_component() -> None:
+    values = {
+        "top_1_amount_share": 90.0,
+        "top_5_amount_share": 80.0,
+        "top_3_sector_share": 70.0,
+        "market_amount_vs_20d": 60.0,
+        "high_liquidity_correlation": 50.0,
+        "margin_balance_5d_change": None,
+    }
+    history = tuple(float(value) for value in range(120))
+    components = [
+        ScoreComponent(
+            name=name,
+            raw_value=values[name],
+            history=history,
+            weight=weight,
+        )
+        for name, weight in CROWDING_COMPONENT_WEIGHTS.items()
+    ]
+
+    score = composite_score(components)
+    by_name = {component.name: component for component in score.components}
+
+    assert score.status == "fresh"
+    assert score.effective_weight == pytest.approx(0.90)
+    assert score.value is not None
+    assert by_name["top_1_amount_share"].effective_weight == pytest.approx(0.25 / 0.90)
+    assert by_name["margin_balance_5d_change"].excluded_reason == "missing_value"
+    assert by_name["margin_balance_5d_change"].effective_weight == 0.0
+    assert by_name["margin_balance_5d_change"].contribution == 0.0
+    assert sum(component.contribution for component in score.components) == pytest.approx(
+        score.value
+    )
 
 
 def test_composite_score_accepts_exactly_seventy_percent_effective_weight() -> None:
