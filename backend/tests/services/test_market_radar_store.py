@@ -36,6 +36,19 @@ def test_market_radar_json_is_canonical_and_invalid_json_is_explicit():
         load_json_object("[]", field_name="metrics_json")
 
 
+@pytest.mark.parametrize(
+    "encoded",
+    (
+        '{"value":NaN}',
+        '{"value":Infinity}',
+        '{"value":-Infinity}',
+    ),
+)
+def test_market_radar_json_rejects_non_standard_numeric_constants(encoded):
+    with pytest.raises(ValueError, match="metrics_json contains invalid JSON"):
+        load_json_object(encoded, field_name="metrics_json")
+
+
 @pytest.mark.asyncio
 async def test_snapshot_upsert_is_idempotent_and_does_not_auto_commit(tmp_path):
     engine, sessions = await _sessions(tmp_path)
@@ -264,6 +277,66 @@ async def test_event_transitions_reject_invalid_or_missing_events(tmp_path):
         await store.resolve_event(event.id, at=now + timedelta(seconds=4))
         with pytest.raises(ValueError, match="Invalid market alert event transition"):
             await store.dismiss_event(event.id, at=now + timedelta(seconds=5))
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_session_cannot_revive_an_event_resolved_by_another_session(tmp_path):
+    engine, sessions = await _sessions(tmp_path)
+    now = datetime(2026, 7, 18, 11, 30)
+
+    async with sessions() as session_a:
+        store_a = MarketRadarStore(session_a)
+        rule = await store_a.upsert_rule(
+            rule_key="market.concurrent",
+            version=1,
+            scope="market",
+            subject="all_a",
+            rule_type="threshold",
+            parameters={"operator": "lte", "value": 20},
+            severity="high",
+            cooldown_seconds=0,
+            enabled=True,
+            source="system",
+        )
+        event, _ = await store_a.record_event_hit(
+            rule_id=rule.id,
+            snapshot_id=None,
+            scope="market",
+            subject="all_a",
+            direction="negative",
+            severity="high",
+            title="Concurrent transition",
+            explanation="Used to verify atomic event transitions",
+            dedupe_key="market.concurrent:all_a",
+            evidence={"value": 18},
+            seen_at=now,
+        )
+        await session_a.commit()
+        assert event.status == "active"
+
+        resolved_at = now + timedelta(seconds=1)
+        async with sessions() as session_b:
+            resolved = await MarketRadarStore(session_b).resolve_event(
+                event.id,
+                at=resolved_at,
+            )
+            assert resolved.status == "resolved"
+            await session_b.commit()
+
+        with pytest.raises(ValueError, match="Invalid market alert event transition"):
+            await store_a.dismiss_event(event.id, at=now + timedelta(seconds=2))
+        assert event.status == "resolved"
+        assert event.resolved_at == resolved_at
+        assert event.dismissed_at is None
+
+    async with sessions() as verification_session:
+        persisted = await verification_session.get(MarketAlertEvent, event.id)
+        assert persisted is not None
+        assert persisted.status == "resolved"
+        assert persisted.resolved_at == resolved_at
+        assert persisted.dismissed_at is None
 
     await engine.dispose()
 

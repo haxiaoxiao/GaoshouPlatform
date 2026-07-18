@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.sqlite import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,8 +51,8 @@ def load_json_object(value: str, *, field_name: str = "value") -> dict[str, Any]
     """Deserialize a Text-backed JSON object without hiding corrupt rows."""
 
     try:
-        decoded = json.loads(value)
-    except (json.JSONDecodeError, TypeError) as exc:
+        decoded = json.loads(value, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} contains invalid JSON") from exc
     if not isinstance(decoded, dict):
         raise ValueError(f"{field_name} must contain a JSON object")
@@ -390,20 +390,44 @@ class MarketRadarStore:
         at: datetime,
     ) -> MarketAlertEvent:
         _require_naive_datetime("at", at)
-        event = await self.session.get(MarketAlertEvent, event_id)
+        timestamp_column = getattr(MarketAlertEvent, timestamp_field)
+        result = await self.session.execute(
+            update(MarketAlertEvent)
+            .where(
+                MarketAlertEvent.id == event_id,
+                MarketAlertEvent.status.in_(allowed_statuses),
+            )
+            .values(
+                status=target_status,
+                **{
+                    timestamp_field: func.coalesce(timestamp_column, at),
+                    "updated_at": _beijing_now(),
+                },
+            )
+            .returning(MarketAlertEvent.id)
+            .execution_options(synchronize_session=False)
+        )
+        updated_id = result.scalar_one_or_none()
+        event = await self._load_event_from_database(event_id)
         if event is None:
             raise ValueError(f"Market alert event {event_id} not found")
-        if event.status not in allowed_statuses:
+        if updated_id is None:
             raise ValueError(
                 "Invalid market alert event transition: "
                 f"{event.status} -> {target_status}"
             )
-        if event.status == target_status:
-            return event
-        event.status = target_status
-        setattr(event, timestamp_field, at)
-        await self.session.flush()
         return event
+
+    async def _load_event_from_database(
+        self,
+        event_id: int,
+    ) -> MarketAlertEvent | None:
+        result = await self.session.execute(
+            select(MarketAlertEvent)
+            .where(MarketAlertEvent.id == event_id)
+            .execution_options(populate_existing=True)
+        )
+        return result.scalar_one_or_none()
 
 
 def _require_choice(field_name: str, value: str, choices: frozenset[str]) -> None:
@@ -415,3 +439,7 @@ def _require_choice(field_name: str, value: str, choices: frozenset[str]) -> Non
 def _require_naive_datetime(field_name: str, value: datetime) -> None:
     if value.tzinfo is not None and value.utcoffset() is not None:
         raise ValueError(f"{field_name} must be a timezone-naive local datetime")
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"Non-standard JSON constant is not allowed: {value}")
