@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.services.market_radar_store as market_radar_store_module
 from app.db.models.base import Base
 from app.db.models.market_radar import MarketAlertEvent, MarketRadarSnapshot
 from app.services.market_radar_store import (
@@ -234,7 +235,7 @@ async def test_event_hits_preserve_user_state_and_start_new_cycle_after_resoluti
 
 
 @pytest.mark.asyncio
-async def test_event_transitions_reject_invalid_or_missing_events(tmp_path):
+async def test_event_transitions_reject_invalid_or_missing_events(tmp_path, monkeypatch):
     engine, sessions = await _sessions(tmp_path)
     now = datetime(2026, 7, 18, 11, 0)
 
@@ -266,17 +267,46 @@ async def test_event_transitions_reject_invalid_or_missing_events(tmp_path):
             seen_at=now,
         )
 
-        dismissed = await store.dismiss_event(event.id, at=now + timedelta(seconds=1))
-        dismissed_again = await store.dismiss_event(event.id, at=now + timedelta(seconds=2))
+        clock = datetime(2026, 7, 18, 12, 0)
+        monkeypatch.setattr(market_radar_store_module, "_beijing_now", lambda: clock)
+
+        acknowledged = await store.acknowledge_event(
+            event.id,
+            at=now + timedelta(seconds=1),
+        )
+        acknowledged_updated_at = acknowledged.updated_at
+        clock += timedelta(seconds=1)
+        acknowledged_again = await store.acknowledge_event(
+            event.id,
+            at=now + timedelta(seconds=2),
+        )
+        assert acknowledged_again.acknowledged_at == acknowledged.acknowledged_at
+        assert acknowledged_again.updated_at == acknowledged_updated_at
+
+        clock += timedelta(seconds=1)
+        dismissed = await store.dismiss_event(event.id, at=now + timedelta(seconds=3))
+        dismissed_updated_at = dismissed.updated_at
+        clock += timedelta(seconds=1)
+        dismissed_again = await store.dismiss_event(event.id, at=now + timedelta(seconds=4))
         assert dismissed_again.dismissed_at == dismissed.dismissed_at
+        assert dismissed_again.updated_at == dismissed_updated_at
         with pytest.raises(ValueError, match="Invalid market alert event transition"):
-            await store.acknowledge_event(event.id, at=now + timedelta(seconds=3))
+            await store.acknowledge_event(event.id, at=now + timedelta(seconds=5))
         with pytest.raises(ValueError, match="not found"):
             await store.dismiss_event(999_999, at=now)
 
-        await store.resolve_event(event.id, at=now + timedelta(seconds=4))
+        clock += timedelta(seconds=1)
+        resolved = await store.resolve_event(event.id, at=now + timedelta(seconds=6))
+        resolved_updated_at = resolved.updated_at
+        clock += timedelta(seconds=1)
+        resolved_again = await store.resolve_event(
+            event.id,
+            at=now + timedelta(seconds=7),
+        )
+        assert resolved_again.resolved_at == resolved.resolved_at
+        assert resolved_again.updated_at == resolved_updated_at
         with pytest.raises(ValueError, match="Invalid market alert event transition"):
-            await store.dismiss_event(event.id, at=now + timedelta(seconds=5))
+            await store.dismiss_event(event.id, at=now + timedelta(seconds=8))
 
     await engine.dispose()
 

@@ -396,6 +396,7 @@ class MarketRadarStore:
             .where(
                 MarketAlertEvent.id == event_id,
                 MarketAlertEvent.status.in_(allowed_statuses),
+                MarketAlertEvent.status != target_status,
             )
             .values(
                 status=target_status,
@@ -412,6 +413,8 @@ class MarketRadarStore:
         if event is None:
             raise ValueError(f"Market alert event {event_id} not found")
         if updated_id is None:
+            if event.status == target_status:
+                return event
             raise ValueError(
                 "Invalid market alert event transition: "
                 f"{event.status} -> {target_status}"
