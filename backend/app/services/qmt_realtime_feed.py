@@ -4,12 +4,12 @@ import asyncio
 import inspect
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from functools import partial
 from math import isfinite
-from threading import RLock
+from threading import RLock, Thread
 from typing import Any, Literal, Protocol, TypeVar, cast
 
 from app.services.market_radar_calculator import QuoteTick
@@ -48,6 +48,9 @@ _POLL_FRESH_SECONDS = 45.0
 _CONTROL_TIMEOUT_SECONDS = 5.0
 _MIN_PUSH_COVERAGE = 0.8
 _MIN_EPOCH_MS = 946_684_800_000
+_A_SHARE_SYMBOL_RE = re.compile(
+    r"^(?:(?:60|68)\d{4}\.SH|(?:00|30)\d{4}\.SZ|[489]\d{5}\.BJ)$"
+)
 
 T = TypeVar("T")
 RawBatch = Mapping[str, Mapping[str, Any]]
@@ -155,16 +158,6 @@ class QmtRealtimeFeed:
         self._resubscribe_seconds = float(resubscribe_seconds)
         self._market_session = market_session or _is_a_share_market_session
 
-        self._control_executor = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-radar-qmt")
-            if blocking_call is None
-            else None
-        )
-        self._poll_executor = (
-            ThreadPoolExecutor(max_workers=1, thread_name_prefix="market-radar-qmt-poll")
-            if poll_submitter is None
-            else None
-        )
         self._blocking_call = blocking_call or self._run_blocking
         self._poll_submitter = poll_submitter or self._submit_poll
         self._poll_waiter = poll_waiter or _wait_for_poll
@@ -181,6 +174,9 @@ class QmtRealtimeFeed:
         }
         self._subscription_errors: dict[str, str] = {}
         self._last_subscription_attempt_at: datetime | None = None
+        self._last_universe_attempt_at: datetime | None = None
+        self._universe_ready = False
+        self._universe_error: str | None = None
         self._push_wait_started_at: datetime | None = None
         self._last_valid_push_by_group: dict[str, datetime] = {}
         self._last_poll_attempt_at: datetime | None = None
@@ -191,6 +187,8 @@ class QmtRealtimeFeed:
         self._started = False
         self._terminal_closed = False
         self._callbacks_enabled = False
+        self._session_open = False
+        self._session_recovery_pending = False
         self._allowed_symbols: frozenset[str] = frozenset(CORE_INDICES)
         self._symbols_by_group: dict[str, tuple[str, ...]] = {
             "SH": (),
@@ -221,15 +219,13 @@ class QmtRealtimeFeed:
                 self._set_mode("closed", "realtime feed disabled")
                 return
 
-            try:
-                loaded = self._universe_loader()
-                symbols = await loaded if inspect.isawaitable(loaded) else loaded
-                self._set_universe(symbols)
-            except Exception as exc:
-                self._set_mode("offline", _safe_error("universe unavailable", exc))
+            now = self._clock()
+            self._session_open = self._market_session(now)
+            self._session_recovery_pending = not self._session_open
+            if not await self._load_universe_if_due(now, force=True):
                 return
 
-            if not self._market_session(self._clock()):
+            if not self._session_open:
                 self._set_mode("closed", "market session closed")
                 return
 
@@ -263,10 +259,6 @@ class QmtRealtimeFeed:
                 self._receipts.clear()
             self._poll_future = None
             self._set_mode("closed", None)
-            self._shutdown_control_executor_if_idle()
-            if self._poll_executor is not None:
-                self._poll_executor.shutdown(wait=False, cancel_futures=True)
-                self._poll_executor = None
 
     async def run_health_cycle(self) -> None:
         if self._terminal_closed or not self._started or not self._enabled:
@@ -337,12 +329,31 @@ class QmtRealtimeFeed:
             return
         now = self._clock()
         if not self._market_session(now):
+            self._session_open = False
+            self._session_recovery_pending = True
             self._set_mode("closed", "market session closed")
             return
+        self._session_open = True
 
-        if not self._subscriptions:
+        if not await self._load_universe_if_due(now):
+            return
+
+        if self._poll_call_is_still_running():
+            if self._mode != "push":
+                self._set_mode("offline", "QMT poll call still running")
+            return
+
+        subscription_attempted = False
+        if self._session_recovery_pending:
+            self._callbacks_enabled = True
+            await self._replace_subscriptions(initial=False)
+            self._session_recovery_pending = False
+            subscription_attempted = True
+            now = self._clock()
+        elif not self._subscriptions and self._subscription_retry_due(now):
             self._callbacks_enabled = True
             await self._replace_subscriptions(initial=self._connection_generation == 0)
+            subscription_attempted = True
             now = self._clock()
 
         if self._mode == "push" and not self._critical_push_ready(now):
@@ -354,9 +365,9 @@ class QmtRealtimeFeed:
             "offline",
         }
         if (
-            needs_resubscribe
-            and self._last_subscription_attempt_at is not None
-            and _elapsed(now, self._last_subscription_attempt_at) >= self._resubscribe_seconds
+            not subscription_attempted
+            and needs_resubscribe
+            and self._subscription_retry_due(now)
         ):
             if self._mode == "push" and self._critical_push_ready(now):
                 await self._retry_group_subscriptions(local_retry_groups)
@@ -368,6 +379,25 @@ class QmtRealtimeFeed:
         if not target_groups:
             return
         await self._poll_if_due(target_groups, now)
+
+    def _subscription_retry_due(self, now: datetime) -> bool:
+        return self._last_subscription_attempt_at is None or (
+            _elapsed(now, self._last_subscription_attempt_at)
+            >= self._resubscribe_seconds
+        )
+
+    def _poll_call_is_still_running(self) -> bool:
+        future = self._poll_future
+        if future is None:
+            return False
+        if not future.done():
+            return True
+        try:
+            future.result()
+        except Exception:
+            pass
+        self._poll_future = None
+        return False
 
     async def _replace_subscriptions(self, *, initial: bool) -> None:
         if self._terminal_closed:
@@ -385,6 +415,7 @@ class QmtRealtimeFeed:
         for group, seq in old_subscriptions.items():
             if not await self._unsubscribe_or_defer(seq):
                 failed_unsubscribe_groups.add(group)
+                self._subscriptions[group] = seq
                 self._subscription_errors[group] = (
                     "push unavailable: previous subscription cleanup failed"
                 )
@@ -422,7 +453,6 @@ class QmtRealtimeFeed:
                     break
 
         if self._terminal_closed or generation != self._connection_generation:
-            self._shutdown_control_executor_if_idle()
             return
         if not self._subscriptions:
             self._set_mode("offline", self._subscription_reason())
@@ -475,7 +505,6 @@ class QmtRealtimeFeed:
                 self._subscription_errors[group] = _safe_error("push unavailable", exc)
 
         if self._terminal_closed:
-            self._shutdown_control_executor_if_idle()
             return
         self._set_mode("push", self._subscription_reason())
 
@@ -571,16 +600,10 @@ class QmtRealtimeFeed:
         return accepted
 
     async def _poll_if_due(self, target_groups: frozenset[str], now: datetime) -> None:
-        if self._poll_future is not None:
-            if not self._poll_future.done():
-                if self._mode != "push":
-                    self._set_mode("offline", "QMT poll call still running")
-                return
-            try:
-                self._poll_future.result()
-            except Exception:
-                pass
-            self._poll_future = None
+        if self._poll_call_is_still_running():
+            if self._mode != "push":
+                self._set_mode("offline", "QMT poll call still running")
+            return
 
         if (
             self._last_poll_attempt_at is not None
@@ -629,7 +652,9 @@ class QmtRealtimeFeed:
             cast(RawBatch, raw_batch),
             "poll",
         )
-        if accepted:
+        coverage = self._market_coverage(self._clock())
+        has_fresh_quote = any(coverage[group] > 0 for group in target_groups)
+        if accepted and has_fresh_quote:
             if self._mode != "push":
                 self._set_mode("polling_30s", self._subscription_reason())
         elif self._mode != "push":
@@ -662,13 +687,45 @@ class QmtRealtimeFeed:
                 values.extend(self._symbols_by_group[group])
         return tuple(dict.fromkeys(values))
 
+    async def _load_universe_if_due(
+        self,
+        now: datetime,
+        *,
+        force: bool = False,
+    ) -> bool:
+        if self._universe_ready:
+            return True
+        if (
+            not force
+            and self._last_universe_attempt_at is not None
+            and _elapsed(now, self._last_universe_attempt_at)
+            < self._resubscribe_seconds
+        ):
+            self._set_mode("offline", self._universe_error or "universe unavailable")
+            return False
+
+        self._last_universe_attempt_at = now
+        try:
+            loaded = self._universe_loader()
+            symbols = await loaded if inspect.isawaitable(loaded) else loaded
+            self._set_universe(symbols)
+        except Exception as exc:
+            self._universe_ready = False
+            self._universe_error = _safe_error("universe unavailable", exc)
+            self._set_mode("offline", self._universe_error)
+            return False
+
+        self._universe_ready = True
+        self._universe_error = None
+        return True
+
     def _set_universe(self, symbols: Iterable[str]) -> None:
         normalized = tuple(
             dict.fromkeys(
                 symbol.strip().upper()
                 for symbol in symbols
                 if isinstance(symbol, str)
-                and symbol.strip().upper().endswith((".SH", ".SZ", ".BJ"))
+                and _A_SHARE_SYMBOL_RE.fullmatch(symbol.strip().upper()) is not None
                 and symbol.strip().upper() not in CORE_INDICES
             )
         )
@@ -678,6 +735,17 @@ class QmtRealtimeFeed:
             for market in ("SH", "SZ", "BJ")
         }
         self._symbols_by_group["INDEX"] = CORE_INDICES
+        with self._latest_lock:
+            self._latest = {
+                symbol: tick
+                for symbol, tick in self._latest.items()
+                if symbol in self._allowed_symbols
+            }
+            self._receipts = {
+                symbol: receipt
+                for symbol, receipt in self._receipts.items()
+                if symbol in self._allowed_symbols
+            }
 
     def _symbol_group(self, symbol: str) -> str:
         if symbol in CORE_INDICES:
@@ -773,7 +841,12 @@ class QmtRealtimeFeed:
             if receipt.source == "push"
             else _POLL_FRESH_SECONDS
         )
-        return 0 <= _elapsed(now, receipt.received_at) <= max_age
+        tick = self._latest.get(symbol)
+        if tick is None:
+            return False
+        receipt_age = _elapsed(now, receipt.received_at)
+        quote_age = _elapsed(now, tick.quote_time)
+        return 0 <= receipt_age <= max_age and 0 <= quote_age <= max_age
 
     def _critical_push_ready(self, now: datetime) -> bool:
         return _CRITICAL_PUSH_GROUPS.issubset(self._subscriptions) and all(
@@ -787,16 +860,18 @@ class QmtRealtimeFeed:
         self._reason = reason
 
     async def _run_blocking(self, function: Callable[[], T]) -> T:
-        if self._control_executor is None:
-            raise RuntimeError("QMT executor is unavailable")
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._control_executor, function)
+        future = _submit_daemon_call(
+            function,
+            thread_name="market-radar-qmt-control",
+        )
+        return cast(T, await asyncio.wrap_future(future))
 
     async def _run_control(
         self,
         function: Callable[[], T],
         *,
         late_subscription: bool = False,
+        timeout_unsubscribe_seq: int | None = None,
     ) -> T:
         async with self._control_lock:
             pending = self._control_task
@@ -812,12 +887,26 @@ class QmtRealtimeFeed:
             except TimeoutError:
                 if late_subscription:
                     task.add_done_callback(self._cleanup_late_subscription)
+                elif timeout_unsubscribe_seq is not None:
+                    task.add_done_callback(
+                        partial(
+                            self._cleanup_timed_out_unsubscribe,
+                            timeout_unsubscribe_seq,
+                        )
+                    )
                 else:
                     task.add_done_callback(self._cleanup_timed_out_control)
                 raise TimeoutError("QMT control call timed out") from None
             except asyncio.CancelledError:
                 if late_subscription:
                     task.add_done_callback(self._cleanup_late_subscription)
+                elif timeout_unsubscribe_seq is not None:
+                    task.add_done_callback(
+                        partial(
+                            self._cleanup_timed_out_unsubscribe,
+                            timeout_unsubscribe_seq,
+                        )
+                    )
                 else:
                     task.add_done_callback(self._cleanup_timed_out_control)
                 raise
@@ -848,6 +937,28 @@ class QmtRealtimeFeed:
         cleanup = loop.create_task(self._drain_deferred_unsubscribes())
         self._track_cleanup_task(cleanup)
 
+    def _cleanup_timed_out_unsubscribe(
+        self,
+        seq: int,
+        task: asyncio.Future[Any],
+    ) -> None:
+        if self._control_task is task:
+            self._control_task = None
+        succeeded = False
+        if not task.cancelled():
+            try:
+                task.result()
+                succeeded = True
+            except Exception:
+                pass
+        if succeeded:
+            self._remove_deferred_unsubscribe(seq)
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        cleanup = loop.create_task(self._drain_deferred_unsubscribes())
+        self._track_cleanup_task(cleanup)
+
     def _track_cleanup_task(self, cleanup: asyncio.Task[None]) -> None:
         self._late_cleanup_tasks.add(cleanup)
         cleanup.add_done_callback(self._late_cleanup_done)
@@ -869,50 +980,68 @@ class QmtRealtimeFeed:
             task.result()
         except (asyncio.CancelledError, Exception):
             pass
-        self._shutdown_control_executor_if_idle()
 
-    async def _unsubscribe_or_defer(self, seq: int) -> bool:
+    async def _unsubscribe_or_defer(self, seq: int, *, front: bool = False) -> bool:
+        self._defer_unsubscribe(seq, front=front)
         try:
-            await self._run_control(partial(self._adapter.unsubscribe_quote, seq))
-        except _ControlBusyError:
-            if seq not in self._deferred_unsubscribe_ids:
-                self._deferred_unsubscribe_ids.append(seq)
-            return False
+            await self._run_control(
+                partial(self._adapter.unsubscribe_quote, seq),
+                timeout_unsubscribe_seq=seq,
+            )
         except Exception:
             return False
+        self._remove_deferred_unsubscribe(seq)
         return True
 
     async def _drain_deferred_unsubscribes(self) -> None:
         while self._deferred_unsubscribe_ids:
             seq = self._deferred_unsubscribe_ids.pop(0)
-            try:
-                await self._run_control(partial(self._adapter.unsubscribe_quote, seq))
-            except _ControlBusyError:
-                self._deferred_unsubscribe_ids.insert(0, seq)
+            if not await self._unsubscribe_or_defer(seq, front=True):
                 return
-            except Exception:
-                continue
 
-    def _shutdown_control_executor_if_idle(self) -> None:
-        if (
-            not self._terminal_closed
-            or self._control_task is not None
-            or self._late_cleanup_tasks
-            or self._deferred_unsubscribe_ids
-            or self._control_executor is None
-        ):
+    def _defer_unsubscribe(self, seq: int, *, front: bool = False) -> None:
+        if seq in self._deferred_unsubscribe_ids:
             return
-        self._control_executor.shutdown(wait=False, cancel_futures=True)
-        self._control_executor = None
+        if front:
+            self._deferred_unsubscribe_ids.insert(0, seq)
+        else:
+            self._deferred_unsubscribe_ids.append(seq)
+
+    def _remove_deferred_unsubscribe(self, seq: int) -> None:
+        self._deferred_unsubscribe_ids = [
+            value for value in self._deferred_unsubscribe_ids if value != seq
+        ]
 
     def _submit_poll(
         self,
         function: Callable[[list[str]], dict[str, dict[str, Any]]],
         codes: list[str],
     ) -> Future[dict[str, dict[str, Any]]]:
-        if self._poll_executor is None:
-            raise RuntimeError("QMT executor is unavailable")
-        return self._poll_executor.submit(function, codes)
+        return _submit_daemon_call(
+            partial(function, codes),
+            thread_name="market-radar-qmt-poll",
+        )
+
+
+def _submit_daemon_call[T](
+    function: Callable[[], T],
+    *,
+    thread_name: str,
+) -> Future[T]:
+    future: Future[T] = Future()
+
+    def run() -> None:
+        if not future.set_running_or_notify_cancel():
+            return
+        try:
+            result = function()
+        except BaseException as exc:
+            future.set_exception(exc)
+        else:
+            future.set_result(result)
+
+    Thread(target=run, name=thread_name, daemon=True).start()
+    return future
 
 
 async def _wait_for_poll(future: Future[Any], timeout: float) -> Any:

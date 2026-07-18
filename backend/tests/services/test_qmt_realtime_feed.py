@@ -12,6 +12,7 @@ from typing import Any, Callable
 import pytest
 from pydantic import ValidationError
 
+import app.services.qmt_realtime_feed as realtime_feed_module
 from app.core.config import Settings
 from app.services.qmt_realtime_feed import QmtRealtimeFeed
 
@@ -163,6 +164,11 @@ async def await_manual_future(future: Future[Any], timeout: float) -> Any:
 async def timeout_immediately(future: Future[Any], timeout: float) -> Any:
     del future, timeout
     raise TimeoutError
+
+
+async def fail_poll_immediately(future: Future[Any], timeout: float) -> Any:
+    del future, timeout
+    raise RuntimeError("poll unavailable")
 
 
 async def shield_manual_future(future: Future[Any], timeout: float) -> Any:
@@ -508,15 +514,20 @@ async def test_resubscribe_after_sixty_seconds_requires_fresh_generation_tick() 
 @pytest.mark.asyncio
 async def test_failed_old_unsubscribe_does_not_create_duplicate_subscription() -> None:
     class UnsubscribeFailAdapter(FakeXtdataAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
         def unsubscribe_quote(self, seq: int) -> None:
             self.unsubscribe_calls.append(seq)
-            if seq == 1:
+            if seq == 1 and not self.failed:
+                self.failed = True
                 raise RuntimeError("unsubscribe failed")
 
     adapter = UnsubscribeFailAdapter()
     feed, adapter, clock, _submitter = make_feed(
         adapter=adapter,
-        poll_waiter=timeout_immediately,
+        poll_waiter=fail_poll_immediately,
     )
     await feed.start()
     await activate_push(adapter, clock)
@@ -528,6 +539,12 @@ async def test_failed_old_unsubscribe_does_not_create_duplicate_subscription() -
     assert feed.market_details["SH"]["reason"] == (
         "push unavailable: previous subscription cleanup failed"
     )
+
+    clock.advance(60)
+    await feed.run_health_cycle()
+
+    assert adapter.unsubscribe_calls.count(1) == 2
+    assert adapter.subscribe_calls.count(("SH",)) == 2
 
 
 @pytest.mark.asyncio
@@ -1041,6 +1058,277 @@ async def test_stop_disables_callbacks_then_unsubscribes_in_order_and_is_idempot
     assert feed.latest_ticks() == {}
     await feed.run_health_cycle()
     assert adapter.unsubscribe_calls == expected_ids
+
+
+@pytest.mark.asyncio
+async def test_old_same_day_push_and_poll_ticks_never_count_as_fresh() -> None:
+    old_quote_time = NOW - timedelta(minutes=30)
+    push_feed, push_adapter, push_clock, _submitter = make_feed()
+    await push_feed.start()
+    push_adapter.emit(
+        ("SH",),
+        "600000.SH",
+        raw_tick(push_clock, quote_time=old_quote_time),
+    )
+    push_adapter.emit(
+        ("SZ",),
+        "000001.SZ",
+        raw_tick(push_clock, quote_time=old_quote_time),
+    )
+    await asyncio.sleep(0)
+
+    assert set(push_feed.latest_ticks()) == {"600000.SH", "000001.SZ"}
+    assert push_feed.status.market_coverage["SH"] == 0.0
+    assert push_feed.status.market_coverage["SZ"] == 0.0
+    assert push_feed.status.mode != "push"
+
+    poll_feed, _adapter, poll_clock, poll_submitter = make_feed()
+    await poll_feed.start()
+    polling = asyncio.create_task(poll_feed.run_health_cycle())
+    await wait_for_poll_submission(poll_submitter)
+    poll_submitter.futures[-1].set_result(
+        {
+            "600000.SH": raw_tick(poll_clock, quote_time=old_quote_time),
+            "000001.SZ": raw_tick(poll_clock, quote_time=old_quote_time),
+        }
+    )
+    await polling
+
+    assert set(poll_feed.latest_ticks()) == {"600000.SH", "000001.SZ"}
+    assert poll_feed.status.market_coverage["SH"] == 0.0
+    assert poll_feed.status.market_coverage["SZ"] == 0.0
+    assert poll_feed.status.mode == "offline"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("source", "age_seconds", "expected_fresh"),
+    [
+        ("push", 5.0, True),
+        ("push", 5.001, False),
+        ("poll", 45.0, True),
+        ("poll", 45.001, False),
+    ],
+)
+async def test_quote_time_freshness_uses_exact_source_thresholds(
+    source: str,
+    age_seconds: float,
+    expected_fresh: bool,
+) -> None:
+    feed, adapter, clock, submitter = make_feed()
+    await feed.start()
+    quote_time = clock() - timedelta(seconds=age_seconds)
+    if source == "push":
+        adapter.emit(("SH",), "600000.SH", raw_tick(clock, quote_time=quote_time))
+        adapter.emit(("SZ",), "000001.SZ", raw_tick(clock, quote_time=quote_time))
+        await asyncio.sleep(0)
+    else:
+        health = asyncio.create_task(feed.run_health_cycle())
+        await wait_for_poll_submission(submitter)
+        submitter.futures[-1].set_result(
+            {
+                "600000.SH": raw_tick(clock, quote_time=quote_time),
+                "000001.SZ": raw_tick(clock, quote_time=quote_time),
+            }
+        )
+        await health
+
+    expected_coverage = 1.0 if expected_fresh else 0.0
+    assert feed.status.market_coverage["SH"] == expected_coverage
+    assert feed.status.market_coverage["SZ"] == expected_coverage
+
+
+@pytest.mark.asyncio
+async def test_first_health_after_session_reopens_resubscribes_and_polls() -> None:
+    session = {"open": True}
+    adapter = FakeXtdataAdapter()
+    clock = FakeClock()
+    submitter = ManualPollSubmitter()
+    feed = QmtRealtimeFeed(
+        adapter=adapter,
+        clock=clock,
+        universe_loader=lambda: ("600000.SH", "000001.SZ"),
+        blocking_call=immediate_blocking_call,
+        poll_submitter=submitter,
+        poll_waiter=await_manual_future,
+        market_session=lambda _now: session["open"],
+    )
+    await feed.start()
+    await activate_push(adapter, clock)
+    session["open"] = False
+    await feed.run_health_cycle()
+    assert feed.status.mode == "closed"
+
+    session["open"] = True
+    reopened = asyncio.create_task(feed.run_health_cycle())
+    await wait_for_poll_submission(submitter)
+
+    assert len(adapter.subscribe_calls) == 8
+    assert feed.status.mode == "polling_30s"
+    submitter.futures[-1].set_result({"600000.SH": raw_tick(clock)})
+    await reopened
+
+
+@pytest.mark.asyncio
+async def test_total_subscription_failure_retries_only_at_sixty_seconds() -> None:
+    adapter = FakeXtdataAdapter()
+    adapter.failed_groups.update({("SH",), ("SZ",), ("BJ",), CORE_INDICES})
+    feed, adapter, clock, _submitter = make_feed(
+        adapter=adapter,
+        poll_waiter=fail_poll_immediately,
+    )
+    await feed.start()
+    assert len(adapter.subscribe_calls) == 4
+
+    clock.advance(59.999)
+    await feed.run_health_cycle()
+    assert len(adapter.subscribe_calls) == 4
+
+    clock.advance(0.001)
+    await feed.run_health_cycle()
+    assert len(adapter.subscribe_calls) == 8
+
+
+@pytest.mark.asyncio
+async def test_running_timed_out_poll_blocks_sixty_second_control_retry() -> None:
+    feed, adapter, clock, submitter = make_feed(poll_waiter=timeout_immediately)
+    await feed.start()
+    await activate_push(adapter, clock)
+    clock.advance(6)
+    await feed.run_health_cycle()
+    assert len(submitter.futures) == 1
+    assert not submitter.futures[0].done()
+
+    clock.advance(54)
+    await feed.run_health_cycle()
+
+    assert len(adapter.subscribe_calls) == 4
+    assert len(submitter.futures) == 1
+    submitter.futures[0].set_result({"600000.SH": raw_tick(clock, price=99.0)})
+    await feed.run_health_cycle()
+    assert len(adapter.subscribe_calls) == 8
+    assert feed.latest_ticks()["600000.SH"].last_price != 99.0
+
+
+@pytest.mark.asyncio
+async def test_transient_universe_failure_reloads_at_sixty_seconds() -> None:
+    calls = 0
+
+    def load_universe() -> tuple[str, ...]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("temporary sqlite failure")
+        return ("600000.SH", "000001.SZ", "430001.BJ")
+
+    adapter = FakeXtdataAdapter()
+    clock = FakeClock()
+    feed = QmtRealtimeFeed(
+        adapter=adapter,
+        clock=clock,
+        universe_loader=load_universe,
+        blocking_call=immediate_blocking_call,
+        poll_submitter=ManualPollSubmitter(),
+        poll_waiter=fail_poll_immediately,
+        market_session=lambda _now: True,
+    )
+    await feed.start()
+    assert calls == 1
+    assert adapter.subscribe_calls == []
+
+    clock.advance(59.999)
+    await feed.run_health_cycle()
+    assert calls == 1
+    assert adapter.subscribe_calls == []
+
+    clock.advance(0.001)
+    await feed.run_health_cycle()
+    assert calls == 2
+    assert adapter.subscribe_calls == [("SH",), ("SZ",), ("BJ",), CORE_INDICES]
+
+
+@pytest.mark.asyncio
+async def test_universe_accepts_only_common_a_share_code_ranges() -> None:
+    universe = (
+        "600000.SH",
+        "688001.SH",
+        "000001.SZ",
+        "300001.SZ",
+        "430001.BJ",
+        "830001.BJ",
+        "920001.BJ",
+        "510300.SH",
+        "159915.SZ",
+        "113001.SH",
+        "123001.SZ",
+    )
+    feed, _adapter, _clock, submitter = make_feed(universe=universe)
+    await feed.start()
+    health = asyncio.create_task(feed.run_health_cycle())
+    await wait_for_poll_submission(submitter)
+
+    assert submitter.calls[-1] == (
+        *universe[:7],
+        *CORE_INDICES,
+    )
+    submitter.futures[-1].set_result({})
+    await health
+
+
+@pytest.mark.asyncio
+async def test_default_blocking_runners_create_only_daemon_threads(monkeypatch) -> None:
+    daemon_flags: list[bool | None] = []
+    real_thread = Thread
+
+    def recording_thread(*args, **kwargs):  # type: ignore[no-untyped-def]
+        daemon_flags.append(kwargs.get("daemon"))
+        return real_thread(*args, **kwargs)
+
+    monkeypatch.setattr(realtime_feed_module, "Thread", recording_thread, raising=False)
+
+    class EmptyPollAdapter(FakeXtdataAdapter):
+        def get_full_tick(self, codes: list[str]) -> dict[str, dict[str, Any]]:
+            self.full_tick_calls.append(tuple(codes))
+            return {}
+
+    adapter = EmptyPollAdapter()
+    feed = QmtRealtimeFeed(
+        adapter=adapter,
+        clock=FakeClock(),
+        universe_loader=lambda: ("600000.SH", "000001.SZ"),
+        market_session=lambda _now: True,
+    )
+
+    await feed.start()
+    await feed.run_health_cycle()
+    await feed.stop()
+
+    assert len(daemon_flags) >= 5
+    assert all(flag is True for flag in daemon_flags)
+
+
+@pytest.mark.asyncio
+async def test_stop_keeps_failed_unsubscribe_for_later_drain() -> None:
+    class FailOnceUnsubscribeAdapter(FakeXtdataAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed = False
+
+        def unsubscribe_quote(self, seq: int) -> None:
+            self.unsubscribe_calls.append(seq)
+            if seq == 1 and not self.failed:
+                self.failed = True
+                raise RuntimeError("temporary unsubscribe failure")
+
+    adapter = FailOnceUnsubscribeAdapter()
+    feed, adapter, _clock, _submitter = make_feed(adapter=adapter)
+    await feed.start()
+
+    await feed.stop()
+    await feed._drain_deferred_unsubscribes()
+
+    assert adapter.unsubscribe_calls == [1, 2, 3, 4, 1]
+    assert feed._deferred_unsubscribe_ids == []
 
 
 def test_market_radar_realtime_settings_have_defaults_and_positive_bounds() -> None:
