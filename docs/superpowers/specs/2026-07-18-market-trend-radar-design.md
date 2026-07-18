@@ -20,10 +20,14 @@
 
 ### 2.1 更新节奏
 
-- **盘中快照**：交易日 09:30-11:30、13:00-15:00 每 60 秒运行一次。只读取 QMT 实时行情、最近日线基线和已缓存舆情，计算轻量指标及规则命中。
+- **盘中实时**：交易日 09:30-11:30、13:00-15:00 优先订阅 QMT 全推行情。后端每 1 秒合并最新 tick，计算市场宽度、核心指数、关注池个股状态和规则命中，通过 SSE 最多每秒推送一次聚合结果。
+- **自动降级**：QMT 全推订阅无法建立或交易时段连续 5 秒没有有效行情时，切换为每 30 秒一次的 `get_full_tick` 批量轮询；降级期间每 60 秒探测并尝试恢复全推订阅。QMT 完全不可用时进入 `offline`，继续提供最近日终快照。
+- **持久化节流**：实时聚合只保留内存最新值；市场盘中快照每 30 秒写一次 SQLite，高严重度预警立即写入。原始 tick 不写 SQLite 或 Parquet。
 - **日终快照**：交易日 15:20 后运行。使用当天完整日线、涨跌停、行业、两融和舆情数据生成全量复盘。
 - **手动刷新**：页面允许请求一次异步重算；同频率任务有互斥锁，重复请求返回当前任务状态，不并发扫描同一数据集。
 - **休市时段**：返回最近一次有效快照，并明确标记“最近交易日”，不制造零值或伪实时数据。
+
+实时状态固定为 `push`、`polling_30s`、`offline`、`closed`。页面始终展示当前状态、最后行情时间、覆盖率和降级原因。
 
 ### 2.2 默认观察范围
 
@@ -159,8 +163,22 @@ ST、北交所和创业板/科创板保留在全 A 口径中，并在响应中�
 - `MarketRadarCalculator`：纯计算市场宽度、连板、拥挤度、行业和情绪温度；无数据库副作用。
 - `MarketAlertEngine`：对快照运行版本化规则、去重并维护事件生命周期。
 - `MarketRadarService`：编排计算、持久化、历史查询和 API 响应。
+- `QmtRealtimeFeed`：API 进程中的单例实时适配器，管理全推订阅、最新 tick 合并、断线检测、30 秒轮询降级和恢复。
+- `MarketRadarStreamBroker`：只发布聚合快照、预警和状态事件，不向浏览器发送全市场原始 tick。
 
 QMT 同步调用必须通过 `asyncio.get_running_loop().run_in_executor()` 或现有阻塞封装。DuckDB 全市场计算放在线程中执行，不阻塞 FastAPI 事件循环。
+
+`QmtRealtimeFeed` 使用本机 xtquant `250516.1.1` 已提供的 `xtdata.subscribe_whole_quote(["SH", "SZ", "BJ"], callback)`，并为 `000001.SH`、`399001.SZ`、`000985.SH` 建立一组独立代码订阅，避免市场全推不包含指数时产生静默缺口。回调运行在线程侧，只把 SQLite 当日有效 A 股的 `time`、最新价、昨收、开高低、成交额、成交量、状态和 1/5 分钟速度覆盖写入 latest-value map；五档盘口只保留关注池股票和距涨跌停 1% 以内的候选。回调通过 `loop.call_soon_threadsafe()` 唤醒聚合器；同一代码始终只保留最新一条，禁止无界 tick 队列。回调中禁止数据库、日志洪泛和复杂计算。
+
+订阅由唯一 owner 线程管理，并记录 `connection_generation`。`watch_quote_server_status()`、`watch_xtquant_status()` 或 tick 失联触发断线后，旧 generation 的迟到回调全部丢弃；清空旧订阅号，指数退避重连，连接恢复后重新建立全部期望订阅。进程退出时先停止接收，再串行调用 `unsubscribe_quote(seq)`，最后清空本地状态。北交所市场订阅若被当前 QMT 版本拒绝，只降级北交所为 30 秒轮询，沪深全推保持工作；响应通过 `market_coverage` 分别报告 SH/SZ/BJ 覆盖，不能把缺失北交所称为完整全 A。
+
+30 秒降级轮询不调用现有会逐代码读取 instrument detail 的 `QMTGateway.get_realtime_quotes()`。它直接对 SQLite 有效股票代码和三个核心指数执行一次 `xtdata.get_full_tick(codes)`，静态名称、行业、股本和涨跌停价从本地表关联。调用保持单 owner、20 秒超时且不重入；超时后的 SDK 线程未结束时跳过下一轮，避免累积不可终止的 detached 线程。
+
+实时覆盖率分母为 SQLite 当日有效上市且未标记停牌的股票；收到 tick 后再排除 QMT `stockStatus` 明确不可交易或最新价/昨收非法的合约。响应同时返回原始股票池、可交易股票、有效新鲜 tick 和被排除数量，避免停牌股导致错误降级。
+
+API 服务保持单 worker 部署，实时 feed 只在 API lifespan 中创建一次。同步服务不建立第二份 QMT 全推订阅；它只负责日终调度。
+
+默认配置为 `MARKET_RADAR_REALTIME_ENABLED=true`、`MARKET_RADAR_PUSH_STALE_SECONDS=5`、`MARKET_RADAR_POLL_INTERVAL_SECONDS=30`、`MARKET_RADAR_RESUBSCRIBE_SECONDS=60`。启动时只做能力探测；miniQMT 未启动或当前 xtquant 不支持全推时直接进入 `offline`/`polling_30s`，不阻塞 API 启动。
 
 ### 6.2 持久化模型
 
@@ -185,20 +203,22 @@ QMT 同步调用必须通过 `asyncio.get_running_loop().run_in_executor()` 或�
 - `POST /alerts/{id}/acknowledge`、`POST /alerts/{id}/dismiss`：更新事件状态。
 - `GET/POST/PATCH/DELETE /rules`：管理有限类型的个股规则。
 - `POST /refresh`：提交盘中或日终重算任务并返回任务 ID；不在请求内执行全市场计算。
+- `GET /stream`：SSE 实时通道，事件类型固定为 `mode`、`snapshot`、`alert`、`heartbeat`。连接建立时先发送当前 mode、最新快照和活跃高严重度预警，之后只发送变化。响应带 `Cache-Control: no-cache, no-transform`、`X-Accel-Buffering: no`；事件带单调 `id` 和 `retry: 5000`，alert 使用持久化事件 ID 去重。
 
 所有响应使用明确的 `as_of`、`computed_at`、`status`、`confidence` 和 `sources`，缺失数据返回结构化原因而不是空数组冒充零值。
 
 ### 6.4 调度
 
-计算任务运行在同步服务进程，使用独立的单 worker `market_radar` 队列和进程内互斥，避免同一频率重入。它只读行情数据并写自己的 SQLite 表，不写行情 Parquet，因此不破坏现有 `sync` FIFO 数据写入契约。
+日终计算任务运行在同步服务进程，使用独立的单 worker `market_radar` 队列和进程内互斥，避免同一频率重入。它只读行情数据并写自己的 SQLite 表，不写行情 Parquet，因此不破坏现有 `sync` FIFO 数据写入契约。
 
-日终任务在所需数据同步完成后执行；如果涨跌停或两融仍未更新，先保存 `partial` 快照并在数据补齐后重算同一 `as_of`。API 进程不启动第二份调度器。
+日终任务在所需数据同步完成后执行；如果涨跌停或两融仍未更新，先保存 `partial` 快照并在数据补齐后重算同一 `as_of`。API 进程不启动第二份调度器，只管理与自身生命周期一致的实时 feed 和 SSE 客户端。
 
 ## 7. 数据新鲜度与失败处理
 
 新鲜度按预期交易日而非自然日判断：
 
-- QMT 盘中行情：90 秒；覆盖率至少 80%。
+- QMT 全推行情：最近有效 tick 不超过 5 秒；全 A 覆盖率至少 80%。
+- QMT 轮询行情：最近成功批次不超过 45 秒；响应明确标记 `polling_30s`，不能显示为 push。
 - 日线：最近预期交易日。
 - 涨跌停/连板：必须等于目标交易日。
 - 两融：允许滞后 2 个预期交易日。
@@ -209,7 +229,9 @@ QMT 同步调用必须通过 `asyncio.get_running_loop().run_in_executor()` 或�
 
 ## 8. 前端状态与通知
 
-新增独立 API 客户端和 Pinia store。页面加载时先取 `overview`，再并行懒加载图表数据；盘中每 15 秒读取最新快照和活跃预警，不直接向 QMT 轮询。
+新增独立 API 客户端和 Pinia store。页面加载时先取 `overview`，再并行懒加载图表数据，并建立 `/api/market-radar/stream` 的 SSE 连接。SSE 只承载聚合结果，浏览器不直接向 QMT 轮询。
+
+SSE 收到 `snapshot` 后原位更新数字和图表末端，不重建整张图。后端每 15 秒发送 heartbeat。连接错误或连续 20 秒未收到 heartbeat 时，前端关闭 EventSource、显示“实时流断开”，并每 30 秒轮询 `overview` 和活跃预警；同时按 5、10、20、40、60 秒上限的退避节奏尝试恢复 SSE，成功后先拉一次 REST 快照补偿断线窗口，再停止 REST 轮询。页面隐藏时保留 SSE 但暂停图表重绘；重新可见时立即补拉一次快照。
 
 扩展现有通知 store，从后端拉取未读高严重度预警。任务通知和市场预警使用不同 ID 命名空间；市场事件的已读状态以后端为准，刷新页面不会恢复为未读。点击通知跳转到 `/market-radar?alert=<id>` 并定位证据详情。
 
@@ -225,10 +247,14 @@ QMT 同步调用必须通过 `asyncio.get_running_loop().run_in_executor()` 或�
 - 验证规则阈值、持仓/自选默认差异、去重、冷却、恶化通知和自动解除。
 - 验证三张表 migration upgrade/downgrade、API 参数校验和分页。
 - 验证 QMT 不可用、DuckDB 查询失败、舆情为空和休市日均返回明确降级状态。
+- 用 fake xtdata 验证全推订阅、latest-value 合并、连接 generation 隔离、迟到回调丢弃、5 秒失联判定、30 秒轮询降级、60 秒恢复探测、重订阅、取消订阅和单例启动。
+- 验证 SH/SZ/BJ 分市场覆盖率，北交所订阅失败只局部降级，债券/ETF 等非股票合约不会进入全 A 分布。
+- 验证高频回调不会逐 tick 写数据库，30 秒快照节流和高严重度预警立即持久化均生效。
 
 ### 前端
 
 - API/store 单测覆盖加载、轮询、未读同步和事件状态更新。
+- SSE 测试覆盖初始状态、1 Hz 合并更新、heartbeat、断线后 30 秒 REST 轮询、指数退避重连和恢复后停止轮询。
 - 组件测试覆盖图表数据转换、过期提示、空态、筛选和移动端表格折叠。
 - `npm run build`、前端测试和相关后端 pytest 必须通过。
 - 使用 Playwright 在 1440x900、1280x720、390x844 截图检查：无重叠、图表非空、文字不溢出、移动端可滚动、预警详情可操作。
@@ -237,14 +263,14 @@ QMT 同步调用必须通过 `asyncio.get_running_loop().run_in_executor()` 或�
 
 - 以最近 15 个有效交易日生成分布，并与直接 DuckDB 汇总抽样核对。
 - 明确显示当前已知过期的连板、两融、北向和指数归档数据，不显示为今天。
-- QMT 可用时生成盘中关注池预警；QMT 不可用时页面仍能查看最近日终快照。
+- QMT 可用时状态显示 `push`，聚合结果端到端更新延迟目标不超过 2 秒；人工断开 QMT 后 5 秒内显示降级并切换 `polling_30s`，QMT 完全不可用时页面仍能查看最近日终快照。
 - 不触发真实订单接口，不修改任何实盘开关。
 
 ## 10. 文档与发布
 
 - 更新 `README.md`、`docs/user-manual.md`、`docs/data-source-cheatsheet.md` 和前端信息架构文档。
 - 新增 `docs/market-radar.md`，记录指标口径、公式版本、新鲜度、预警规则、接口和排障。
-- 更新桌面启动/关闭脚本的健康检查说明，仅当新增独立常驻进程或端口时修改脚本；本设计复用同步服务，不新增端口。
+- 更新桌面启动/关闭脚本的健康检查说明和实时状态检查。实时 feed 复用 API 进程，不新增端口；miniQMT 仍是可选外部依赖，未启动时不得阻塞平台启动。
 - 发布时先执行 migration，再重启后端 API、同步服务和前端，最后做健康检查与页面 smoke test。
 
 ## 11. 实施约束
