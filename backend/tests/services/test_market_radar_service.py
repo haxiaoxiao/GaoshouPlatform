@@ -1569,6 +1569,19 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
             breakdowns=(market,),
             exclusion_counts=(),
             facts=(),
+            indices=(
+                SimpleNamespace(
+                    symbol="000001.SH",
+                    label="上证指数",
+                    trade_date=trade_day,
+                    previous_trade_date=trade_day - timedelta(days=1),
+                    close=3_030.0,
+                    previous_close=3_000.0,
+                    return_pct=1.0,
+                    status="fresh",
+                    reason=None,
+                ),
+            ),
         )
 
     daily = SimpleNamespace(
@@ -1628,6 +1641,17 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
     assert result.metrics["overview"]["emotion"]["label"] is None
     assert result.metrics["overview"]["emotion"]["formula_version"].endswith("reduced-v1")
     assert len(result.metrics["overview"]["emotion"]["components"]) == 4
+    assert result.metrics["breadth"]["days"][0]["indices"]["000001.SH"] == {
+        "symbol": "000001.SH",
+        "label": "上证指数",
+        "trade_date": "2026-07-16",
+        "previous_trade_date": "2026-07-15",
+        "close": 3030.0,
+        "previous_close": 3000.0,
+        "return_pct": 1.0,
+        "status": "fresh",
+        "reason": None,
+    }
     market = next(item for item in result.observations if item.subject == "ALL")
     assert market.metrics["crowding_score"].status == "fresh"
     assert market.metrics["emotion_score"].status == "partial"

@@ -1900,7 +1900,7 @@ class MarketRadarService:
                     "risk_level": _risk_level(market_metrics),
                 },
                 "breadth": serialized["daily"],
-                "indices": {},
+                "indices": _compact_indices(latest_slice),
                 "limit_ladder": serialized["limit_ladder"],
                 "crowding": {
                     "status": getattr(crowding, "status", "unavailable"),
@@ -2337,12 +2337,34 @@ def _compact_daily(daily: object) -> dict[str, Any]:
                 "exclusion_counts": [
                     list(value) for value in tuple(getattr(item, "exclusion_counts", ()) or ())
                 ],
+                "indices": _compact_indices(item),
             }
         )
     return {
         "status": getattr(daily, "status", "unavailable"),
         "expected_date": _iso_value(getattr(daily, "expected_date", None)),
         "days": days,
+    }
+
+
+def _compact_indices(value: object) -> dict[str, Any]:
+    return {
+        str(getattr(item, "symbol", "")): _named_attributes(
+            item,
+            (
+                "symbol",
+                "label",
+                "trade_date",
+                "previous_trade_date",
+                "close",
+                "previous_close",
+                "return_pct",
+                "status",
+                "reason",
+            ),
+        )
+        for item in tuple(getattr(value, "indices", ()) or ())
+        if getattr(item, "symbol", None)
     }
 
 

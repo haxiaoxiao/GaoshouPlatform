@@ -29,6 +29,11 @@ from app.services.market_radar_calculator import (
 )
 
 FreshnessStatus = Literal["fresh", "partial", "stale", "unavailable"]
+CORE_INDEX_LABELS = {
+    "000001.SH": "上证指数",
+    "399001.SZ": "深证成指",
+    "000985.SH": "中证全指",
+}
 _ALLOWED_DATASETS = frozenset(
     {"klines_daily", "tushare_limit_list_d", "tushare_limit_step", "tushare_margin"}
 )
@@ -97,6 +102,19 @@ class MarketBreakdown:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyIndexReturn:
+    symbol: str
+    label: str
+    trade_date: date
+    previous_trade_date: date | None
+    close: float | None
+    previous_close: float | None
+    return_pct: float | None
+    status: FreshnessStatus
+    reason: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DailyMarketSlice:
     trade_date: date
     previous_trade_date: date | None
@@ -104,6 +122,7 @@ class DailyMarketSlice:
     breadth: BreadthResult
     breakdowns: tuple[MarketBreakdown, ...]
     exclusion_counts: tuple[tuple[str, int], ...]
+    indices: tuple[DailyIndexReturn, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -323,9 +342,18 @@ class MarketRadarDataService:
         query_dates = sorted(set(calendar_dates[-(days + 1) :]) | set(requested_dates))
 
         frame = await self._load_daily_frame(query_dates)
-        source_date = _latest_date(frame, "trade_date")
         universe_by_symbol = {item.symbol: item for item in universe}
-        rows_by_key, conflicts = _normalize_daily_rows(frame, set(universe_by_symbol))
+        universe_symbols = set(universe_by_symbol)
+        stock_frame = (
+            frame.loc[frame["symbol"].astype(str).isin(universe_symbols)]
+            if not frame.empty and "symbol" in frame
+            else pd.DataFrame()
+        )
+        source_date = _latest_date(stock_frame, "trade_date")
+        rows_by_key, conflicts = _normalize_daily_rows(
+            frame,
+            universe_symbols | set(CORE_INDEX_LABELS),
+        )
         slices: list[DailyMarketSlice] = []
         for trade_day in requested_dates:
             prior_dates = [item for item in calendar_dates if item < trade_day]
@@ -369,6 +397,12 @@ class MarketRadarDataService:
                     exclusion_counts=tuple(sorted(Counter(
                         fact.exclusion_reason for fact in facts if fact.exclusion_reason
                     ).items())),
+                    indices=self._daily_index_returns(
+                        trade_day,
+                        previous_day,
+                        rows_by_key,
+                        conflicts,
+                    ),
                 )
             )
 
@@ -379,7 +413,7 @@ class MarketRadarDataService:
             source_date=source_date,
             coverage=coverage,
             minimum_coverage=0.8,
-            rows=len(frame.index),
+            rows=len(stock_frame.index),
         )
         source_freshness = SourceFreshness(
             source="klines_daily",
@@ -387,7 +421,7 @@ class MarketRadarDataService:
             expected_date=expected,
             source_date=source_date,
             lag_trading_days=_trading_lag(expected, source_date, calendar.trading_dates),
-            row_count=len(frame.index),
+            row_count=len(stock_frame.index),
             coverage=coverage,
             reason=source_reason,
         )
@@ -1285,6 +1319,53 @@ class MarketRadarDataService:
             [start, expected],
         )
         return history, source_date, row_count, error
+
+    @staticmethod
+    def _daily_index_returns(
+        trade_day: date,
+        previous_day: date | None,
+        rows: dict[tuple[str, date], dict[str, object]],
+        conflicts: set[tuple[str, date]],
+    ) -> tuple[DailyIndexReturn, ...]:
+        values: list[DailyIndexReturn] = []
+        for symbol, label in CORE_INDEX_LABELS.items():
+            current_key = (symbol, trade_day)
+            previous_key = (symbol, previous_day) if previous_day is not None else None
+            current = rows.get(current_key)
+            previous = rows.get(previous_key) if previous_key is not None else None
+            reason: str | None = None
+            if current_key in conflicts or (
+                previous_key is not None and previous_key in conflicts
+            ):
+                reason = "duplicate_conflict"
+            elif current is None:
+                reason = "missing_current"
+            elif previous is None:
+                reason = "missing_previous"
+            current_close = _positive(current.get("close")) if current else None
+            previous_close = _positive(previous.get("close")) if previous else None
+            if reason is None and (current_close is None or previous_close is None):
+                reason = "invalid_price"
+            values.append(
+                DailyIndexReturn(
+                    symbol=symbol,
+                    label=label,
+                    trade_date=trade_day,
+                    previous_trade_date=previous_day,
+                    close=current_close,
+                    previous_close=previous_close,
+                    return_pct=(
+                        (current_close / previous_close - 1.0) * 100.0
+                        if reason is None
+                        and current_close is not None
+                        and previous_close is not None
+                        else None
+                    ),
+                    status="fresh" if reason is None else "unavailable",
+                    reason=reason,
+                )
+            )
+        return tuple(values)
 
     @staticmethod
     def _daily_fact(

@@ -120,7 +120,12 @@ async def test_daily_market_uses_exact_previous_market_date_and_calculator_bins(
     returns = (-9.0, -7.0, -5.0, -3.0, -1.0, 0.0, 1.0, 3.0, 5.0, 7.0, 9.0)
     symbols = [f"6000{i:02d}.SH" for i in range(9)] + ["000001.SZ", "920001.BJ"]
     stocks = [_stock(symbol, is_st=1 if index == 1 else 0) for index, symbol in enumerate(symbols)]
-    stocks.append(_stock("000985.SH", security_type="index", product_class="index"))
+    stocks.extend(
+        [
+            _stock("000001.SH", security_type="index", product_class="index"),
+            _stock("000985.SH", security_type="index", product_class="index"),
+        ]
+    )
     stocks.extend(
         [
             _stock("510300.SH", security_type=None, product_class=None),
@@ -135,7 +140,18 @@ async def test_daily_market_uses_exact_previous_market_date_and_calculator_bins(
                 _bar(symbol, target, 100.0 + return_pct, amount=100.0 + return_pct),
             ]
         )
-    records.extend([_bar(symbols[0], target, 91.0, amount=91.0), _bar("000985.SH", target, 100.0)])
+    records.append(_bar(symbols[0], target, 91.0, amount=91.0))
+    for symbol, previous_close, current_close in (
+        ("000001.SH", 3_000.0, 3_030.0),
+        ("399001.SZ", 10_000.0, 9_900.0),
+        ("000985.SH", 5_000.0, 5_100.0),
+    ):
+        records.extend(
+            [
+                _bar(symbol, previous, previous_close),
+                _bar(symbol, target, current_close),
+            ]
+        )
     _write_dataset(tmp_path, "klines_daily", records)
     engine, sessions = await _database(tmp_path, stocks)
     try:
@@ -160,8 +176,80 @@ async def test_daily_market_uses_exact_previous_market_date_and_calculator_bins(
         assert all(item.exclusion_reason is None for item in current.facts)
         assert result.source_freshness.source_date == target
         assert result.source_freshness.expected_date == target
+        index_returns = {item.symbol: item for item in current.indices}
+        assert set(index_returns) == {"000001.SH", "399001.SZ", "000985.SH"}
+        assert index_returns["000001.SH"].return_pct == pytest.approx(1.0)
+        assert index_returns["399001.SZ"].return_pct == pytest.approx(-1.0)
+        assert index_returns["000985.SH"].return_pct == pytest.approx(2.0)
+        assert all(item.status == "fresh" for item in index_returns.values())
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_market_freshness_ignores_newer_core_index_rows(tmp_path):
+    previous = date(2026, 7, 17)
+    target = date(2026, 7, 20)
+    records = [
+        _bar("600001.SH", previous, 10.0),
+        _bar("000001.SH", previous, 3_000.0),
+        _bar("000001.SH", target, 3_030.0),
+    ]
+    _write_dataset(tmp_path, "klines_daily", records)
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar((previous, target)),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=target)
+
+        assert result.status == "stale"
+        assert result.source_freshness.status == "stale"
+        assert result.source_freshness.source_date == previous
+        assert result.source_freshness.row_count == 1
+        index = {item.symbol: item for item in result.slices[-1].indices}["000001.SH"]
+        assert index.status == "fresh"
+        assert index.return_pct == pytest.approx(1.0)
+    finally:
+        await engine.dispose()
+
+
+def test_daily_index_returns_keep_missing_invalid_and_conflict_gaps():
+    previous = date(2026, 7, 17)
+    target = date(2026, 7, 20)
+    rows = {
+        ("000001.SH", previous): _bar("000001.SH", previous, 3_000.0),
+        ("399001.SZ", target): _bar("399001.SZ", target, 10_000.0),
+        ("000985.SH", previous): _bar("000985.SH", previous, 0.0),
+        ("000985.SH", target): _bar("000985.SH", target, 5_000.0),
+    }
+
+    values = {
+        item.symbol: item
+        for item in MarketRadarDataService._daily_index_returns(
+            target,
+            previous,
+            rows,
+            set(),
+        )
+    }
+
+    assert values["000001.SH"].reason == "missing_current"
+    assert values["399001.SZ"].reason == "missing_previous"
+    assert values["000985.SH"].reason == "invalid_price"
+    assert all(item.return_pct is None for item in values.values())
+    conflicted = MarketRadarDataService._daily_index_returns(
+        target,
+        previous,
+        rows,
+        {("000001.SH", target)},
+    )
+    assert next(item for item in conflicted if item.symbol == "000001.SH").reason == (
+        "duplicate_conflict"
+    )
 
 
 @pytest.mark.asyncio
