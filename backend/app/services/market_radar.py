@@ -18,7 +18,7 @@ from typing import Any, Literal, cast
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models.market_radar import MarketAlertEvent, MarketAlertRule
+from app.db.models.market_radar import MarketAlertEvent, MarketAlertRule, MarketRadarSnapshot
 from app.db.models.watchlist import WatchlistStock
 from app.services.market_radar_calculator import (
     CROWDING_COMPONENT_WEIGHTS,
@@ -51,6 +51,13 @@ CORE_INDICES = frozenset({"000001.SH", "399001.SZ", "000985.SH"})
 _OPEN_EVENT_STATUSES = ("active", "acknowledged", "dismissed")
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
 _UNSAFE_SNAPSHOT_TERMS = ("tick", "quantity", "cost", "account", "position_size")
+_SYMBOL_CONTEXT_KEYS = (
+    "volume_ratio_20d",
+    "down_limit_price",
+    "up_limit_price",
+    "negative_heat_z20",
+    "weighted_sentiment",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +67,38 @@ class MetricValue:
     as_of: datetime
     source: str
     baseline: float | str | None = None
+    reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EligibleUniverse:
+    symbols: tuple[str, ...]
+    status: FreshnessStatus
+    as_of: datetime
+    source: str
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "symbols", tuple(dict.fromkeys(self.symbols)))
+
+
+@dataclass(frozen=True, slots=True)
+class IntradaySymbolContext:
+    metrics: Mapping[str, MetricValue]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+
+
+@dataclass(frozen=True, slots=True)
+class RadarHistoryContext:
+    limit_down_counts: tuple[float, ...] = ()
+    limit_down_median_5d: float | None = None
+    previous_emotion_score: float | None = None
+    previous_as_of: datetime | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "limit_down_counts", tuple(self.limit_down_counts))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1084,6 +1123,13 @@ class MarketRadarService:
         snapshot_builder: Callable[..., object] | None = None,
         eod_snapshot_builder: Callable[..., object] | None = None,
         focus_resolver: FocusUniverseResolver | None = None,
+        eligible_universe_loader: Callable[[], Awaitable[EligibleUniverse | Iterable[str]]]
+        | None = None,
+        symbol_context_loader: Callable[
+            [tuple[str, ...], Mapping[str, QuoteTick], datetime],
+            Awaitable[Mapping[str, IntradaySymbolContext]],
+        ]
+        | None = None,
         clock: Callable[[], datetime] = datetime.now,
         intraday_coalesce_seconds: float = 1.0,
         snapshot_persist_seconds: float = 30.0,
@@ -1095,9 +1141,25 @@ class MarketRadarService:
         self.store = store
         self.alert_engine = alert_engine or MarketAlertEngine()
         self.broker = broker or MarketRadarStreamBroker(clock=clock)
+        self._uses_default_snapshot_builder = snapshot_builder is None
+        self._uses_default_eod_builder = eod_snapshot_builder is None
         self._snapshot_builder = snapshot_builder or self._build_intraday_snapshot
         self._eod_snapshot_builder = eod_snapshot_builder or self._build_eod_snapshot
         self._focus_resolver = focus_resolver
+        if eligible_universe_loader is None or symbol_context_loader is None:
+            from app.services.market_radar_intraday_context import (
+                MarketRadarIntradayContextLoader,
+            )
+
+            default_context_loader = MarketRadarIntradayContextLoader(store.session, clock=clock)
+            eligible_universe_loader = (
+                eligible_universe_loader or default_context_loader.load_eligible_universe
+            )
+            symbol_context_loader = (
+                symbol_context_loader or default_context_loader.load_symbol_context
+            )
+        self._eligible_universe_loader = eligible_universe_loader
+        self._symbol_context_loader = symbol_context_loader
         self._clock = clock
         self._intraday_coalesce_seconds = intraday_coalesce_seconds
         self._snapshot_persist_seconds = snapshot_persist_seconds
@@ -1110,6 +1172,9 @@ class MarketRadarService:
         self._focus_cache: FocusUniverse | None = None
         self._focus_cached_at: datetime | None = None
         self._focus_cache_seconds = 30.0
+        self._eligible_cache: EligibleUniverse | None = None
+        self._eligible_cached_at: datetime | None = None
+        self._eligible_cache_seconds = 60.0
         self._loop_task: asyncio.Task[None] | None = None
         self._started = False
         self._last_loop_error: str | None = None
@@ -1125,12 +1190,24 @@ class MarketRadarService:
     def current_envelope(self) -> RadarSnapshotEnvelope | None:
         return self._current
 
+    @staticmethod
+    def project_snapshot(snapshot: RadarSnapshotEnvelope | None) -> dict[str, Any]:
+        if snapshot is None:
+            raise RadarSnapshotUnavailable("no market radar snapshot is available")
+        return snapshot.as_dict()
+
     async def start(self) -> None:
         if self._started:
             return
         start = getattr(self.feed, "start", None)
         if callable(start):
-            await _await_result(start())
+            try:
+                await _await_result(start())
+            except Exception:
+                stop = getattr(self.feed, "stop", None)
+                if callable(stop):
+                    await _await_result(stop())
+                raise
         try:
             await self.alert_engine.persist(
                 self.store,
@@ -1170,8 +1247,10 @@ class MarketRadarService:
             if callable(status):
                 status = status()
             initial.append(("mode", _feed_status_dict(status)))
+            if self._current is None:
+                self._current = await self._load_latest_snapshot()
             if self._current is not None:
-                initial.append(("snapshot", self._current.as_dict()))
+                initial.append(("snapshot", self.project_snapshot(self._current)))
             result = await self.store.session.execute(
                 select(MarketAlertEvent)
                 .where(
@@ -1216,16 +1295,22 @@ class MarketRadarService:
                     self._last_heartbeat_at = now
                 return snapshot
             focus = await self._resolve_focus(now)
+            eligible_universe = await self._resolve_eligible_universe(now)
+            symbol_context = await self._resolve_symbol_context(focus.symbols, ticks, now)
+            builder_kwargs: dict[str, Any] = {
+                "ticks": ticks,
+                "feed_status": feed_status,
+                "focus": focus,
+                "now": now,
+            }
+            if self._uses_default_snapshot_builder:
+                builder_kwargs.update(
+                    eligible_universe=eligible_universe,
+                    symbol_context=symbol_context,
+                )
             snapshot = cast(
                 RadarSnapshotEnvelope,
-                await _await_result(
-                    self._snapshot_builder(
-                        ticks=ticks,
-                        feed_status=feed_status,
-                        focus=focus,
-                        now=now,
-                    )
-                ),
+                await _await_result(self._snapshot_builder(**builder_kwargs)),
             )
             _validate_snapshot(snapshot)
             configured_rules = await self.alert_engine.load_rules(self.store)
@@ -1278,19 +1363,21 @@ class MarketRadarService:
         crowding = await self.data_service.load_crowding_inputs(target_date=target_date)
         sectors = await self.data_service.load_sector_inputs(target_date=target_date)
         sentiment = await self.data_service.load_sentiment_inputs(as_of=sentiment_as_of, mode="eod")
+        history = await self._load_history_context(target_date)
+        builder_kwargs: dict[str, Any] = {
+            "target_date": target_date,
+            "daily": daily,
+            "limit": limit,
+            "crowding": crowding,
+            "sectors": sectors,
+            "sentiment": sentiment,
+            "now": now,
+        }
+        if self._uses_default_eod_builder:
+            builder_kwargs["history"] = history
         snapshot = cast(
             RadarSnapshotEnvelope,
-            await _await_result(
-                self._eod_snapshot_builder(
-                    target_date=target_date,
-                    daily=daily,
-                    limit=limit,
-                    crowding=crowding,
-                    sectors=sectors,
-                    sentiment=sentiment,
-                    now=now,
-                )
-            ),
+            await _await_result(self._eod_snapshot_builder(**builder_kwargs)),
         )
         _validate_snapshot(snapshot)
         configured_rules = await self.alert_engine.load_rules(self.store)
@@ -1353,6 +1440,115 @@ class MarketRadarService:
         self._focus_cached_at = now
         return resolved
 
+    async def _resolve_eligible_universe(self, now: datetime) -> EligibleUniverse:
+        if (
+            self._eligible_cache is not None
+            and self._eligible_cached_at is not None
+            and (now - self._eligible_cached_at).total_seconds() < self._eligible_cache_seconds
+        ):
+            return self._eligible_cache
+        loader = self._eligible_universe_loader
+        if loader is None:
+            public_loader = getattr(self.feed, "eligible_symbols", None)
+            loader = public_loader if callable(public_loader) else None
+        if loader is None:
+            resolved = EligibleUniverse(
+                (),
+                "unavailable",
+                now,
+                "eligible_universe",
+                "eligible universe loader is not configured",
+            )
+        else:
+            try:
+                raw = await _await_result(loader())
+                if isinstance(raw, EligibleUniverse):
+                    resolved = raw
+                else:
+                    resolved = EligibleUniverse(
+                        _symbols(cast(Iterable[object], raw)),
+                        "fresh",
+                        now,
+                        "eligible_universe_loader",
+                    )
+            except Exception:
+                resolved = EligibleUniverse(
+                    (),
+                    "unavailable",
+                    now,
+                    "eligible_universe_loader",
+                    "eligible universe loading failed",
+                )
+        self._eligible_cache = resolved
+        self._eligible_cached_at = now
+        return resolved
+
+    async def _resolve_symbol_context(
+        self,
+        symbols: tuple[str, ...],
+        ticks: Mapping[str, QuoteTick],
+        now: datetime,
+    ) -> Mapping[str, IntradaySymbolContext]:
+        if not symbols or self._symbol_context_loader is None:
+            return MappingProxyType({})
+        try:
+            resolved = await self._symbol_context_loader(symbols, ticks, now)
+        except Exception:
+            return MappingProxyType(
+                {
+                    symbol: IntradaySymbolContext(
+                        metrics={
+                            key: MetricValue(
+                                None,
+                                "unavailable",
+                                now,
+                                "symbol_context_loader",
+                                reason="symbol enrichment loading failed",
+                            )
+                            for key in _SYMBOL_CONTEXT_KEYS
+                        }
+                    )
+                    for symbol in symbols
+                }
+            )
+        return MappingProxyType(dict(resolved))
+
+    async def _load_history_context(self, target_date: date) -> RadarHistoryContext:
+        target = datetime.combine(target_date, time.min)
+        result = await self.store.session.execute(
+            select(MarketRadarSnapshot)
+            .where(
+                MarketRadarSnapshot.snapshot_type == "eod",
+                MarketRadarSnapshot.formula_version == DEFAULT_FORMULA_VERSION,
+                MarketRadarSnapshot.as_of < target,
+            )
+            .order_by(MarketRadarSnapshot.as_of.desc(), MarketRadarSnapshot.id.desc())
+            .limit(5)
+        )
+        rows = tuple(result.scalars())
+        counts: list[float] = []
+        previous_emotion: float | None = None
+        previous_as_of: datetime | None = None
+        for index, row in enumerate(rows):
+            metrics = load_json_object(row.metrics_json, field_name="metrics_json")
+            limit_status = _nested_value(metrics, "limit_ladder", "status")
+            count = _nested_number(metrics, "limit_ladder", "down_count")
+            if limit_status == "fresh" and count is not None:
+                counts.append(count)
+            if index == 0:
+                emotion_status = _nested_value(metrics, "overview", "emotion", "status")
+                value = _nested_number(metrics, "overview", "emotion", "value")
+                if emotion_status == "fresh" and value is not None:
+                    previous_emotion = value
+                    previous_as_of = row.as_of
+        baseline = float(median(counts)) if len(counts) == 5 else None
+        return RadarHistoryContext(
+            limit_down_counts=tuple(counts),
+            limit_down_median_5d=baseline,
+            previous_emotion_score=previous_emotion,
+            previous_as_of=previous_as_of,
+        )
+
     async def _load_latest_snapshot(self) -> RadarSnapshotEnvelope | None:
         row = await self.store.get_latest_snapshot()
         if row is None:
@@ -1377,54 +1573,92 @@ class MarketRadarService:
         ticks: Mapping[str, QuoteTick],
         feed_status: object,
         focus: FocusUniverse,
+        eligible_universe: EligibleUniverse | None = None,
+        symbol_context: Mapping[str, IntradaySymbolContext] | None = None,
         now: datetime,
     ) -> RadarSnapshotEnvelope:
-        equity_ticks = {
-            symbol: tick for symbol, tick in ticks.items() if symbol not in CORE_INDICES
-        }
-        breadth = calculate_breadth(equity_ticks, equity_ticks, now=now)
-        freshness: FreshnessStatus = cast(FreshnessStatus, breadth.status)
-        returns = [
-            (tick.last_price / tick.previous_close - 1) * 100
-            for tick in equity_ticks.values()
-            if tick.last_price > 0
-            and tick.previous_close > 0
-            and 0 <= (now - tick.quote_time).total_seconds() <= 5
-            and tick.stock_status != 1
+        mode = str(getattr(feed_status, "mode", "offline"))
+        max_age = _quote_max_age(mode)
+        universe = eligible_universe or EligibleUniverse(
+            (),
+            "unavailable",
+            now,
+            "eligible_universe",
+            "eligible universe is unavailable",
+        )
+        contexts = symbol_context or {}
+        breadth = calculate_breadth(
+            ticks,
+            universe.symbols,
+            now=now,
+            max_age_seconds=max_age,
+        )
+        if mode not in {"push", "polling_30s"}:
+            freshness = "unavailable"
+        elif universe.status == "unavailable":
+            freshness: FreshnessStatus = "unavailable"
+        elif universe.status != "fresh" and breadth.status == "fresh":
+            freshness = "partial"
+        else:
+            freshness = cast(FreshnessStatus, breadth.status)
+        valid_equity_ticks = [
+            ticks[symbol]
+            for symbol in universe.symbols
+            if symbol in ticks and _valid_realtime_tick(ticks[symbol], now, max_age)
         ]
+        returns = [(tick.last_price / tick.previous_close - 1) * 100 for tick in valid_equity_ticks]
+        market_as_of = max(
+            (tick.quote_time for tick in valid_equity_ticks),
+            default=now,
+        )
         market_metrics = {
             "median_return_pct": MetricValue(
                 median(returns) if returns else None,
                 freshness,
-                now,
+                market_as_of,
                 "qmt_realtime",
+                reason=None if freshness == "fresh" else "full-market coverage is incomplete",
             ),
             "decline_ratio": MetricValue(
                 sum(value < 0 for value in returns) / len(returns) if returns else None,
                 freshness,
-                now,
+                market_as_of,
                 "qmt_realtime",
+                reason=None if freshness == "fresh" else "full-market coverage is incomplete",
             ),
         }
         observations: list[RadarObservation] = [RadarObservation("market", "ALL", market_metrics)]
         indices: dict[str, Any] = {}
         for symbol in sorted(CORE_INDICES):
             tick = ticks.get(symbol)
-            status: FreshnessStatus = "fresh" if tick is not None else "unavailable"
+            valid = tick is not None and _valid_realtime_tick(tick, now, max_age)
+            status: FreshnessStatus = "fresh" if valid else "unavailable"
+            quote_time = tick.quote_time if tick is not None else now
+            reason = None if valid else "index quote is missing, stale, or invalid"
             index_metrics = {
                 "return_pct": MetricValue(
                     (tick.last_price / tick.previous_close - 1) * 100
-                    if tick is not None and tick.previous_close > 0
+                    if valid and tick is not None
                     else None,
                     status,
-                    tick.quote_time if tick is not None else now,
+                    quote_time,
                     "qmt_realtime",
+                    reason=reason,
                 ),
                 "return_5m_pct": MetricValue(
-                    tick.speed_5m if tick is not None else None,
-                    status if tick is not None and tick.speed_5m is not None else "unavailable",
-                    tick.quote_time if tick is not None else now,
+                    tick.speed_5m
+                    if valid and tick is not None and _finite_or_none(tick.speed_5m) is not None
+                    else None,
+                    "fresh"
+                    if valid and tick is not None and _finite_or_none(tick.speed_5m) is not None
+                    else "unavailable",
+                    quote_time,
                     "qmt_realtime",
+                    reason=(
+                        None
+                        if valid and tick is not None and _finite_or_none(tick.speed_5m) is not None
+                        else "five-minute index return is unavailable"
+                    ),
                 ),
             }
             observations.append(RadarObservation("market", symbol, index_metrics))
@@ -1433,38 +1667,188 @@ class MarketRadarService:
                     "value": value.value,
                     "status": value.status,
                     "as_of": value.as_of.isoformat(),
+                    "reason": value.reason,
                 }
                 for key, value in index_metrics.items()
             }
+        focus_metric_status: dict[str, dict[str, Any]] = {}
         for symbol in focus.symbols:
             tick = ticks.get(symbol)
-            status = "fresh" if tick is not None else "unavailable"
+            valid = tick is not None and _valid_realtime_tick(tick, now, max_age)
+            tick_status: FreshnessStatus = "fresh" if valid else "unavailable"
+            quote_time = tick.quote_time if tick is not None else now
+            context = contexts.get(symbol)
+            volume_ratio = _context_metric(
+                context,
+                "volume_ratio_20d",
+                now,
+                reason="symbol enrichment unavailable",
+            )
+            negative_heat = _context_metric(
+                context,
+                "negative_heat_z20",
+                now,
+                reason="symbol enrichment unavailable",
+            )
+            weighted_sentiment = _context_metric(
+                context,
+                "weighted_sentiment",
+                now,
+                reason="symbol enrichment unavailable",
+            )
+            down_limit = _context_metric(
+                context,
+                "down_limit_price",
+                now,
+                reason="exact down-limit price is unavailable",
+            )
+            up_limit = _context_metric(
+                context,
+                "up_limit_price",
+                now,
+                reason="exact up-limit price is unavailable",
+            )
+            down_limit_value = _finite_or_none(down_limit.value)
+            up_limit_value = _finite_or_none(up_limit.value)
+            down_distance = MetricValue(
+                (
+                    (tick.last_price - down_limit_value) / down_limit_value * 100
+                    if valid
+                    and tick is not None
+                    and down_limit.status == "fresh"
+                    and down_limit_value is not None
+                    and down_limit_value > 0
+                    else None
+                ),
+                (
+                    "fresh"
+                    if valid
+                    and down_limit.status == "fresh"
+                    and down_limit_value is not None
+                    and down_limit_value > 0
+                    else "unavailable"
+                ),
+                quote_time,
+                down_limit.source,
+                baseline=down_limit_value,
+                reason=(
+                    None
+                    if valid
+                    and down_limit.status == "fresh"
+                    and down_limit_value is not None
+                    and down_limit_value > 0
+                    else down_limit.reason or "exact down-limit price or fresh quote is unavailable"
+                ),
+            )
+            broken = MetricValue(
+                (
+                    bool(
+                        tick.high_price is not None
+                        and tick.high_price >= up_limit_value - 1e-4
+                        and tick.last_price < up_limit_value - 1e-4
+                    )
+                    if valid
+                    and tick is not None
+                    and up_limit.status == "fresh"
+                    and up_limit_value is not None
+                    and up_limit_value > 0
+                    and _finite_or_none(tick.high_price) is not None
+                    else None
+                ),
+                (
+                    "fresh"
+                    if valid
+                    and up_limit.status == "fresh"
+                    and up_limit_value is not None
+                    and up_limit_value > 0
+                    and tick is not None
+                    and _finite_or_none(tick.high_price) is not None
+                    else "unavailable"
+                ),
+                quote_time,
+                up_limit.source,
+                baseline=up_limit_value,
+                reason=(
+                    None
+                    if valid
+                    and up_limit.status == "fresh"
+                    and up_limit_value is not None
+                    and up_limit_value > 0
+                    and tick is not None
+                    and _finite_or_none(tick.high_price) is not None
+                    else up_limit.reason
+                    or "exact up-limit price or fresh high price is unavailable"
+                ),
+            )
+            symbol_metrics = {
+                "return_pct": MetricValue(
+                    (tick.last_price / tick.previous_close - 1) * 100
+                    if valid and tick is not None
+                    else None,
+                    tick_status,
+                    quote_time,
+                    "qmt_realtime",
+                    reason=None if valid else "symbol quote is missing, stale, or invalid",
+                ),
+                "drawdown_pct": MetricValue(
+                    (tick.high_price - tick.last_price) / tick.high_price * 100
+                    if valid
+                    and tick is not None
+                    and _finite_or_none(tick.high_price) is not None
+                    and cast(float, tick.high_price) > 0
+                    else None,
+                    (
+                        "fresh"
+                        if valid
+                        and tick is not None
+                        and _finite_or_none(tick.high_price) is not None
+                        and cast(float, tick.high_price) > 0
+                        else "unavailable"
+                    ),
+                    quote_time,
+                    "qmt_realtime",
+                    reason=(
+                        None
+                        if valid
+                        and tick is not None
+                        and _finite_or_none(tick.high_price) is not None
+                        and cast(float, tick.high_price) > 0
+                        else "fresh intraday high is unavailable"
+                    ),
+                ),
+                "volume_ratio_20d": volume_ratio,
+                "down_limit_distance_pct": down_distance,
+                "limit_up_broken": broken,
+                "negative_heat_z20": negative_heat,
+                "weighted_sentiment": weighted_sentiment,
+            }
             observations.append(
                 RadarObservation(
                     "symbol",
                     symbol,
-                    {
-                        "return_pct": MetricValue(
-                            (tick.last_price / tick.previous_close - 1) * 100
-                            if tick is not None and tick.previous_close > 0
-                            else None,
-                            status,
-                            tick.quote_time if tick is not None else now,
-                            "qmt_realtime",
-                        ),
-                        "drawdown_pct": MetricValue(
-                            (tick.high_price - tick.last_price) / tick.high_price * 100
-                            if tick is not None and tick.high_price and tick.high_price > 0
-                            else None,
-                            status if tick is not None and tick.high_price else "unavailable",
-                            tick.quote_time if tick is not None else now,
-                            "qmt_realtime",
-                        ),
-                    },
+                    symbol_metrics,
                     sources=focus.sources.get(symbol, ()),
                 )
             )
-        mode = str(getattr(feed_status, "mode", "offline"))
+            focus_metric_status[symbol] = {
+                key: {
+                    "value": metric.value,
+                    "status": metric.status,
+                    "as_of": metric.as_of.isoformat(),
+                    "source": metric.source,
+                    "reason": metric.reason,
+                }
+                for key, metric in symbol_metrics.items()
+            }
+        breadth_payload = serialize_breadth_result(breadth)
+        breadth_payload["status"] = freshness
+        breadth_payload["universe"] = {
+            "status": universe.status,
+            "as_of": universe.as_of.isoformat(),
+            "source": universe.source,
+            "reason": universe.reason,
+            "eligible": len(universe.symbols),
+        }
         metrics = {
             "overview": {
                 "mode": mode,
@@ -1472,20 +1856,24 @@ class MarketRadarService:
                 "decline_ratio": market_metrics["decline_ratio"].value,
                 "status": freshness,
             },
-            "breadth": serialize_breadth_result(breadth),
+            "breadth": breadth_payload,
             "indices": indices,
             "limit_ladder": {"status": "unavailable", "reason": "intraday source not loaded"},
             "crowding": {"status": "unavailable", "reason": "daily baseline not loaded"},
             "sectors": {"status": "unavailable", "items": []},
             "sentiment": {"status": "unavailable", "reason": "intraday source not loaded"},
-            "focus": focus.as_dict(),
+            "focus": {**focus.as_dict(), "metric_status": focus_metric_status},
         }
         return RadarSnapshotEnvelope(
             snapshot_type="intraday",
             as_of=now,
             computed_at=now,
             status=freshness,
-            confidence=breadth.coverage.coverage,
+            confidence=(
+                breadth.coverage.coverage
+                if mode in {"push", "polling_30s"} and universe.status != "unavailable"
+                else 0.0
+            ),
             formula_version=DEFAULT_FORMULA_VERSION,
             metrics=metrics,
             source_freshness={
@@ -1499,7 +1887,14 @@ class MarketRadarService:
                     ),
                     "coverage": dict(getattr(feed_status, "market_coverage", {})),
                     "reason": getattr(feed_status, "reason", None),
-                }
+                },
+                "eligible_universe": {
+                    "status": universe.status,
+                    "as_of": universe.as_of.isoformat(),
+                    "source": universe.source,
+                    "reason": universe.reason,
+                    "row_count": len(universe.symbols),
+                },
             },
             observations=tuple(observations),
         )
@@ -1513,8 +1908,10 @@ class MarketRadarService:
         crowding: object,
         sectors: object,
         sentiment: object,
+        history: RadarHistoryContext | None = None,
         now: datetime,
     ) -> RadarSnapshotEnvelope:
+        historical = history or RadarHistoryContext()
         inputs = {
             "daily": daily,
             "limit_ladder": limit,
@@ -1527,6 +1924,8 @@ class MarketRadarService:
             for value in inputs.values()
         ]
         overall = _combined_status(statuses)
+        if overall == "fresh":
+            overall = "partial"
         observations: list[RadarObservation] = []
         market_metrics: dict[str, MetricValue] = {}
         slices = tuple(getattr(daily, "slices", ()) or ())
@@ -1562,6 +1961,22 @@ class MarketRadarService:
                 market_metrics["limit_down_count"] = MetricValue(
                     getattr(limit, "down_count", None), limit_status, now, "tushare_limit_list_d"
                 )
+                market_metrics["limit_down_median_5d"] = MetricValue(
+                    historical.limit_down_median_5d,
+                    "fresh"
+                    if historical.limit_down_median_5d is not None
+                    and len(historical.limit_down_counts) == 5
+                    else "unavailable",
+                    historical.previous_as_of or now,
+                    "market_radar_eod_history",
+                    baseline="previous_5_eod_snapshots",
+                    reason=(
+                        None
+                        if historical.limit_down_median_5d is not None
+                        and len(historical.limit_down_counts) == 5
+                        else "five fresh prior limit-down counts are unavailable"
+                    ),
+                )
         crowding_score = _crowding_score(crowding)
         emotion_score = _emotion_score(
             daily=daily,
@@ -1586,20 +2001,19 @@ class MarketRadarService:
             emotion_score.value,
             emotion_status,
             now,
-            "market_radar_emotion_v1",
+            "market_radar_emotion_reduced_v1",
             emotion_score.formula_version,
+            reason="limit-ladder history and several v1 subcomponents are unavailable",
         )
-        previous_emotion = _nested_number(
-            self._current.metrics if self._current is not None else {},
-            "overview",
-            "emotion",
-            "value",
-        )
+        previous_emotion = historical.previous_emotion_score
         market_metrics["previous_emotion_score"] = MetricValue(
             previous_emotion,
             "fresh" if previous_emotion is not None else "unavailable",
-            self._current.as_of if self._current is not None else now,
-            "previous_market_radar_snapshot",
+            historical.previous_as_of or now,
+            "previous_eod_market_radar_snapshot",
+            reason=None
+            if previous_emotion is not None
+            else "previous fresh EOD emotion is unavailable",
         )
         if market_metrics:
             observations.append(RadarObservation("market", "ALL", market_metrics))
@@ -1629,6 +2043,18 @@ class MarketRadarService:
                             else "unavailable",
                             now,
                             "klines_daily_sector_inputs",
+                        ),
+                        "crowding_score": MetricValue(
+                            crowding_score.value,
+                            "fresh" if crowding_score.status == "fresh" else "unavailable",
+                            now,
+                            "market_radar_crowding_v1",
+                            baseline=crowding_score.formula_version,
+                            reason=(
+                                None
+                                if crowding_score.status == "fresh"
+                                else "market crowding score is insufficient"
+                            ),
                         ),
                     },
                 )
@@ -1928,7 +2354,7 @@ def _emotion_score(
             ),
         ),
     }
-    return composite_score(raw.values(), formula_version="market-radar-emotion-v1")
+    return composite_score(raw.values(), formula_version="market-radar-emotion-reduced-v1")
 
 
 def _all_market_breakdown(item: object) -> object | None:
@@ -1943,11 +2369,48 @@ def _all_market_breakdown(item: object) -> object | None:
 
 
 def _finite_or_none(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
     try:
         numeric = float(value)
     except (TypeError, ValueError, OverflowError):
         return None
     return numeric if math.isfinite(numeric) else None
+
+
+def _quote_max_age(mode: str) -> float:
+    if mode == "push":
+        return 5.0
+    if mode == "polling_30s":
+        return 45.0
+    return 0.0
+
+
+def _valid_realtime_tick(tick: QuoteTick, now: datetime, max_age_seconds: float) -> bool:
+    if max_age_seconds <= 0 or tick.stock_status == 1:
+        return False
+    age = (now - tick.quote_time).total_seconds()
+    return (
+        0 <= age <= max_age_seconds
+        and (last := _finite_or_none(tick.last_price)) is not None
+        and last > 0
+        and (previous := _finite_or_none(tick.previous_close)) is not None
+        and previous > 0
+    )
+
+
+def _context_metric(
+    context: IntradaySymbolContext | None,
+    key: str,
+    now: datetime,
+    *,
+    reason: str,
+) -> MetricValue:
+    if context is not None:
+        value = context.metrics.get(key)
+        if value is not None:
+            return value
+    return MetricValue(None, "unavailable", now, "symbol_enrichment", reason=reason)
 
 
 def _nested_number(value: Mapping[str, Any], *keys: str) -> float | None:
@@ -1957,6 +2420,15 @@ def _nested_number(value: Mapping[str, Any], *keys: str) -> float | None:
             return None
         current = current.get(key)
     return _finite_or_none(current)
+
+
+def _nested_value(value: Mapping[str, Any], *keys: str) -> object | None:
+    current: object = value
+    for key in keys:
+        if not isinstance(current, Mapping):
+            return None
+        current = current.get(key)
+    return current
 
 
 def _risk_level(metrics: Mapping[str, MetricValue]) -> str:

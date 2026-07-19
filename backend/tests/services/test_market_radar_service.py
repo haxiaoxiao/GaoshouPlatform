@@ -7,28 +7,35 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+import pandas as pd
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
 from app.db.models.market_radar import MarketAlertEvent
+from app.db.models.sentiment import SentimentAnalysis
+from app.db.models.stock import Stock
 from app.services.market_radar import (
     DEFAULT_RULE_VERSION,
     BrokerDisconnected,
+    EligibleUniverse,
     FocusUniverse,
     FocusUniverseResolver,
+    IntradaySymbolContext,
     MarketAlertEngine,
     MarketRadarService,
     MarketRadarStreamBroker,
     MetricValue,
+    RadarHistoryContext,
     RadarObservation,
     RadarSnapshotEnvelope,
     RuleDefinition,
 )
 from app.services.market_radar_calculator import QuoteTick
 from app.services.market_radar_data import RawComponent, SourceFreshness
+from app.services.market_radar_intraday_context import MarketRadarIntradayContextLoader
 from app.services.market_radar_store import MarketRadarStore
 from app.services.qmt_realtime_feed import RealtimeFeedStatus
 
@@ -924,6 +931,56 @@ async def test_service_propagates_status_and_publishes_mode_changes(radar_sessio
     assert (await subscriber.get()).event == "mode"
 
 
+@pytest.mark.asyncio
+async def test_initial_subscription_loads_persisted_snapshot_before_atomic_alerts(radar_session):
+    store = MarketRadarStore(radar_session)
+    await store.upsert_snapshot(
+        snapshot_type="eod",
+        as_of=datetime(2026, 7, 17, 15, 20),
+        computed_at=datetime(2026, 7, 17, 15, 21),
+        status="fresh",
+        confidence=1,
+        formula_version="market-radar-v1",
+        metrics={"overview": {"status": "fresh"}},
+        source_freshness={"daily": {"status": "fresh"}},
+    )
+    rule = await store.upsert_rule(
+        rule_key="initial_high",
+        version=1,
+        scope="market",
+        subject="*",
+        rule_type="metric_threshold",
+        parameters={"metric": "x", "operator": "lte", "threshold": 0},
+        severity="high",
+        cooldown_seconds=900,
+        enabled=True,
+        source="user",
+    )
+    await store.record_event_hit(
+        rule_id=rule.id,
+        snapshot_id=None,
+        scope="market",
+        subject="ALL",
+        direction="down",
+        severity="high",
+        title="初始高风险",
+        explanation="证据",
+        dedupe_key="initial-high",
+        evidence={"value": -1},
+        seen_at=NOW,
+    )
+    await radar_session.commit()
+
+    service = MarketRadarService(
+        feed=FakeFeed(), data_service=SimpleNamespace(), store=store, clock=FakeClock()
+    )
+    subscription = await service.subscribe_with_initial()
+    events = [await subscription.get() for _ in range(3)]
+    assert [event.event for event in events] == ["mode", "snapshot", "alert"]
+    assert events[1].data == service.project_snapshot(service.current_envelope())
+    assert [event.sequence for event in events] == sorted(event.sequence for event in events)
+
+
 class FakeEodData:
     def __init__(self):
         self.calls: list[str] = []
@@ -1089,11 +1146,275 @@ def test_default_intraday_builder_excludes_core_indices_from_all_a_breadth(radar
         ticks=ticks,
         feed_status=FakeFeed().status,
         focus=FocusUniverse((), (), (), (), {}, ()),
+        eligible_universe=EligibleUniverse(("600000.SH",), "fresh", NOW, "sqlite_stocks"),
+        symbol_context={},
         now=NOW,
     )
     assert result.metrics["breadth"]["coverage"]["requested"] == 1
     market = next(item for item in result.observations if item.subject == "ALL")
     assert market.metrics["median_return_pct"].value == pytest.approx(-10)
+
+
+@pytest.mark.asyncio
+async def test_intraday_uses_full_eligible_universe_and_gates_partial_market_rules(
+    radar_session,
+):
+    feed = FakeFeed()
+    feed._ticks["600000.SH"] = QuoteTick("600000.SH", NOW, 9.0, 10.0)
+
+    async def eligible():
+        return EligibleUniverse(
+            symbols=("600000.SH", "000001.SZ"),
+            status="fresh",
+            as_of=NOW,
+            source="sqlite_stocks",
+        )
+
+    service = MarketRadarService(
+        feed=feed,
+        data_service=SimpleNamespace(),
+        store=MarketRadarStore(radar_session),
+        eligible_universe_loader=eligible,
+        clock=FakeClock(),
+    )
+    result = await service.refresh_intraday()
+    assert result.metrics["breadth"]["coverage"]["requested"] == 2
+    assert result.metrics["breadth"]["coverage"]["valid"] == 1
+    assert result.status == "partial"
+    market = next(item for item in result.observations if item.subject == "ALL")
+    assert market.metrics["median_return_pct"].value == pytest.approx(-10)
+    assert market.metrics["median_return_pct"].status == "partial"
+    assert await event_rows(radar_session) == []
+
+
+def test_realtime_tick_validation_uses_push_five_seconds_and_polling_forty_five_seconds(
+    radar_session,
+):
+    service = MarketRadarService(
+        feed=FakeFeed(), data_service=SimpleNamespace(), store=MarketRadarStore(radar_session)
+    )
+    focus = FocusUniverse(
+        holdings=("600000.SH",),
+        watchlist=(),
+        focus=("600000.SH",),
+        symbols=("600000.SH",),
+        sources={"600000.SH": ("qmt_holding",)},
+    )
+    eligible = EligibleUniverse(("600000.SH",), "fresh", NOW, "sqlite_stocks")
+    stale_for_push = QuoteTick("600000.SH", NOW - timedelta(seconds=6), 9.0, 10.0, high_price=10.0)
+    index = QuoteTick("000001.SH", NOW - timedelta(seconds=6), 90.0, 100.0)
+
+    push = service._build_intraday_snapshot(
+        ticks={"600000.SH": stale_for_push, "000001.SH": index},
+        feed_status=FakeFeed().status,
+        focus=focus,
+        eligible_universe=eligible,
+        symbol_context={},
+        now=NOW,
+    )
+    market = next(item for item in push.observations if item.subject == "ALL")
+    symbol = next(item for item in push.observations if item.subject == "600000.SH")
+    core = next(item for item in push.observations if item.subject == "000001.SH")
+    assert market.metrics["median_return_pct"].status == "partial"
+    assert symbol.metrics["return_pct"].status == "unavailable"
+    assert core.metrics["return_pct"].status == "unavailable"
+
+    poll_status = RealtimeFeedStatus(
+        mode="polling_30s",
+        changed_at=NOW,
+        last_quote_at=NOW - timedelta(seconds=6),
+        connection_generation=1,
+        reason="push stale",
+        market_coverage={"SH": 1, "SZ": 1, "BJ": 1, "INDEX": 1},
+    )
+    polling = service._build_intraday_snapshot(
+        ticks={"600000.SH": stale_for_push, "000001.SH": index},
+        feed_status=poll_status,
+        focus=focus,
+        eligible_universe=eligible,
+        symbol_context={},
+        now=NOW,
+    )
+    polled_symbol = next(item for item in polling.observations if item.subject == "600000.SH")
+    assert polling.status == "fresh"
+    assert polled_symbol.metrics["return_pct"].status == "fresh"
+
+    offline_status = RealtimeFeedStatus(
+        mode="offline",
+        changed_at=NOW,
+        last_quote_at=NOW,
+        connection_generation=1,
+        reason="QMT unavailable",
+        market_coverage={"SH": 1, "SZ": 1, "BJ": 1, "INDEX": 1},
+    )
+    offline = service._build_intraday_snapshot(
+        ticks={"600000.SH": QuoteTick("600000.SH", NOW, 9, 10)},
+        feed_status=offline_status,
+        focus=focus,
+        eligible_universe=eligible,
+        symbol_context={},
+        now=NOW,
+    )
+    assert offline.status == "unavailable"
+
+
+def test_intraday_enrichment_activates_holding_limit_volume_and_sentiment_rules(radar_session):
+    service = MarketRadarService(
+        feed=FakeFeed(), data_service=SimpleNamespace(), store=MarketRadarStore(radar_session)
+    )
+    focus = FocusUniverse(
+        holdings=("600000.SH",),
+        watchlist=(),
+        focus=("600000.SH",),
+        symbols=("600000.SH",),
+        sources={"600000.SH": ("qmt_holding",)},
+    )
+    tick = QuoteTick("600000.SH", NOW, 9.045, 10.0, high_price=11.0, volume=1_000_000)
+    context = IntradaySymbolContext(
+        metrics={
+            "volume_ratio_20d": metric(3.0, source="klines_daily_20d"),
+            "down_limit_price": metric(9.0, source="stock_limit_prices"),
+            "up_limit_price": metric(11.0, source="stock_limit_prices"),
+            "negative_heat_z20": metric(2.1, source="sentiment_analysis"),
+            "weighted_sentiment": metric(-0.5, source="sentiment_analysis"),
+        }
+    )
+    snapshot = service._build_intraday_snapshot(
+        ticks={"600000.SH": tick},
+        feed_status=FakeFeed().status,
+        focus=focus,
+        eligible_universe=EligibleUniverse(("600000.SH",), "fresh", NOW, "sqlite_stocks"),
+        symbol_context={"600000.SH": context},
+        now=NOW,
+    )
+    item = next(value for value in snapshot.observations if value.subject == "600000.SH")
+    assert item.metrics["volume_ratio_20d"].status == "fresh"
+    assert item.metrics["down_limit_distance_pct"].value == pytest.approx(0.5)
+    assert item.metrics["limit_up_broken"].value is True
+    matches = MarketAlertEngine().evaluate(snapshot).matches
+    assert {
+        "holding_volume_price_anomaly",
+        "holding_near_limit_down",
+        "holding_limit_up_broken",
+        "symbol_negative_sentiment_heat",
+    }.issubset({match.rule.key for match in matches})
+
+
+def test_intraday_missing_enrichment_is_structured_unavailable(radar_session):
+    service = MarketRadarService(
+        feed=FakeFeed(), data_service=SimpleNamespace(), store=MarketRadarStore(radar_session)
+    )
+    focus = FocusUniverse(
+        holdings=("600000.SH",),
+        watchlist=(),
+        focus=("600000.SH",),
+        symbols=("600000.SH",),
+        sources={"600000.SH": ("qmt_holding",)},
+    )
+    snapshot = service._build_intraday_snapshot(
+        ticks={"600000.SH": QuoteTick("600000.SH", NOW, 10.0, 10.0)},
+        feed_status=FakeFeed().status,
+        focus=focus,
+        eligible_universe=EligibleUniverse(("600000.SH",), "fresh", NOW, "sqlite_stocks"),
+        symbol_context={},
+        now=NOW,
+    )
+    item = next(value for value in snapshot.observations if value.subject == "600000.SH")
+    assert item.metrics["volume_ratio_20d"].status == "unavailable"
+    assert item.metrics["down_limit_distance_pct"].reason == "exact down-limit price is unavailable"
+    assert (
+        snapshot.metrics["focus"]["metric_status"]["600000.SH"]["weighted_sentiment"]["status"]
+        == "unavailable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_intraday_context_loader_batches_universe_volume_limits_and_sentiment(
+    radar_session,
+):
+    radar_session.add_all(
+        [
+            Stock(
+                symbol="600000.SH",
+                exchange="SH",
+                list_date=date(2000, 1, 1),
+                is_delist=0,
+                is_suspend=0,
+            ),
+            Stock(
+                symbol="000001.SZ",
+                exchange="SZ",
+                list_date=date(2000, 1, 1),
+                is_delist=0,
+                is_suspend=1,
+            ),
+        ]
+    )
+    await radar_session.execute(
+        text(
+            "CREATE TABLE stock_limit_prices ("
+            "symbol TEXT, trade_date DATE, up_limit REAL, down_limit REAL)"
+        )
+    )
+    await radar_session.execute(
+        text(
+            "INSERT INTO stock_limit_prices(symbol, trade_date, up_limit, down_limit) "
+            "VALUES (:symbol, :trade_date, :up, :down)"
+        ),
+        {
+            "symbol": "600000.SH",
+            "trade_date": NOW.date().isoformat(),
+            "up": 11.0,
+            "down": 9.0,
+        },
+    )
+    for offset in range(1, 21):
+        radar_session.add(
+            SentimentAnalysis(
+                source="test",
+                source_item_id=f"history-{offset}",
+                symbol="600000.SH",
+                model_version="v1",
+                score=-0.5,
+                confidence=0.1 + offset * 0.02,
+                analyzed_at=NOW - timedelta(days=offset),
+            )
+        )
+    radar_session.add(
+        SentimentAnalysis(
+            source="test",
+            source_item_id="current",
+            symbol="600000.SH",
+            model_version="v1",
+            score=-0.5,
+            confidence=1.0,
+            analyzed_at=NOW - timedelta(hours=1),
+        )
+    )
+    await radar_session.commit()
+
+    class DailyStore:
+        def load_daily(self, symbols, start_date, end_date, columns):
+            days = pd.date_range(end=NOW.date() - timedelta(days=1), periods=20)
+            return pd.DataFrame(
+                {"symbol": ["600000.SH"] * 20, "volume": [1_000.0] * 20},
+                index=days,
+            )
+
+    loader = MarketRadarIntradayContextLoader(radar_session, market_store=DailyStore())
+    universe = await loader.load_eligible_universe()
+    assert universe.symbols == ("600000.SH",)
+    context = await loader.load_symbol_context(
+        ("600000.SH",),
+        {"600000.SH": QuoteTick("600000.SH", NOW, 10, 10, volume=300_000)},
+        NOW,
+    )
+    metrics = context["600000.SH"].metrics
+    assert metrics["volume_ratio_20d"].value == pytest.approx(3.0)
+    assert metrics["down_limit_price"].value == 9.0
+    assert metrics["up_limit_price"].value == 11.0
+    assert metrics["weighted_sentiment"].value == pytest.approx(-0.5)
+    assert metrics["negative_heat_z20"].status == "fresh"
 
 
 def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar_session):
@@ -1188,7 +1509,19 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
         detail_freshness=fresh,
         step_freshness=fresh,
     )
-    sectors = SimpleNamespace(status="fresh", sectors=(), source_freshness=fresh)
+    sectors = SimpleNamespace(
+        status="fresh",
+        sectors=(
+            SimpleNamespace(
+                industry="电子",
+                median_return=-2.0,
+                advance_ratio=0.2,
+                share_z20=2.5,
+                amount_vs_20d=2.0,
+            ),
+        ),
+        source_freshness=fresh,
+    )
     sentiment = SimpleNamespace(
         status="fresh",
         weighted_score=0.5,
@@ -1203,6 +1536,12 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
         crowding=crowding_inputs(6),
         sectors=sectors,
         sentiment=sentiment,
+        history=RadarHistoryContext(
+            limit_down_counts=(10, 20, 30, 40, 50),
+            limit_down_median_5d=30,
+            previous_emotion_score=29,
+            previous_as_of=datetime(2026, 7, 16, 15, 20),
+        ),
         now=NOW,
     )
     assert result.metrics["crowding"]["score"]["status"] == "fresh"
@@ -1213,6 +1552,13 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
     market = next(item for item in result.observations if item.subject == "ALL")
     assert market.metrics["crowding_score"].status == "fresh"
     assert market.metrics["emotion_score"].status == "fresh"
+    assert market.metrics["limit_down_median_5d"].value == 30
+    assert market.metrics["previous_emotion_score"].value == 29
+    sector = next(item for item in result.observations if item.scope == "sector")
+    assert sector.metrics["crowding_score"].value >= 80
+    assert {match.rule.key for match in MarketAlertEngine().evaluate(result).matches}.issuperset(
+        {"sector_breadth_down", "sector_share_crowding"}
+    )
 
     insufficient = service._build_eod_snapshot(
         target_date=date(2026, 7, 17),
@@ -1221,10 +1567,38 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
         crowding=crowding_inputs(2),
         sectors=sectors,
         sentiment=sentiment,
+        history=RadarHistoryContext(),
         now=NOW,
     )
     assert insufficient.metrics["crowding"]["score"]["status"] == "insufficient"
     assert insufficient.metrics["crowding"]["score"]["value"] is None
+
+
+@pytest.mark.asyncio
+async def test_eod_history_context_reads_five_prior_snapshots_from_persistence(radar_session):
+    store = MarketRadarStore(radar_session)
+    for offset, down_count in enumerate((10, 20, 30, 40, 50), start=1):
+        day = datetime(2026, 7, 11 + offset, 15, 20)
+        await store.upsert_snapshot(
+            snapshot_type="eod",
+            as_of=day,
+            computed_at=day,
+            status="fresh",
+            confidence=1,
+            formula_version="market-radar-v1",
+            metrics={
+                "overview": {"emotion": {"status": "fresh", "value": 20 + offset}},
+                "limit_ladder": {"status": "fresh", "down_count": down_count},
+            },
+            source_freshness={"limit_detail": {"status": "fresh"}},
+        )
+    await radar_session.commit()
+    service = MarketRadarService(feed=FakeFeed(), data_service=SimpleNamespace(), store=store)
+    history = await service._load_history_context(date(2026, 7, 17))
+    assert history.limit_down_counts == (50, 40, 30, 20, 10)
+    assert history.limit_down_median_5d == 30
+    assert history.previous_emotion_score == 25
+    assert history.previous_as_of == datetime(2026, 7, 16, 15, 20)
 
 
 @pytest.mark.asyncio
@@ -1333,16 +1707,20 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
         def __init__(self):
             super().__init__()
             self.start_calls = 0
+            self.stop_calls = 0
+            self.partially_started = False
             self.fail_start = True
             self.fail_health = True
 
         async def start(self):
             self.start_calls += 1
+            self.partially_started = True
             if self.fail_start:
                 raise RuntimeError("start failed")
 
         async def stop(self):
-            return None
+            self.stop_calls += 1
+            self.partially_started = False
 
         async def run_health_cycle(self):
             self.health_calls += 1
@@ -1365,6 +1743,8 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
     with pytest.raises(RuntimeError, match="start failed"):
         await service.start()
     assert service.started is False
+    assert feed.stop_calls == 1
+    assert feed.partially_started is False
 
     feed.fail_start = False
     await service.start()
