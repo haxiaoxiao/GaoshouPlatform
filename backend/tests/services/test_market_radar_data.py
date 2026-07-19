@@ -302,6 +302,33 @@ def test_daily_index_returns_keep_missing_invalid_and_conflict_gaps():
     )
 
 
+def test_daily_row_normalization_streams_without_record_dict_materialization(monkeypatch):
+    frame = pd.DataFrame.from_records(
+        [
+            _bar("600001.SH", date(2026, 7, 20), 10.0),
+            _bar("600001.SH", date(2026, 7, 20), 10.0),
+            _bar("000001.SZ", date(2026, 7, 20), 20.0),
+            _bar("000001.SZ", date(2026, 7, 20), 21.0),
+        ]
+    )
+
+    def reject_record_materialization(*_args, **_kwargs):
+        raise AssertionError("daily normalization must not materialize DataFrame records")
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", reject_record_materialization)
+
+    rows, conflicts = radar_data._normalize_daily_rows(
+        frame,
+        {"600001.SH", "000001.SZ"},
+    )
+
+    stable_key = ("600001.SH", date(2026, 7, 20))
+    conflict_key = ("000001.SZ", date(2026, 7, 20))
+    assert rows[stable_key]["close"] == 10.0
+    assert conflict_key in conflicts
+    assert conflict_key not in rows
+
+
 @pytest.mark.asyncio
 async def test_daily_market_reports_exclusions_conflicts_and_incomplete_universe(tmp_path):
     previous = date(2026, 7, 17)

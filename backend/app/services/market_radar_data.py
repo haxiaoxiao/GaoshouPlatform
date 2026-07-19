@@ -1503,23 +1503,44 @@ def _normalize_daily_rows(
 ) -> tuple[dict[tuple[str, date], dict[str, object]], set[tuple[str, date]]]:
     if frame.empty:
         return {}, set()
-    values: dict[tuple[str, date], list[dict[str, object]]] = defaultdict(list)
-    for row in frame.to_dict("records"):
-        symbol = str(row.get("symbol") or "")
-        trade_day = _as_date(row.get("trade_date"))
-        if symbol in universe and trade_day is not None:
-            values[(symbol, trade_day)].append(row)
+    column_indexes = {str(column): index for index, column in enumerate(frame.columns)}
+    symbol_index = column_indexes.get("symbol")
+    date_index = column_indexes.get("trade_date")
+    if symbol_index is None or date_index is None:
+        return {}, set()
+
+    value_indexes = {
+        column: column_indexes.get(column)
+        for column in ("close", "volume", "amount")
+    }
     normalized: dict[tuple[str, date], dict[str, object]] = {}
     conflicts: set[tuple[str, date]] = set()
-    for key, rows in values.items():
-        signatures = {
-            tuple(_finite(row.get(column)) for column in ("close", "volume", "amount"))
-            for row in rows
+    signatures: dict[tuple[str, date], tuple[float | None, ...]] = {}
+    for values in frame.itertuples(index=False, name=None):
+        symbol = str(values[symbol_index] or "")
+        trade_day = _as_date(values[date_index])
+        if symbol not in universe or trade_day is None:
+            continue
+        key = (symbol, trade_day)
+        if key in conflicts:
+            continue
+        row = {
+            "symbol": symbol,
+            "trade_date": trade_day,
+            **{
+                column: values[index] if index is not None else None
+                for column, index in value_indexes.items()
+            },
         }
-        if len(signatures) > 1:
+        signature = tuple(_finite(row[column]) for column in ("close", "volume", "amount"))
+        previous = signatures.get(key)
+        if previous is None:
+            normalized[key] = row
+            signatures[key] = signature
+        elif previous != signature:
             conflicts.add(key)
-        else:
-            normalized[key] = rows[0]
+            normalized.pop(key, None)
+            signatures.pop(key, None)
     return normalized, conflicts
 
 
