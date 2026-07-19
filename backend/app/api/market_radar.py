@@ -856,7 +856,14 @@ async def refresh_radar(request: Request, payload: RefreshRequest) -> dict[str, 
             "/internal/market-radar/eod",
             json_body={"trade_date": trade_date},
         )
-        task_payload = response["data"]
+        sync_task = response["data"]
+        task_payload = {
+            "task_id": sync_task["task_id"],
+            "kind": sync_task["kind"],
+            "status": sync_task["status"],
+            "refresh_kind": sync_task["refresh_kind"],
+            "trade_date": sync_task["trade_date"],
+        }
         current = service.current_envelope()
         envelope = (
             service.project_snapshot(current, realtime_mode=_feed_mode(service))
@@ -940,21 +947,34 @@ async def get_refresh_task(
     request: Request,
     task_id: Annotated[
         str,
-        Path(pattern=r"^market-radar-eod-[0-9a-f]{32}$|^radar-eod-[A-Za-z0-9-]+$"),
+        Path(
+            pattern=(
+                r"^(?:market-radar-[0-9a-f]{32}|"
+                r"market-radar-eod-[0-9a-f]{32}|radar-eod-[A-Za-z0-9-]+)$"
+            )
+        ),
     ],
 ) -> dict[str, Any]:
     service = _service(request)
-    response = await proxy_sync_request(
-        "GET",
-        f"/internal/market-radar/tasks/{task_id}",
-    )
+    if task_id.startswith("market-radar-") and not task_id.startswith(
+        "market-radar-eod-"
+    ):
+        task_payload = get_task(task_id)
+        if task_payload is None:
+            raise HTTPException(status_code=404, detail="market radar refresh task not found")
+    else:
+        response = await proxy_sync_request(
+            "GET",
+            f"/internal/market-radar/tasks/{task_id}",
+        )
+        task_payload = response["data"]
     current = service.current_envelope()
     envelope = (
         service.project_snapshot(current, realtime_mode=_feed_mode(service))
         if current is not None
         else _unavailable_envelope(service, "no market radar snapshot is available")
     )
-    return _with_data(envelope, response["data"])
+    return _with_data(envelope, task_payload)
 
 
 def _sse_frame(event: StreamEvent) -> str:

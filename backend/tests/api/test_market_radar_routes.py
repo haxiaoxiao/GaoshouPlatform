@@ -536,6 +536,12 @@ async def test_eod_refresh_is_proxied_to_sync_owner_without_local_execution(
                 "status": "queued",
                 "refresh_kind": "eod",
                 "trade_date": "2026-07-18",
+                "reason": "manual",
+                "source_run_id": None,
+                "snapshot_status": None,
+                "recompute_needed": False,
+                "deleted_intraday": 0,
+                "error": None,
             },
         }
 
@@ -590,6 +596,34 @@ async def test_eod_refresh_task_status_is_publicly_proxied(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["data"]["status"] == "completed"
     assert response.json()["data"]["recompute_needed"] is True
+
+
+@pytest.mark.asyncio
+async def test_intraday_refresh_task_status_is_read_from_api_runtime(client):
+    service = FakeRadarService(snapshot())
+    client.app.state.market_radar_service = service  # type: ignore[attr-defined]
+
+    submitted = await client.post(
+        "/api/market-radar/refresh",
+        json={"kind": "intraday"},
+    )
+    task_id = submitted.json()["data"]["task_id"]
+    for _ in range(20):
+        task = get_task(task_id)
+        if task is not None and task["status"] == "succeeded":
+            break
+        await asyncio.sleep(0)
+
+    response = await client.get(f"/api/market-radar/refresh/{task_id}")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["task_id"] == task_id
+    assert response.json()["data"]["status"] == "succeeded"
+
+    missing = await client.get(
+        "/api/market-radar/refresh/market-radar-00000000000000000000000000000000"
+    )
+    assert missing.status_code == 404
 
 
 @pytest.mark.asyncio

@@ -123,7 +123,7 @@ MARKET_RADAR_RESUBSCRIBE_SECONDS=60
 | GET | `/api/market-radar/refresh/{task_id}` | 查询重算任务状态 |
 | GET | `/api/market-radar/stream` | SSE：`mode`、`snapshot`、`alert`、`heartbeat` |
 
-`POST /refresh` 不在 HTTP 请求内执行全市场计算。盘中任务由 API 进程串行处理；日终任务代理到同步服务的专用单 worker 队列。
+`POST /refresh` 不在 HTTP 请求内执行全市场计算。盘中任务由 API 进程串行处理；日终任务代理到同步服务的专用单 worker 队列。两类任务都通过同一个 `GET /refresh/{task_id}` 查询，接口会按任务 ID 路由到对应的进程内状态。
 
 ## 6. 调度与保留
 
