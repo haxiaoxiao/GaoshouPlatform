@@ -5,8 +5,8 @@ from __future__ import annotations
 import inspect
 import math
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Literal
@@ -20,7 +20,12 @@ from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.duckdb import get_duckdb
 from app.db.models.sentiment import SentimentAnalysis, SentimentPost
 from app.db.models.stock import Stock
-from app.services.market_radar_calculator import BreadthResult, QuoteTick, calculate_breadth
+from app.services.market_radar_calculator import (
+    BreadthResult,
+    QuoteTick,
+    calculate_breadth,
+    serialize_breadth_result,
+)
 
 FreshnessStatus = Literal["fresh", "partial", "stale", "unavailable"]
 _ALLOWED_DATASETS = frozenset(
@@ -55,6 +60,7 @@ class UniverseMember:
     exchange: str
     industry: str | None
     list_date: date
+    delist_date: date | None
     is_st: bool
 
 
@@ -117,6 +123,9 @@ class LimitLadderRow:
     industry: str | None
     is_st: bool
     board_count: int
+    pct_change: float | None = None
+    turnover_ratio: float | None = None
+    limit_times: int | None = None
     amount: float | None = None
     seal_amount: float | None = None
     first_time: str | None = None
@@ -170,6 +179,16 @@ class SectorInput:
 
 
 @dataclass(frozen=True, slots=True)
+class SectorInputSet:
+    as_of: date
+    status: FreshnessStatus
+    sectors: tuple[SectorInput, ...]
+    source_freshness: SourceFreshness
+    classification: str
+    coverage: float
+
+
+@dataclass(frozen=True, slots=True)
 class SentimentInputSet:
     as_of: datetime
     status: FreshnessStatus
@@ -184,6 +203,33 @@ class SentimentInputSet:
     latest_model: str | None
     daily_history: tuple[tuple[date, float], ...]
     freshness: SourceFreshness
+
+
+def serialize_market_radar_data(value: object) -> object:
+    """Serialize radar contracts without deep-copying immutable data structures."""
+    if isinstance(value, BreadthResult):
+        return serialize_breadth_result(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if is_dataclass(value) and not isinstance(value, type):
+        return {
+            field.name: serialize_market_radar_data(getattr(value, field.name))
+            for field in fields(value)
+        }
+    if isinstance(value, Mapping):
+        return {
+            str(key): serialize_market_radar_data(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (tuple, list)):
+        return [serialize_market_radar_data(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"unsupported market radar value: {type(value).__name__}")
 
 
 class MarketRadarDataService:
@@ -211,11 +257,14 @@ class MarketRadarDataService:
         if lookback_days < 2 or lookback_days > 400:
             raise ValueError("lookback_days must be between 2 and 400")
         explicit_target = target_date is not None
-        expected = target_date or self._now().date()
-        start = expected - timedelta(days=max(lookback_days * 2, 240))
+        requested = target_date or self._now().date()
+        expected = requested
+        start = requested - timedelta(days=max(lookback_days * 2, 240))
         if self._calendar_provider is not None:
-            raw_dates = await self._provider_dates(start, expected)
-            dates = _normalize_dates(raw_dates, end=expected)[-lookback_days:]
+            raw_dates = await self._provider_dates(start, requested)
+            dates = _normalize_dates(raw_dates, end=requested)[-lookback_days:]
+            if not explicit_target and dates:
+                expected = dates[-1]
             exact = expected in dates
             freshness = SourceFreshness(
                 source="trading_calendar",
@@ -238,8 +287,6 @@ class MarketRadarDataService:
         )
         dates = tuple(sorted(_frame_dates(frame, "trade_date")))
         observed = dates[-1] if dates else None
-        if not explicit_target and observed is not None:
-            expected = observed
         freshness = SourceFreshness(
             source="observed_klines_calendar",
             status="partial" if dates else "unavailable",
@@ -266,12 +313,12 @@ class MarketRadarDataService:
             raise ValueError("days must be between 1 and 120")
         calendar = await self.resolve_calendar(target_date=target_date, lookback_days=days + 121)
         expected = target_date or calendar.expected_date
-        universe, universe_freshness = await self._load_universe(expected)
         calendar_dates = tuple(item for item in calendar.trading_dates if item <= expected)
         requested_dates = list(calendar_dates[-days:])
-        if expected not in requested_dates:
-            requested_dates.append(expected)
-        requested_dates = sorted(set(requested_dates))[-days:]
+        universe, universe_freshness = await self._load_universe(
+            expected,
+            start_date=requested_dates[0] if requested_dates else expected,
+        )
         query_dates = sorted(set(calendar_dates[-(days + 1) :]) | set(requested_dates))
 
         frame = await self._load_daily_frame(query_dates)
@@ -282,6 +329,9 @@ class MarketRadarDataService:
         for trade_day in requested_dates:
             prior_dates = [item for item in calendar_dates if item < trade_day]
             previous_day = prior_dates[-1] if prior_dates else None
+            active_universe = tuple(
+                member for member in universe if _member_active_on(member, trade_day)
+            )
             facts = tuple(
                 self._daily_fact(
                     member,
@@ -290,7 +340,7 @@ class MarketRadarDataService:
                     rows_by_key,
                     conflicts,
                 )
-                for member in universe
+                for member in active_universe
             )
             ticks = {
                 fact.symbol: QuoteTick(
@@ -304,7 +354,7 @@ class MarketRadarDataService:
             }
             breadth = calculate_breadth(
                 ticks,
-                universe_by_symbol,
+                (member.symbol for member in active_universe),
                 now=self._now(),
                 max_age_seconds=1,
             )
@@ -360,29 +410,60 @@ class MarketRadarDataService:
         expected = target_date or calendar.expected_date
         universe, _ = await self._load_universe(expected)
         universe_by_symbol = {item.symbol: item for item in universe}
-        detail = await self._read_dataset(
+        history_start = (
+            calendar.trading_dates[-20]
+            if len(calendar.trading_dates) >= 20
+            else (calendar.trading_dates[0] if calendar.trading_dates else expected - timedelta(days=60))
+        )
+        detail, detail_date, detail_count, detail_error = await self._load_optional_dated_dataset(
             "tushare_limit_list_d",
-            "SELECT * FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
-            "WHERE CAST(trade_date_dt AS DATE) <= ?",
-            [expected],
+            date_column="trade_date_dt",
+            expected=expected,
+            start=history_start,
         )
-        step = await self._read_dataset(
+        step, step_date, step_count, step_error = await self._load_optional_dated_dataset(
             "tushare_limit_step",
-            "SELECT * FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
-            "WHERE CAST(trade_date_dt AS DATE) <= ?",
-            [expected],
+            date_column="trade_date_dt",
+            expected=expected,
+            start=history_start,
         )
-        detail_date = _latest_date(detail, "trade_date_dt")
-        step_date = _latest_date(step, "trade_date_dt")
-        detail_exact = detail_date == expected
-        step_exact = step_date == expected
-        detail_latest_rows = _rows_on_date(detail, "trade_date_dt", detail_date)
-        step_latest_rows = _rows_on_date(step, "trade_date_dt", step_date)
-        detail_freshness = _dated_freshness(
-            "tushare_limit_list_d", expected, detail_date, len(detail_latest_rows), calendar.trading_dates
+        if detail_error is None and detail_date == expected:
+            detail_error = _optional_schema_error(
+                detail,
+                source="tushare_limit_list_d",
+                required=("limit",),
+                any_of=("symbol", "ts_code"),
+            )
+        if step_error is None and step_date == expected:
+            step_error = _optional_schema_error(
+                step,
+                source="tushare_limit_step",
+                required=("nums",),
+                any_of=("symbol", "ts_code"),
+            )
+        detail_exact = detail_date == expected and detail_error is None
+        step_exact = step_date == expected and step_error is None
+        detail_freshness = (
+            _unavailable_freshness("tushare_limit_list_d", expected, detail_error)
+            if detail_error
+            else _dated_freshness(
+                "tushare_limit_list_d",
+                expected,
+                detail_date,
+                detail_count,
+                calendar.trading_dates,
+            )
         )
-        step_freshness = _dated_freshness(
-            "tushare_limit_step", expected, step_date, len(step_latest_rows), calendar.trading_dates
+        step_freshness = (
+            _unavailable_freshness("tushare_limit_step", expected, step_error)
+            if step_error
+            else _dated_freshness(
+                "tushare_limit_step",
+                expected,
+                step_date,
+                step_count,
+                calendar.trading_dates,
+            )
         )
 
         if not detail_exact and not step_exact:
@@ -437,14 +518,17 @@ class MarketRadarDataService:
                 str(row.get("symbol") or row.get("ts_code") or ""): _positive_int(row.get("nums"))
                 for row in previous_steps
             }
-            comparable = [
-                row for row in rows
-                if previous_boards.get(row.symbol) is not None
-            ]
-            if comparable:
+            valid_previous = {
+                symbol: board
+                for symbol, board in previous_boards.items()
+                if board is not None
+            }
+            current_boards = {row.symbol: row.board_count for row in rows}
+            if valid_previous:
                 promotion_rate = sum(
-                    row.board_count > int(previous_boards[row.symbol]) for row in comparable
-                ) / len(comparable)
+                    current_boards.get(symbol, 0) > board
+                    for symbol, board in valid_previous.items()
+                ) / len(valid_previous)
         else:
             source_mode = "derived"
             up_history = _up_limit_dates(detail)
@@ -503,8 +587,11 @@ class MarketRadarDataService:
     async def load_crowding_inputs(self, *, target_date: date | None = None) -> CrowdingInputSet:
         calendar = await self.resolve_calendar(target_date=target_date, lookback_days=180)
         expected = target_date or calendar.expected_date
-        universe, universe_freshness = await self._load_universe(expected)
         dates = tuple(item for item in calendar.trading_dates if item <= expected)[-141:]
+        universe, universe_freshness = await self._load_universe(
+            expected,
+            start_date=dates[0] if dates else expected,
+        )
         daily = await self._load_daily_range(dates)
         series, _ = await run_blocking(_aggregate_daily_inputs, daily, universe, dates)
         daily_source_date = _latest_date(daily, "trade_date")
@@ -573,13 +660,16 @@ class MarketRadarDataService:
             status = "partial"
         return CrowdingInputSet(as_of=expected, status=status, components=tuple(components))
 
-    async def load_sector_inputs(self, *, target_date: date | None = None) -> tuple[SectorInput, ...]:
+    async def load_sector_inputs(self, *, target_date: date | None = None) -> SectorInputSet:
         calendar = await self.resolve_calendar(target_date=target_date, lookback_days=180)
         expected = target_date or calendar.expected_date
-        universe, _ = await self._load_universe(expected)
         dates = tuple(item for item in calendar.trading_dates if item <= expected)[-141:]
+        universe, universe_freshness = await self._load_universe(
+            expected,
+            start_date=dates[0] if dates else expected,
+        )
         daily = await self._load_daily_range(dates)
-        _, sectors_by_date = await run_blocking(
+        series, sectors_by_date = await run_blocking(
             _aggregate_daily_inputs,
             daily,
             universe,
@@ -587,6 +677,34 @@ class MarketRadarDataService:
             False,
         )
         current = sectors_by_date.get(expected, {})
+        source_date = _latest_date(daily, "trade_date")
+        coverage = float(series.get("coverage", {}).get(expected, 0.0))
+        source_status, source_reason = _exact_source_status(
+            expected=expected,
+            source_date=source_date,
+            coverage=coverage,
+            minimum_coverage=0.8,
+            rows=len(daily.index),
+        )
+        if source_status == "fresh" and not current:
+            source_status = "partial"
+            source_reason = "exact daily source has no non-null industry classification"
+        elif source_status == "fresh" and universe_freshness.status != "fresh":
+            source_status = "partial"
+            source_reason = universe_freshness.reason
+        elif source_status == "fresh" and calendar.freshness.status != "fresh":
+            source_status = "partial"
+            source_reason = calendar.freshness.reason
+        source_freshness = SourceFreshness(
+            source="klines_daily_sector_inputs",
+            status=source_status,
+            expected_date=expected,
+            source_date=source_date,
+            lag_trading_days=_trading_lag(expected, source_date, calendar.trading_dates),
+            row_count=len(_rows_on_date(daily, "trade_date", source_date)),
+            coverage=coverage,
+            reason=source_reason,
+        )
         prior_dates = [item for item in dates if item < expected][-20:]
         result: list[SectorInput] = []
         for industry, metrics in current.items():
@@ -623,7 +741,14 @@ class MarketRadarDataService:
                     stock_count=int(metrics["stock_count"]),
                 )
             )
-        return tuple(sorted(result, key=lambda item: (-item.amount_share, item.industry)))
+        return SectorInputSet(
+            as_of=expected,
+            status=source_status,
+            sectors=tuple(sorted(result, key=lambda item: (-item.amount_share, item.industry))),
+            source_freshness=source_freshness,
+            classification="current_non_pit",
+            coverage=coverage,
+        )
 
     async def load_sentiment_inputs(
         self,
@@ -640,6 +765,9 @@ class MarketRadarDataService:
                 SentimentPost.source,
                 SentimentPost.source_post_id,
                 SentimentPost.symbol,
+                SentimentPost.title,
+                SentimentPost.content,
+                SentimentPost.author,
                 SentimentPost.published_at,
                 SentimentPost.sentiment_score,
                 SentimentPost.reply_count,
@@ -718,6 +846,19 @@ class MarketRadarDataService:
                     "weight": weight,
                     "model": model,
                     "analyzed_at": analyzed_at,
+                    "cluster_post": SentimentPost(
+                        source=str(row.source),
+                        source_post_id=str(row.source_post_id),
+                        symbol=str(row.symbol),
+                        title=row.title,
+                        content=row.content,
+                        author=row.author,
+                        published_at=published_at,
+                        sentiment_score=score,
+                        reply_count=int(row.reply_count or 0),
+                        like_count=int(row.like_count or 0),
+                        comment_count=int(row.comment_count or 0),
+                    ),
                 }
             )
 
@@ -760,9 +901,11 @@ class MarketRadarDataService:
             f"latest scored sentiment is older than {int(threshold.total_seconds() // 3600)} hours"
         )
         sources = {str(item["source"]) for item in current_observations}
-        clusters = Counter(
-            (str(item["source"]), item["published_at"].date())
-            for item in current_observations
+        from app.services.sentiment import _event_clusters
+
+        event_clusters = _event_clusters(
+            [item["cluster_post"] for item in current_observations],
+            limit=max(1, len(current_observations)),
         )
         analyzed = [
             item for item in current_observations
@@ -794,7 +937,6 @@ class MarketRadarDataService:
             if total_weight > 0
             else None
         )
-        scores = [float(item["score"]) for item in current_observations]
         freshness = SourceFreshness(
             source="sentiment_posts",
             status=status,
@@ -812,18 +954,31 @@ class MarketRadarDataService:
             heat=total_weight if current_observations else None,
             sample_size=len(current_observations),
             negative_ratio=(
-                sum(score < 0 for score in scores) / len(scores) if scores else None
+                sum(
+                    float(item["weight"])
+                    for item in current_observations
+                    if float(item["score"]) < 0
+                )
+                / total_weight
+                if total_weight > 0
+                else None
             ),
             disagreement=(
                 math.sqrt(
-                    sum((score - weighted_score) ** 2 for score in scores) / len(scores)
+                    sum(
+                        float(item["weight"])
+                        * (float(item["score"]) - weighted_score) ** 2
+                        for item in current_observations
+                    )
+                    / total_weight
                 )
-                if scores and weighted_score is not None
+                if total_weight > 0 and weighted_score is not None
                 else None
             ),
             cluster_intensity=(
-                max(clusters.values()) / len(current_observations)
-                if current_observations
+                max(int(cluster["post_count"]) for cluster in event_clusters)
+                / len(current_observations)
+                if current_observations and event_clusters
                 else None
             ),
             source_count=len(sources),
@@ -844,8 +999,12 @@ class MarketRadarDataService:
         return await value if inspect.isawaitable(value) else value
 
     async def _load_universe(
-        self, target: date
+        self,
+        target: date,
+        *,
+        start_date: date | None = None,
     ) -> tuple[tuple[UniverseMember, ...], SourceFreshness]:
+        active_since = start_date or target
         statement = (
             select(
                 Stock.symbol,
@@ -853,6 +1012,7 @@ class MarketRadarDataService:
                 Stock.exchange,
                 Stock.industry,
                 Stock.list_date,
+                Stock.delist_date,
                 Stock.is_st,
                 Stock.security_type,
                 Stock.product_class,
@@ -860,7 +1020,7 @@ class MarketRadarDataService:
             .where(
                 Stock.list_date.is_not(None),
                 Stock.list_date <= target,
-                func.coalesce(Stock.is_delist, 0) == 0,
+                or_(Stock.delist_date.is_(None), Stock.delist_date > active_since),
                 Stock.exchange.in_(("SH", "SZ", "BJ")),
                 or_(Stock.security_type.is_(None), func.lower(Stock.security_type) == "stock"),
                 or_(Stock.product_class.is_(None), func.lower(Stock.product_class) == "stock"),
@@ -875,26 +1035,28 @@ class MarketRadarDataService:
                 exchange=str(row.exchange),
                 industry=row.industry,
                 list_date=row.list_date,
+                delist_date=row.delist_date,
                 is_st=bool(row.is_st),
             )
             for row in records
             if _is_equity_symbol(str(row.symbol), str(row.exchange))
         )
-        exchanges = {item.exchange for item in members}
+        target_members = tuple(item for item in members if _member_active_on(item, target))
+        exchanges = {item.exchange for item in target_members}
         missing = sorted({"SH", "SZ", "BJ"} - exchanges)
-        status: FreshnessStatus = "fresh" if members and not missing else ("partial" if members else "unavailable")
+        status: FreshnessStatus = "fresh" if target_members and not missing else ("partial" if target_members else "unavailable")
         reason = None
         if missing:
             reason = f"universe missing exchange coverage: {', '.join(missing)}"
-        elif not members:
+        elif not target_members:
             reason = "no eligible A-share stocks in SQLite universe"
         return members, SourceFreshness(
             source="sqlite_stocks",
             status=status,
             expected_date=target,
-            source_date=target if members else None,
-            lag_trading_days=0 if members else None,
-            row_count=len(members),
+            source_date=target if target_members else None,
+            lag_trading_days=0 if target_members else None,
+            row_count=len(target_members),
             coverage=len(exchanges) / 3,
             reason=reason,
         )
@@ -928,13 +1090,21 @@ class MarketRadarDataService:
     ) -> RawComponent:
         dates = tuple(item for item in calendar.trading_dates if item <= expected)[-130:]
         start = dates[0] if dates else expected - timedelta(days=200)
-        frame = await self._read_dataset(
+        frame, error = await self._read_optional_dataset(
             "tushare_margin",
             "SELECT CAST(trade_date_dt AS DATE) AS trade_date_dt, exchange_id, rzye "
             "FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
             "WHERE CAST(trade_date_dt AS DATE) BETWEEN ? AND ?",
             [start, expected],
         )
+        if error:
+            return RawComponent(
+                key="margin_balance_5d_change",
+                current_value=None,
+                history=(),
+                freshness=_unavailable_freshness("tushare_margin", expected, error),
+                excluded_reason="margin_unavailable",
+            )
         latest_raw = _latest_date(frame, "trade_date_dt")
         required = {"SSE", "SZSE", "BSE"}
         by_date: dict[date, dict[str, float]] = defaultdict(dict)
@@ -972,7 +1142,11 @@ class MarketRadarDataService:
             excluded = "incomplete_exchange_coverage"
         else:
             status = "fresh"
-            reason = None
+            reason = (
+                f"ignored later incomplete margin rows dated {latest_raw.isoformat()}"
+                if latest_raw is not None and latest is not None and latest_raw > latest
+                else None
+            )
             calendar_order = sorted(item for item in calendar.trading_dates if item <= expected)
             if latest in calendar_order and calendar_order.index(latest) >= 5:
                 baseline_day = calendar_order[calendar_order.index(latest) - 5]
@@ -987,6 +1161,8 @@ class MarketRadarDataService:
         history_values: list[float] = []
         calendar_order = sorted(item for item in calendar.trading_dates if item <= expected)
         for index in range(5, len(calendar_order)):
+            if latest is not None and calendar_order[index] >= latest:
+                continue
             base = complete_dates.get(calendar_order[index - 5])
             current_total = complete_dates.get(calendar_order[index])
             if base is not None and current_total is not None and base > 0:
@@ -1025,6 +1201,52 @@ class MarketRadarDataService:
             return get_duckdb().execute(sql, [pattern, *parameters]).df()
 
         return await run_blocking(query)
+
+    async def _read_optional_dataset(
+        self,
+        dataset: str,
+        sql: str,
+        parameters: Sequence[object],
+    ) -> tuple[pd.DataFrame, str | None]:
+        try:
+            return await self._read_dataset(dataset, sql, parameters), None
+        except Exception as exc:  # Optional sources must not take down mandatory radar data.
+            reason = f"{dataset} query failed ({type(exc).__name__})"
+            return pd.DataFrame(), reason[:159]
+
+    async def _load_optional_dated_dataset(
+        self,
+        dataset: str,
+        *,
+        date_column: str,
+        expected: date,
+        start: date,
+    ) -> tuple[pd.DataFrame, date | None, int, str | None]:
+        if date_column != "trade_date_dt":
+            raise ValueError("unsupported optional source date column")
+        latest_frame, error = await self._read_optional_dataset(
+            dataset,
+            "SELECT CAST(trade_date_dt AS DATE) AS source_date, COUNT(*) AS row_count "
+            "FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
+            "WHERE CAST(trade_date_dt AS DATE) <= ? GROUP BY source_date "
+            "ORDER BY source_date DESC LIMIT 1",
+            [expected],
+        )
+        if error:
+            return pd.DataFrame(), None, 0, error
+        if latest_frame.empty:
+            return pd.DataFrame(), None, 0, None
+        source_date = _as_date(latest_frame.iloc[0].get("source_date"))
+        row_count = int(latest_frame.iloc[0].get("row_count") or 0)
+        if source_date != expected:
+            return pd.DataFrame(), source_date, row_count, None
+        history, error = await self._read_optional_dataset(
+            dataset,
+            "SELECT * FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
+            "WHERE CAST(trade_date_dt AS DATE) BETWEEN ? AND ?",
+            [start, expected],
+        )
+        return history, source_date, row_count, error
 
     @staticmethod
     def _daily_fact(
@@ -1131,6 +1353,13 @@ def _is_equity_symbol(symbol: str, exchange: str) -> bool:
     if exchange == "BJ":
         return prefix.startswith(("4", "8", "9"))
     return False
+
+
+def _member_active_on(member: UniverseMember, trade_day: date) -> bool:
+    return (
+        member.list_date <= trade_day
+        and (member.delist_date is None or member.delist_date > trade_day)
+    )
 
 
 def _normalize_daily_rows(
@@ -1260,6 +1489,37 @@ def _dated_freshness(
     )
 
 
+def _unavailable_freshness(
+    source: str,
+    expected: date | datetime,
+    reason: str | None,
+) -> SourceFreshness:
+    return SourceFreshness(
+        source=source,
+        status="unavailable",
+        expected_date=expected,
+        source_date=None,
+        lag_trading_days=None,
+        row_count=0,
+        coverage=0.0,
+        reason=reason or "optional source is unavailable",
+    )
+
+
+def _optional_schema_error(
+    frame: pd.DataFrame,
+    *,
+    source: str,
+    required: Sequence[str],
+    any_of: Sequence[str],
+) -> str | None:
+    columns = set(frame.columns)
+    missing = [column for column in required if column not in columns]
+    if missing or not columns.intersection(any_of):
+        return f"{source} schema is missing required market radar fields"
+    return None
+
+
 def _positive_int(value: object) -> int | None:
     number = _finite(value)
     if number is None or number < 1 or not number.is_integer():
@@ -1292,6 +1552,9 @@ def _ladder_row(
         industry=_text_or_none(detail.get("industry")) or (member.industry if member else None),
         is_st=bool(member.is_st) if member else False,
         board_count=board_count,
+        pct_change=_finite(detail.get("pct_chg")),
+        turnover_ratio=_nonnegative(detail.get("turnover_ratio")),
+        limit_times=_positive_int(detail.get("limit_times")),
         amount=_nonnegative(detail.get("amount")),
         seal_amount=_nonnegative(detail.get("fd_amount")),
         first_time=_text_or_none(detail.get("first_time")),
@@ -1354,6 +1617,7 @@ def _aggregate_daily_inputs(
                 conflicts,
             )
             for member in universe
+            if _member_active_on(member, trade_day)
         )
 
     series: dict[str, dict[date, float]] = {
@@ -1380,7 +1644,8 @@ def _aggregate_daily_inputs(
             and item.return_pct is not None
             and item.amount is not None
         )
-        series["coverage"][trade_day] = len(valid) / len(universe) if universe else 0.0
+        eligible_count = len(panels[trade_day])
+        series["coverage"][trade_day] = len(valid) / eligible_count if eligible_count else 0.0
         if not valid:
             continue
         amounts = sorted((item.amount or 0.0 for item in valid), reverse=True)
@@ -1440,17 +1705,19 @@ def _aggregate_daily_inputs(
         if not include_correlation:
             continue
         return_window = ordered_dates[max(0, index - 19) : index + 1]
-        if len(return_window) < 15:
+        if len(return_window) < 20:
             continue
         liquidity_window = return_window[-20:]
         mean_liquidity: dict[str, float] = {}
         for member in universe:
+            if not _member_active_on(member, trade_day):
+                continue
             observations = [
                 amounts_by_date.get(day, {}).get(member.symbol)
                 for day in liquidity_window
             ]
             valid_amounts = [value for value in observations if value is not None]
-            if valid_amounts:
+            if len(valid_amounts) >= 15:
                 mean_liquidity[member.symbol] = sum(valid_amounts) / len(valid_amounts)
         top_symbols = [
             symbol

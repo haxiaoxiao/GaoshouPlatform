@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import math
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
 import pytest
+from fastapi.encoders import jsonable_encoder
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import app.services.market_radar_data as radar_data
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.models.sentiment import SentimentAnalysis, SentimentPost
 from app.db.models.stock import Stock
@@ -56,6 +59,8 @@ def _stock(
     is_st: int = 0,
     security_type: str | None = "stock",
     product_class: str | None = "stock",
+    delist_date: date | None = None,
+    is_delist: int = 0,
 ) -> Stock:
     return Stock(
         symbol=symbol,
@@ -63,12 +68,19 @@ def _stock(
         exchange=symbol.rsplit(".", 1)[-1],
         list_date=list_date,
         is_st=is_st,
-        is_delist=0,
+        delist_date=delist_date,
+        is_delist=is_delist,
         is_suspend=0,
         industry=industry,
         security_type=security_type,
         product_class=product_class,
     )
+
+
+def _write_corrupt_dataset(root: Path, dataset: str, records: list[dict]) -> None:
+    target = root / dataset / "year=2026" / "month=07"
+    target.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame.from_records(records).to_parquet(target / "part-0.parquet", index=False)
 
 
 def _bar(
@@ -89,6 +101,16 @@ def _bar(
         "volume": volume,
         "amount": amount,
     }
+
+
+def _weekdays(start: date, count: int) -> tuple[date, ...]:
+    result: list[date] = []
+    current = start
+    while len(result) < count:
+        if current.weekday() < 5:
+            result.append(current)
+        current += timedelta(days=1)
+    return tuple(result)
 
 
 @pytest.mark.asyncio
@@ -215,6 +237,126 @@ async def test_observed_calendar_is_explicitly_partial_and_stale_daily_keeps_rea
 
 
 @pytest.mark.asyncio
+async def test_implicit_calendar_uses_authoritative_last_trading_day_on_weekend(tmp_path):
+    friday = date(2026, 7, 17)
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    try:
+        async with sessions() as session:
+            calendar = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar((date(2026, 7, 16), friday)),
+                now=lambda: datetime(2026, 7, 19, 12),
+            ).resolve_calendar()
+
+        assert calendar.expected_date == friday
+        assert calendar.freshness.status == "fresh"
+        assert calendar.freshness.expected_date == friday
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_no_provider_keeps_today_expected_and_exposes_observed_lag(tmp_path):
+    friday = date(2026, 7, 17)
+    monday = date(2026, 7, 20)
+    _write_dataset(tmp_path, "klines_daily", [_bar("600001.SH", friday, 10)])
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    try:
+        async with sessions() as session:
+            service = MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                now=lambda: datetime(2026, 7, 20, 12),
+            )
+            calendar = await service.resolve_calendar()
+            daily = await service.load_daily_market()
+
+        assert calendar.expected_date == monday
+        assert calendar.freshness.status == "partial"
+        assert calendar.freshness.source_date == friday
+        assert daily.expected_date == monday
+        assert daily.source_freshness.status == "stale"
+        assert daily.slices[-1].trade_date == friday
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_weekend_preserves_expected_but_slices_only_trading_dates(tmp_path):
+    dates = (date(2026, 7, 15), date(2026, 7, 16), date(2026, 7, 17))
+    weekend = date(2026, 7, 19)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(tmp_path, "klines_daily", _history_records(symbols, dates))
+    engine, sessions = await _database(tmp_path, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=weekend, days=2)
+
+        assert result.expected_date == weekend
+        assert [item.trade_date for item in result.slices] == list(dates[-2:])
+        assert weekend not in {item.trade_date for item in result.slices}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_fifteen_day_history_has_only_real_trading_slices(tmp_path):
+    dates = _weekdays(date(2026, 6, 22), 16)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(tmp_path, "klines_daily", _history_records(symbols, dates))
+    engine, sessions = await _database(tmp_path, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=dates[-1], days=15)
+
+        assert [item.trade_date for item in result.slices] == list(dates[-15:])
+        assert all(item.trade_date.weekday() < 5 for item in result.slices)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_universe_is_point_in_time_for_listings_and_delistings(tmp_path):
+    dates = tuple(date(2026, 7, 14) + timedelta(days=offset) for offset in range(4))
+    old = _stock("600001.SH", delist_date=dates[-1], is_delist=1)
+    new = _stock("000001.SZ", list_date=dates[2])
+    always = _stock("920001.BJ")
+    records = _history_records([old.symbol, always.symbol], dates[:3])
+    records.extend(_history_records([new.symbol], dates[2:]))
+    records.extend(_history_records([always.symbol], dates[3:]))
+    _write_dataset(tmp_path, "klines_daily", records)
+    engine, sessions = await _database(tmp_path, [old, new, always])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=dates[-1], days=3)
+
+        facts = {item.trade_date: {fact.symbol for fact in item.facts} for item in result.slices}
+        assert old.symbol in facts[dates[1]]
+        assert new.symbol not in facts[dates[1]]
+        assert old.symbol not in facts[dates[-1]]
+        assert new.symbol in facts[dates[-1]]
+        assert result.universe_freshness.row_count == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_limit_ladder_prefers_exact_official_step_and_keeps_step_only_st(tmp_path):
     previous = date(2026, 7, 17)
     target = date(2026, 7, 20)
@@ -223,6 +365,7 @@ async def test_limit_ladder_prefers_exact_official_step_and_keeps_step_only_st(t
         "tushare_limit_step",
         [
             {"symbol": "600001.SH", "name": "甲", "trade_date_dt": previous, "nums": "1"},
+            {"symbol": "600004.SH", "name": "戊", "trade_date_dt": previous, "nums": "2"},
             {"symbol": "600001.SH", "name": "甲", "trade_date_dt": target, "nums": "2"},
             {"symbol": "000001.SZ", "name": "ST乙", "trade_date_dt": target, "nums": "3"},
         ],
@@ -231,12 +374,12 @@ async def test_limit_ladder_prefers_exact_official_step_and_keeps_step_only_st(t
         tmp_path,
         "tushare_limit_list_d",
         [
-            {"symbol": "600001.SH", "name": "甲", "industry": "电子", "trade_date_dt": target, "limit": "U", "limit_times": 2, "amount": 100.0, "fd_amount": 10.0, "first_time": "093100", "last_time": "145500", "open_times": 1},
+            {"symbol": "600001.SH", "name": "甲", "industry": "电子", "trade_date_dt": target, "limit": "U", "limit_times": 2, "pct_chg": 10.01, "turnover_ratio": 8.5, "amount": 100.0, "fd_amount": 10.0, "first_time": "093100", "last_time": "145500", "open_times": 1},
             {"symbol": "600002.SH", "name": "丙", "industry": "电子", "trade_date_dt": target, "limit": "D", "limit_times": None, "amount": 80.0, "fd_amount": None, "first_time": None, "last_time": None, "open_times": 0},
             {"symbol": "600003.SH", "name": "丁", "industry": "机械", "trade_date_dt": target, "limit": "Z", "limit_times": None, "amount": 70.0, "fd_amount": None, "first_time": "100000", "last_time": None, "open_times": 2},
         ],
     )
-    stocks = [_stock("600001.SH"), _stock("000001.SZ", is_st=1), _stock("600002.SH"), _stock("600003.SH")]
+    stocks = [_stock("600001.SH"), _stock("000001.SZ", is_st=1), _stock("600002.SH"), _stock("600003.SH"), _stock("600004.SH")]
     engine, sessions = await _database(tmp_path, stocks)
     try:
         async with sessions() as session:
@@ -251,13 +394,22 @@ async def test_limit_ladder_prefers_exact_official_step_and_keeps_step_only_st(t
         assert result.source_mode == "official"
         assert rows["000001.SZ"].board_count == 3
         assert rows["000001.SZ"].is_st is True
+        assert rows["600001.SH"].pct_change == pytest.approx(10.01)
+        assert rows["600001.SH"].turnover_ratio == pytest.approx(8.5)
+        assert rows["600001.SH"].limit_times == 2
         assert result.up_count == 1
         assert result.down_count == 1
         assert result.broken_count == 1
         assert result.broken_rate == pytest.approx(0.5)
         assert result.highest_board == 3
-        assert result.promotion_rate == pytest.approx(1.0)
+        assert result.promotion_rate == pytest.approx(0.5)
         assert result.status == "fresh"
+        encoded = radar_data.serialize_market_radar_data(result)
+        assert jsonable_encoder(encoded) == encoded
+        encoded_row = next(item for item in encoded["rows"] if item["symbol"] == "600001.SH")
+        assert encoded_row["pct_change"] == pytest.approx(10.01)
+        assert encoded_row["turnover_ratio"] == pytest.approx(8.5)
+        assert encoded_row["limit_times"] == 2
     finally:
         await engine.dispose()
 
@@ -417,6 +569,35 @@ async def test_crowding_inputs_are_fixed_safe_and_exclude_future_history(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_correlation_requires_full_twenty_day_window(tmp_path):
+    dates = _weekdays(date(2026, 6, 15), 21)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(tmp_path, "klines_daily", _history_records(symbols, dates))
+    engine, sessions = await _database(tmp_path, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            service = MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            )
+            fifteen = await service.load_crowding_inputs(target_date=dates[15])
+            twenty = await service.load_crowding_inputs(target_date=dates[-1])
+
+        fifteen_corr = next(
+            item for item in fifteen.components if item.key == "high_liquidity_correlation"
+        )
+        twenty_corr = next(
+            item for item in twenty.components if item.key == "high_liquidity_correlation"
+        )
+        assert fifteen_corr.current_value is None
+        assert twenty_corr.current_value is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_margin_component_requires_all_exchanges_and_lag_at_most_two_days(tmp_path):
     dates = tuple(date(2026, 6, 22) + timedelta(days=offset) for offset in range(25))
     target = dates[-1]
@@ -507,6 +688,9 @@ async def test_margin_uses_latest_complete_exchange_date_not_later_partial_date(
         assert margin.freshness.status == "fresh"
         assert margin.current_value is not None
         assert margin.excluded_reason is None
+        assert margin.freshness.reason and "ignored later incomplete" in margin.freshness.reason
+        assert len(margin.history) == 1
+        assert margin.current_value not in margin.history
     finally:
         await engine.dispose()
 
@@ -528,11 +712,58 @@ async def test_sector_inputs_use_all_market_denominator_but_do_not_rank_null_ind
                 now=lambda: NOW,
             ).load_sector_inputs(target_date=target)
 
-        assert {item.industry for item in result} == {"电子", "机械"}
-        assert sum(item.amount_share for item in result) < 1.0
-        assert all(item.classification == "current_non_pit" for item in result)
-        assert all(item.amount_vs_20d is not None for item in result)
-        assert all(item.share_z20 is not None for item in result)
+        assert isinstance(result, radar_data.SectorInputSet)
+        assert result.status == "fresh"
+        assert result.source_freshness.status == "fresh"
+        assert {item.industry for item in result.sectors} == {"电子", "机械"}
+        assert sum(item.amount_share for item in result.sectors) < 1.0
+        assert all(item.classification == "current_non_pit" for item in result.sectors)
+        assert all(item.amount_vs_20d is not None for item in result.sectors)
+        assert all(item.share_z20 is not None for item in result.sectors)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sector_input_set_distinguishes_stale_source_and_empty_classification(tmp_path):
+    previous = date(2026, 7, 17)
+    target = date(2026, 7, 20)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+
+    stale_root = tmp_path / "stale"
+    _write_dataset(stale_root, "klines_daily", _history_records(symbols, (date(2026, 7, 16), previous)))
+    engine, sessions = await _database(stale_root, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            stale = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(stale_root)),
+                calendar_provider=StaticCalendar((date(2026, 7, 16), previous, target)),
+                now=lambda: NOW,
+            ).load_sector_inputs(target_date=target)
+        assert stale.status == "stale"
+        assert stale.sectors == ()
+        assert stale.source_freshness.source_date == previous
+        assert stale.source_freshness.reason
+    finally:
+        await engine.dispose()
+
+    empty_root = tmp_path / "empty"
+    _write_dataset(empty_root, "klines_daily", _history_records(symbols, (previous, target)))
+    empty_stocks = [_stock(symbol, industry=None) for symbol in symbols]
+    engine, sessions = await _database(empty_root, empty_stocks)
+    try:
+        async with sessions() as session:
+            empty = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(empty_root)),
+                calendar_provider=StaticCalendar((previous, target)),
+                now=lambda: NOW,
+            ).load_sector_inputs(target_date=target)
+        assert empty.status == "partial"
+        assert empty.sectors == ()
+        assert empty.source_freshness.status == "partial"
+        assert "classification" in (empty.source_freshness.reason or "")
     finally:
         await engine.dispose()
 
@@ -545,8 +776,8 @@ async def test_sentiment_batch_uses_scores_and_analysis_without_future_leakage(t
         async with sessions() as session:
             session.add_all(
                 [
-                    SentimentPost(source="guba", source_post_id="fresh", symbol="600001.SH", published_at=as_of - timedelta(hours=6), sentiment_score=-0.8, sentiment_label="negative", reply_count=10, like_count=5, comment_count=0),
-                    SentimentPost(source="xueqiu", source_post_id="analyzed", symbol="600001.SH", published_at=as_of - timedelta(hours=2), sentiment_score=None, reply_count=0, like_count=0, comment_count=0),
+                    SentimentPost(source="guba", source_post_id="fresh", symbol="600001.SH", title="market crash and earnings warning", content="negative demand collapse across factories", published_at=as_of - timedelta(hours=6), sentiment_score=-0.8, sentiment_label="negative", reply_count=10, like_count=5, comment_count=0),
+                    SentimentPost(source="xueqiu", source_post_id="analyzed", symbol="600001.SH", title="new product launch growth outlook", content="positive orders and expanding customer demand", published_at=as_of - timedelta(hours=2), sentiment_score=None, reply_count=0, like_count=0, comment_count=0),
                     SentimentPost(source="guba", source_post_id="future", symbol="600001.SH", published_at=as_of + timedelta(minutes=1), sentiment_score=1.0, reply_count=100, like_count=100, comment_count=100),
                     SentimentPost(source="guba", source_post_id="empty", symbol="600001.SH", published_at=as_of - timedelta(hours=1), sentiment_score=None, reply_count=0, like_count=0, comment_count=0),
                     SentimentAnalysis(source="xueqiu", source_item_id="analyzed", symbol="600001.SH", model_version="model-v2", score=0.4, label="positive", confidence=0.8, analyzed_at=as_of - timedelta(hours=1)),
@@ -561,9 +792,11 @@ async def test_sentiment_batch_uses_scores_and_analysis_without_future_leakage(t
         assert result.latest_at == as_of - timedelta(hours=2)
         assert result.latest_model == "model-v2"
         assert -0.8 < result.weighted_score < 0.4
-        assert result.negative_ratio == pytest.approx(0.5)
+        assert result.negative_ratio == pytest.approx(
+            (1 + math.log1p(15)) / ((1 + math.log1p(15)) + 0.8)
+        )
         assert result.disagreement > 0
-        assert result.cluster_intensity > 0
+        assert result.cluster_intensity == pytest.approx(0.5)
         assert result.freshness.row_count == 2
     finally:
         await engine.dispose()
@@ -612,5 +845,163 @@ async def test_sentiment_current_window_is_not_diluted_by_121_day_history(tmp_pa
         assert result.weighted_score == pytest.approx(-0.5)
         assert len(result.daily_history) == 2
         assert result.freshness.row_count == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sentiment_uses_weighted_dispersion_and_text_event_clusters(tmp_path):
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    try:
+        async with sessions() as session:
+            session.add_all(
+                [
+                    SentimentPost(
+                        source="guba",
+                        source_post_id="negative",
+                        symbol="600001.SH",
+                        title="semiconductor earnings collapse warning",
+                        content="factory orders and margins deteriorated sharply",
+                        published_at=NOW - timedelta(hours=2),
+                        sentiment_score=-1.0,
+                        reply_count=9,
+                        like_count=0,
+                        comment_count=0,
+                    ),
+                    SentimentPost(
+                        source="guba",
+                        source_post_id="positive",
+                        symbol="600001.SH",
+                        title="renewable energy policy expansion",
+                        content="new solar capacity targets improve demand outlook",
+                        published_at=NOW - timedelta(hours=1),
+                        sentiment_score=1.0,
+                        reply_count=0,
+                        like_count=0,
+                        comment_count=0,
+                    ),
+                ]
+            )
+            await session.commit()
+            result = await MarketRadarDataService(session, now=lambda: NOW).load_sentiment_inputs(
+                as_of=NOW,
+                mode="intraday",
+            )
+
+        negative_weight = 1 + math.log1p(9)
+        positive_weight = 1.0
+        total_weight = negative_weight + positive_weight
+        expected_mean = (-negative_weight + positive_weight) / total_weight
+        expected_variance = (
+            negative_weight * (-1.0 - expected_mean) ** 2
+            + positive_weight * (1.0 - expected_mean) ** 2
+        ) / total_weight
+        assert result.negative_ratio == pytest.approx(negative_weight / total_weight)
+        assert result.disagreement == pytest.approx(expected_variance**0.5)
+        assert result.cluster_intensity == pytest.approx(0.5)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_optional_limit_sources_degrade_independently(tmp_path):
+    target = date(2026, 7, 20)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+
+    bad_step_root = tmp_path / "bad-step"
+    _write_dataset(
+        bad_step_root,
+        "tushare_limit_list_d",
+        [{"symbol": "600001.SH", "name": "甲", "trade_date_dt": target, "limit": "U", "limit_times": 2}],
+    )
+    _write_corrupt_dataset(bad_step_root, "tushare_limit_step", [{"wrong_date": "20260720"}])
+    engine, sessions = await _database(bad_step_root, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(bad_step_root)),
+                calendar_provider=StaticCalendar((target,)),
+                now=lambda: NOW,
+            ).load_limit_ladder(target_date=target)
+        assert result.source_mode == "derived"
+        assert result.rows[0].board_count == 2
+        assert result.step_freshness.status == "unavailable"
+        assert result.step_freshness.reason
+        assert str(bad_step_root) not in result.step_freshness.reason
+        assert len(result.step_freshness.reason) < 160
+    finally:
+        await engine.dispose()
+
+    bad_detail_root = tmp_path / "bad-detail"
+    _write_corrupt_dataset(bad_detail_root, "tushare_limit_list_d", [{"wrong_date": "20260720"}])
+    _write_dataset(
+        bad_detail_root,
+        "tushare_limit_step",
+        [{"symbol": "600001.SH", "name": "甲", "trade_date_dt": target, "nums": "2"}],
+    )
+    engine, sessions = await _database(bad_detail_root, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(bad_detail_root)),
+                calendar_provider=StaticCalendar((target,)),
+                now=lambda: NOW,
+            ).load_limit_ladder(target_date=target)
+        assert result.status == "partial"
+        assert result.source_mode == "official"
+        assert result.rows[0].board_count == 2
+        assert result.detail_freshness.status == "unavailable"
+        assert result.detail_freshness.reason
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_optional_margin_keeps_daily_crowding_components(tmp_path):
+    dates = _weekdays(date(2026, 6, 15), 21)
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(tmp_path, "klines_daily", _history_records(symbols, dates))
+    _write_corrupt_dataset(tmp_path, "tushare_margin", [{"wrong_date": "20260720"}])
+    engine, sessions = await _database(tmp_path, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_crowding_inputs(target_date=dates[-1])
+
+        components = {item.key: item for item in result.components}
+        assert components["top_1_amount_share"].current_value is not None
+        assert components["margin_balance_5d_change"].current_value is None
+        assert components["margin_balance_5d_change"].freshness.status == "unavailable"
+        assert components["margin_balance_5d_change"].freshness.reason
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_market_radar_data_serializer_is_explicit_and_json_ready(tmp_path):
+    dates = (date(2026, 7, 17), date(2026, 7, 20))
+    symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(tmp_path, "klines_daily", _history_records(symbols, dates))
+    engine, sessions = await _database(tmp_path, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=dates[-1])
+
+        payload = radar_data.serialize_market_radar_data(result)
+        assert jsonable_encoder(payload) == payload
+        assert payload["expected_date"] == dates[-1].isoformat()
+        assert payload["source_freshness"]["source_date"] == dates[-1].isoformat()
+        assert isinstance(payload["slices"][0]["breadth"]["buckets"], dict)
     finally:
         await engine.dispose()
