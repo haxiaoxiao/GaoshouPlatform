@@ -32,9 +32,11 @@ const timestamp = (value: string): number => {
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : '市场雷达连接失败'
 
-const isEnvelope = (value: unknown): value is MarketRadarEnvelope<MarketRadarOverview> => {
+type MarketRadarMetrics = Record<string, unknown> & { overview?: MarketRadarOverview }
+
+const isEnvelope = (value: unknown): value is MarketRadarEnvelope<MarketRadarMetrics> => {
   if (!value || typeof value !== 'object') return false
-  const candidate = value as Partial<MarketRadarEnvelope<MarketRadarOverview>>
+  const candidate = value as Partial<MarketRadarEnvelope<MarketRadarMetrics>>
   return typeof candidate.computed_at === 'string'
     && typeof candidate.realtime_mode === 'string'
     && candidate.data !== null
@@ -43,6 +45,7 @@ const isEnvelope = (value: unknown): value is MarketRadarEnvelope<MarketRadarOve
 
 export const useMarketRadarStore = defineStore('marketRadar', () => {
   const overview = ref<MarketRadarEnvelope<MarketRadarOverview> | null>(null)
+  const latestSnapshot = ref<MarketRadarEnvelope<MarketRadarMetrics> | null>(null)
   const alerts = ref<MarketRadarAlert[]>([])
   const connectionState = ref<MarketRadarConnectionState>('idle')
   const realtimeMode = ref<RadarRealtimeMode>('offline')
@@ -60,6 +63,7 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
   >()
   let latestComputedAt = Number.NEGATIVE_INFINITY
   let deferredOverview: MarketRadarEnvelope<MarketRadarOverview> | null = null
+  let deferredSnapshot: MarketRadarEnvelope<MarketRadarMetrics> | null = null
   let heartbeatTimer: ReturnType<typeof setTimeout> | null = null
   let pollingTimer: ReturnType<typeof setInterval> | null = null
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -74,17 +78,24 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
 
   const notificationStore = useNotificationStore()
 
-  function commitOverview(value: MarketRadarEnvelope<MarketRadarOverview>): boolean {
+  function commitOverview(value: MarketRadarEnvelope<MarketRadarMetrics>): boolean {
     const incomingTimestamp = timestamp(value.computed_at)
     if (incomingTimestamp < latestComputedAt) return false
     latestComputedAt = incomingTimestamp
     realtimeMode.value = value.realtime_mode
+    const nestedOverview = value.data.overview
+    const normalizedOverview: MarketRadarEnvelope<MarketRadarOverview> = nestedOverview
+      ? { ...value, data: nestedOverview }
+      : value as MarketRadarEnvelope<MarketRadarOverview>
     if (!pageVisible.value) {
-      deferredOverview = value
+      deferredOverview = normalizedOverview
+      if (nestedOverview) deferredSnapshot = value
       return true
     }
     deferredOverview = null
-    overview.value = value
+    deferredSnapshot = null
+    overview.value = normalizedOverview
+    if (nestedOverview) latestSnapshot.value = value
     return true
   }
 
@@ -93,6 +104,8 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
     overview.value = deferredOverview
     realtimeMode.value = deferredOverview.realtime_mode
     deferredOverview = null
+    if (deferredSnapshot) latestSnapshot.value = deferredSnapshot
+    deferredSnapshot = null
   }
 
   function replaceAlerts(items: MarketRadarAlert[]): void {
@@ -143,6 +156,16 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
     connectionState.value = 'live'
   }
 
+  function completeOpenFromSnapshot(generation: number, currentSource: EventSource): void {
+    const pending = openCompensation
+    if (!pending || pending.generation !== generation || pending.source !== currentSource) return
+    openCompensation = null
+    stopPolling()
+    reconnectAttempt = 0
+    lastError.value = null
+    connectionState.value = 'live'
+  }
+
   function failOpenCompensation(
     generation: number,
     requestGeneration: number,
@@ -166,7 +189,7 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
     const controller = new AbortController()
     restController = controller
     try {
-      const [overviewResponse, alertResponse] = await Promise.all([
+      const [overviewResult, alertResult] = await Promise.allSettled([
         marketRadarApi.overview({ signal: controller.signal, notifyError: false }),
         marketRadarApi.activeHighAlerts({ signal: controller.signal }),
       ])
@@ -175,19 +198,22 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
         || requestGeneration !== restGeneration
         || controller.signal.aborted
       ) return false
-      commitOverview(overviewResponse)
-      const reconciledAlerts = new Map(
-        alertResponse.data.items
-          .filter(isActiveHighAlert)
-          .map(item => [item.id, item]),
-      )
-      for (const [id, mutation] of streamAlertMutations) {
-        if (mutation.sequence <= alertSequenceAtRequest) continue
-        if (mutation.alert) reconciledAlerts.set(id, mutation.alert)
-        else reconciledAlerts.delete(id)
+      if (alertResult.status === 'fulfilled') {
+        const reconciledAlerts = new Map(
+          alertResult.value.data.items
+            .filter(isActiveHighAlert)
+            .map(item => [item.id, item]),
+        )
+        for (const [id, mutation] of streamAlertMutations) {
+          if (mutation.sequence <= alertSequenceAtRequest) continue
+          if (mutation.alert) reconciledAlerts.set(id, mutation.alert)
+          else reconciledAlerts.delete(id)
+        }
+        replaceAlerts([...reconciledAlerts.values()])
+        streamAlertMutations.clear()
       }
-      replaceAlerts([...reconciledAlerts.values()])
-      streamAlertMutations.clear()
+      if (overviewResult.status === 'rejected') throw overviewResult.reason
+      commitOverview(overviewResult.value)
       lastError.value = null
       completeOpenCompensation(generation, requestGeneration)
       return true
@@ -311,8 +337,8 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
       void (async () => {
         try {
           await refreshRest(generation)
-        } catch (error) {
-          if (source === currentSource) enterFallback(generation, errorText(error))
+        } catch {
+          // refreshRest degrades only while this connection still needs REST compensation.
         }
       })()
     }
@@ -349,6 +375,7 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
         const payload = parseEvent<unknown>(event as MessageEvent<string>)
         if (!isEnvelope(payload)) throw new Error('市场雷达 snapshot 事件无效')
         commitOverview(payload)
+        completeOpenFromSnapshot(generation, currentSource)
       } catch (error) {
         enterFallback(generation, errorText(error))
       }
@@ -409,6 +436,7 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
     restController?.abort()
     restController = null
     deferredOverview = null
+    deferredSnapshot = null
     openCompensation = null
     if (listeningForVisibility) {
       document.removeEventListener('visibilitychange', handleVisibilityChange)
@@ -418,6 +446,7 @@ export const useMarketRadarStore = defineStore('marketRadar', () => {
 
   return {
     overview,
+    latestSnapshot,
     alerts,
     connectionState,
     realtimeMode,

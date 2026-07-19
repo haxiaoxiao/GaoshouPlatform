@@ -82,6 +82,35 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
     ],
   },
   {
+    key: 'market-radar',
+    path: '/market-radar',
+    section: 'research',
+    label: '市场雷达',
+    hint: 'Radar',
+    subtitle: '观察全 A 盈亏分布、指数体感、连板生态、交易拥挤和风险预警。',
+    kicker: 'MARKET TREND RADAR',
+    badge: 'Live',
+    icon: icons.monitor,
+    context: [
+      {
+        title: '市场状态',
+        rows: [
+          { label: 'Feed', value: 'Push / 30s fallback', tone: 'good' },
+          { label: 'Breadth', value: '全 A 10 档分布' },
+          { label: 'Alert', value: '事件生命周期', tone: 'warn' },
+        ],
+      },
+      {
+        title: '数据口径',
+        rows: [
+          { label: 'Intraday', value: 'QMT 聚合' },
+          { label: 'EOD', value: '交易日快照' },
+          { label: 'Missing', value: '不补零', tone: 'good' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'data',
     path: '/data',
     activePatterns: ['/stock/*'],

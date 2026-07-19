@@ -170,6 +170,34 @@ describe('market radar realtime store', () => {
     expect(notifications.addMarketAlert).toHaveBeenCalledTimes(1)
   })
 
+  it('normalizes a full-metrics SSE snapshot while retaining it for live panels', async () => {
+    await store.start()
+    const source = FakeEventSource.instances[0]
+    source.open()
+    await settle()
+
+    source.emit('snapshot', streamPayload({
+      ...envelope('2026-07-18T10:00:02', {
+        overview: {
+          mode: 'push',
+          market_median_return_pct: -1.6,
+          decline_ratio: 0.72,
+          status: 'fresh',
+        },
+        breadth: { status: 'fresh', buckets: { le_neg_8: { percentage: 2.1 } } },
+        indices: { '000001.SH': { return_pct: -0.8, status: 'fresh' } },
+        limit_ladder: { status: 'unavailable', reason: 'intraday source not loaded' },
+      }),
+    }, 2))
+
+    expect(store.overview?.data).toMatchObject({ market_median_return_pct: -1.6 })
+    expect(store.overview?.data).not.toHaveProperty('overview')
+    expect(store.latestSnapshot?.data).toMatchObject({
+      breadth: { status: 'fresh' },
+      limit_ladder: { status: 'unavailable' },
+    })
+  })
+
   it('falls back after 20 seconds without heartbeat and polls at most once every 30 seconds', async () => {
     await store.start()
     const source = FakeEventSource.instances[0]
@@ -242,12 +270,28 @@ describe('market radar realtime store', () => {
 
     source.open()
     source.emit('snapshot', streamPayload(envelope('2026-07-18T10:01:00'), 2))
-    expect(store.connectionState).toBe('connecting')
+    expect(store.connectionState).toBe('live')
     compensation.resolve(envelope('2026-07-18T10:00:30'))
     await settle()
 
     expect(store.overview?.computed_at).toBe('2026-07-18T10:01:00')
     expect(store.connectionState).toBe('live')
+  })
+
+  it('keeps the stream live when a valid snapshot beats a failed overview catch-up', async () => {
+    await store.start()
+    const source = FakeEventSource.instances[0]
+    const compensation = Promise.withResolvers<MarketRadarEnvelope<MarketRadarOverview>>()
+    api.overview.mockImplementationOnce(() => compensation.promise)
+
+    source.open()
+    source.emit('snapshot', streamPayload(envelope('2026-07-18T10:01:00'), 2))
+    compensation.reject(new Error('overview catch-up failed'))
+    await settle()
+
+    expect(source.closed).toBe(false)
+    expect(store.connectionState).toBe('live')
+    expect(store.overview?.computed_at).toBe('2026-07-18T10:01:00')
   })
 
   it('preserves alerts received while the onopen REST compensation is pending', async () => {
@@ -263,6 +307,21 @@ describe('market radar realtime store', () => {
 
     expect(store.alerts.map(item => item.id)).toEqual([8, 7])
     expect(store.connectionState).toBe('live')
+  })
+
+  it('keeps a healthy SSE connection when only the alert catch-up request fails', async () => {
+    await store.start()
+    const source = FakeEventSource.instances[0]
+    api.overview.mockResolvedValueOnce(envelope('2026-07-18T10:00:30'))
+    api.activeHighAlerts.mockRejectedValueOnce(new Error('alert catch-up failed'))
+
+    source.open()
+    await settle()
+
+    expect(source.closed).toBe(false)
+    expect(store.connectionState).toBe('live')
+    expect(store.overview?.computed_at).toBe('2026-07-18T10:00:30')
+    expect(store.alerts.map(item => item.id)).toEqual([7])
   })
 
   it('becomes live when a newer REST generation supersedes the onopen compensation', async () => {

@@ -15,6 +15,12 @@ const router = createRouter({
       meta: routeMetaForPath('/home'),
     },
     {
+      path: '/market-radar',
+      name: 'MarketRadar',
+      component: () => import('@/views/MarketRadar/index.vue'),
+      meta: routeMetaForPath('/market-radar'),
+    },
+    {
       path: '/data',
       name: 'DataManage',
       component: () => import('@/views/DataManage/index.vue'),
