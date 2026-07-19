@@ -253,6 +253,7 @@ class QmtRealtimeFeed:
             self._subscription_errors.clear()
             for seq in subscription_ids:
                 await self._unsubscribe_or_defer(seq)
+            await self._drain_deferred_unsubscribes()
 
             with self._latest_lock:
                 self._latest.clear()

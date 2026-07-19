@@ -1308,7 +1308,7 @@ async def test_default_blocking_runners_create_only_daemon_threads(monkeypatch) 
 
 
 @pytest.mark.asyncio
-async def test_stop_keeps_failed_unsubscribe_for_later_drain() -> None:
+async def test_stop_retries_one_transient_unsubscribe_failure_during_bounded_drain() -> None:
     class FailOnceUnsubscribeAdapter(FakeXtdataAdapter):
         def __init__(self) -> None:
             super().__init__()
@@ -1325,10 +1325,29 @@ async def test_stop_keeps_failed_unsubscribe_for_later_drain() -> None:
     await feed.start()
 
     await feed.stop()
-    await feed._drain_deferred_unsubscribes()
 
     assert adapter.unsubscribe_calls == [1, 2, 3, 4, 1]
     assert feed._deferred_unsubscribe_ids == []
+    assert feed.status.mode == "closed"
+
+
+@pytest.mark.asyncio
+async def test_stop_attempts_persistent_unsubscribe_failure_only_twice() -> None:
+    class PersistentUnsubscribeFailAdapter(FakeXtdataAdapter):
+        def unsubscribe_quote(self, seq: int) -> None:
+            self.unsubscribe_calls.append(seq)
+            if seq == 1:
+                raise RuntimeError("persistent unsubscribe failure")
+
+    adapter = PersistentUnsubscribeFailAdapter()
+    feed, adapter, _clock, _submitter = make_feed(adapter=adapter)
+    await feed.start()
+
+    await feed.stop()
+
+    assert adapter.unsubscribe_calls == [1, 2, 3, 4, 1]
+    assert feed._deferred_unsubscribe_ids == [1]
+    assert feed.status.mode == "closed"
 
 
 def test_market_radar_realtime_settings_have_defaults_and_positive_bounds() -> None:
