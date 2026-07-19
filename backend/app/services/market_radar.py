@@ -7,9 +7,9 @@ import hashlib
 import inspect
 import json
 import math
-from collections import deque
-from collections.abc import Awaitable, Callable, Iterable, Mapping
-from dataclasses import dataclass, field, replace
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import date, datetime, time
 from statistics import median
 from types import MappingProxyType
@@ -20,6 +20,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.market_radar import MarketAlertEvent, MarketAlertRule, MarketRadarSnapshot
 from app.db.models.watchlist import WatchlistStock
+from app.services.market_radar_broker import (
+    BrokerDisconnected as BrokerDisconnected,
+)
+from app.services.market_radar_broker import (
+    MarketRadarStreamBroker,
+    MarketRadarSubscription,
+)
 from app.services.market_radar_calculator import (
     CROWDING_COMPONENT_WEIGHTS,
     EMOTION_COMPONENT_WEIGHTS,
@@ -30,6 +37,32 @@ from app.services.market_radar_calculator import (
     crowding_label,
     serialize_breadth_result,
 )
+from app.services.market_radar_contracts import (
+    DEFAULT_COOLDOWN_SECONDS as DEFAULT_COOLDOWN_SECONDS,
+)
+from app.services.market_radar_contracts import (
+    DEFAULT_FORMULA_VERSION,
+    DEFAULT_RULE_VERSION,
+    AlertPersistenceResult,
+    EligibleUniverse,
+    FocusUniverse,
+    FreshnessStatus,
+    IntradaySymbolContext,
+    MetricValue,
+    RadarHistoryContext,
+    RadarObservation,
+    RadarScope,
+    RadarSnapshotEnvelope,
+    RuleDefinition,
+    RuleEvaluation,
+    RuleMatch,
+    Severity,
+    SnapshotType,
+    StreamEventType,
+)
+from app.services.market_radar_contracts import (
+    StreamEvent as StreamEvent,
+)
 from app.services.market_radar_data import serialize_market_radar_data
 from app.services.market_radar_store import (
     MarketRadarStore,
@@ -37,15 +70,6 @@ from app.services.market_radar_store import (
     load_json_object,
 )
 
-FreshnessStatus = Literal["fresh", "partial", "stale", "unavailable"]
-RadarScope = Literal["market", "sector", "symbol", "data"]
-SnapshotType = Literal["intraday", "eod"]
-Severity = Literal["low", "medium", "high"]
-StreamEventType = Literal["mode", "snapshot", "alert", "heartbeat"]
-
-DEFAULT_RULE_VERSION = 1
-DEFAULT_FORMULA_VERSION = "market-radar-v1"
-DEFAULT_COOLDOWN_SECONDS = 15 * 60
 CORE_INDICES = frozenset({"000001.SH", "399001.SZ", "000985.SH"})
 _OPEN_EVENT_STATUSES = ("active", "acknowledged", "dismissed")
 _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2}
@@ -71,126 +95,6 @@ _SOURCE_DEFAULT_REASONS = {
     "stock_limit_prices": "exact stock limit prices are unavailable",
     "sentiment_posts": "symbol sentiment posts are unavailable",
 }
-
-
-@dataclass(frozen=True, slots=True)
-class MetricValue:
-    value: float | bool | None
-    status: FreshnessStatus
-    as_of: datetime
-    source: str
-    baseline: float | str | None = None
-    reason: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class EligibleUniverse:
-    symbols: tuple[str, ...]
-    status: FreshnessStatus
-    as_of: datetime
-    source: str
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "symbols", tuple(dict.fromkeys(self.symbols)))
-
-
-@dataclass(frozen=True, slots=True)
-class IntradaySymbolContext:
-    metrics: Mapping[str, MetricValue]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
-
-
-@dataclass(frozen=True, slots=True)
-class RadarHistoryContext:
-    limit_down_counts: tuple[float, ...] = ()
-    limit_down_median_5d: float | None = None
-    previous_emotion_score: float | None = None
-    previous_as_of: datetime | None = None
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "limit_down_counts", tuple(self.limit_down_counts))
-
-
-@dataclass(frozen=True, slots=True)
-class RadarObservation:
-    scope: RadarScope
-    subject: str
-    metrics: Mapping[str, MetricValue]
-    sources: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
-        object.__setattr__(self, "sources", tuple(dict.fromkeys(self.sources)))
-
-
-@dataclass(frozen=True, slots=True)
-class RadarSnapshotEnvelope:
-    snapshot_type: SnapshotType
-    as_of: datetime
-    computed_at: datetime
-    status: FreshnessStatus
-    confidence: float
-    formula_version: str
-    metrics: Mapping[str, Any]
-    source_freshness: Mapping[str, Any]
-    observations: tuple[RadarObservation, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not 0 <= self.confidence <= 1:
-            raise ValueError("confidence must be between 0 and 1")
-        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
-        object.__setattr__(
-            self,
-            "source_freshness",
-            MappingProxyType(dict(self.source_freshness)),
-        )
-        object.__setattr__(self, "observations", tuple(self.observations))
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "snapshot_type": self.snapshot_type,
-            "as_of": self.as_of.isoformat(),
-            "computed_at": self.computed_at.isoformat(),
-            "status": self.status,
-            "confidence": self.confidence,
-            "formula_version": self.formula_version,
-            "metrics": serialize_market_radar_data(self.metrics),
-            "source_freshness": serialize_market_radar_data(self.source_freshness),
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class RuleDefinition:
-    key: str
-    scope: RadarScope
-    severity: Severity
-    title: str
-    direction: str
-    rule_type: str = ""
-    parameters: Mapping[str, Any] = field(default_factory=dict)
-    subject: str = "*"
-    enabled: bool = True
-    source: Literal["system", "user"] = "system"
-    cooldown_seconds: int = DEFAULT_COOLDOWN_SECONDS
-    version: int = DEFAULT_RULE_VERSION
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "parameters", MappingProxyType(dict(self.parameters)))
-        if self.rule_type == "metric_threshold":
-            metric_name = self.parameters.get("metric")
-            operator = self.parameters.get("operator")
-            threshold = self.parameters.get("threshold")
-            if not isinstance(metric_name, str) or not metric_name:
-                raise ValueError("metric_threshold requires a metric")
-            if operator not in {"lte", "gte", "abs_gte"}:
-                raise ValueError("metric_threshold operator is invalid")
-            if not isinstance(threshold, (int, float)) or not math.isfinite(float(threshold)):
-                raise ValueError("metric_threshold requires a finite threshold")
-
-
 _DEFAULT_RULE_SPECS: tuple[tuple[str, RadarScope, Severity, str, str, Mapping[str, Any]], ...] = (
     ("market_median_return_down", "market", "high", "全A中位数急跌", "down", {"lte": -2.5}),
     ("market_decline_ratio_high", "market", "high", "市场普跌", "down", {"gte": 0.8}),
@@ -290,255 +194,8 @@ DEFAULT_RULE_DEFINITIONS = tuple(
 _DEFAULT_RULES_BY_KEY = MappingProxyType({rule.key: rule for rule in DEFAULT_RULE_DEFINITIONS})
 
 
-@dataclass(frozen=True, slots=True)
-class RuleMatch:
-    rule: RuleDefinition
-    scope: RadarScope
-    subject: str
-    direction: str
-    severity: Severity
-    title: str
-    explanation: str
-    dedupe_key: str
-    evidence: Mapping[str, Any]
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "evidence", MappingProxyType(dict(self.evidence)))
-
-
-@dataclass(frozen=True, slots=True)
-class RuleEvaluation:
-    matches: tuple[RuleMatch, ...]
-    evaluated_dedupe_keys: frozenset[str]
-    evaluated_rules: Mapping[str, RuleDefinition]
-    skipped_reasons: tuple[str, ...] = ()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "matches", tuple(self.matches))
-        object.__setattr__(
-            self,
-            "evaluated_rules",
-            MappingProxyType(dict(self.evaluated_rules)),
-        )
-        object.__setattr__(self, "skipped_reasons", tuple(self.skipped_reasons))
-
-
-@dataclass(frozen=True, slots=True)
-class AlertPersistenceResult:
-    notifications: tuple[MarketAlertEvent, ...]
-    touched_event_ids: tuple[int, ...]
-    resolved_event_ids: tuple[int, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class StreamEvent:
-    sequence: int
-    event_id: str
-    event: StreamEventType
-    data: Mapping[str, Any]
-    created_at: datetime
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "data", MappingProxyType(dict(self.data)))
-
-
-class BrokerDisconnected(RuntimeError):
-    """Raised when a stream client is closed or too slow to consume safely."""
-
-
 class RadarSnapshotUnavailable(RuntimeError):
     """Raised when the market is closed and no prior snapshot exists."""
-
-
-@dataclass(slots=True)
-class _SubscriberState:
-    id: int
-    queue: deque[StreamEvent]
-    condition: asyncio.Condition
-    overflow_count: int = 0
-    disconnected: bool = False
-    disconnect_reason: str | None = None
-
-
-class MarketRadarSubscription:
-    def __init__(self, broker: MarketRadarStreamBroker, state: _SubscriberState) -> None:
-        self._broker = broker
-        self._state = state
-
-    @property
-    def id(self) -> int:
-        return self._state.id
-
-    @property
-    def pending(self) -> int:
-        return len(self._state.queue)
-
-    @property
-    def disconnect_reason(self) -> str | None:
-        return self._state.disconnect_reason
-
-    async def get(self) -> StreamEvent:
-        state = self._state
-        async with state.condition:
-            await state.condition.wait_for(lambda: bool(state.queue) or state.disconnected)
-            if state.disconnected:
-                raise BrokerDisconnected(state.disconnect_reason or "subscription_closed")
-            return state.queue.popleft()
-
-    async def close(self) -> None:
-        await self._broker.unsubscribe(self.id)
-
-    def __aiter__(self) -> MarketRadarSubscription:
-        return self
-
-    async def __anext__(self) -> StreamEvent:
-        try:
-            return await self.get()
-        except BrokerDisconnected as exc:
-            raise StopAsyncIteration from exc
-
-
-class MarketRadarStreamBroker:
-    """Fan out aggregate events without allowing slow clients to block publishers."""
-
-    def __init__(
-        self,
-        *,
-        queue_size: int = 64,
-        overflow_disconnect_threshold: int = 3,
-        heartbeat_seconds: float = 15.0,
-        clock: Callable[[], datetime] = datetime.now,
-    ) -> None:
-        if queue_size < 1:
-            raise ValueError("queue_size must be positive")
-        if overflow_disconnect_threshold < 1:
-            raise ValueError("overflow_disconnect_threshold must be positive")
-        if not math.isfinite(heartbeat_seconds) or heartbeat_seconds <= 0:
-            raise ValueError("heartbeat_seconds must be finite and positive")
-        self._queue_size = queue_size
-        self._hard_limit = queue_size + overflow_disconnect_threshold - 1
-        self._overflow_disconnect_threshold = overflow_disconnect_threshold
-        self._heartbeat_seconds = heartbeat_seconds
-        self._clock = clock
-        self._subscribers: dict[int, _SubscriberState] = {}
-        self._subscriber_lock = asyncio.Lock()
-        self._next_subscriber_id = 1
-        self._sequence = 0
-        self._last_heartbeat_at: datetime | None = None
-
-    @property
-    def subscriber_count(self) -> int:
-        return len(self._subscribers)
-
-    async def subscribe(
-        self,
-        *,
-        initial_events: Iterable[tuple[StreamEventType, Mapping[str, Any]]] = (),
-    ) -> MarketRadarSubscription:
-        async with self._subscriber_lock:
-            subscriber_id = self._next_subscriber_id
-            self._next_subscriber_id += 1
-            state = _SubscriberState(
-                id=subscriber_id,
-                queue=deque(maxlen=self._hard_limit),
-                condition=asyncio.Condition(),
-            )
-            for event_type, data in initial_events:
-                if len(state.queue) >= self._hard_limit:
-                    raise ValueError("initial stream state exceeds subscriber queue capacity")
-                state.queue.append(self._new_event(event_type, data, self._clock()))
-            self._subscribers[subscriber_id] = state
-        return MarketRadarSubscription(self, state)
-
-    async def unsubscribe(self, subscriber_id: int) -> None:
-        async with self._subscriber_lock:
-            state = self._subscribers.pop(subscriber_id, None)
-        if state is None:
-            return
-        async with state.condition:
-            state.disconnected = True
-            state.disconnect_reason = state.disconnect_reason or "subscription_closed"
-            state.queue.clear()
-            state.condition.notify_all()
-
-    async def publish(
-        self,
-        event: StreamEventType,
-        data: Mapping[str, Any],
-        *,
-        created_at: datetime | None = None,
-    ) -> StreamEvent:
-        async with self._subscriber_lock:
-            stream_event = self._new_event(event, data, created_at or self._clock())
-            states = tuple(self._subscribers.values())
-        for state in states:
-            await self._offer(state, stream_event)
-        return stream_event
-
-    def _new_event(
-        self,
-        event: StreamEventType,
-        data: Mapping[str, Any],
-        created_at: datetime,
-    ) -> StreamEvent:
-        self._sequence += 1
-        return StreamEvent(
-            sequence=self._sequence,
-            event_id=str(self._sequence),
-            event=event,
-            data=data,
-            created_at=created_at,
-        )
-
-    async def heartbeat(self, now: datetime | None = None) -> bool:
-        current = now or self._clock()
-        if (
-            self._last_heartbeat_at is not None
-            and (current - self._last_heartbeat_at).total_seconds() < self._heartbeat_seconds
-        ):
-            return False
-        self._last_heartbeat_at = current
-        await self.publish("heartbeat", {"at": current.isoformat()}, created_at=current)
-        return True
-
-    async def _offer(self, state: _SubscriberState, event: StreamEvent) -> None:
-        async with state.condition:
-            if state.disconnected:
-                return
-            if event.event == "snapshot":
-                for index, pending in enumerate(state.queue):
-                    if pending.event == "snapshot":
-                        state.queue[index] = event
-                        state.condition.notify()
-                        return
-            if len(state.queue) >= self._queue_size:
-                dropped = self._drop_disposable(state.queue)
-                if event.event in {"snapshot", "heartbeat"} and not dropped:
-                    return
-                if not dropped:
-                    state.overflow_count += 1
-                    if state.overflow_count >= self._overflow_disconnect_threshold:
-                        state.disconnected = True
-                        state.disconnect_reason = "slow_subscriber"
-                        state.queue.clear()
-                        state.condition.notify_all()
-                        return
-            if len(state.queue) >= self._hard_limit:
-                state.disconnected = True
-                state.disconnect_reason = "slow_subscriber"
-                state.queue.clear()
-                state.condition.notify_all()
-                return
-            state.queue.append(event)
-            state.condition.notify()
-
-    @staticmethod
-    def _drop_disposable(queue: deque[StreamEvent]) -> bool:
-        for index, pending in enumerate(queue):
-            if pending.event in {"snapshot", "heartbeat"}:
-                del queue[index]
-                return True
-        return False
 
 
 class MarketAlertEngine:
@@ -1018,26 +675,6 @@ class MarketAlertEngine:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class FocusUniverse:
-    holdings: tuple[str, ...]
-    watchlist: tuple[str, ...]
-    focus: tuple[str, ...]
-    symbols: tuple[str, ...]
-    sources: Mapping[str, tuple[str, ...]]
-    warnings: tuple[str, ...] = ()
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "holdings": list(self.holdings),
-            "watchlist": list(self.watchlist),
-            "focus": list(self.focus),
-            "symbols": list(self.symbols),
-            "sources": {key: list(value) for key, value in self.sources.items()},
-            "warnings": list(self.warnings),
-        }
-
-
 class FocusUniverseResolver:
     def __init__(
         self,
@@ -1191,6 +828,7 @@ class MarketRadarService:
         self._loop_task: asyncio.Task[None] | None = None
         self._started = False
         self._last_loop_error: str | None = None
+        self._last_cleanup_error: str | None = None
 
     @property
     def started(self) -> bool:
@@ -1199,6 +837,10 @@ class MarketRadarService:
     @property
     def last_loop_error(self) -> str | None:
         return self._last_loop_error
+
+    @property
+    def last_cleanup_error(self) -> str | None:
+        return self._last_cleanup_error
 
     def current_envelope(self) -> RadarSnapshotEnvelope | None:
         return self._current
@@ -1251,10 +893,8 @@ class MarketRadarService:
         if callable(start):
             try:
                 await _await_result(start())
-            except Exception:
-                stop = getattr(self.feed, "stop", None)
-                if callable(stop):
-                    await _await_result(stop())
+            except BaseException:
+                await self._cleanup_feed()
                 raise
         try:
             await self.alert_engine.persist(
@@ -1263,11 +903,9 @@ class MarketRadarService:
                 seen_at=self._clock(),
             )
             await self.store.session.commit()
-        except Exception:
-            await self.store.session.rollback()
-            stop = getattr(self.feed, "stop", None)
-            if callable(stop):
-                await _await_result(stop())
+        except BaseException:
+            await self._rollback_session()
+            await self._cleanup_feed()
             raise
         self._started = True
         self._loop_task = asyncio.create_task(self._run_loop(), name="market-radar-loop")
@@ -1311,7 +949,7 @@ class MarketRadarService:
             return await self.broker.subscribe(initial_events=initial)
 
     async def refresh_intraday(self) -> RadarSnapshotEnvelope:
-        async with self._refresh_lock:
+        async with self._locked_refresh():
             now = self._clock()
             if (
                 self._current is not None
@@ -1370,19 +1008,15 @@ class MarketRadarService:
                 >= self._snapshot_persist_seconds
             )
             persisted_snapshot = None
-            try:
-                if due_snapshot:
-                    persisted_snapshot = await self._persist_snapshot(snapshot)
-                persistence = await self.alert_engine.persist(
-                    self.store,
-                    evaluation,
-                    seen_at=now,
-                    snapshot_id=persisted_snapshot.id if persisted_snapshot is not None else None,
-                )
-                await self.store.session.commit()
-            except Exception:
-                await self.store.session.rollback()
-                raise
+            if due_snapshot:
+                persisted_snapshot = await self._persist_snapshot(snapshot)
+            persistence = await self.alert_engine.persist(
+                self.store,
+                evaluation,
+                seen_at=now,
+                snapshot_id=persisted_snapshot.id if persisted_snapshot is not None else None,
+            )
+            await self.store.session.commit()
 
             if due_snapshot:
                 self._last_snapshot_persisted_at = now
@@ -1403,6 +1037,10 @@ class MarketRadarService:
         return await self.refresh_intraday()
 
     async def refresh_eod(self, target_date: date) -> RadarSnapshotEnvelope:
+        async with self._locked_refresh():
+            return await self._refresh_eod_locked(target_date)
+
+    async def _refresh_eod_locked(self, target_date: date) -> RadarSnapshotEnvelope:
         now = self._clock()
         sentiment_as_of = datetime.combine(target_date, time(15, 20))
         # MarketRadarDataService owns one AsyncSession, so its SQL calls stay sequential.
@@ -1430,24 +1068,44 @@ class MarketRadarService:
         _validate_snapshot(snapshot)
         configured_rules = await self.alert_engine.load_rules(self.store)
         evaluation = self.alert_engine.evaluate(snapshot, rules=configured_rules)
-        try:
-            persisted = await self._persist_snapshot(snapshot)
-            persistence = await self.alert_engine.persist(
-                self.store,
-                evaluation,
-                seen_at=now,
-                snapshot_id=persisted.id,
-            )
-            await self.store.session.commit()
-        except Exception:
-            await self.store.session.rollback()
-            raise
+        persisted = await self._persist_snapshot(snapshot)
+        persistence = await self.alert_engine.persist(
+            self.store,
+            evaluation,
+            seen_at=now,
+            snapshot_id=persisted.id,
+        )
+        await self.store.session.commit()
         self._current = snapshot
         self._last_snapshot_persisted_at = now
         await self.broker.publish("snapshot", self.project_snapshot(snapshot), created_at=now)
         for event in persistence.notifications:
             await self.broker.publish("alert", _event_dict(event), created_at=now)
         return snapshot
+
+    async def _rollback_session(self) -> None:
+        try:
+            await self.store.session.rollback()
+        except BaseException as exc:
+            self._last_cleanup_error = f"{type(exc).__name__}: session rollback failed"
+
+    @asynccontextmanager
+    async def _locked_refresh(self) -> AsyncIterator[None]:
+        async with self._refresh_lock:
+            try:
+                yield
+            except BaseException:
+                await self._rollback_session()
+                raise
+
+    async def _cleanup_feed(self) -> None:
+        stop = getattr(self.feed, "stop", None)
+        if not callable(stop):
+            return
+        try:
+            await _await_result(stop())
+        except BaseException as exc:
+            self._last_cleanup_error = f"{type(exc).__name__}: {exc}"
 
     async def _persist_snapshot(self, snapshot: RadarSnapshotEnvelope) -> object:
         return await self.store.upsert_snapshot(

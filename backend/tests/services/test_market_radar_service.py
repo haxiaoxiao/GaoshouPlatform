@@ -14,7 +14,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
-from app.db.models.market_radar import MarketAlertEvent
+from app.db.models.market_radar import MarketAlertEvent, MarketRadarSnapshot
 from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
 from app.services.market_radar import (
@@ -40,6 +40,27 @@ from app.services.market_radar_store import MarketRadarStore
 from app.services.qmt_realtime_feed import RealtimeFeedStatus
 
 NOW = datetime(2026, 7, 17, 10, 0, 0)
+
+
+def test_market_radar_reexports_split_contracts_and_broker():
+    from app.services import market_radar
+    from app.services.market_radar_broker import (
+        BrokerDisconnected as SplitBrokerDisconnected,
+    )
+    from app.services.market_radar_broker import (
+        MarketRadarStreamBroker as SplitMarketRadarStreamBroker,
+    )
+    from app.services.market_radar_contracts import (
+        MetricValue as SplitMetricValue,
+    )
+    from app.services.market_radar_contracts import (
+        RadarSnapshotEnvelope as SplitRadarSnapshotEnvelope,
+    )
+
+    assert market_radar.BrokerDisconnected is SplitBrokerDisconnected
+    assert market_radar.MarketRadarStreamBroker is SplitMarketRadarStreamBroker
+    assert market_radar.MetricValue is SplitMetricValue
+    assert market_radar.RadarSnapshotEnvelope is SplitRadarSnapshotEnvelope
 
 
 def metric(
@@ -127,6 +148,7 @@ async def test_broker_drops_heartbeat_before_critical_and_disconnects_chronic_sl
     await broker.publish("mode", {"mode": "push"})
     await broker.publish("alert", {"id": 2})
     await broker.publish("alert", {"id": 3})
+    assert broker.subscriber_count == 0
     with pytest.raises(BrokerDisconnected):
         await subscription.get()
     assert subscription.disconnect_reason == "slow_subscriber"
@@ -1726,6 +1748,199 @@ async def test_refresh_eod_does_not_concurrently_use_one_data_service_session(ra
 
 
 @pytest.mark.asyncio
+async def test_intraday_and_eod_refreshes_share_one_session_lock(radar_session):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    class BlockingEodData(FakeEodData):
+        async def load_daily_market(self, **kwargs):
+            entered.set()
+            await release.wait()
+            return await super().load_daily_market(**kwargs)
+
+    feed = FakeFeed()
+
+    async def intraday_builder(**kwargs):
+        return envelope(as_of=kwargs["now"])
+
+    async def eod_builder(**kwargs):
+        return RadarSnapshotEnvelope(
+            snapshot_type="eod",
+            as_of=NOW,
+            computed_at=NOW,
+            status="partial",
+            confidence=0.5,
+            formula_version="market-radar-v1",
+            metrics={"overview": {"status": "partial"}},
+            source_freshness={},
+        )
+
+    service = MarketRadarService(
+        feed=feed,
+        data_service=BlockingEodData(),
+        store=MarketRadarStore(radar_session),
+        snapshot_builder=intraday_builder,
+        eod_snapshot_builder=eod_builder,
+        clock=FakeClock(),
+    )
+    eod_task = asyncio.create_task(service.refresh_eod(date(2026, 7, 17)))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    intraday_task = asyncio.create_task(service.refresh_intraday())
+    await asyncio.sleep(0)
+    assert feed.health_calls == 0
+    release.set()
+    await asyncio.gather(eod_task, intraday_task)
+    assert feed.health_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("refresh_kind", ["intraday", "eod"])
+async def test_cancelled_refresh_rolls_back_flushed_transaction_and_can_restart(
+    radar_session,
+    refresh_kind,
+):
+    class BlockingSnapshotStore(MarketRadarStore):
+        def __init__(self, session):
+            super().__init__(session)
+            self.flushed = asyncio.Event()
+            self.block_once = True
+
+        async def upsert_snapshot(self, **kwargs):
+            row = await super().upsert_snapshot(**kwargs)
+            if self.block_once:
+                self.block_once = False
+                self.flushed.set()
+                await asyncio.Event().wait()
+            return row
+
+    store = BlockingSnapshotStore(radar_session)
+
+    async def intraday_builder(**kwargs):
+        return envelope(as_of=kwargs["now"])
+
+    async def eod_builder(**kwargs):
+        return RadarSnapshotEnvelope(
+            snapshot_type="eod",
+            as_of=NOW,
+            computed_at=NOW,
+            status="partial",
+            confidence=0.5,
+            formula_version="market-radar-v1",
+            metrics={"overview": {"status": "partial"}},
+            source_freshness={},
+        )
+
+    service = MarketRadarService(
+        feed=FakeFeed(),
+        data_service=FakeEodData(),
+        store=store,
+        snapshot_builder=intraday_builder,
+        eod_snapshot_builder=eod_builder,
+        clock=FakeClock(),
+    )
+    refresh = (
+        service.refresh_intraday
+        if refresh_kind == "intraday"
+        else lambda: service.refresh_eod(date(2026, 7, 17))
+    )
+    task = asyncio.create_task(refresh())
+    await asyncio.wait_for(store.flushed.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    rows = list((await radar_session.execute(select(MarketRadarSnapshot))).scalars())
+    assert rows == []
+    restarted = await refresh()
+    assert restarted.snapshot_type == refresh_kind
+
+
+@pytest.mark.asyncio
+async def test_cancelled_intraday_context_read_rolls_back_before_restart(radar_session):
+    entered = asyncio.Event()
+    block_once = True
+
+    async def eligible():
+        nonlocal block_once
+        await radar_session.execute(select(MarketRadarSnapshot).limit(1))
+        if block_once:
+            block_once = False
+            entered.set()
+            await asyncio.Event().wait()
+        return EligibleUniverse(("600000.SH",), "fresh", NOW, "sqlite_stocks")
+
+    async def contexts(_symbols, _ticks, _now):
+        return {}
+
+    async def builder(**kwargs):
+        return envelope(as_of=kwargs["now"])
+
+    service = MarketRadarService(
+        feed=FakeFeed(),
+        data_service=SimpleNamespace(),
+        store=MarketRadarStore(radar_session),
+        snapshot_builder=builder,
+        eligible_universe_loader=eligible,
+        symbol_context_loader=contexts,
+        clock=FakeClock(),
+    )
+    task = asyncio.create_task(service.refresh_intraday())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not radar_session.in_transaction()
+    assert (await service.refresh_intraday()).snapshot_type == "intraday"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_eod_source_read_rolls_back_before_restart(radar_session):
+    entered = asyncio.Event()
+
+    class BlockingEodData(FakeEodData):
+        def __init__(self):
+            super().__init__()
+            self.block_once = True
+
+        async def load_daily_market(self, **kwargs):
+            await radar_session.execute(select(MarketRadarSnapshot).limit(1))
+            if self.block_once:
+                self.block_once = False
+                entered.set()
+                await asyncio.Event().wait()
+            return await super().load_daily_market(**kwargs)
+
+    async def builder(**kwargs):
+        return RadarSnapshotEnvelope(
+            snapshot_type="eod",
+            as_of=NOW,
+            computed_at=NOW,
+            status="partial",
+            confidence=0.5,
+            formula_version="market-radar-v1",
+            metrics={"overview": {"status": "partial"}},
+            source_freshness={},
+        )
+
+    service = MarketRadarService(
+        feed=FakeFeed(),
+        data_service=BlockingEodData(),
+        store=MarketRadarStore(radar_session),
+        eod_snapshot_builder=builder,
+        clock=FakeClock(),
+    )
+    task = asyncio.create_task(service.refresh_eod(date(2026, 7, 17)))
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not radar_session.in_transaction()
+    assert (await service.refresh_eod(date(2026, 7, 17))).snapshot_type == "eod"
+
+
+@pytest.mark.asyncio
 async def test_closed_market_reuses_latest_persisted_snapshot_without_intraday_write(radar_session):
     store = CountingStore(radar_session)
     await store.upsert_snapshot(
@@ -1785,6 +2000,7 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
             self.stop_calls = 0
             self.partially_started = False
             self.fail_start = True
+            self.fail_stop = True
             self.fail_health = True
 
         async def start(self):
@@ -1796,6 +2012,8 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
         async def stop(self):
             self.stop_calls += 1
             self.partially_started = False
+            if self.fail_stop:
+                raise RuntimeError("feed cleanup failed")
 
         async def run_health_cycle(self):
             self.health_calls += 1
@@ -1820,8 +2038,10 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
     assert service.started is False
     assert feed.stop_calls == 1
     assert feed.partially_started is False
+    assert service.last_cleanup_error == "RuntimeError: feed cleanup failed"
 
     feed.fail_start = False
+    feed.fail_stop = False
     await service.start()
     for _ in range(100):
         if service.current_envelope() is not None:
@@ -1831,6 +2051,81 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
     assert service.last_loop_error is not None
     assert service.current_envelope() is not None, service.last_loop_error
     await service.stop()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_feed_start_still_cleans_up_partial_start(radar_session):
+    entered = asyncio.Event()
+
+    class BlockingStartFeed(FakeFeed):
+        def __init__(self):
+            super().__init__()
+            self.stop_calls = 0
+            self.partially_started = False
+
+        async def start(self):
+            self.partially_started = True
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def stop(self):
+            self.stop_calls += 1
+            self.partially_started = False
+
+    feed = BlockingStartFeed()
+    service = MarketRadarService(
+        feed=feed,
+        data_service=SimpleNamespace(),
+        store=MarketRadarStore(radar_session),
+    )
+    task = asyncio.create_task(service.start())
+    await asyncio.wait_for(entered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert service.started is False
+    assert feed.stop_calls == 1
+    assert feed.partially_started is False
+
+
+@pytest.mark.asyncio
+async def test_start_preserves_setup_error_when_rollback_fails_and_cleans_feed():
+    class Feed(FakeFeed):
+        def __init__(self):
+            super().__init__()
+            self.stop_calls = 0
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            self.stop_calls += 1
+
+    class Session:
+        async def commit(self):
+            return None
+
+        async def rollback(self):
+            raise RuntimeError("rollback cleanup failed")
+
+    class FailingAlertEngine(MarketAlertEngine):
+        async def persist(self, *_args, **_kwargs):
+            raise ValueError("startup setup failed")
+
+    feed = Feed()
+    store = SimpleNamespace(session=Session())
+    service = MarketRadarService(
+        feed=feed,
+        data_service=SimpleNamespace(),
+        store=store,
+        alert_engine=FailingAlertEngine(),
+    )
+
+    with pytest.raises(ValueError, match="startup setup failed"):
+        await service.start()
+    assert feed.stop_calls == 1
+    assert service.last_cleanup_error == "RuntimeError: session rollback failed"
 
 
 @pytest.mark.asyncio

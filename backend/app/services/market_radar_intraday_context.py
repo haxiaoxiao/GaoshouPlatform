@@ -16,12 +16,12 @@ from app.core.blocking import run_blocking
 from app.data_stores.parquet_store import ParquetMarketDataStore
 from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
-from app.services.market_radar import (
+from app.services.market_radar_calculator import QuoteTick
+from app.services.market_radar_contracts import (
     EligibleUniverse,
     IntradaySymbolContext,
     MetricValue,
 )
-from app.services.market_radar_calculator import QuoteTick
 
 _DAILY_VOLUME_TO_SHARES = 100.0
 _CONTEXT_KEYS = (
