@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.blocking import run_blocking
 from app.data_stores.parquet_store import ParquetMarketDataStore
-from app.db.models.sentiment import SentimentAnalysis
+from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
 from app.services.market_radar import (
     EligibleUniverse,
@@ -141,7 +141,7 @@ class MarketRadarIntradayContextLoader:
                     "negative_heat_z20": sentiment_metrics.get(
                         "negative_heat_z20",
                         _unavailable_metric(
-                            "sentiment_analysis",
+                            "sentiment_posts",
                             as_of,
                             "20-day symbol negative-heat history is unavailable",
                         ),
@@ -149,7 +149,7 @@ class MarketRadarIntradayContextLoader:
                     "weighted_sentiment": sentiment_metrics.get(
                         "weighted_sentiment",
                         _unavailable_metric(
-                            "sentiment_analysis",
+                            "sentiment_posts",
                             as_of,
                             "fresh symbol sentiment is unavailable",
                         ),
@@ -171,7 +171,7 @@ class MarketRadarIntradayContextLoader:
             list(symbols),
             target_date - timedelta(days=60),
             target_date - timedelta(days=1),
-            ["symbol", "trade_date", "volume"],
+            ["symbol", "trade_date", "volume", "close", "amount"],
         )
         self._volume_baselines = _volume_baselines(daily)
         self._limit_prices = await self._load_limit_prices(symbols, target_date)
@@ -219,52 +219,67 @@ class MarketRadarIntradayContextLoader:
         start = as_of - timedelta(days=21)
         result = await self._session.execute(
             select(
-                SentimentAnalysis.symbol,
-                SentimentAnalysis.score,
-                SentimentAnalysis.confidence,
-                SentimentAnalysis.analyzed_at,
+                SentimentPost.symbol,
+                SentimentPost.sentiment_score,
+                SentimentPost.published_at,
+                SentimentPost.reply_count,
+                SentimentPost.like_count,
+                SentimentPost.comment_count,
             ).where(
-                SentimentAnalysis.symbol.in_(symbols),
-                SentimentAnalysis.score.is_not(None),
-                SentimentAnalysis.analyzed_at >= start,
-                SentimentAnalysis.analyzed_at <= as_of,
+                SentimentPost.symbol.in_(symbols),
+                SentimentPost.sentiment_score.is_not(None),
+                SentimentPost.published_at.is_not(None),
+                SentimentPost.published_at >= start,
+                SentimentPost.published_at <= as_of,
             )
         )
-        grouped: dict[str, list[tuple[float, float, datetime]]] = defaultdict(list)
-        for symbol, raw_score, raw_confidence, analyzed_at in result.all():
+        grouped: dict[str, list[tuple[float, datetime, int]]] = defaultdict(list)
+        for symbol, raw_score, published_at, replies, likes, comments in result.all():
             score = _finite(raw_score)
-            confidence = _finite(raw_confidence)
-            if score is None or confidence is None or confidence <= 0:
+            if score is None or published_at is None:
                 continue
-            grouped[str(symbol)].append((score, confidence, analyzed_at))
+            engagement = sum(max(0, int(value or 0)) for value in (replies, likes, comments))
+            grouped[str(symbol)].append((score, published_at, engagement))
 
         cutoff = as_of - timedelta(hours=6)
         output: dict[str, dict[str, MetricValue]] = {}
         for symbol, rows in grouped.items():
-            current = [row for row in rows if row[2] >= cutoff]
-            weight = sum(row[1] for row in current)
-            weighted = sum(row[0] * row[1] for row in current) / weight if weight > 0 else None
-            current_negative = sum(row[1] for row in current if row[0] < 0)
-            history_by_day: dict[date, float] = defaultdict(float)
-            for score, confidence, analyzed_at in rows:
-                if analyzed_at < cutoff and score < 0:
-                    history_by_day[analyzed_at.date()] += confidence
-            history = tuple(history_by_day[day] for day in sorted(history_by_day))[-20:]
-            heat_z = _z_score(current_negative, history) if len(history) == 20 else None
-            latest = max((row[2] for row in current), default=as_of)
+            current = [row for row in rows if row[1] >= cutoff]
+            weight = sum(1.0 + math.log1p(row[2]) for row in current)
+            weighted = (
+                sum(row[0] * (1.0 + math.log1p(row[2])) for row in current) / weight
+                if weight > 0
+                else None
+            )
+            history_days = tuple(
+                as_of.date() - timedelta(days=offset) for offset in range(20, 0, -1)
+            )
+            history_by_day = {day: 0.0 for day in history_days}
+            current_negative = 0.0
+            for score, published_at, engagement in rows:
+                if score >= 0:
+                    continue
+                heat = math.log1p(1 + engagement)
+                if published_at.date() == as_of.date():
+                    current_negative += heat
+                elif published_at.date() in history_by_day:
+                    history_by_day[published_at.date()] += heat
+            history = tuple(history_by_day[day] for day in history_days)
+            heat_z = _z_score(current_negative, history)
+            latest = max((row[1] for row in current), default=as_of)
             output[symbol] = {
                 "weighted_sentiment": MetricValue(
                     weighted,
                     "fresh" if weighted is not None else "unavailable",
                     latest,
-                    "sentiment_analysis",
-                    reason=None if weighted is not None else "no sentiment analysis in six hours",
+                    "sentiment_posts",
+                    reason=None if weighted is not None else "no sentiment posts in six hours",
                 ),
                 "negative_heat_z20": MetricValue(
                     heat_z,
                     "fresh" if heat_z is not None else "unavailable",
                     latest,
-                    "sentiment_analysis",
+                    "sentiment_posts",
                     baseline=mean(history) if history else None,
                     reason=None
                     if heat_z is not None
@@ -275,15 +290,21 @@ class MarketRadarIntradayContextLoader:
 
 
 def _volume_baselines(frame: pd.DataFrame) -> dict[str, float]:
-    if frame.empty or "symbol" not in frame.columns or "volume" not in frame.columns:
+    if frame.empty or not {"symbol", "volume", "close", "amount"}.issubset(frame.columns):
         return {}
     result: dict[str, float] = {}
     for symbol, group in frame.groupby("symbol", sort=False):
-        values = [
-            value * _DAILY_VOLUME_TO_SHARES
-            for raw in group.sort_index()["volume"].tolist()
-            if (value := _positive(raw)) is not None
-        ][-20:]
+        values: list[float] = []
+        for row in group.sort_index().itertuples():
+            volume = _positive(getattr(row, "volume", None))
+            close = _positive(getattr(row, "close", None))
+            amount = _positive(getattr(row, "amount", None))
+            if volume is None or close is None or amount is None:
+                continue
+            implied_unit = amount / (volume * close)
+            multiplier = _DAILY_VOLUME_TO_SHARES if implied_unit > 20 else 1.0
+            values.append(volume * multiplier)
+        values = values[-20:]
         if len(values) == 20:
             result[str(symbol)] = mean(values)
     return result

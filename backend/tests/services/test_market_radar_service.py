@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.db.models.base import Base
 from app.db.models.market_radar import MarketAlertEvent
-from app.db.models.sentiment import SentimentAnalysis
+from app.db.models.sentiment import SentimentPost
 from app.db.models.stock import Stock
 from app.services.market_radar import (
     DEFAULT_RULE_VERSION,
@@ -977,7 +977,20 @@ async def test_initial_subscription_loads_persisted_snapshot_before_atomic_alert
     subscription = await service.subscribe_with_initial()
     events = [await subscription.get() for _ in range(3)]
     assert [event.event for event in events] == ["mode", "snapshot", "alert"]
-    assert events[1].data == service.project_snapshot(service.current_envelope())
+    projected = service.project_snapshot(service.current_envelope())
+    assert events[1].data == projected
+    assert set(projected) == {
+        "as_of",
+        "computed_at",
+        "status",
+        "confidence",
+        "realtime_mode",
+        "sources",
+        "data",
+    }
+    assert projected["realtime_mode"] == "closed"
+    assert projected["data"]["overview"]["status"] == "fresh"
+    assert projected["sources"][0]["name"] == "daily"
     assert [event.sequence for event in events] == sorted(event.sequence for event in events)
 
 
@@ -1342,6 +1355,13 @@ async def test_default_intraday_context_loader_batches_universe_volume_limits_an
                 is_suspend=0,
             ),
             Stock(
+                symbol="600001.SH",
+                exchange="SH",
+                list_date=date(2000, 1, 1),
+                is_delist=0,
+                is_suspend=0,
+            ),
+            Stock(
                 symbol="000001.SZ",
                 exchange="SZ",
                 list_date=date(2000, 1, 1),
@@ -1370,25 +1390,27 @@ async def test_default_intraday_context_loader_batches_universe_volume_limits_an
     )
     for offset in range(1, 21):
         radar_session.add(
-            SentimentAnalysis(
+            SentimentPost(
                 source="test",
-                source_item_id=f"history-{offset}",
+                source_post_id=f"history-{offset}",
                 symbol="600000.SH",
-                model_version="v1",
-                score=-0.5,
-                confidence=0.1 + offset * 0.02,
-                analyzed_at=NOW - timedelta(days=offset),
+                sentiment_score=-0.5,
+                reply_count=offset,
+                like_count=offset % 3,
+                comment_count=0,
+                published_at=NOW - timedelta(days=offset),
             )
         )
     radar_session.add(
-        SentimentAnalysis(
+        SentimentPost(
             source="test",
-            source_item_id="current",
+            source_post_id="current",
             symbol="600000.SH",
-            model_version="v1",
-            score=-0.5,
-            confidence=1.0,
-            analyzed_at=NOW - timedelta(hours=1),
+            sentiment_score=-0.5,
+            reply_count=100,
+            like_count=20,
+            comment_count=10,
+            published_at=NOW - timedelta(hours=1),
         )
     )
     await radar_session.commit()
@@ -1397,20 +1419,29 @@ async def test_default_intraday_context_loader_batches_universe_volume_limits_an
         def load_daily(self, symbols, start_date, end_date, columns):
             days = pd.date_range(end=NOW.date() - timedelta(days=1), periods=20)
             return pd.DataFrame(
-                {"symbol": ["600000.SH"] * 20, "volume": [1_000.0] * 20},
-                index=days,
+                {
+                    "symbol": ["600000.SH"] * 20 + ["600001.SH"] * 20,
+                    "volume": [1_000.0] * 20 + [100_000.0] * 20,
+                    "close": [10.0] * 40,
+                    "amount": [1_000_000.0] * 40,
+                },
+                index=days.append(days),
             )
 
     loader = MarketRadarIntradayContextLoader(radar_session, market_store=DailyStore())
     universe = await loader.load_eligible_universe()
-    assert universe.symbols == ("600000.SH",)
+    assert universe.symbols == ("600000.SH", "600001.SH")
     context = await loader.load_symbol_context(
-        ("600000.SH",),
-        {"600000.SH": QuoteTick("600000.SH", NOW, 10, 10, volume=300_000)},
+        ("600000.SH", "600001.SH"),
+        {
+            "600000.SH": QuoteTick("600000.SH", NOW, 10, 10, volume=300_000),
+            "600001.SH": QuoteTick("600001.SH", NOW, 10, 10, volume=300_000),
+        },
         NOW,
     )
     metrics = context["600000.SH"].metrics
     assert metrics["volume_ratio_20d"].value == pytest.approx(3.0)
+    assert context["600001.SH"].metrics["volume_ratio_20d"].value == pytest.approx(3.0)
     assert metrics["down_limit_price"].value == 9.0
     assert metrics["up_limit_price"].value == 11.0
     assert metrics["weighted_sentiment"].value == pytest.approx(-0.5)
@@ -1547,18 +1578,22 @@ def test_default_eod_builder_outputs_versioned_crowding_and_emotion_scores(radar
     assert result.metrics["crowding"]["score"]["status"] == "fresh"
     assert result.metrics["crowding"]["score"]["value"] > 90
     assert result.metrics["crowding"]["label"] == "极端拥挤"
-    assert result.metrics["overview"]["emotion"]["status"] == "fresh"
+    assert result.metrics["overview"]["emotion"]["status"] == "partial"
+    assert result.metrics["overview"]["emotion"]["label"] is None
+    assert result.metrics["overview"]["emotion"]["formula_version"].endswith("reduced-v1")
     assert len(result.metrics["overview"]["emotion"]["components"]) == 4
     market = next(item for item in result.observations if item.subject == "ALL")
     assert market.metrics["crowding_score"].status == "fresh"
-    assert market.metrics["emotion_score"].status == "fresh"
+    assert market.metrics["emotion_score"].status == "partial"
     assert market.metrics["limit_down_median_5d"].value == 30
     assert market.metrics["previous_emotion_score"].value == 29
     sector = next(item for item in result.observations if item.scope == "sector")
-    assert sector.metrics["crowding_score"].value >= 80
-    assert {match.rule.key for match in MarketAlertEngine().evaluate(result).matches}.issuperset(
-        {"sector_breadth_down", "sector_share_crowding"}
-    )
+    assert sector.metrics["crowding_score"].status == "unavailable"
+    assert sector.metrics["crowding_score"].reason == "independent sector crowding is unavailable"
+    eod_rule_keys = {match.rule.key for match in MarketAlertEngine().evaluate(result).matches}
+    assert "sector_share_crowding" not in eod_rule_keys
+    assert "market_emotion_cross_up" not in eod_rule_keys
+    assert "market_emotion_cross_down" not in eod_rule_keys
 
     insufficient = service._build_eod_snapshot(
         target_date=date(2026, 7, 17),
@@ -1698,6 +1733,22 @@ async def test_closed_market_reuses_latest_persisted_snapshot_without_intraday_w
     assert result.metrics["overview"]["trade_date"] == "2026-07-17"
     assert store.snapshot_calls == 0
 
+    offline_feed = FakeFeed()
+    offline_feed._status = RealtimeFeedStatus(
+        mode="offline",
+        changed_at=NOW,
+        last_quote_at=NOW,
+        connection_generation=2,
+        reason="QMT unavailable with residual ticks",
+        market_coverage={"SH": 1, "SZ": 0, "BJ": 0, "INDEX": 0},
+    )
+    offline = MarketRadarService(
+        feed=offline_feed, data_service=SimpleNamespace(), store=store, clock=FakeClock()
+    )
+    offline_result = await offline.refresh_intraday()
+    assert offline_result.snapshot_type == "eod"
+    assert store.snapshot_calls == 0
+
 
 @pytest.mark.asyncio
 async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_error(
@@ -1756,6 +1807,56 @@ async def test_start_rolls_back_on_feed_failure_and_loop_recovers_after_refresh_
     assert service.last_loop_error is not None
     assert service.current_envelope() is not None, service.last_loop_error
     await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rollback_fails", [False, True])
+async def test_loop_rolls_back_failed_transaction_and_survives_rollback_failure(rollback_fails):
+    class Session:
+        def __init__(self):
+            self.calls = 0
+
+        async def rollback(self):
+            self.calls += 1
+            if rollback_fails and self.calls == 1:
+                raise RuntimeError("rollback failed")
+
+    session = Session()
+
+    async def eligible():
+        return EligibleUniverse((), "unavailable", NOW, "test")
+
+    async def contexts(_symbols, _ticks, _now):
+        return {}
+
+    service = MarketRadarService(
+        feed=FakeFeed(),
+        data_service=SimpleNamespace(),
+        store=SimpleNamespace(session=session),
+        eligible_universe_loader=eligible,
+        symbol_context_loader=contexts,
+        intraday_coalesce_seconds=0.01,
+    )
+    recovered = asyncio.Event()
+    refresh_calls = 0
+
+    async def refresh():
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 1:
+            raise RuntimeError("failed transaction")
+        recovered.set()
+        return envelope()
+
+    service.refresh_intraday = refresh
+    task = asyncio.create_task(service._run_loop())
+    await asyncio.wait_for(recovered.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert session.calls >= 1
+    assert refresh_calls >= 2
+    assert service.last_loop_error is not None
 
 
 @pytest.mark.asyncio

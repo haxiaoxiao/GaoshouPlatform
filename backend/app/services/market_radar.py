@@ -28,7 +28,6 @@ from app.services.market_radar_calculator import (
     calculate_breadth,
     composite_score,
     crowding_label,
-    emotion_label,
     serialize_breadth_result,
 )
 from app.services.market_radar_data import serialize_market_radar_data
@@ -1194,7 +1193,33 @@ class MarketRadarService:
     def project_snapshot(snapshot: RadarSnapshotEnvelope | None) -> dict[str, Any]:
         if snapshot is None:
             raise RadarSnapshotUnavailable("no market radar snapshot is available")
-        return snapshot.as_dict()
+        freshness = cast(
+            Mapping[str, Any],
+            serialize_market_radar_data(snapshot.source_freshness),
+        )
+        sources = [
+            {
+                "name": name,
+                **(dict(details) if isinstance(details, Mapping) else {"value": details}),
+            }
+            for name, details in sorted(freshness.items())
+        ]
+        overview = snapshot.metrics.get("overview")
+        mode = overview.get("mode") if isinstance(overview, Mapping) else None
+        realtime_mode = (
+            str(mode)
+            if mode in {"push", "polling_30s", "offline", "closed"}
+            else ("closed" if snapshot.snapshot_type == "eod" else "offline")
+        )
+        return {
+            "as_of": snapshot.as_of.isoformat(),
+            "computed_at": snapshot.computed_at.isoformat(),
+            "status": snapshot.status,
+            "confidence": snapshot.confidence,
+            "realtime_mode": realtime_mode,
+            "sources": sources,
+            "data": cast(dict[str, Any], serialize_market_radar_data(snapshot.metrics)),
+        }
 
     async def start(self) -> None:
         if self._started:
@@ -1277,7 +1302,7 @@ class MarketRadarService:
             if callable(feed_status):
                 feed_status = feed_status()
             ticks = dict(self.feed.latest_ticks())
-            if feed_status.mode == "closed" or (feed_status.mode == "offline" and not ticks):
+            if feed_status.mode in {"closed", "offline"}:
                 snapshot = self._current or await self._load_latest_snapshot()
                 if self._last_mode != feed_status.mode:
                     await self.broker.publish(
@@ -1343,7 +1368,7 @@ class MarketRadarService:
             if mode_changed:
                 await self.broker.publish("mode", _feed_status_dict(feed_status), created_at=now)
                 self._last_mode = feed_status.mode
-            await self.broker.publish("snapshot", snapshot.as_dict(), created_at=now)
+            await self.broker.publish("snapshot", self.project_snapshot(snapshot), created_at=now)
             for event in persistence.notifications:
                 await self.broker.publish("alert", _event_dict(event), created_at=now)
             if (now - self._last_heartbeat_at).total_seconds() >= 15:
@@ -1396,7 +1421,7 @@ class MarketRadarService:
             raise
         self._current = snapshot
         self._last_snapshot_persisted_at = now
-        await self.broker.publish("snapshot", snapshot.as_dict(), created_at=now)
+        await self.broker.publish("snapshot", self.project_snapshot(snapshot), created_at=now)
         for event in persistence.notifications:
             await self.broker.publish("alert", _event_dict(event), created_at=now)
         return snapshot
@@ -1424,6 +1449,12 @@ class MarketRadarService:
                 raise
             except Exception as exc:
                 self._last_loop_error = f"{type(exc).__name__}: market radar refresh failed"
+                try:
+                    await self.store.session.rollback()
+                except Exception as rollback_exc:
+                    self._last_loop_error = (
+                        f"{self._last_loop_error}; {type(rollback_exc).__name__}: rollback failed"
+                    )
             await asyncio.sleep(self._intraday_coalesce_seconds)
 
     async def _resolve_focus(self, now: datetime) -> FocusUniverse:
@@ -1988,7 +2019,7 @@ class MarketRadarService:
             "fresh" if crowding_score.status == "fresh" else "unavailable"
         )
         emotion_status: FreshnessStatus = (
-            "fresh" if emotion_score.status == "fresh" else "unavailable"
+            "partial" if emotion_score.value is not None else "unavailable"
         )
         market_metrics["crowding_score"] = MetricValue(
             crowding_score.value,
@@ -2045,16 +2076,11 @@ class MarketRadarService:
                             "klines_daily_sector_inputs",
                         ),
                         "crowding_score": MetricValue(
-                            crowding_score.value,
-                            "fresh" if crowding_score.status == "fresh" else "unavailable",
+                            None,
+                            "unavailable",
                             now,
-                            "market_radar_crowding_v1",
-                            baseline=crowding_score.formula_version,
-                            reason=(
-                                None
-                                if crowding_score.status == "fresh"
-                                else "market crowding score is insufficient"
-                            ),
+                            "sector_crowding",
+                            reason="independent sector crowding is unavailable",
                         ),
                     },
                 )
@@ -2069,6 +2095,8 @@ class MarketRadarService:
         freshness_payload = _collect_eod_freshness(inputs, target_date)
         crowding_payload = cast(dict[str, Any], serialize_market_radar_data(crowding_score))
         emotion_payload = cast(dict[str, Any], serialize_market_radar_data(emotion_score))
+        if emotion_score.value is not None:
+            emotion_payload["status"] = "partial"
         crowding_value = crowding_score.value
         emotion_value = emotion_score.value
         return RadarSnapshotEnvelope(
@@ -2102,9 +2130,12 @@ class MarketRadarService:
                     },
                     "emotion": {
                         **emotion_payload,
-                        "label": emotion_label(emotion_value)
-                        if emotion_value is not None
-                        else None,
+                        "label": None,
+                        "reason": (
+                            "reduced formula excludes unavailable v1 subcomponent histories"
+                            if emotion_value is not None
+                            else "effective emotion weight is insufficient"
+                        ),
                     },
                     "risk_level": _risk_level(market_metrics),
                 },
