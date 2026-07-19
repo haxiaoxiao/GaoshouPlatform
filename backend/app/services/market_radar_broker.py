@@ -20,6 +20,7 @@ class BrokerDisconnected(RuntimeError):
 @dataclass(slots=True)
 class _SubscriberState:
     id: int
+    prelude: deque[StreamEvent]
     queue: deque[StreamEvent]
     condition: asyncio.Condition
     overflow_count: int = 0
@@ -38,7 +39,7 @@ class MarketRadarSubscription:
 
     @property
     def pending(self) -> int:
-        return len(self._state.queue)
+        return len(self._state.prelude) + len(self._state.queue)
 
     @property
     def disconnect_reason(self) -> str | None:
@@ -47,9 +48,13 @@ class MarketRadarSubscription:
     async def get(self) -> StreamEvent:
         state = self._state
         async with state.condition:
-            await state.condition.wait_for(lambda: bool(state.queue) or state.disconnected)
+            await state.condition.wait_for(
+                lambda: bool(state.prelude) or bool(state.queue) or state.disconnected
+            )
             if state.disconnected:
                 raise BrokerDisconnected(state.disconnect_reason or "subscription_closed")
+            if state.prelude:
+                return state.prelude.popleft()
             return state.queue.popleft()
 
     async def close(self) -> None:
@@ -107,13 +112,12 @@ class MarketRadarStreamBroker:
             self._next_subscriber_id += 1
             state = _SubscriberState(
                 id=subscriber_id,
+                prelude=deque(),
                 queue=deque(maxlen=self._hard_limit),
                 condition=asyncio.Condition(),
             )
             for event_type, data in initial_events:
-                if len(state.queue) >= self._hard_limit:
-                    raise ValueError("initial stream state exceeds subscriber queue capacity")
-                state.queue.append(self._new_event(event_type, data, self._clock()))
+                state.prelude.append(self._new_event(event_type, data, self._clock()))
             self._subscribers[subscriber_id] = state
         return MarketRadarSubscription(self, state)
 
@@ -125,6 +129,7 @@ class MarketRadarStreamBroker:
         async with state.condition:
             state.disconnected = True
             state.disconnect_reason = state.disconnect_reason or "subscription_closed"
+            state.prelude.clear()
             state.queue.clear()
             state.condition.notify_all()
 
@@ -191,12 +196,14 @@ class MarketRadarStreamBroker:
                     if state.overflow_count >= self._overflow_disconnect_threshold:
                         state.disconnected = True
                         state.disconnect_reason = "slow_subscriber"
+                        state.prelude.clear()
                         state.queue.clear()
                         state.condition.notify_all()
                         return
             if len(state.queue) >= self._hard_limit:
                 state.disconnected = True
                 state.disconnect_reason = "slow_subscriber"
+                state.prelude.clear()
                 state.queue.clear()
                 state.condition.notify_all()
                 return

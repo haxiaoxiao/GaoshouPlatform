@@ -1,20 +1,135 @@
 # backend/app/main.py
+import asyncio
 from contextlib import asynccontextmanager
+from datetime import datetime
 from uuid import uuid4
 
 from fastapi import FastAPI, Request
 from loguru import logger
+from sqlalchemy import or_, select
 
 from app.api import api_router
 from app.cache.redis_cache import get_redis_client
 from app.core.blocking import install_default_executor, shutdown_default_executor
+from app.core.config import settings
 from app.core.dev_data_mode import apply_dev_data_mode_to_settings
 from app.core.logging import setup_logging
+from app.data_stores import get_market_data_store
 from app.db import init_db
+from app.db.models.stock import Stock
+from app.db.sqlite import async_session_factory
+from app.services.market_radar import FocusUniverseResolver, MarketRadarService
+from app.services.market_radar_data import MarketRadarDataService
+from app.services.market_radar_intraday_context import MarketRadarIntradayContextLoader
+from app.services.market_radar_store import MarketRadarStore
+from app.services.qmt_realtime_feed import QmtRealtimeFeed
 from app.services.runtime_tasks import mark_stale_runtime_tasks_failed
 
 # 配置日志
 setup_logging(debug=True)
+
+
+def _is_a_share_symbol(symbol: str, exchange: str | None) -> bool:
+    normalized = symbol.strip().upper()
+    if len(normalized) != 9 or normalized[6] != ".":
+        return False
+    code, suffix = normalized.split(".", 1)
+    if not code.isdigit() or suffix != (exchange or suffix).strip().upper():
+        return False
+    if suffix == "SH":
+        return code.startswith(("60", "68"))
+    if suffix == "SZ":
+        return code.startswith(("00", "30"))
+    if suffix == "BJ":
+        return code.startswith(("4", "8", "9"))
+    return False
+
+
+async def _load_market_radar_universe() -> tuple[str, ...]:
+    """Load active A-share equities with a short, isolated session."""
+
+    async with async_session_factory() as session:
+        result = await session.execute(
+            select(Stock.symbol, Stock.exchange).where(
+                Stock.exchange.in_(("SH", "SZ", "BJ")),
+                or_(Stock.is_delist == 0, Stock.is_delist.is_(None)),
+                or_(Stock.is_suspend == 0, Stock.is_suspend.is_(None)),
+                or_(Stock.list_date.is_(None), Stock.list_date <= datetime.now().date()),
+                or_(Stock.delist_date.is_(None), Stock.delist_date > datetime.now().date()),
+            )
+        )
+    return tuple(
+        sorted(
+            symbol.strip().upper()
+            for symbol, exchange in result
+            if isinstance(symbol, str) and _is_a_share_symbol(symbol, exchange)
+        )
+    )
+
+
+async def _start_market_radar_runtime(app: FastAPI) -> None:
+    """Create and start the API-owned market-radar runtime exactly once."""
+
+    if getattr(app.state, "market_radar_service", None) is not None:
+        return
+    session = async_session_factory()
+    market_store = get_market_data_store()
+    feed = QmtRealtimeFeed(
+        universe_loader=_load_market_radar_universe,
+        enabled=settings.market_radar_realtime_enabled,
+        push_stale_seconds=settings.market_radar_push_stale_seconds,
+        poll_interval_seconds=settings.market_radar_poll_interval_seconds,
+        resubscribe_seconds=settings.market_radar_resubscribe_seconds,
+    )
+    context_loader = MarketRadarIntradayContextLoader(session, market_store=market_store)
+    service = MarketRadarService(
+        feed=feed,
+        data_service=MarketRadarDataService(session, store=market_store),
+        store=MarketRadarStore(session),
+        focus_resolver=FocusUniverseResolver(session),
+        eligible_universe_loader=context_loader.load_eligible_universe,
+        symbol_context_loader=context_loader.load_symbol_context,
+    )
+    app.state.market_radar_session = session
+    app.state.market_radar_feed = feed
+    app.state.market_radar_service = service
+    app.state.market_radar_refresh_tasks = set()
+    app.state.market_radar_start_error = None
+    try:
+        await service.start()
+    except ImportError:
+        app.state.market_radar_start_error = "realtime market data unavailable"
+        logger.warning("Market radar started without realtime QMT capability")
+    else:
+        feed_status = feed.status
+        if callable(feed_status):
+            feed_status = feed_status()
+        mode = getattr(feed_status, "mode", None)
+        if mode in {"offline", "polling_30s"}:
+            logger.warning("Market radar realtime feed degraded: mode={}", mode)
+
+
+async def _stop_market_radar_runtime(app: FastAPI) -> None:
+    """Stop refresh work, the singleton feed service, and its owned session."""
+
+    tasks = tuple(getattr(app.state, "market_radar_refresh_tasks", ()) or ())
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    service = getattr(app.state, "market_radar_service", None)
+    if service is not None:
+        try:
+            await service.stop()
+        except Exception as exc:
+            logger.warning("Market radar shutdown failed: {}", type(exc).__name__)
+    session = getattr(app.state, "market_radar_session", None)
+    if session is not None:
+        await session.close()
+    app.state.market_radar_service = None
+    app.state.market_radar_feed = None
+    app.state.market_radar_session = None
 
 
 @asynccontextmanager
@@ -69,17 +184,21 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.info("Redis cache not available, running without cache")
 
-    yield
-
-    # 关闭调度器
-    logger.info("Stopping application...")
-    # 关闭 Redis 连接
-    if redis_client is not None and redis_client.available:
-        redis_client.close()
-        logger.info("Redis connection closed")
-
-    shutdown_default_executor()
-    logger.info("Application stopped")
+    try:
+        await _start_market_radar_runtime(app)
+        yield
+    finally:
+        logger.info("Stopping application...")
+        try:
+            await _stop_market_radar_runtime(app)
+        finally:
+            try:
+                if redis_client is not None and redis_client.available:
+                    redis_client.close()
+                    logger.info("Redis connection closed")
+            finally:
+                shutdown_default_executor()
+                logger.info("Application stopped")
 
 
 app = FastAPI(

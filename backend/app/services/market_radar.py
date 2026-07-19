@@ -212,10 +212,18 @@ class MarketAlertEngine:
 
     async def load_rules(self, store: MarketRadarStore) -> tuple[RuleDefinition, ...]:
         result = await store.session.execute(
-            select(MarketAlertRule).where(MarketAlertRule.version == self.rule_version)
+            select(MarketAlertRule).order_by(
+                MarketAlertRule.rule_key,
+                MarketAlertRule.version.desc(),
+                MarketAlertRule.id.desc(),
+            )
         )
         loaded: list[RuleDefinition] = []
+        seen_rule_keys: set[str] = set()
         for row in result.scalars():
+            if row.rule_key in seen_rule_keys:
+                continue
+            seen_rule_keys.add(row.rule_key)
             parameters = load_json_object(row.parameters_json)
             base = _DEFAULT_RULES_BY_KEY.get(row.rule_key)
             loaded.append(
@@ -223,7 +231,10 @@ class MarketAlertEngine:
                     key=row.rule_key,
                     scope=cast(RadarScope, row.scope),
                     severity=cast(Severity, row.severity),
-                    title=base.title if base is not None else row.rule_key,
+                    title=str(
+                        parameters.get("title")
+                        or (base.title if base is not None else row.rule_key)
+                    ),
                     direction=str(
                         parameters.get("direction")
                         or (base.direction if base is not None else "either")
@@ -600,15 +611,18 @@ class MarketAlertEngine:
         definitions_by_key.update((rule.key, rule) for rule in evaluation.evaluated_rules.values())
         existing_rule_result = await store.session.execute(
             select(MarketAlertRule).where(
-                MarketAlertRule.version == self.rule_version,
                 MarketAlertRule.rule_key.in_(definitions_by_key),
             )
         )
-        existing_rules = {row.rule_key: row for row in existing_rule_result.scalars()}
-        rule_ids: dict[str, int] = {key: row.id for key, row in existing_rules.items()}
+        existing_rules = {
+            (row.rule_key, row.version): row for row in existing_rule_result.scalars()
+        }
+        rule_ids: dict[str, int] = {}
         new_rules: list[MarketAlertRule] = []
         for key, definition in definitions_by_key.items():
-            if key in existing_rules:
+            existing = existing_rules.get((key, definition.version))
+            if existing is not None:
+                rule_ids[key] = existing.id
                 continue
             parameters = dict(definition.parameters)
             if definition.source == "user":
@@ -846,7 +860,11 @@ class MarketRadarService:
         return self._current
 
     @staticmethod
-    def project_snapshot(snapshot: RadarSnapshotEnvelope | None) -> dict[str, Any]:
+    def project_snapshot(
+        snapshot: RadarSnapshotEnvelope | None,
+        *,
+        realtime_mode: str | None = None,
+    ) -> dict[str, Any]:
         if snapshot is None:
             raise RadarSnapshotUnavailable("no market radar snapshot is available")
         freshness = cast(
@@ -855,10 +873,14 @@ class MarketRadarService:
         )
         overview = snapshot.metrics.get("overview")
         mode = overview.get("mode") if isinstance(overview, Mapping) else None
-        realtime_mode = (
-            str(mode)
-            if mode in {"push", "polling_30s", "offline", "closed"}
-            else ("closed" if snapshot.snapshot_type == "eod" else "offline")
+        projected_mode = (
+            realtime_mode
+            if realtime_mode in {"push", "polling_30s", "offline", "closed"}
+            else (
+                str(mode)
+                if mode in {"push", "polling_30s", "offline", "closed"}
+                else ("closed" if snapshot.snapshot_type == "eod" else "offline")
+            )
         )
         source_names = list(freshness)
         if snapshot.snapshot_type == "intraday":
@@ -881,7 +903,7 @@ class MarketRadarService:
             "computed_at": snapshot.computed_at.isoformat(),
             "status": snapshot.status,
             "confidence": snapshot.confidence,
-            "realtime_mode": realtime_mode,
+            "realtime_mode": projected_mode,
             "sources": sources,
             "data": cast(dict[str, Any], serialize_market_radar_data(snapshot.metrics)),
         }
@@ -926,26 +948,51 @@ class MarketRadarService:
         if callable(stop):
             await _await_result(stop())
 
-    async def subscribe_with_initial(self) -> MarketRadarSubscription:
+    async def subscribe_with_initial(
+        self,
+        *,
+        initial_loader: Callable[
+            [],
+            Awaitable[tuple[RadarSnapshotEnvelope | None, Iterable[MarketAlertEvent]]],
+        ]
+        | None = None,
+        snapshot: RadarSnapshotEnvelope | None = None,
+        alerts: Iterable[MarketAlertEvent] = (),
+    ) -> MarketRadarSubscription:
         async with self._refresh_lock:
+            if initial_loader is not None:
+                snapshot, alerts = await initial_loader()
             initial: list[tuple[StreamEventType, Mapping[str, Any]]] = []
             status = self.feed.status
             if callable(status):
                 status = status()
             initial.append(("mode", _feed_status_dict(status)))
-            if self._current is None:
-                self._current = await self._load_latest_snapshot()
-            if self._current is not None:
-                initial.append(("snapshot", self.project_snapshot(self._current)))
-            result = await self.store.session.execute(
-                select(MarketAlertEvent)
-                .where(
-                    MarketAlertEvent.status == "active",
-                    MarketAlertEvent.severity == "high",
+            if snapshot is not None:
+                initial.append(
+                    (
+                        "snapshot",
+                        self.project_snapshot(
+                            snapshot,
+                            realtime_mode=str(getattr(status, "mode", "offline")),
+                        ),
+                    )
                 )
-                .order_by(MarketAlertEvent.triggered_at, MarketAlertEvent.id)
-            )
-            initial.extend(("alert", _event_dict(event)) for event in result.scalars())
+            else:
+                initial.append(
+                    (
+                        "snapshot",
+                        {
+                            "as_of": None,
+                            "computed_at": self._clock().isoformat(),
+                            "status": "unavailable",
+                            "confidence": 0.0,
+                            "realtime_mode": str(getattr(status, "mode", "offline")),
+                            "sources": [],
+                            "data": {"reason": "no market radar snapshot is available"},
+                        },
+                    )
+                )
+            initial.extend(("alert", _event_dict(event)) for event in alerts)
             return await self.broker.subscribe(initial_events=initial)
 
     async def refresh_intraday(self) -> RadarSnapshotEnvelope:
@@ -1025,7 +1072,11 @@ class MarketRadarService:
             if mode_changed:
                 await self.broker.publish("mode", _feed_status_dict(feed_status), created_at=now)
                 self._last_mode = feed_status.mode
-            await self.broker.publish("snapshot", self.project_snapshot(snapshot), created_at=now)
+            await self.broker.publish(
+                "snapshot",
+                self.project_snapshot(snapshot, realtime_mode=feed_status.mode),
+                created_at=now,
+            )
             for event in persistence.notifications:
                 await self.broker.publish("alert", _event_dict(event), created_at=now)
             if (now - self._last_heartbeat_at).total_seconds() >= 15:
@@ -1078,7 +1129,17 @@ class MarketRadarService:
         await self.store.session.commit()
         self._current = snapshot
         self._last_snapshot_persisted_at = now
-        await self.broker.publish("snapshot", self.project_snapshot(snapshot), created_at=now)
+        feed_status = self.feed.status
+        if callable(feed_status):
+            feed_status = feed_status()
+        await self.broker.publish(
+            "snapshot",
+            self.project_snapshot(
+                snapshot,
+                realtime_mode=str(getattr(feed_status, "mode", "offline")),
+            ),
+            created_at=now,
+        )
         for event in persistence.notifications:
             await self.broker.publish("alert", _event_dict(event), created_at=now)
         return snapshot
