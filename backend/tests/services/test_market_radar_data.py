@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import math
+import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -184,6 +186,54 @@ async def test_daily_market_uses_exact_previous_market_date_and_calculator_bins(
         assert all(item.status == "fresh" for item in index_returns.values())
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_daily_market_cpu_pipeline_keeps_event_loop_responsive(tmp_path, monkeypatch):
+    previous = date(2026, 7, 17)
+    target = date(2026, 7, 20)
+    _write_dataset(
+        tmp_path,
+        "klines_daily",
+        [
+            _bar("600001.SH", previous, 10.0),
+            _bar("600001.SH", target, 10.5),
+        ],
+    )
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    original = radar_data.calculate_breadth
+
+    def slow_breadth(*args, **kwargs):
+        time.sleep(0.2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(radar_data, "calculate_breadth", slow_breadth)
+    beats: list[float] = []
+    stopped = False
+
+    async def heartbeat() -> None:
+        while not stopped:
+            beats.append(time.perf_counter())
+            await asyncio.sleep(0.01)
+
+    monitor = asyncio.create_task(heartbeat())
+    try:
+        await asyncio.sleep(0.02)
+        async with sessions() as session:
+            await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(tmp_path)),
+                calendar_provider=StaticCalendar((previous, target)),
+                now=lambda: NOW,
+            ).load_daily_market(target_date=target)
+        await asyncio.sleep(0.02)
+    finally:
+        stopped = True
+        await monitor
+        await engine.dispose()
+
+    gaps = [right - left for left, right in zip(beats, beats[1:], strict=False)]
+    assert gaps and max(gaps) < 0.12
 
 
 @pytest.mark.asyncio

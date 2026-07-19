@@ -342,69 +342,85 @@ class MarketRadarDataService:
         query_dates = sorted(set(calendar_dates[-(days + 1) :]) | set(requested_dates))
 
         frame = await self._load_daily_frame(query_dates)
-        universe_by_symbol = {item.symbol: item for item in universe}
-        universe_symbols = set(universe_by_symbol)
-        stock_frame = (
-            frame.loc[frame["symbol"].astype(str).isin(universe_symbols)]
-            if not frame.empty and "symbol" in frame
-            else pd.DataFrame()
-        )
-        source_date = _latest_date(stock_frame, "trade_date")
-        rows_by_key, conflicts = _normalize_daily_rows(
-            frame,
-            universe_symbols | set(CORE_INDEX_LABELS),
-        )
-        slices: list[DailyMarketSlice] = []
-        for trade_day in requested_dates:
-            prior_dates = [item for item in calendar_dates if item < trade_day]
-            previous_day = prior_dates[-1] if prior_dates else None
-            active_universe = tuple(
-                member for member in universe if _member_active_on(member, trade_day)
+        calculation_time = self._now()
+
+        def build_daily_slices() -> tuple[
+            pd.DataFrame,
+            date | None,
+            tuple[DailyMarketSlice, ...],
+        ]:
+            universe_by_symbol = {item.symbol: item for item in universe}
+            universe_symbols = set(universe_by_symbol)
+            stock_frame = (
+                frame.loc[frame["symbol"].astype(str).isin(universe_symbols)]
+                if not frame.empty and "symbol" in frame
+                else pd.DataFrame()
             )
-            facts = tuple(
-                self._daily_fact(
-                    member,
-                    trade_day,
-                    previous_day,
-                    rows_by_key,
-                    conflicts,
+            source_date = _latest_date(stock_frame, "trade_date")
+            rows_by_key, conflicts = _normalize_daily_rows(
+                frame,
+                universe_symbols | set(CORE_INDEX_LABELS),
+            )
+            slices: list[DailyMarketSlice] = []
+            for trade_day in requested_dates:
+                prior_dates = [item for item in calendar_dates if item < trade_day]
+                previous_day = prior_dates[-1] if prior_dates else None
+                active_universe = tuple(
+                    member for member in universe if _member_active_on(member, trade_day)
                 )
-                for member in active_universe
-            )
-            ticks = {
-                fact.symbol: QuoteTick(
-                    symbol=fact.symbol,
-                    quote_time=self._now(),
-                    last_price=fact.close or 0.0,
-                    previous_close=fact.previous_close or 0.0,
-                )
-                for fact in facts
-                if fact.exclusion_reason is None
-            }
-            breadth = calculate_breadth(
-                ticks,
-                (member.symbol for member in active_universe),
-                now=self._now(),
-                max_age_seconds=1,
-            )
-            slices.append(
-                DailyMarketSlice(
-                    trade_date=trade_day,
-                    previous_trade_date=previous_day,
-                    facts=facts,
-                    breadth=breadth,
-                    breakdowns=_market_breakdowns(facts),
-                    exclusion_counts=tuple(sorted(Counter(
-                        fact.exclusion_reason for fact in facts if fact.exclusion_reason
-                    ).items())),
-                    indices=self._daily_index_returns(
+                facts = tuple(
+                    self._daily_fact(
+                        member,
                         trade_day,
                         previous_day,
                         rows_by_key,
                         conflicts,
-                    ),
+                    )
+                    for member in active_universe
                 )
-            )
+                ticks = {
+                    fact.symbol: QuoteTick(
+                        symbol=fact.symbol,
+                        quote_time=calculation_time,
+                        last_price=fact.close or 0.0,
+                        previous_close=fact.previous_close or 0.0,
+                    )
+                    for fact in facts
+                    if fact.exclusion_reason is None
+                }
+                breadth = calculate_breadth(
+                    ticks,
+                    (member.symbol for member in active_universe),
+                    now=calculation_time,
+                    max_age_seconds=1,
+                )
+                slices.append(
+                    DailyMarketSlice(
+                        trade_date=trade_day,
+                        previous_trade_date=previous_day,
+                        facts=facts,
+                        breadth=breadth,
+                        breakdowns=_market_breakdowns(facts),
+                        exclusion_counts=tuple(
+                            sorted(
+                                Counter(
+                                    fact.exclusion_reason
+                                    for fact in facts
+                                    if fact.exclusion_reason
+                                ).items()
+                            )
+                        ),
+                        indices=self._daily_index_returns(
+                            trade_day,
+                            previous_day,
+                            rows_by_key,
+                            conflicts,
+                        ),
+                    )
+                )
+            return stock_frame, source_date, tuple(slices)
+
+        stock_frame, source_date, slices = await run_blocking(build_daily_slices)
 
         latest_slice = slices[-1] if slices else None
         coverage = latest_slice.breadth.coverage.coverage if latest_slice else 0.0
@@ -435,7 +451,7 @@ class MarketRadarDataService:
             status=status,
             calendar=calendar,
             universe=universe,
-            slices=tuple(slices),
+            slices=slices,
             source_freshness=source_freshness,
             universe_freshness=universe_freshness,
         )
