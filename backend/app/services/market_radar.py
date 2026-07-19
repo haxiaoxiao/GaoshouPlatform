@@ -57,6 +57,20 @@ _SYMBOL_CONTEXT_KEYS = (
     "negative_heat_z20",
     "weighted_sentiment",
 )
+_INTRADAY_SOURCE_ORDER = (
+    "qmt_realtime",
+    "eligible_universe",
+    "klines_daily_20d",
+    "stock_limit_prices",
+    "sentiment_posts",
+)
+_SOURCE_DEFAULT_REASONS = {
+    "qmt_realtime": "QMT realtime quotes are unavailable",
+    "eligible_universe": "eligible A-share universe is unavailable",
+    "klines_daily_20d": "20-day volume baseline is unavailable",
+    "stock_limit_prices": "exact stock limit prices are unavailable",
+    "sentiment_posts": "symbol sentiment posts are unavailable",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -1197,13 +1211,6 @@ class MarketRadarService:
             Mapping[str, Any],
             serialize_market_radar_data(snapshot.source_freshness),
         )
-        sources = [
-            {
-                "name": name,
-                **(dict(details) if isinstance(details, Mapping) else {"value": details}),
-            }
-            for name, details in sorted(freshness.items())
-        ]
         overview = snapshot.metrics.get("overview")
         mode = overview.get("mode") if isinstance(overview, Mapping) else None
         realtime_mode = (
@@ -1211,6 +1218,22 @@ class MarketRadarService:
             if mode in {"push", "polling_30s", "offline", "closed"}
             else ("closed" if snapshot.snapshot_type == "eod" else "offline")
         )
+        source_names = list(freshness)
+        if snapshot.snapshot_type == "intraday":
+            source_names = [
+                *_INTRADAY_SOURCE_ORDER,
+                *sorted(set(source_names) - set(_INTRADAY_SOURCE_ORDER)),
+            ]
+        else:
+            source_names.sort()
+        sources = [
+            _project_source(
+                name,
+                freshness.get(name),
+                default_reason=_SOURCE_DEFAULT_REASONS.get(name),
+            )
+            for name in source_names
+        ]
         return {
             "as_of": snapshot.as_of.isoformat(),
             "computed_at": snapshot.computed_at.isoformat(),
@@ -1895,6 +1918,23 @@ class MarketRadarService:
             "sentiment": {"status": "unavailable", "reason": "intraday source not loaded"},
             "focus": {**focus.as_dict(), "metric_status": focus_metric_status},
         }
+        enrichment_freshness = {
+            "klines_daily_20d": _aggregate_intraday_source(
+                focus_metric_status,
+                ("volume_ratio_20d",),
+                default_reason=_SOURCE_DEFAULT_REASONS["klines_daily_20d"],
+            ),
+            "stock_limit_prices": _aggregate_intraday_source(
+                focus_metric_status,
+                ("down_limit_distance_pct", "limit_up_broken"),
+                default_reason=_SOURCE_DEFAULT_REASONS["stock_limit_prices"],
+            ),
+            "sentiment_posts": _aggregate_intraday_source(
+                focus_metric_status,
+                ("negative_heat_z20", "weighted_sentiment"),
+                default_reason=_SOURCE_DEFAULT_REASONS["sentiment_posts"],
+            ),
+        }
         return RadarSnapshotEnvelope(
             snapshot_type="intraday",
             as_of=now,
@@ -1926,6 +1966,7 @@ class MarketRadarService:
                     "reason": universe.reason,
                     "row_count": len(universe.symbols),
                 },
+                **enrichment_freshness,
             },
             observations=tuple(observations),
         )
@@ -2255,6 +2296,66 @@ def _feed_status_dict(status: object) -> dict[str, Any]:
         "connection_generation": getattr(status, "connection_generation", 0),
         "reason": getattr(status, "reason", None),
         "market_coverage": dict(getattr(status, "market_coverage", {})),
+    }
+
+
+def _project_source(
+    name: str,
+    raw: object,
+    *,
+    default_reason: str | None,
+) -> dict[str, Any]:
+    details = dict(raw) if isinstance(raw, Mapping) else {}
+    status = str(details.get("status") or "unavailable")
+    as_of = details.get("as_of") or details.get("source_date") or details.get("latest_at")
+    reason = details.get("reason")
+    if reason is None and status != "fresh":
+        reason = default_reason or f"{name} is {status}"
+    return {
+        "name": name,
+        "as_of": as_of,
+        "status": status,
+        "reason": reason,
+        **{
+            key: value
+            for key, value in details.items()
+            if key not in {"name", "as_of", "status", "reason"}
+        },
+    }
+
+
+def _aggregate_intraday_source(
+    metric_status: Mapping[str, Mapping[str, Any]],
+    metric_names: tuple[str, ...],
+    *,
+    default_reason: str,
+) -> dict[str, Any]:
+    values = [
+        metrics[name]
+        for metrics in metric_status.values()
+        for name in metric_names
+        if name in metrics
+    ]
+    if not values:
+        return {
+            "as_of": None,
+            "status": "unavailable",
+            "reason": default_reason,
+        }
+    fresh = [value for value in values if value.get("status") == "fresh"]
+    status = "fresh" if len(fresh) == len(values) else ("partial" if fresh else "unavailable")
+    fresh_times = [str(value["as_of"]) for value in fresh if value.get("as_of")]
+    reasons = tuple(
+        dict.fromkeys(
+            str(value["reason"])
+            for value in values
+            if value.get("status") != "fresh" and value.get("reason")
+        )
+    )
+    return {
+        "as_of": max(fresh_times, default=None),
+        "status": status,
+        "reason": None if status == "fresh" else ("; ".join(reasons) or default_reason),
     }
 
 

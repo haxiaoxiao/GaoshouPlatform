@@ -942,7 +942,13 @@ async def test_initial_subscription_loads_persisted_snapshot_before_atomic_alert
         confidence=1,
         formula_version="market-radar-v1",
         metrics={"overview": {"status": "fresh"}},
-        source_freshness={"daily": {"status": "fresh"}},
+        source_freshness={
+            "daily": {
+                "status": "fresh",
+                "source_date": "2026-07-17",
+                "reason": None,
+            }
+        },
     )
     rule = await store.upsert_rule(
         rule_key="initial_high",
@@ -991,6 +997,8 @@ async def test_initial_subscription_loads_persisted_snapshot_before_atomic_alert
     assert projected["realtime_mode"] == "closed"
     assert projected["data"]["overview"]["status"] == "fresh"
     assert projected["sources"][0]["name"] == "daily"
+    assert projected["sources"][0]["as_of"] == "2026-07-17"
+    assert set(projected["sources"][0]).issuperset({"name", "as_of", "status", "reason"})
     assert [event.sequence for event in events] == sorted(event.sequence for event in events)
 
 
@@ -1339,6 +1347,22 @@ def test_intraday_missing_enrichment_is_structured_unavailable(radar_session):
         snapshot.metrics["focus"]["metric_status"]["600000.SH"]["weighted_sentiment"]["status"]
         == "unavailable"
     )
+    projected_sources = service.project_snapshot(snapshot)["sources"]
+    assert [source["name"] for source in projected_sources] == [
+        "qmt_realtime",
+        "eligible_universe",
+        "klines_daily_20d",
+        "stock_limit_prices",
+        "sentiment_posts",
+    ]
+    assert all(
+        set(source).issuperset({"name", "as_of", "status", "reason"})
+        for source in projected_sources
+    )
+    unavailable = {source["name"]: source for source in projected_sources}
+    assert unavailable["klines_daily_20d"]["status"] == "unavailable"
+    assert unavailable["stock_limit_prices"]["reason"]
+    assert unavailable["sentiment_posts"]["as_of"] is None
 
 
 @pytest.mark.asyncio
