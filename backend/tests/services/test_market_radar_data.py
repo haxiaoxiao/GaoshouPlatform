@@ -329,6 +329,132 @@ def test_daily_row_normalization_streams_without_record_dict_materialization(mon
     assert conflict_key not in rows
 
 
+def test_row_count_on_date_is_vectorized_without_record_materialization(monkeypatch):
+    target = date(2026, 7, 20)
+    frame = pd.DataFrame(
+        {
+            "trade_date": pd.to_datetime([target, target, date(2026, 7, 19)]),
+            "value": [1, 2, 3],
+        }
+    )
+
+    def reject_record_materialization(*_args, **_kwargs):
+        raise AssertionError("row counting must not materialize DataFrame records")
+
+    monkeypatch.setattr(pd.DataFrame, "to_dict", reject_record_materialization)
+
+    assert radar_data._count_rows_on_date(frame, "trade_date", target) == 2
+
+
+def test_sector_only_aggregation_skips_correlation_matrices(monkeypatch):
+    previous = date(2026, 7, 17)
+    target = date(2026, 7, 20)
+    frame = pd.DataFrame.from_records(
+        [
+            _bar("600001.SH", previous, 10.0),
+            _bar("600001.SH", target, 10.5),
+        ]
+    )
+    universe = (
+        radar_data.UniverseMember(
+            symbol="600001.SH",
+            name="测试股票",
+            exchange="SH",
+            industry="电子",
+            list_date=date(2020, 1, 1),
+            delist_date=None,
+            is_st=False,
+        ),
+    )
+
+    def reject_matrix_build(*_args, **_kwargs):
+        raise AssertionError("sector-only aggregation must not build correlation matrices")
+
+    monkeypatch.setattr(pd.DataFrame, "from_dict", reject_matrix_build)
+
+    _series, sectors = radar_data._aggregate_daily_inputs(
+        frame,
+        universe,
+        (previous, target),
+        include_correlation=False,
+    )
+
+    assert sectors[target]["电子"]["stock_count"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_daily_range_query_is_reused_within_one_data_service(monkeypatch, tmp_path):
+    dates = (date(2026, 7, 17), date(2026, 7, 20))
+    frame = pd.DataFrame.from_records([_bar("600001.SH", dates[-1], 10.0)])
+    service = MarketRadarDataService(
+        object(),  # type: ignore[arg-type]
+        store=ParquetMarketDataStore(str(tmp_path)),
+    )
+    calls = 0
+
+    async def read_dataset(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return frame
+
+    monkeypatch.setattr(service, "_read_dataset", read_dataset)
+
+    first = await service._load_daily_range(dates)
+    second = await service._load_daily_range(dates)
+
+    assert calls == 1
+    assert second is first
+
+
+@pytest.mark.asyncio
+async def test_richer_daily_aggregation_is_reused_for_sector_inputs(monkeypatch, tmp_path):
+    dates = (date(2026, 7, 17), date(2026, 7, 20))
+    frame = pd.DataFrame.from_records(
+        [
+            _bar("600001.SH", dates[0], 10.0),
+            _bar("600001.SH", dates[1], 10.5),
+        ]
+    )
+    universe = (
+        radar_data.UniverseMember(
+            symbol="600001.SH",
+            name="测试股票",
+            exchange="SH",
+            industry="电子",
+            list_date=date(2020, 1, 1),
+            delist_date=None,
+            is_st=False,
+        ),
+    )
+    service = MarketRadarDataService(
+        object(),  # type: ignore[arg-type]
+        store=ParquetMarketDataStore(str(tmp_path)),
+    )
+    calls: list[bool] = []
+
+    def aggregate(*_args, include_correlation=True, **_kwargs):
+        calls.append(include_correlation)
+        return ({"coverage": {}}, {dates[-1]: {"电子": {"stock_count": 1.0}}})
+
+    monkeypatch.setattr(radar_data, "_aggregate_daily_inputs", aggregate)
+
+    richer = await service._aggregate_inputs(
+        frame,
+        universe,
+        dates,
+        include_correlation=True,
+    )
+    sector_only = await service._aggregate_inputs(
+        frame,
+        universe,
+        dates,
+        include_correlation=False,
+    )
+
+    assert calls == [True]
+    assert sector_only is richer
+
+
 @pytest.mark.asyncio
 async def test_daily_market_reports_exclusions_conflicts_and_incomplete_universe(tmp_path):
     previous = date(2026, 7, 17)

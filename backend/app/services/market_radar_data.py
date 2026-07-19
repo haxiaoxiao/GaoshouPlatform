@@ -37,6 +37,8 @@ CORE_INDEX_LABELS = {
 _ALLOWED_DATASETS = frozenset(
     {"klines_daily", "tushare_limit_list_d", "tushare_limit_step", "tushare_margin"}
 )
+DailyAggregateSeries = dict[str, dict[date, float]]
+SectorAggregatesByDate = dict[date, dict[str, dict[str, float]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +70,14 @@ class UniverseMember:
     list_date: date
     delist_date: date | None
     is_st: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _DailyAggregationCache:
+    dates: tuple[date, ...]
+    universe: tuple[UniverseMember, ...]
+    include_correlation: bool
+    result: tuple[DailyAggregateSeries, SectorAggregatesByDate]
 
 
 @dataclass(frozen=True, slots=True)
@@ -267,6 +277,8 @@ class MarketRadarDataService:
         self._store = store or ParquetMarketDataStore()
         self._calendar_provider = calendar_provider
         self._now = now
+        self._daily_range_cache: tuple[tuple[date, date], pd.DataFrame] | None = None
+        self._daily_aggregation_cache: _DailyAggregationCache | None = None
 
     async def resolve_calendar(
         self,
@@ -650,7 +662,12 @@ class MarketRadarDataService:
             start_date=dates[0] if dates else expected,
         )
         daily = await self._load_daily_range(dates)
-        series, _ = await run_blocking(_aggregate_daily_inputs, daily, universe, dates)
+        series, _ = await self._aggregate_inputs(
+            daily,
+            universe,
+            dates,
+            include_correlation=True,
+        )
         daily_source_date = _latest_date(daily, "trade_date")
         current_panel = series.get("coverage", {}).get(expected)
         coverage = float(current_panel) if current_panel is not None else 0.0
@@ -735,12 +752,11 @@ class MarketRadarDataService:
             start_date=dates[0] if dates else expected,
         )
         daily = await self._load_daily_range(dates)
-        series, sectors_by_date = await run_blocking(
-            _aggregate_daily_inputs,
+        series, sectors_by_date = await self._aggregate_inputs(
             daily,
             universe,
             dates,
-            False,
+            include_correlation=False,
         )
         current = sectors_by_date.get(expected, {})
         source_date = _latest_date(daily, "trade_date")
@@ -767,7 +783,7 @@ class MarketRadarDataService:
             expected_date=expected,
             source_date=source_date,
             lag_trading_days=_trading_lag(expected, source_date, calendar.trading_dates),
-            row_count=len(_rows_on_date(daily, "trade_date", source_date)),
+            row_count=_count_rows_on_date(daily, "trade_date", source_date),
             coverage=coverage,
             reason=source_reason,
         )
@@ -1163,13 +1179,50 @@ class MarketRadarDataService:
     async def _load_daily_range(self, dates: Sequence[date]) -> pd.DataFrame:
         if not dates:
             return pd.DataFrame()
-        return await self._read_dataset(
+        cache_key = (dates[0], dates[-1])
+        if self._daily_range_cache is not None and self._daily_range_cache[0] == cache_key:
+            return self._daily_range_cache[1]
+        frame = await self._read_dataset(
             "klines_daily",
             "SELECT symbol, CAST(trade_date AS DATE) AS trade_date, close, volume, amount "
             "FROM read_parquet(?, hive_partitioning=true, union_by_name=true) "
             "WHERE CAST(trade_date AS DATE) BETWEEN ? AND ?",
-            [dates[0], dates[-1]],
+            [*cache_key],
         )
+        self._daily_range_cache = (cache_key, frame)
+        return frame
+
+    async def _aggregate_inputs(
+        self,
+        frame: pd.DataFrame,
+        universe: tuple[UniverseMember, ...],
+        dates: Sequence[date],
+        *,
+        include_correlation: bool,
+    ) -> tuple[DailyAggregateSeries, SectorAggregatesByDate]:
+        date_key = tuple(dates)
+        cached = self._daily_aggregation_cache
+        if (
+            cached is not None
+            and cached.dates == date_key
+            and cached.universe == universe
+            and (cached.include_correlation or not include_correlation)
+        ):
+            return cached.result
+        result = await run_blocking(
+            _aggregate_daily_inputs,
+            frame,
+            universe,
+            date_key,
+            include_correlation=include_correlation,
+        )
+        self._daily_aggregation_cache = _DailyAggregationCache(
+            dates=date_key,
+            universe=universe,
+            include_correlation=include_correlation,
+            result=result,
+        )
+        return result
 
     async def _load_margin_component(
         self,
@@ -1614,6 +1667,17 @@ def _rows_on_date(
     ]
 
 
+def _count_rows_on_date(
+    frame: pd.DataFrame,
+    column: str,
+    target: date | None,
+) -> int:
+    if target is None or frame.empty or column not in frame:
+        return 0
+    normalized = pd.to_datetime(frame[column], errors="coerce").dt.normalize()
+    return int(normalized.eq(pd.Timestamp(target)).sum())
+
+
 def _dated_freshness(
     source: str,
     expected: date,
@@ -1847,15 +1911,19 @@ def _aggregate_daily_inputs(
         }
 
     ordered_dates = list(trading_dates)
-    symbol_columns = sorted({member.symbol for member in universe})
-    returns_frame = pd.DataFrame.from_dict(returns_by_date, orient="index").reindex(
-        index=ordered_dates,
-        columns=symbol_columns,
-    )
-    amounts_frame = pd.DataFrame.from_dict(amounts_by_date, orient="index").reindex(
-        index=ordered_dates,
-        columns=symbol_columns,
-    )
+    symbol_columns: list[str] = []
+    returns_frame: pd.DataFrame | None = None
+    amounts_frame: pd.DataFrame | None = None
+    if include_correlation:
+        symbol_columns = sorted({member.symbol for member in universe})
+        returns_frame = pd.DataFrame.from_dict(returns_by_date, orient="index").reindex(
+            index=ordered_dates,
+            columns=symbol_columns,
+        )
+        amounts_frame = pd.DataFrame.from_dict(amounts_by_date, orient="index").reindex(
+            index=ordered_dates,
+            columns=symbol_columns,
+        )
     for index, trade_day in enumerate(ordered_dates):
         total = totals.get(trade_day)
         previous_totals = [
@@ -1870,6 +1938,7 @@ def _aggregate_daily_inputs(
 
         if not include_correlation:
             continue
+        assert returns_frame is not None and amounts_frame is not None
         window_start = index - 19
         if window_start < 0:
             continue
