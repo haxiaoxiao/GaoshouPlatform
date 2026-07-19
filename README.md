@@ -14,6 +14,7 @@ Last updated: 2026-06-20.
 - 默认且当前支持链路为 `MARKET_DATA_BACKEND=parquet`，零运维启动，不依赖外部列式数据库服务。
 - 指数池：回测可通过 `index_symbol` 使用动态指数成分池，例如中小综指 `399101.SZ`，避免用当前自选股静态替代历史股票池。
 - 因子能力：既有指标注册体系，也有表达式 Compute Engine；Factor Value Store 已承载 TA-Lib、研究因子、小市值因子和 Alpha101 缓存；Alpha101 101 个公式已接入宽表向量化批量计算。
+- 市场雷达：`/market-radar` 汇总全 A 盈亏分布、核心指数、连板生态、拥挤度、行业温度和个股预警；miniQMT 推送异常时自动降级到 30 秒轮询。
 - 前端信息架构：`/home` 是投研决策工作台，`/monitor` 是系统运维控制台；数据查看 `/data` 与数据同步 `/data/sync` 已拆分，因子定义 `/factor` 与因子评估 `/factor/evaluation` 已拆分。
 - 同步状态语义：`/api/data/sync/status` 中 `can_trigger=true` 表示“同步服务可接收新提交/排队”，不表示当前没有任务运行；前端展示为“提交入口/运行说明”，避免把运行中任务误判为空闲。
 
@@ -22,6 +23,7 @@ Last updated: 2026-06-20.
 | 文档 | 用途 |
 |---|---|
 | `docs/user-manual.md` | 使用手册：启动、数据同步、AKQuant 回测、ID=43 小市值流程 |
+| `docs/market-radar.md` | 市场雷达：指标口径、新鲜度、实时降级、预警规则、接口和排障 |
 | `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare、AKShare 的优先级和适用场景 |
 | `docs/local-data-onboarding.md` | 本地数据接入配置：SQLite + Parquet/DuckDB + 前端验证流程 |
 | `docs/relay-long-tail-data-notes.md` | 长尾 Parquet/JQ 数据目录、日期字段口径和新资金流因子 |
@@ -367,6 +369,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 | 路由 | 页面职责 |
 |---|---|
 | `/home` | 今日投研工作台：研究就绪度、今日行动建议、投研输入口径和流水线推进 |
+| `/market-radar` | 市场雷达：全 A 盈亏分布、指数趋势、连板、拥挤度、行业温度与预警中心 |
 | `/data` | 数据查看：最新日线、分钟线、基础股票、财务、指标、概念和舆情口径 |
 | `/data/sync` | 数据同步：任务目录、预设、执行参数、队列、进度、同步日志 |
 | `/explorer` | 数据浏览器：按需预览 Parquet/DuckDB 表，不默认全量 `count(*)` |

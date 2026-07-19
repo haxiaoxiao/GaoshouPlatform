@@ -515,6 +515,84 @@ async def test_refresh_returns_202_and_updates_runtime_task(client):
 
 
 @pytest.mark.asyncio
+async def test_eod_refresh_is_proxied_to_sync_owner_without_local_execution(
+    client,
+    monkeypatch,
+):
+    import app.api.market_radar as market_radar_api
+
+    service = FakeRadarService(snapshot())
+    client.app.state.market_radar_service = service  # type: ignore[attr-defined]
+    calls: list[tuple[str, str, dict[str, Any]]] = []
+
+    async def proxy(method, path, *, json_body=None, params=None):
+        calls.append((method, path, json_body))
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "task_id": "radar-eod-sync-1",
+                "kind": "market_radar_refresh",
+                "status": "queued",
+                "refresh_kind": "eod",
+                "trade_date": "2026-07-18",
+            },
+        }
+
+    monkeypatch.setattr(market_radar_api, "proxy_sync_request", proxy)
+    response = await client.post(
+        "/api/market-radar/refresh",
+        json={"kind": "eod", "trade_date": "2026-07-18"},
+    )
+
+    assert response.status_code == 202
+    assert response.json()["data"]["task_id"] == "radar-eod-sync-1"
+    assert calls == [
+        (
+            "POST",
+            "/internal/market-radar/eod",
+            {"trade_date": "2026-07-18"},
+        )
+    ]
+    assert service.eod_refreshes == []
+
+
+@pytest.mark.asyncio
+async def test_eod_refresh_task_status_is_publicly_proxied(client, monkeypatch):
+    import app.api.market_radar as market_radar_api
+
+    service = FakeRadarService(snapshot())
+    client.app.state.market_radar_service = service  # type: ignore[attr-defined]
+
+    async def proxy(method, path, *, json_body=None, params=None):
+        assert method == "GET"
+        assert path == "/internal/market-radar/tasks/radar-eod-sync-1"
+        return {
+            "code": 0,
+            "message": "success",
+            "data": {
+                "task_id": "radar-eod-sync-1",
+                "kind": "market_radar_refresh",
+                "status": "completed",
+                "refresh_kind": "eod",
+                "trade_date": "2026-07-18",
+                "snapshot_status": "partial",
+                "recompute_needed": True,
+                "deleted_intraday": 3,
+            },
+        }
+
+    monkeypatch.setattr(market_radar_api, "proxy_sync_request", proxy)
+    response = await client.get(
+        "/api/market-radar/refresh/radar-eod-sync-1",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["data"]["status"] == "completed"
+    assert response.json()["data"]["recompute_needed"] is True
+
+
+@pytest.mark.asyncio
 async def test_refresh_deduplicates_concurrent_and_repeated_requests(client):
     class BlockingRefreshService(FakeRadarService):
         def __init__(self):

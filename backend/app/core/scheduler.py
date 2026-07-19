@@ -3,8 +3,8 @@
 
 使用 APScheduler 实现定时任务调度，支持 cron 表达式。
 """
-from datetime import datetime
 import json
+from datetime import datetime
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -14,6 +14,8 @@ from sqlalchemy import select, update
 
 from app.db.models import SyncTask
 from app.db.sqlite import async_session_factory
+from app.services.market_radar_runtime import notify_market_radar_sync_completed
+from app.services.task_queue import QueuedTask, get_task_queue
 
 # 单例调度器实例
 _scheduler: AsyncIOScheduler | None = None
@@ -49,6 +51,30 @@ def stop_scheduler() -> None:
 
 
 async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None:
+    """Serialize scheduled work with API-triggered syncs."""
+    queued_id = f"scheduled-sync-{task_id}-{datetime.now().timestamp()}"
+    await get_task_queue("sync").submit(
+        QueuedTask(
+            task_id=queued_id,
+            title=f"scheduled sync {sync_type}",
+            handler=lambda: _run_scheduled_sync_job(
+                task_id,
+                sync_type,
+                run_id=queued_id,
+                **kwargs,
+            ),
+            metadata={"sync_type": sync_type, "scheduler_task_id": task_id},
+        )
+    )
+
+
+async def _run_scheduled_sync_job(
+    task_id: int,
+    sync_type: str,
+    *,
+    run_id: str | None = None,
+    **kwargs: Any,
+) -> None:
     """
     执行同步任务的内部函数
 
@@ -67,16 +93,16 @@ async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None
 
             # 根据同步类型调用相应方法
             if sync_type == "stock_info":
-                await sync_service.sync_stock_info(task_id=task_id)
+                progress = await sync_service.sync_stock_info(task_id=task_id)
             elif sync_type == "kline_daily":
-                await sync_service.sync_kline_daily(
+                progress = await sync_service.sync_kline_daily(
                     task_id=task_id,
                     symbols=kwargs.get("symbols"),
                     start_date=kwargs.get("start_date"),
                     end_date=kwargs.get("end_date"),
                 )
             elif sync_type == "kline_minute":
-                await sync_service.sync_kline_minute(
+                progress = await sync_service.sync_kline_minute(
                     task_id=task_id,
                     symbols=kwargs.get("symbols"),
                     start_date=kwargs.get("start_date"),
@@ -88,7 +114,7 @@ async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None
                     sources = ["xueqiu_spyder"]
                 elif sync_type == "sentiment_nga":
                     sources = ["flocktrader"]
-                await sync_service.sync_sentiment(
+                progress = await sync_service.sync_sentiment(
                     task_id=task_id,
                     sources=sources,
                     symbols=kwargs.get("symbols"),
@@ -103,6 +129,14 @@ async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None
             else:
                 raise ValueError(f"Unknown sync type: {sync_type}")
 
+            if getattr(progress, "status", None) != "completed":
+                logger.warning(
+                    "Sync job did not complete: task_id={}, status={}",
+                    task_id,
+                    getattr(progress, "status", None),
+                )
+                return
+
             # 更新任务的最后执行时间
             now = datetime.now()
             await session.execute(
@@ -112,7 +146,16 @@ async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None
             )
             await session.commit()
 
-            logger.info(f"Sync job completed: task_id={task_id}")
+            logger.info("Sync job completed: task_id={}", task_id)
+            if run_id is not None:
+                try:
+                    await notify_market_radar_sync_completed(run_id, sync_type)
+                except Exception as exc:
+                    logger.warning(
+                        "Market radar follow-up after scheduled sync {} was not queued: {}",
+                        run_id,
+                        type(exc).__name__,
+                    )
 
     except Exception as e:
         logger.exception(f"Sync job failed: task_id={task_id}, error={e}")

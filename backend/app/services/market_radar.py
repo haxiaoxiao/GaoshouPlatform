@@ -95,6 +95,7 @@ _SOURCE_DEFAULT_REASONS = {
     "stock_limit_prices": "exact stock limit prices are unavailable",
     "sentiment_posts": "symbol sentiment posts are unavailable",
 }
+_INITIAL_STATE_UNSET = object()
 _DEFAULT_RULE_SPECS: tuple[tuple[str, RadarScope, Severity, str, str, Mapping[str, Any]], ...] = (
     ("market_median_return_down", "market", "high", "全A中位数急跌", "down", {"lte": -2.5}),
     ("market_decline_ratio_high", "market", "high", "市场普跌", "down", {"gte": 0.8}),
@@ -956,12 +957,37 @@ class MarketRadarService:
             Awaitable[tuple[RadarSnapshotEnvelope | None, Iterable[MarketAlertEvent]]],
         ]
         | None = None,
-        snapshot: RadarSnapshotEnvelope | None = None,
-        alerts: Iterable[MarketAlertEvent] = (),
+        snapshot: RadarSnapshotEnvelope | None | object = _INITIAL_STATE_UNSET,
+        alerts: Iterable[MarketAlertEvent] | object = _INITIAL_STATE_UNSET,
     ) -> MarketRadarSubscription:
         async with self._refresh_lock:
+            load_from_store = (
+                initial_loader is None
+                and snapshot is _INITIAL_STATE_UNSET
+                and alerts is _INITIAL_STATE_UNSET
+            )
             if initial_loader is not None:
                 snapshot, alerts = await initial_loader()
+            elif load_from_store:
+                snapshot = self._current or await self._load_latest_snapshot()
+                result = await self.store.session.execute(
+                    select(MarketAlertEvent)
+                    .where(
+                        MarketAlertEvent.status == "active",
+                        MarketAlertEvent.severity == "high",
+                    )
+                    .order_by(MarketAlertEvent.triggered_at, MarketAlertEvent.id)
+                )
+                alerts = tuple(result.scalars())
+            else:
+                if snapshot is _INITIAL_STATE_UNSET:
+                    snapshot = None
+                if alerts is _INITIAL_STATE_UNSET:
+                    alerts = ()
+            snapshot = cast(RadarSnapshotEnvelope | None, snapshot)
+            alerts = cast(Iterable[MarketAlertEvent], alerts)
+            if snapshot is not None:
+                self._current = snapshot
             initial: list[tuple[StreamEventType, Mapping[str, Any]]] = []
             status = self.feed.status
             if callable(status):
@@ -973,7 +999,11 @@ class MarketRadarService:
                         "snapshot",
                         self.project_snapshot(
                             snapshot,
-                            realtime_mode=str(getattr(status, "mode", "offline")),
+                            realtime_mode=(
+                                None
+                                if load_from_store
+                                else str(getattr(status, "mode", "offline"))
+                            ),
                         ),
                     )
                 )
@@ -1087,11 +1117,21 @@ class MarketRadarService:
     async def run_once(self) -> RadarSnapshotEnvelope:
         return await self.refresh_intraday()
 
-    async def refresh_eod(self, target_date: date) -> RadarSnapshotEnvelope:
+    async def refresh_eod(
+        self,
+        target_date: date,
+        *,
+        commit: bool = True,
+    ) -> RadarSnapshotEnvelope:
         async with self._locked_refresh():
-            return await self._refresh_eod_locked(target_date)
+            return await self._refresh_eod_locked(target_date, commit=commit)
 
-    async def _refresh_eod_locked(self, target_date: date) -> RadarSnapshotEnvelope:
+    async def _refresh_eod_locked(
+        self,
+        target_date: date,
+        *,
+        commit: bool,
+    ) -> RadarSnapshotEnvelope:
         now = self._clock()
         sentiment_as_of = datetime.combine(target_date, time(15, 20))
         # MarketRadarDataService owns one AsyncSession, so its SQL calls stay sequential.
@@ -1126,7 +1166,10 @@ class MarketRadarService:
             seen_at=now,
             snapshot_id=persisted.id,
         )
-        await self.store.session.commit()
+        if commit:
+            await self.store.session.commit()
+        else:
+            await self.store.session.flush()
         self._current = snapshot
         self._last_snapshot_persisted_at = now
         feed_status = self.feed.status

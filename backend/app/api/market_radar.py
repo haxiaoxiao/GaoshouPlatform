@@ -10,7 +10,7 @@ from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, Literal, cast
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from loguru import logger
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import func, select, update
@@ -33,6 +33,7 @@ from app.services.market_radar_contracts import (
 )
 from app.services.market_radar_store import MarketRadarStore, load_json_object
 from app.services.runtime_tasks import get_task, register_task, update_task
+from app.services.sync_proxy import proxy_sync_request
 
 router = APIRouter()
 
@@ -814,11 +815,9 @@ async def _run_refresh(
 ) -> None:
     update_task(task_id, status="running", progress=0.1)
     try:
-        if payload.kind == "intraday":
-            snapshot = await service.refresh_intraday()
-        else:
-            assert payload.trade_date is not None
-            snapshot = await service.refresh_eod(payload.trade_date)
+        if payload.kind != "intraday":
+            raise ValueError("API-owned refresh only supports intraday snapshots")
+        snapshot = await service.refresh_intraday()
         update_task(
             task_id,
             status="succeeded",
@@ -851,6 +850,21 @@ async def _run_refresh(
 async def refresh_radar(request: Request, payload: RefreshRequest) -> dict[str, Any]:
     service = _service(request)
     trade_date = payload.trade_date.isoformat() if payload.trade_date else None
+    if payload.kind == "eod":
+        response = await proxy_sync_request(
+            "POST",
+            "/internal/market-radar/eod",
+            json_body={"trade_date": trade_date},
+        )
+        task_payload = response["data"]
+        current = service.current_envelope()
+        envelope = (
+            service.project_snapshot(current, realtime_mode=_feed_mode(service))
+            if current is not None
+            else _unavailable_envelope(service, "no market radar snapshot is available")
+        )
+        return _with_data(envelope, task_payload)
+
     refresh_key = (payload.kind, trade_date)
     refresh_lock = getattr(request.app.state, "market_radar_refresh_lock", None)
     if refresh_lock is None:
@@ -919,6 +933,28 @@ async def refresh_radar(request: Request, payload: RefreshRequest) -> dict[str, 
         else _unavailable_envelope(service, "no market radar snapshot is available")
     )
     return _with_data(envelope, task_payload)
+
+
+@router.get("/refresh/{task_id}")
+async def get_refresh_task(
+    request: Request,
+    task_id: Annotated[
+        str,
+        Path(pattern=r"^market-radar-eod-[0-9a-f]{32}$|^radar-eod-[A-Za-z0-9-]+$"),
+    ],
+) -> dict[str, Any]:
+    service = _service(request)
+    response = await proxy_sync_request(
+        "GET",
+        f"/internal/market-radar/tasks/{task_id}",
+    )
+    current = service.current_envelope()
+    envelope = (
+        service.project_snapshot(current, realtime_mode=_feed_mode(service))
+        if current is not None
+        else _unavailable_envelope(service, "no market radar snapshot is available")
+    )
+    return _with_data(envelope, response["data"])
 
 
 def _sse_frame(event: StreamEvent) -> str:

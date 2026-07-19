@@ -14,9 +14,10 @@ import app.services.sync_service as sync_service_module
 from app.db.sqlite import get_async_session
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.cache_invalidation import invalidate_after_sync
+from app.services.market_radar_runtime import notify_market_radar_sync_completed
 from app.services.sync_run_store import (
-    get_sync_run,
     get_latest_sync_run,
+    get_sync_run,
     idle_sync_status,
     run_to_status,
     upsert_sync_run,
@@ -424,6 +425,7 @@ async def _run_sync_task(
                 logger.info("Cache invalidated after {} sync: {}", request.sync_type, invalidated)
             except Exception as exc:
                 logger.warning("Cache invalidation after {} sync failed: {}", request.sync_type, exc)
+            await _notify_market_radar_after_sync(run_id, request.sync_type, progress)
     except Exception as exc:
         logger.opt(exception=True).error("Sync task {} failed: {}", request.sync_type, exc)
         async with async_session() as session:
@@ -444,6 +446,23 @@ async def _run_sync_task(
         except asyncio.CancelledError:
             pass
         await engine.dispose()
+
+
+async def _notify_market_radar_after_sync(
+    run_id: str,
+    sync_type: str,
+    progress: SyncProgress | None,
+) -> None:
+    if progress is None or progress.status != "completed":
+        return
+    try:
+        await notify_market_radar_sync_completed(run_id, sync_type)
+    except Exception as exc:
+        logger.warning(
+            "Market radar follow-up after sync {} was not queued: {}",
+            run_id,
+            type(exc).__name__,
+        )
 
 
 @router.post("/sync")

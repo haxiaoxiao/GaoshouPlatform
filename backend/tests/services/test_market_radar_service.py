@@ -1003,7 +1003,13 @@ async def test_initial_subscription_loads_persisted_snapshot_before_atomic_alert
         feed=FakeFeed(), data_service=SimpleNamespace(), store=store, clock=FakeClock()
     )
     subscription = await service.subscribe_with_initial()
-    events = [await subscription.get() for _ in range(3)]
+    try:
+        events = [
+            await asyncio.wait_for(subscription.get(), timeout=1)
+            for _ in range(3)
+        ]
+    finally:
+        await subscription.close()
     assert [event.event for event in events] == ["mode", "snapshot", "alert"]
     projected = service.project_snapshot(service.current_envelope())
     assert events[1].data == projected
@@ -1088,6 +1094,53 @@ async def test_refresh_eod_loads_each_source_once_and_persists_serialized_snapsh
     latest = await service.store.get_latest_snapshot(snapshot_type="eod")
     assert latest is not None
     assert json.loads(latest.metrics_json)["sources"] == sorted(data.calls)
+
+
+@pytest.mark.asyncio
+async def test_refresh_eod_can_defer_commit_so_cleanup_failure_rolls_back_snapshot(
+    radar_session,
+    monkeypatch,
+):
+    data = FakeEodData()
+
+    async def eod_builder(*, target_date, now, **_kwargs):
+        return RadarSnapshotEnvelope(
+            snapshot_type="eod",
+            as_of=datetime.combine(target_date, datetime.min.time()),
+            computed_at=now,
+            status="partial",
+            confidence=0.6,
+            formula_version="market-radar-v1",
+            metrics={},
+            source_freshness={},
+            observations=(),
+        )
+
+    store = MarketRadarStore(radar_session)
+    service = MarketRadarService(
+        feed=FakeFeed(),
+        data_service=data,
+        store=store,
+        eod_snapshot_builder=eod_builder,
+        clock=FakeClock(),
+    )
+
+    async def fail_cleanup(*, cutoff):
+        raise RuntimeError(f"cleanup failed at {cutoff.isoformat()}")
+
+    monkeypatch.setattr(store, "cleanup_intraday_snapshots", fail_cleanup)
+
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        try:
+            await service.refresh_eod(date(2026, 7, 17), commit=False)
+            await store.cleanup_intraday_snapshots(cutoff=datetime(2026, 4, 18))
+            await radar_session.commit()
+        except BaseException:
+            await radar_session.rollback()
+            raise
+
+    rows = list((await radar_session.execute(select(MarketRadarSnapshot))).scalars())
+    assert rows == []
 
 
 def test_default_eod_builder_compacts_daily_facts_and_preserves_freshness_details(radar_session):

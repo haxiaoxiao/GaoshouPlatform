@@ -70,6 +70,7 @@ if not defined TS_TOKEN if defined TUSHARE_TOKEN set "TS_TOKEN=%TUSHARE_TOKEN%"
 if not defined TUSHARE_TOKEN if defined TS_TOKEN set "TUSHARE_TOKEN=%TS_TOKEN%"
 
 set "BACKEND_URL=http://%BACKEND_HOST%:%BACKEND_PORT%/health"
+set "RADAR_URL=http://%BACKEND_HOST%:%BACKEND_PORT%/api/market-radar/overview"
 set "SYNC_URL=http://%SYNC_HOST%:%SYNC_PORT%/health"
 set "SYNC_SERVICE_URL=http://%SYNC_HOST%:%SYNC_PORT%"
 set "SYNC_SERVICE_PORT=%SYNC_PORT%"
@@ -186,7 +187,7 @@ popd
 echo       OK
 
 echo [5/8] Starting sync service on %SYNC_HOST%:%SYNC_PORT%...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','uvicorn','app.sync_main:app','--host','%SYNC_HOST%','--port','%SYNC_PORT%') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','app.service_runner','app.sync_main:app','--host','%SYNC_HOST%','--port','%SYNC_PORT%','--pid-file','%ROOT%\.runtime\sync-service.pid') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%SYNC_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Sync service health check failed: %SYNC_URL%
@@ -196,7 +197,7 @@ if errorlevel 1 (
 echo       OK
 
 echo [6/8] Starting backend on %BACKEND_HOST%:%BACKEND_PORT%...
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','uvicorn','app.main:app','--host','%BACKEND_HOST%','--port','%BACKEND_PORT%') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%PYTHON%' -ArgumentList @('-m','app.service_runner','app.main:app','--host','%BACKEND_HOST%','--port','%BACKEND_PORT%','--pid-file','%ROOT%\.runtime\backend-api.pid') -WorkingDirectory '%BACKEND_DIR%' -WindowStyle Hidden"
 powershell -NoProfile -ExecutionPolicy Bypass -Command "$url='%BACKEND_URL%'; $ok=$false; for($i=0; $i -lt 60; $i++){ try { Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 2 | Out-Null; $ok=$true; break } catch { Start-Sleep -Seconds 1 } }; if(-not $ok){ exit 1 }"
 if errorlevel 1 (
   echo       ERROR: Backend health check failed: %BACKEND_URL%
@@ -206,6 +207,21 @@ if errorlevel 1 (
 echo       OK
 
 echo [7/8] Checking miniQMT live-trading bridge...
+set "RADAR_STATUS="
+set "RADAR_MODE="
+set "RADAR_AS_OF="
+for /f "usebackq tokens=1,2,3 delims=|" %%a in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $r=Invoke-RestMethod -Uri '%RADAR_URL%' -TimeoutSec 5; Write-Output ($r.status.ToString() + '|' + $r.realtime_mode.ToString() + '|' + $(if($null -eq $r.as_of){'none'}else{$r.as_of.ToString()})) } catch { exit 1 }"`) do (
+  set "RADAR_STATUS=%%a"
+  set "RADAR_MODE=%%b"
+  set "RADAR_AS_OF=%%c"
+)
+if not defined RADAR_MODE (
+  echo       WARN: Market radar status is unavailable at %RADAR_URL%.
+) else (
+  echo       Market radar: status=!RADAR_STATUS! mode=!RADAR_MODE! as_of=!RADAR_AS_OF!
+  if /i "!RADAR_MODE!"=="offline" echo       NOTICE: miniQMT realtime is offline; the latest daily radar snapshot remains available.
+  if /i "!RADAR_MODE!"=="polling_30s" echo       NOTICE: realtime push is degraded; radar is using the 30-second QMT polling fallback.
+)
 if not defined QMT_ACCOUNT_ID (
   echo       SKIP: miniQMT account is optional and QMT_ACCOUNT_ID is not configured.
 ) else if not defined QMT_TRADER_PATH (
@@ -240,6 +256,8 @@ echo   Startup complete
 echo ========================================
 echo Backend docs:  http://%BACKEND_HOST%:%BACKEND_PORT%/docs
 echo Backend API:   http://%BACKEND_HOST%:%BACKEND_PORT%/api/system/status
+echo Market radar:  %FRONTEND_URL%/market-radar
+echo Radar status:  %RADAR_URL%
 echo Sync health:   http://%SYNC_HOST%:%SYNC_PORT%/health
 echo Live trading:  %FRONTEND_URL%/trade
 echo Frontend:      %FRONTEND_URL%
@@ -259,8 +277,10 @@ if not exist "%ROOT%\.runtime" mkdir "%ROOT%\.runtime" >nul 2>&1
 exit /b 0
 
 :stop_project_processes
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%'); if(Test-Path -LiteralPath '%ROOT%\.runtime\frontend-port.txt'){ $saved=Get-Content -LiteralPath '%ROOT%\.runtime\frontend-port.txt' -ErrorAction SilentlyContinue; if($saved -match '^\d+$'){ $ports += [int]$saved } }; $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run (dev|preview)|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -and $_.CommandLine -like '*%ROOT%\frontend*' -and $_.CommandLine -match 'vite\.js.*preview' } | ForEach-Object { $ids += [int]$_.ProcessId }; $ids | Select-Object -Unique | ForEach-Object { Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
+set "STALE_FRONTEND_PORT=%FRONTEND_PORT%"
+if exist "%ROOT%\.runtime\frontend-port.txt" set /p STALE_FRONTEND_PORT=<"%ROOT%\.runtime\frontend-port.txt"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\stop-gaoshouplatform-services.ps1" -ProjectRoot "%ROOT%" -BackendPort "%BACKEND_PORT%" -SyncPort "%SYNC_PORT%" -FrontendPort "%STALE_FRONTEND_PORT%" -GracefulTimeoutSeconds 20
+if errorlevel 1 echo       WARN: verified stale-process shutdown failed; ports will be checked without killing unknown owners.
 exit /b 0
 
 :assert_ports_free

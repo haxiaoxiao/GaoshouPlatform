@@ -13,6 +13,10 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 | 场景 | 首选 | 兜底 | 说明 |
 |---|---|---|---|
 | 实时行情、实盘相关 | miniQMT | 无 | 本地券商/QMT 环境最可靠，外部接口不适合实盘。 |
+| 市场雷达盘中宽度/指数 | miniQMT 全推 | miniQMT `get_full_tick` 30 秒轮询 | 两种模式都由后端聚合；浏览器不直接连接 QMT。 |
+| 市场雷达日终宽度/拥挤度 | 本地日线 Parquet + SQLite 股票池 | 无 | 每项携带真实交易日；缺失或冲突不按零处理。 |
+| 市场雷达连板 | 当日 Tushare 涨跌停/连板表 | 从新鲜涨停明细按连续交易日推导 | 旧交易日梯队不能覆盖目标日。 |
+| 市场雷达舆情 | 本地已评分舆情记录 | 分项退出评分 | 盘中 6 小时、日终 24 小时，并展示来源覆盖。 |
 | 当前 A 股基础信息 | miniQMT | Tushare / AKShare | QMT 能给当前 instrument detail；Tushare/AKShare 可补名称、行业等。 |
 | 普通在市股票日线 | miniQMT | Tushare, AKShare | QMT 本地缓存优先；Tushare/AKShare 可补历史区间。 |
 | 退市/历史股票日线 | Tushare | AKShare | QMT 对部分退市股会返回成交量但 OHLC 为 0，不能直接入库。 |
