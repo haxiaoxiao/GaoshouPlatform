@@ -45,10 +45,18 @@ import { useNotificationStore, type Notification } from '@/stores/notification'
 const store = useNotificationStore()
 const router = useRouter()
 
-function handleNotificationClick(notification: Notification) {
-  store.markAsRead(notification.id)
+async function handleNotificationClick(notification: Notification) {
+  if (notification.marketAlertId) {
+    try {
+      await store.acknowledgeMarketAlert(notification.id)
+    } catch {
+      return
+    }
+  } else {
+    store.markAsRead(notification.id)
+  }
   if (notification.route) {
-    router.push(notification.route)
+    await router.push(notification.route)
   }
 }
 
