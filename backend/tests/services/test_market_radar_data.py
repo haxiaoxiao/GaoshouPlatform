@@ -332,11 +332,13 @@ async def test_daily_universe_is_point_in_time_for_listings_and_delistings(tmp_p
     old = _stock("600001.SH", delist_date=dates[-1], is_delist=1)
     new = _stock("000001.SZ", list_date=dates[2])
     always = _stock("920001.BJ")
+    dirty_delisted = _stock("600009.SH", is_delist=1, delist_date=None)
     records = _history_records([old.symbol, always.symbol], dates[:3])
     records.extend(_history_records([new.symbol], dates[2:]))
     records.extend(_history_records([always.symbol], dates[3:]))
+    records.extend(_history_records([dirty_delisted.symbol], dates))
     _write_dataset(tmp_path, "klines_daily", records)
-    engine, sessions = await _database(tmp_path, [old, new, always])
+    engine, sessions = await _database(tmp_path, [old, new, always, dirty_delisted])
     try:
         async with sessions() as session:
             result = await MarketRadarDataService(
@@ -351,6 +353,7 @@ async def test_daily_universe_is_point_in_time_for_listings_and_delistings(tmp_p
         assert new.symbol not in facts[dates[1]]
         assert old.symbol not in facts[dates[-1]]
         assert new.symbol in facts[dates[-1]]
+        assert dirty_delisted.symbol not in set().union(*facts.values())
         assert result.universe_freshness.row_count == 2
     finally:
         await engine.dispose()
@@ -593,6 +596,62 @@ async def test_correlation_requires_full_twenty_day_window(tmp_path):
         )
         assert fifteen_corr.current_value is None
         assert twenty_corr.current_value is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_correlation_requires_eighty_percent_finite_pair_coverage(tmp_path):
+    dates = _weekdays(date(2026, 6, 15), 21)
+
+    def records(symbols: list[str], *, constant_last: bool) -> list[dict]:
+        result: list[dict] = []
+        for index, trade_day in enumerate(dates):
+            closes = [10 + index + index**2 * 0.01, 20 + index * 1.5 + index**2 * 0.03]
+            if len(symbols) == 3:
+                closes.append(30.0 if constant_last else 30 + index)
+            result.extend(
+                _bar(symbol, trade_day, close, amount=100.0 + symbol_index * 10)
+                for symbol_index, (symbol, close) in enumerate(zip(symbols, closes, strict=True))
+            )
+        return result
+
+    three_root = tmp_path / "three"
+    three_symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
+    _write_dataset(three_root, "klines_daily", records(three_symbols, constant_last=True))
+    engine, sessions = await _database(three_root, [_stock(symbol) for symbol in three_symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(three_root)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_crowding_inputs(target_date=dates[-1])
+        correlation = next(
+            item for item in result.components if item.key == "high_liquidity_correlation"
+        )
+        assert correlation.current_value is None
+        assert correlation.excluded_reason == "insufficient_pair_coverage"
+    finally:
+        await engine.dispose()
+
+    two_root = tmp_path / "two"
+    two_symbols = ["600001.SH", "000001.SZ"]
+    _write_dataset(two_root, "klines_daily", records(two_symbols, constant_last=False))
+    engine, sessions = await _database(two_root, [_stock(symbol) for symbol in two_symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(two_root)),
+                calendar_provider=StaticCalendar(dates),
+                now=lambda: NOW,
+            ).load_crowding_inputs(target_date=dates[-1])
+        correlation = next(
+            item for item in result.components if item.key == "high_liquidity_correlation"
+        )
+        assert correlation.current_value is not None
     finally:
         await engine.dispose()
 
@@ -904,6 +963,71 @@ async def test_sentiment_uses_weighted_dispersion_and_text_event_clusters(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_sentiment_cluster_intensity_uses_only_the_hundred_cluster_candidates(tmp_path):
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    try:
+        async with sessions() as session:
+            session.add_all(
+                [
+                    SentimentPost(
+                        source="guba",
+                        source_post_id=f"cluster-{index}",
+                        symbol="600001.SH",
+                        title="semiconductor production recovery signal",
+                        content="factory utilization and orders improve across the supply chain",
+                        published_at=NOW - timedelta(minutes=index),
+                        sentiment_score=0.2,
+                        reply_count=0,
+                        like_count=0,
+                        comment_count=0,
+                    )
+                    for index in range(120)
+                ]
+            )
+            await session.commit()
+            result = await MarketRadarDataService(session, now=lambda: NOW).load_sentiment_inputs(
+                as_of=NOW,
+                mode="intraday",
+            )
+
+        assert result.sample_size == 120
+        assert result.cluster_intensity == pytest.approx(1.0)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sentiment_historical_cutoff_rejects_future_created_or_updated_raw_values(tmp_path):
+    engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
+    before = NOW - timedelta(days=1)
+    after = NOW + timedelta(days=1)
+    try:
+        async with sessions() as session:
+            session.add_all(
+                [
+                    SentimentPost(source="guba", source_post_id="trusted", symbol="600001.SH", title="trusted current market note", content="ordinary evidence available before cutoff", published_at=NOW - timedelta(hours=2), sentiment_score=-0.2, reply_count=0, like_count=0, comment_count=0, created_at=before, updated_at=before),
+                    SentimentPost(source="xueqiu", source_post_id="analyzed-backfill", symbol="600001.SH", title="analysis existed before cutoff", content="raw values were updated only after cutoff", published_at=NOW - timedelta(hours=1), sentiment_score=-1.0, reply_count=1000, like_count=1000, comment_count=1000, created_at=before, updated_at=after),
+                    SentimentPost(source="guba", source_post_id="raw-backfill", symbol="600001.SH", title="future raw sentiment update", content="this score was backfilled after historical cutoff", published_at=NOW - timedelta(minutes=30), sentiment_score=1.0, reply_count=1000, like_count=1000, comment_count=1000, created_at=before, updated_at=after),
+                    SentimentPost(source="guba", source_post_id="future-created", symbol="600001.SH", title="future created row", content="record did not exist at historical cutoff", published_at=NOW - timedelta(minutes=10), sentiment_score=1.0, reply_count=0, like_count=0, comment_count=0, created_at=after, updated_at=after),
+                    SentimentAnalysis(source="xueqiu", source_item_id="analyzed-backfill", symbol="600001.SH", model_version="historical-v1", score=0.4, label="positive", confidence=0.8, analyzed_at=NOW - timedelta(minutes=45)),
+                ]
+            )
+            await session.commit()
+            result = await MarketRadarDataService(session, now=lambda: NOW).load_sentiment_inputs(
+                as_of=NOW,
+                mode="intraday",
+            )
+
+        assert result.sample_size == 2
+        assert result.heat == pytest.approx(1.8)
+        assert result.weighted_score == pytest.approx((-0.2 + 0.4 * 0.8) / 1.8)
+        assert result.latest_at == NOW - timedelta(hours=1)
+        assert result.latest_model == "historical-v1"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_corrupt_optional_limit_sources_degrade_independently(tmp_path):
     target = date(2026, 7, 20)
     symbols = ["600001.SH", "000001.SZ", "920001.BJ"]
@@ -930,6 +1054,32 @@ async def test_corrupt_optional_limit_sources_degrade_independently(tmp_path):
         assert result.step_freshness.reason
         assert str(bad_step_root) not in result.step_freshness.reason
         assert len(result.step_freshness.reason) < 160
+    finally:
+        await engine.dispose()
+
+    both_root = tmp_path / "both-invalid"
+    _write_dataset(
+        both_root,
+        "tushare_limit_list_d",
+        [{"trade_date_dt": target, "wrong_detail": "x"}],
+    )
+    _write_dataset(
+        both_root,
+        "tushare_limit_step",
+        [{"trade_date_dt": target, "wrong_step": "x"}],
+    )
+    engine, sessions = await _database(both_root, [_stock(symbol) for symbol in symbols])
+    try:
+        async with sessions() as session:
+            result = await MarketRadarDataService(
+                session,
+                store=ParquetMarketDataStore(str(both_root)),
+                calendar_provider=StaticCalendar((target,)),
+                now=lambda: NOW,
+            ).load_limit_ladder(target_date=target)
+        assert result.detail_freshness.status == "unavailable"
+        assert result.step_freshness.status == "unavailable"
+        assert result.status == "unavailable"
     finally:
         await engine.dispose()
 

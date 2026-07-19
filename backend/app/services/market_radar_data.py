@@ -11,8 +11,9 @@ from datetime import date, datetime, timedelta
 from statistics import median
 from typing import Literal
 
+import numpy as np
 import pandas as pd
-from sqlalchemy import func, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.blocking import run_blocking
@@ -467,8 +468,14 @@ class MarketRadarDataService:
         )
 
         if not detail_exact and not step_exact:
+            both_unavailable = (
+                detail_freshness.status == "unavailable"
+                and step_freshness.status == "unavailable"
+            )
             status: FreshnessStatus = (
-                "unavailable" if detail_date is None and step_date is None else "stale"
+                "unavailable"
+                if both_unavailable or (detail_date is None and step_date is None)
+                else "stale"
             )
             return LimitLadderData(
                 trade_date=expected,
@@ -638,7 +645,16 @@ class MarketRadarDataService:
                 current = None
                 excluded_reason = "daily_source_not_exact"
             elif current is None:
-                excluded_reason = "insufficient_daily_history"
+                pair_coverage = _finite(
+                    series.get("high_liquidity_correlation_pair_coverage", {}).get(expected)
+                )
+                excluded_reason = (
+                    "insufficient_pair_coverage"
+                    if key == "high_liquidity_correlation"
+                    and pair_coverage is not None
+                    and pair_coverage < 0.8
+                    else "insufficient_daily_history"
+                )
             components.append(
                 RawComponent(
                     key=key,
@@ -773,11 +789,14 @@ class MarketRadarDataService:
                 SentimentPost.reply_count,
                 SentimentPost.like_count,
                 SentimentPost.comment_count,
+                SentimentPost.created_at,
+                SentimentPost.updated_at,
             )
             .where(
                 SentimentPost.published_at.is_not(None),
                 SentimentPost.published_at >= start,
                 SentimentPost.published_at <= cutoff,
+                SentimentPost.created_at <= cutoff,
             )
             .order_by(SentimentPost.published_at)
         )
@@ -820,7 +839,8 @@ class MarketRadarDataService:
             analysis = latest_analysis.get(
                 (str(row.source), str(row.source_post_id), str(row.symbol))
             )
-            raw_score = _finite(row.sentiment_score)
+            raw_trusted = row.updated_at is None or row.updated_at <= cutoff
+            raw_score = _finite(row.sentiment_score) if raw_trusted else None
             if analysis is not None:
                 score = _finite(analysis["score"])
                 confidence = _finite(analysis["confidence"]) or 0.0
@@ -833,9 +853,13 @@ class MarketRadarDataService:
                 analyzed_at = None
             if score is None:
                 continue
-            engagement = sum(
-                max(0, int(value or 0))
-                for value in (row.reply_count, row.like_count, row.comment_count)
+            engagement = (
+                sum(
+                    max(0, int(value or 0))
+                    for value in (row.reply_count, row.like_count, row.comment_count)
+                )
+                if raw_trusted
+                else 0
             )
             weight = (1.0 + math.log1p(engagement)) * max(0.1, confidence)
             observations.append(
@@ -903,9 +927,17 @@ class MarketRadarDataService:
         sources = {str(item["source"]) for item in current_observations}
         from app.services.sentiment import _event_clusters
 
+        cluster_candidates = sorted(
+            current_observations,
+            key=lambda item: item["published_at"],
+            reverse=True,
+        )[:100]
         event_clusters = _event_clusters(
-            [item["cluster_post"] for item in current_observations],
-            limit=max(1, len(current_observations)),
+            [item["cluster_post"] for item in cluster_candidates],
+            limit=max(1, len(cluster_candidates)),
+        )
+        clustered_sample_count = sum(
+            int(cluster["post_count"]) for cluster in event_clusters
         )
         analyzed = [
             item for item in current_observations
@@ -977,8 +1009,8 @@ class MarketRadarDataService:
             ),
             cluster_intensity=(
                 max(int(cluster["post_count"]) for cluster in event_clusters)
-                / len(current_observations)
-                if current_observations and event_clusters
+                / clustered_sample_count
+                if clustered_sample_count > 0
                 else None
             ),
             source_count=len(sources),
@@ -1020,7 +1052,13 @@ class MarketRadarDataService:
             .where(
                 Stock.list_date.is_not(None),
                 Stock.list_date <= target,
-                or_(Stock.delist_date.is_(None), Stock.delist_date > active_since),
+                or_(
+                    Stock.delist_date > active_since,
+                    and_(
+                        Stock.delist_date.is_(None),
+                        func.coalesce(Stock.is_delist, 0) == 0,
+                    ),
+                ),
                 Stock.exchange.in_(("SH", "SZ", "BJ")),
                 or_(Stock.security_type.is_(None), func.lower(Stock.security_type) == "stock"),
                 or_(Stock.product_class.is_(None), func.lower(Stock.product_class) == "stock"),
@@ -1629,6 +1667,7 @@ def _aggregate_daily_inputs(
             "top_3_sector_share",
             "market_amount_vs_20d",
             "high_liquidity_correlation",
+            "high_liquidity_correlation_pair_coverage",
         )
     }
     sectors_by_date: dict[date, dict[str, dict[str, float]]] = {}
@@ -1690,6 +1729,15 @@ def _aggregate_daily_inputs(
         }
 
     ordered_dates = list(trading_dates)
+    symbol_columns = sorted({member.symbol for member in universe})
+    returns_frame = pd.DataFrame.from_dict(returns_by_date, orient="index").reindex(
+        index=ordered_dates,
+        columns=symbol_columns,
+    )
+    amounts_frame = pd.DataFrame.from_dict(amounts_by_date, orient="index").reindex(
+        index=ordered_dates,
+        columns=symbol_columns,
+    )
     for index, trade_day in enumerate(ordered_dates):
         total = totals.get(trade_day)
         previous_totals = [
@@ -1704,40 +1752,52 @@ def _aggregate_daily_inputs(
 
         if not include_correlation:
             continue
-        return_window = ordered_dates[max(0, index - 19) : index + 1]
-        if len(return_window) < 20:
+        window_start = index - 19
+        if window_start < 0:
             continue
-        liquidity_window = return_window[-20:]
-        mean_liquidity: dict[str, float] = {}
-        for member in universe:
-            if not _member_active_on(member, trade_day):
-                continue
-            observations = [
-                amounts_by_date.get(day, {}).get(member.symbol)
-                for day in liquidity_window
-            ]
-            valid_amounts = [value for value in observations if value is not None]
-            if len(valid_amounts) >= 15:
-                mean_liquidity[member.symbol] = sum(valid_amounts) / len(valid_amounts)
+        window_amounts = amounts_frame.iloc[window_start : index + 1]
+        amount_counts = window_amounts.count()
+        amount_means = window_amounts.mean()
+        active_symbols = {
+            member.symbol for member in universe if _member_active_on(member, trade_day)
+        }
         top_symbols = [
             symbol
-            for symbol, _ in sorted(mean_liquidity.items(), key=lambda item: (-item[1], item[0]))[:300]
+            for symbol, _ in sorted(
+                (
+                    (symbol, float(amount_means[symbol]))
+                    for symbol in symbol_columns
+                    if symbol in active_symbols
+                    and int(amount_counts[symbol]) >= 15
+                    and _finite(amount_means[symbol]) is not None
+                ),
+                key=lambda item: (-item[1], item[0]),
+            )[:300]
         ]
         if len(top_symbols) < 2:
             continue
-        return_frame = pd.DataFrame.from_dict(
-            {day: returns_by_date.get(day, {}) for day in return_window}, orient="index"
-        ).reindex(columns=top_symbols)
-        correlations = return_frame.corr(min_periods=15)
-        upper_values = [
-            _finite(correlations.iloc[row_index, column_index])
-            for row_index in range(len(correlations.columns))
-            for column_index in range(row_index + 1, len(correlations.columns))
-        ]
-        finite_values = [value for value in upper_values if value is not None]
-        if finite_values:
-            series["high_liquidity_correlation"][trade_day] = sum(finite_values) / len(finite_values)
+        correlations = returns_frame.iloc[window_start : index + 1][top_symbols].corr(
+            min_periods=15
+        )
+        correlation, pair_coverage = _correlation_upper_triangle(correlations)
+        series["high_liquidity_correlation_pair_coverage"][trade_day] = pair_coverage
+        if correlation is not None and pair_coverage >= 0.8:
+            series["high_liquidity_correlation"][trade_day] = correlation
     return series, sectors_by_date
+
+
+def _correlation_upper_triangle(correlations: pd.DataFrame) -> tuple[float | None, float]:
+    matrix = correlations.to_numpy(copy=False)
+    expected_pairs = len(matrix) * (len(matrix) - 1) // 2
+    if expected_pairs == 0:
+        return None, 0.0
+    row_indices, column_indices = np.triu_indices_from(matrix, k=1)
+    upper = matrix[row_indices, column_indices]
+    finite = upper[np.isfinite(upper)]
+    pair_coverage = len(finite) / expected_pairs
+    if len(finite) == 0:
+        return None, pair_coverage
+    return sum(finite.tolist()) / len(finite), pair_coverage
 
 
 def _z_score(value: float, history: Sequence[float]) -> float | None:
