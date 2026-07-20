@@ -21,14 +21,22 @@ import {
 } from 'lightweight-charts'
 import type { KlineDataDisplay } from '@/api/kline'
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   data: KlineDataDisplay[]
-}>()
+  queryKey?: string
+}>(), {
+  queryKey: '',
+})
+
+const emit = defineEmits<{ 'request-older': [] }>()
 
 const chartRef = ref<HTMLDivElement | null>(null)
 const chart = shallowRef<IChartApi | null>(null)
 const candleSeries = shallowRef<ISeriesApi<'Candlestick'> | null>(null)
 const volumeSeries = shallowRef<ISeriesApi<'Histogram'> | null>(null)
+let requestOlderArmed = false
+let lastDataLength = 0
+let lastNewestTime: string | null = null
 
 const sortedData = computed(() =>
   [...(props.data || [])].sort((a, b) => String(a.datetime).localeCompare(String(b.datetime)))
@@ -78,8 +86,32 @@ const resizeChart = () => {
   chart.value.resize(Math.max(0, Math.floor(rect.width)), Math.max(0, Math.floor(rect.height)))
 }
 
-const updateSeries = () => {
+const handleVisibleLogicalRangeChange = (range: { from: number; to: number } | null) => {
+  if (!range) return
+  if (range.from > 10) {
+    requestOlderArmed = true
+    return
+  }
+  if (!requestOlderArmed) return
+  requestOlderArmed = false
+  emit('request-older')
+  queueMicrotask(() => {
+    requestOlderArmed = true
+  })
+}
+
+const updateSeries = (forceFit = false) => {
   if (!candleSeries.value || !volumeSeries.value) return
+  const timeScale = chart.value?.timeScale()
+  const visibleRange = timeScale?.getVisibleLogicalRange()
+  const nextLength = candleData.value.length
+  const nextNewestTime = sortedData.value.at(-1)?.datetime || null
+  const addedCount = Math.max(0, nextLength - lastDataLength)
+  const appendedOlder = !forceFit
+    && lastDataLength > 0
+    && addedCount > 0
+    && nextNewestTime === lastNewestTime
+  requestOlderArmed = false
   chart.value?.applyOptions({
     timeScale: {
       timeVisible: hasIntradayData.value,
@@ -88,7 +120,19 @@ const updateSeries = () => {
   })
   candleSeries.value.setData(candleData.value)
   volumeSeries.value.setData(volumeData.value)
-  chart.value?.timeScale().fitContent()
+  if (appendedOlder && visibleRange && timeScale) {
+    timeScale.setVisibleLogicalRange({
+      from: visibleRange.from + addedCount,
+      to: visibleRange.to + addedCount,
+    })
+  } else {
+    timeScale?.fitContent()
+  }
+  lastDataLength = nextLength
+  lastNewestTime = nextNewestTime
+  queueMicrotask(() => {
+    requestOlderArmed = true
+  })
 }
 
 const initChart = () => {
@@ -142,13 +186,23 @@ const initChart = () => {
   volume.priceScale().applyOptions({
     scaleMargins: { top: 0.76, bottom: 0 },
   })
-  updateSeries()
+  instance.timeScale().subscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange)
+  updateSeries(true)
 }
 
 watch(
   () => props.data,
   () => updateSeries(),
   { deep: false }
+)
+
+watch(
+  () => props.queryKey,
+  () => {
+    requestOlderArmed = false
+    lastDataLength = 0
+    lastNewestTime = null
+  },
 )
 
 onMounted(async () => {
@@ -159,6 +213,7 @@ onMounted(async () => {
 useResizeObserver(chartRef, resizeChart)
 
 onUnmounted(() => {
+  chart.value?.timeScale().unsubscribeVisibleLogicalRangeChange(handleVisibleLogicalRangeChange)
   chart.value?.remove()
   chart.value = null
   candleSeries.value = null

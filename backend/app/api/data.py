@@ -497,7 +497,7 @@ async def get_klines(
     start_date: date | None = Query(default=None, description="开始日期"),
     end_date: date | None = Query(default=None, description="结束日期"),
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=100, ge=1, le=1000, description="每页数量"),
+    page_size: int = Query(default=250, ge=1, le=1000, description="每页数量"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
@@ -540,6 +540,9 @@ async def get_klines(
     return {
         "items": items,
         "total": result.total,
+        "page": result.page,
+        "page_size": result.page_size,
+        "total_pages": result.total_pages,
     }
 
 

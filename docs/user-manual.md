@@ -54,6 +54,10 @@ Prod 标准端口为 `3511/8800/8810`，实际前端端口见 `.runtime/frontend
 | `kline_minute` | 分钟 K | Parquet |
 | `realtime_mv` | 实时市值 | SQLite `stocks` |
 
+“日常更新”预设默认使用全市场范围；只有主动切换到“自定义”后才会把股票代码列表发送给同步服务。数据查看页的“最近 / 关注”记录用户实际选择过的最近 10 只股票，并保存在当前浏览器，不再使用固定示例股票。
+
+日线查询默认返回约一个交易年的 250 条。选择更长日期区间后，将 K 线时间轴拖到最左侧会继续加载更早分页，直到覆盖所选区间；切换股票、周期或日期范围会重新从第一页查询。
+
 xtquant 是同步阻塞 SDK。后端代码中所有 QMT 调用都应通过 `asyncio.get_running_loop().run_in_executor()` 或 `asyncio.to_thread()` 包装。
 
 不要使用 `download_financial_data`，它可能在 miniQMT 上无限阻塞。财务数据只使用 `download_financial_data2(callback=None)`。

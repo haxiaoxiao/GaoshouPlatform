@@ -6,6 +6,7 @@ import copy
 import hashlib
 import math
 import time
+import uuid
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterable
@@ -36,7 +37,53 @@ CATALOG_CACHE_TTL_SECONDS = 300
 COVERAGE_CACHE_TTL_SECONDS = 300
 _CATALOG_CACHE: dict[str, Any] = {"expires_at": 0.0, "value": None}
 _COVERAGE_CACHE: dict[tuple[str, str, str, bool], tuple[float, dict[str, Any]]] = {}
+_COVERAGE_CACHE_GENERATIONS: dict[tuple[str, str, str, bool], str] = {}
 _FAST_COVERAGE_DATASETS = {"klines_daily", "klines_minute", "factor_values"}
+_COVERAGE_INVALIDATION_MARKER = ".coverage-invalidation"
+
+
+def invalidate_dataset_metadata(datasets: Iterable[str]) -> dict[str, object]:
+    """Discard cached and durable coverage metadata for specific datasets."""
+    normalized = list(dict.fromkeys(str(dataset) for dataset in datasets))
+    affected = set(normalized)
+    coverage_cache_entries_deleted = 0
+    for cache_key in list(_COVERAGE_CACHE):
+        if cache_key[1] in affected:
+            del _COVERAGE_CACHE[cache_key]
+            _COVERAGE_CACHE_GENERATIONS.pop(cache_key, None)
+            coverage_cache_entries_deleted += 1
+
+    _CATALOG_CACHE.update({"expires_at": 0.0, "value": None})
+
+    manifests_deleted: list[str] = []
+    manifest_delete_failed: list[dict[str, str]] = []
+    data_root = Path(settings.parquet_data_dir)
+    for dataset in normalized:
+        manifest = data_root / dataset / "_manifest.json"
+        try:
+            manifest.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            error = str(exc)
+            logger.warning("Failed to invalidate {} dataset manifest {}: {}", dataset, manifest, error)
+            manifest_delete_failed.append({"dataset": dataset, "path": str(manifest), "error": error})
+        else:
+            manifests_deleted.append(dataset)
+        try:
+            marker = data_root / dataset / _COVERAGE_INVALIDATION_MARKER
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.write_text(uuid.uuid4().hex, encoding="ascii")
+        except OSError as exc:
+            logger.warning("Failed to update {} coverage marker: {}", dataset, exc)
+
+    return {
+        "datasets": normalized,
+        "coverage_cache_entries_deleted": coverage_cache_entries_deleted,
+        "catalog_cache_cleared": True,
+        "manifests_deleted": manifests_deleted,
+        "manifest_delete_failed": manifest_delete_failed,
+    }
 
 
 
@@ -330,7 +377,11 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
     now = time.monotonic()
     cached = _COVERAGE_CACHE.get(cache_key)
     if cached and now < cached[0]:
-        return copy.deepcopy(cached[1])
+        generation = _COVERAGE_CACHE_GENERATIONS.get(cache_key)
+        if generation == _coverage_marker_generation(dataset_root := Path(settings.parquet_data_dir) / dataset):
+            return copy.deepcopy(cached[1])
+        _COVERAGE_CACHE.pop(cache_key, None)
+        _COVERAGE_CACHE_GENERATIONS.pop(cache_key, None)
 
     dataset_root = Path(settings.parquet_data_dir) / dataset
     manifest = read_dataset_manifest(dataset_root)
@@ -345,7 +396,7 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
             "partition_count": manifest.partition_count,
             "validation_status": manifest.validation_status,
         }
-        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        _store_coverage_cache(cache_key, now, result, dataset_root)
         return copy.deepcopy(result)
 
     store = ParquetMarketDataStore(settings.parquet_data_dir)
@@ -356,7 +407,7 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
         boundary = _exact_partition_boundaries(dataset, date_col)
         if boundary:
             fast = {**fast, **boundary}
-        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, fast)
+        _store_coverage_cache(cache_key, now, fast, dataset_root)
         return copy.deepcopy(fast)
     try:
         pattern = store._glob_pattern(dataset)
@@ -374,13 +425,30 @@ def dataset_coverage(dataset: str, date_col: str, *, exact: bool = False) -> dic
             "max_date": str(row[2]) if row and row[2] is not None else None,
             "estimated": False,
         }
-        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        _store_coverage_cache(cache_key, now, result, dataset_root)
         return copy.deepcopy(result)
     except Exception as exc:
         logger.warning("Failed to read coverage for relay dataset {}: {}", dataset, exc)
         result = {**fast, "error": str(exc)}
-        _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, result)
+        _store_coverage_cache(cache_key, now, result, dataset_root)
         return copy.deepcopy(result)
+
+
+def _coverage_marker_generation(dataset_root: Path) -> str:
+    try:
+        return dataset_root.joinpath(_COVERAGE_INVALIDATION_MARKER).read_text(encoding="ascii")
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _store_coverage_cache(
+    cache_key: tuple[str, str, str, bool],
+    now: float,
+    value: dict[str, Any],
+    dataset_root: Path,
+) -> None:
+    _COVERAGE_CACHE[cache_key] = (now + COVERAGE_CACHE_TTL_SECONDS, value)
+    _COVERAGE_CACHE_GENERATIONS[cache_key] = _coverage_marker_generation(dataset_root)
 
 
 def _quote_identifier(name: str) -> str:
