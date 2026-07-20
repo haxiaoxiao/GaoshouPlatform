@@ -29,6 +29,7 @@ from app.services.sync_run_store import (
     upsert_sync_run,
 )
 from app.services.task_queue import (
+    SYNC_QUEUE_NAME,
     QueuedTask,
     get_task_queue,
     shutdown_task_queues,
@@ -63,8 +64,7 @@ async def _recover_queued_sync_runs() -> None:
                     error_message=f"Cannot recover queued sync request: {exc}",
                 )
                 continue
-            queue_name = "sentiment_sync" if request.sync_type.startswith("sentiment") else "data_sync"
-            await get_task_queue(queue_name).submit(
+            await get_task_queue(SYNC_QUEUE_NAME).submit(
                 QueuedTask(
                     task_id=run.run_id,
                     title=f"recovered data sync {request.sync_type}",
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
         stop_scheduler()
         try:
             await shutdown_task_queues(
-                ("sync", "data_sync", "sentiment_sync")
+                (SYNC_QUEUE_NAME, "data_sync", "sentiment_sync")
             )
         finally:
             try:

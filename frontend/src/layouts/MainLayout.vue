@@ -18,7 +18,11 @@
       @click="mobileNavOpen = false"
     />
 
-    <aside class="sidebar" :aria-hidden="isMobile && !mobileNavOpen">
+    <aside
+      class="sidebar"
+      :aria-hidden="isMobile && !mobileNavOpen"
+      :inert="isMobile && !mobileNavOpen ? true : undefined"
+    >
       <div class="sidebar__brand">
         <div class="brand-icon" aria-hidden="true">
           GS
@@ -96,14 +100,19 @@
             <path d="M21 21l-4.35-4.35"/>
           </svg>
           <input
+            ref="searchInput"
             v-model="searchQuery"
             type="text"
-            placeholder="搜索股票、策略、因子..."
+            aria-label="搜索页面或股票代码"
+            autocomplete="off"
+            placeholder="搜索页面或股票代码..."
             class="search-input"
             @focus="searchFocused = true"
             @blur="searchFocused = false"
+            @keydown.enter.prevent="submitGlobalSearch"
+            @keydown.esc="clearGlobalSearch"
           />
-          <kbd v-if="!searchFocused" class="search-kbd">Ctrl K</kbd>
+          <kbd v-if="!searchFocused" class="search-kbd" aria-hidden="true">Ctrl K</kbd>
         </label>
 
         <div class="topbar__right">
@@ -134,17 +143,23 @@
         </router-view>
       </div>
     </main>
-    <AICopilotDrawer :open="copilotOpen" @close="copilotOpen = false" />
+    <AICopilotDrawer
+      :open="copilotOpen"
+      :initial-conversation-id="copilotConversationId"
+      @close="copilotOpen = false"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import { ChatDotRound, Close, Menu } from '@element-plus/icons-vue'
 import {
   NAV_SECTIONS,
   navItemsForSection,
+  resolveGlobalSearchTarget,
   resolveNavItem,
   type AppNavItem,
 } from '@/app/navigation'
@@ -155,19 +170,28 @@ import AICopilotDrawer from '@/components/AICopilotDrawer.vue'
 
 const notificationStore = useNotificationStore()
 const route = useRoute()
+const router = useRouter()
 
 const isCollapsed = ref(false)
 const isMobile = ref(false)
 const mobileNavOpen = ref(false)
 const searchFocused = ref(false)
 const searchQuery = ref('')
+const searchInput = ref<HTMLInputElement | null>(null)
 const showNotifications = ref(false)
 const copilotOpen = ref(false)
 let mobileMediaQuery: MediaQueryList | null = null
 
 const navSections = NAV_SECTIONS
 const activeNavItem = computed(() => resolveNavItem(route.path))
+const copilotConversationId = computed(() => (
+  typeof route.query.conversation_id === 'string' ? route.query.conversation_id : undefined
+))
 const envLabel = (import.meta.env.VITE_APP_ENV_LABEL || 'PROD').toString()
+
+watch(() => route.query.copilot, value => {
+  if (value === '1') copilotOpen.value = true
+}, { immediate: true })
 
 const pageTitle = computed(() => {
   const title = route.meta.title
@@ -212,6 +236,29 @@ function isActive(item: AppNavItem) {
   return activeNavItem.value?.key === item.key
 }
 
+function focusGlobalSearch(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLocaleLowerCase() === 'k') {
+    event.preventDefault()
+    searchInput.value?.focus()
+  }
+}
+
+function clearGlobalSearch() {
+  searchQuery.value = ''
+  searchInput.value?.blur()
+}
+
+function submitGlobalSearch() {
+  const target = resolveGlobalSearchTarget(searchQuery.value)
+  if (!target) {
+    ElMessage.info('未找到匹配页面或股票代码')
+    return
+  }
+  void router.push(target)
+  clearGlobalSearch()
+  mobileNavOpen.value = false
+}
+
 const THEME_CLASS_NAMES = [
   'theme-terminal-light',
   'theme-cyber-chalk',
@@ -230,6 +277,7 @@ function applyTheme(theme: ThemeClassName) {
 
 onMounted(() => {
   document.addEventListener('click', closeNotificationPanel)
+  document.addEventListener('keydown', focusGlobalSearch)
   notificationStore.startTaskPolling()
   localStorage.setItem('gs-theme', DEFAULT_THEME)
   applyTheme(DEFAULT_THEME)
@@ -240,6 +288,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   document.removeEventListener('click', closeNotificationPanel)
+  document.removeEventListener('keydown', focusGlobalSearch)
   notificationStore.stopTaskPolling()
   mobileMediaQuery?.removeEventListener('change', syncMobileState)
 })

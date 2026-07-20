@@ -23,6 +23,7 @@ from app.engines.qmt_gateway import qmt_gateway
 from app.indicators.scheduler import indicator_scheduler
 from app.services.index_catalog import IndexCatalogItem, get_index_item, list_index_items
 from app.services.index_components import ensure_index_components
+from app.services.sentiment_focus_pool import SentimentFocusPoolResolver
 from app.services.sync_run_store import get_current_sync_run, run_to_status, upsert_sync_run
 from app.services.xueqiu_session import XueqiuSession
 
@@ -1812,7 +1813,7 @@ class SyncService:
                         ),
                         timeout=300,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     progress.details["download_timeout"] = progress.details.get("download_timeout", 0) + 1
                 except Exception as e:
                     progress.details["download_error"] = str(e)[:200]
@@ -3216,6 +3217,7 @@ class SyncService:
     ) -> SyncProgress:
         from app.services.sentiment import (
             SentimentIngestService,
+            XueqiuCrawlBlockedError,
             normalize_sentiment_symbol,
             ordered_sentiment_sources,
         )
@@ -3230,19 +3232,15 @@ class SyncService:
             )
         )
         explicit_symbols = bool(symbol_list)
-        if "xueqiu_spyder" in requested_sources and not symbol_list:
-            from app.db.models.watchlist import WatchlistStock
-
-            watchlist_result = await self.session.execute(
-                select(WatchlistStock.symbol).distinct().limit(100)
-            )
-            symbol_list = list(
-                dict.fromkeys(
-                    normalize_sentiment_symbol(symbol)
-                    for symbol in watchlist_result.scalars().all()
-                    if str(symbol or "").strip()
-                )
-            )
+        focus_pool_details: dict[str, object] | None = None
+        xueqiu_target_sources: dict[str, tuple[str, ...]] = {}
+        if "xueqiu_spyder" in requested_sources and not explicit_symbols:
+            focus_pool = await SentimentFocusPoolResolver(self.session).resolve()
+            symbol_list = [target.symbol for target in focus_pool.targets]
+            xueqiu_target_sources = {
+                target.symbol: target.sources for target in focus_pool.targets
+            }
+            focus_pool_details = focus_pool.as_details()
         work_items: list[tuple[str, str | None]] = []
         xueqiu_targets: list[str] = []
         for source in requested_sources:
@@ -3267,6 +3265,7 @@ class SyncService:
                 "force_refresh": force_refresh,
                 "sync_mode": sync_mode,
                 "results": [],
+                **({"target_pool": focus_pool_details} if focus_pool_details is not None else {}),
             },
         )
         _current_sync = progress
@@ -3322,7 +3321,7 @@ class SyncService:
                                 }
                             ]
 
-                        for symbol in xueqiu_targets:
+                        for target_index, symbol in enumerate(xueqiu_targets):
                             try:
                                 effective_start = start_date
                                 effective_end = end_date
@@ -3340,9 +3339,21 @@ class SyncService:
                                         effective_start = latest_value.date() - td(days=1)
                                     effective_end = effective_end or date.today()
 
+                                target_sources = xueqiu_target_sources.get(symbol, ())
+                                target_max_pages = max_pages
+                                if target_sources:
+                                    target_max_pages = min(
+                                        max_pages,
+                                        3
+                                        if any(
+                                            source.startswith("qmt_holding")
+                                            for source in target_sources
+                                        )
+                                        else 2,
+                                    )
                                 posts, stats = await xueqiu_session.collect(
                                     symbol,
-                                    max_pages=max_pages,
+                                    max_pages=target_max_pages,
                                     min_reply=min_reply,
                                     start_date=effective_start,
                                     end_date=effective_end,
@@ -3367,6 +3378,33 @@ class SyncService:
                                         **stats,
                                     }
                                 )
+                            except XueqiuCrawlBlockedError as exc:
+                                await ingest_session.rollback()
+                                limited_reason = exc.reason
+                                if focus_pool_details is not None:
+                                    focus_pool_details["crawl_limited_reason"] = limited_reason
+                                batch_results.append(
+                                    {
+                                        "ok": False,
+                                        "source": "xueqiu_spyder",
+                                        "symbol": symbol,
+                                        "error_code": "xueqiu_circuit_breaker",
+                                        "error": str(exc),
+                                    }
+                                )
+                                for skipped_symbol in xueqiu_targets[target_index + 1 :]:
+                                    batch_results.append(
+                                        {
+                                            "ok": False,
+                                            "source": "xueqiu_spyder",
+                                            "symbol": skipped_symbol,
+                                            "error_code": "xueqiu_circuit_open",
+                                            "error": (
+                                                "Xueqiu batch stopped after a blocked response"
+                                            ),
+                                        }
+                                    )
+                                break
                             except Exception as exc:
                                 await ingest_session.rollback()
                                 batch_results.append(
@@ -3379,6 +3417,13 @@ class SyncService:
                                 )
                                 if failure_strategy == "stop":
                                     break
+                            if target_index < len(xueqiu_targets) - 1:
+                                delay_seconds = max(
+                                    0.0,
+                                    float(app_settings.xueqiu_stock_delay_seconds),
+                                )
+                                if delay_seconds:
+                                    await asyncio.sleep(delay_seconds)
                         return batch_results
                     finally:
                         await xueqiu_session.disconnect()

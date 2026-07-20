@@ -41,3 +41,35 @@ def test_control_session_is_unavailable_without_configured_secret():
 
     with pytest.raises(ValueError, match="not configured"):
         manager.unlock(secret="anything", expected_account_mask="66***80", actual_account_mask="66***80")
+
+
+def test_live_submission_context_is_fully_bound_and_consumed_once():
+    manager = LiveControlSessionManager(secret="control-secret", ttl_seconds=60)
+    control = manager.unlock(
+        secret="control-secret",
+        expected_account_mask="66***80",
+        actual_account_mask="66***80",
+    )
+
+    authorization = manager.issue_submission_authorization(
+        control_session=control,
+        release_id="release-1",
+        strategy_id=43,
+        profile_key="stable-profile",
+        account_mask="66***80",
+        idempotency_hash="idempotency-hash",
+        reservation_id="live-submit:idempotency-hash",
+    )
+    permit = manager.consume_submission_authorization(authorization)
+    context = manager.validate_broker_permit(permit)
+
+    assert context.release_id == "release-1"
+    assert context.strategy_id == 43
+    assert context.profile_key == "stable-profile"
+    assert context.account_mask == "66***80"
+    assert context.idempotency_hash == "idempotency-hash"
+    assert context.reservation_id == "live-submit:idempotency-hash"
+    with pytest.raises(PermissionError, match="already consumed"):
+        manager.consume_submission_authorization(authorization)
+    with pytest.raises(PermissionError, match="only through"):
+        manager.validate_broker_permit(context)

@@ -132,6 +132,10 @@ class Settings(BaseSettings):
     xueqiu_chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     xueqiu_debug_port: int = 9222
     xueqiu_user_data_dir: str = str(_DATA_DIR / "sentiment" / "xueqiu-profile")
+    sentiment_focus_vault_dir: str = str(
+        _DATA_DIR / "TheLandsBetween" / "wiki" / "03 实体" / "待观察"
+    )
+    xueqiu_stock_delay_seconds: float = 2.0
     xueqiu_spyder_dir: str = r"E:\Projects\xueqiu-spyder"
     xueqiu_cookie: str = ""
     flocktrader_dir: str = r"E:\Projects\flocktrader"

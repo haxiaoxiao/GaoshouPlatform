@@ -7,7 +7,7 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from app.db.sqlite import get_async_session
-from app.services.task_queue import QueuedTask, get_task_queue, reset_task_queues
+from app.services.task_queue import SYNC_QUEUE_NAME, QueuedTask, get_task_queue, reset_task_queues
 from app.sync_main import app as sync_app
 
 
@@ -50,7 +50,7 @@ async def test_sync_endpoint_accepts_multiple_requests_and_runs_them_serially(mo
             assert second.json()["data"]["status"] == "queued"
 
             release_first.set()
-            await asyncio.wait_for(get_task_queue("data_sync").join(), timeout=2)
+            await asyncio.wait_for(get_task_queue(SYNC_QUEUE_NAME).join(), timeout=2)
     finally:
         sync_app.dependency_overrides.clear()
         reset_task_queues()
@@ -59,9 +59,11 @@ async def test_sync_endpoint_accepts_multiple_requests_and_runs_them_serially(mo
 
 
 @pytest.mark.asyncio
-async def test_sentiment_sync_uses_dedicated_queue(monkeypatch):
-    completed = asyncio.Event()
-    captured: dict[str, object] = {}
+async def test_sentiment_sync_is_serialized_behind_market_data_sync(monkeypatch):
+    market_started = asyncio.Event()
+    release_market = asyncio.Event()
+    sentiment_started = asyncio.Event()
+    run_order: list[str] = []
 
     async def fake_session():
         yield object()
@@ -70,9 +72,12 @@ async def test_sentiment_sync_uses_dedicated_queue(monkeypatch):
         return None
 
     async def fake_run_sync_task(run_id, request):
-        captured["run_id"] = run_id
-        captured["request"] = request
-        completed.set()
+        run_order.append(request.sync_type)
+        if request.sync_type == "stock_info":
+            market_started.set()
+            await release_market.wait()
+        else:
+            sentiment_started.set()
 
     reset_task_queues()
     sync_app.dependency_overrides[get_async_session] = fake_session
@@ -80,6 +85,10 @@ async def test_sentiment_sync_uses_dedicated_queue(monkeypatch):
     monkeypatch.setattr("app.api.sync._run_sync_task", fake_run_sync_task)
     try:
         async with AsyncClient(transport=ASGITransport(app=sync_app), base_url="http://test") as client:
+            first = await client.post("/api/data/sync", json={"sync_type": "stock_info"})
+            assert first.status_code == 200
+            await asyncio.wait_for(market_started.wait(), timeout=2)
+
             response = await client.post(
                 "/api/data/sync",
                 json={
@@ -89,18 +98,21 @@ async def test_sentiment_sync_uses_dedicated_queue(monkeypatch):
                     "min_reply": 0,
                     "sync_mode": "incremental",
                 },
-            )
-        await asyncio.wait_for(completed.wait(), timeout=2)
-        await asyncio.wait_for(get_task_queue("sentiment_sync").join(), timeout=2)
+        )
+        await asyncio.sleep(0.05)
+        sentiment_started_while_market_blocked = sentiment_started.is_set()
+        release_market.set()
+        await asyncio.wait_for(sentiment_started.wait(), timeout=2)
+        await asyncio.wait_for(get_task_queue(SYNC_QUEUE_NAME).join(), timeout=2)
     finally:
+        release_market.set()
         sync_app.dependency_overrides.clear()
         reset_task_queues()
 
     assert response.status_code == 200
     assert response.json()["data"]["sync_type"] == "sentiment"
-    request = captured["request"]
-    assert request.sentiment_sources == ["eastmoney_guba", "flocktrader"]
-    assert request.max_pages == 2
+    assert sentiment_started_while_market_blocked is False
+    assert run_order == ["stock_info", "sentiment"]
 
 
 @pytest.mark.asyncio
@@ -178,7 +190,7 @@ async def test_sync_cancel_all_cancels_active_and_pending_queue(monkeypatch):
     monkeypatch.setattr("app.api.sync.SyncService", FakeSyncService)
     monkeypatch.setattr("app.api.sync.upsert_sync_run", fake_upsert_sync_run)
 
-    queue = get_task_queue("data_sync")
+    queue = get_task_queue(SYNC_QUEUE_NAME)
     try:
         await queue.submit(
             QueuedTask(
@@ -214,6 +226,41 @@ async def test_sync_cancel_all_cancels_active_and_pending_queue(monkeypatch):
     assert body["pending_cancelled_count"] == 1
     assert {item["run_id"] for item in upserts} == {"sync-active", "sync-pending"}
     assert all(item["status"] == "cancelled" for item in upserts)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_sync_uses_the_same_serial_queue(monkeypatch):
+    from app.core import scheduler
+
+    blocker_started = asyncio.Event()
+    release_blocker = asyncio.Event()
+    scheduled_started = asyncio.Event()
+
+    async def blocker():
+        blocker_started.set()
+        await release_blocker.wait()
+
+    async def fake_scheduled_run(*_args, **_kwargs):
+        scheduled_started.set()
+
+    reset_task_queues()
+    queue = get_task_queue(SYNC_QUEUE_NAME)
+    monkeypatch.setattr(scheduler, "_run_scheduled_sync_job", fake_scheduled_run)
+    try:
+        await queue.submit(QueuedTask(task_id="api-sync", title="api sync", handler=blocker))
+        await asyncio.wait_for(blocker_started.wait(), timeout=2)
+
+        await scheduler._execute_sync_job(7, "stock_info")
+        await asyncio.sleep(0.05)
+        assert scheduled_started.is_set() is False
+
+        release_blocker.set()
+        await asyncio.wait_for(queue.join(), timeout=2)
+    finally:
+        release_blocker.set()
+        reset_task_queues()
+
+    assert scheduled_started.is_set() is True
 
 
 @pytest.mark.asyncio

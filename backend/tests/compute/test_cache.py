@@ -1,9 +1,11 @@
 """缓存管理器测试"""
 import json
+from datetime import date
 from unittest.mock import patch
 
 import pandas as pd
 
+from app.compute import cache as cache_module
 from app.compute.cache import ComputeCache, LRUCache, get_compute_cache, reset_compute_cache
 
 
@@ -46,6 +48,78 @@ class TestComputeCache:
         k1 = ComputeCache.make_key("Mean($close, 20)")
         k2 = ComputeCache.make_key("  mean($close,20)  ")
         assert k1 == k2
+
+    def test_make_key_includes_evaluation_context(self):
+        base = {
+            "symbols": ["600519.SH", "000001.SZ"],
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2024, 12, 31),
+            "engine": "builtin",
+        }
+
+        key = ComputeCache.make_key("Mean($close, 20)", **base)
+
+        assert key == ComputeCache.make_key(
+            " mean($close,20) ",
+            **{**base, "symbols": list(reversed(base["symbols"]))},
+        )
+        assert key != ComputeCache.make_key(
+            "Mean($close, 20)",
+            **{**base, "symbols": ["600519.SH"]},
+        )
+        assert key != ComputeCache.make_key(
+            "Mean($close, 20)",
+            **{**base, "end_date": date(2025, 1, 2)},
+        )
+
+    def test_persistent_key_separates_compute_engines(self):
+        builtin = ComputeCache.make_persistent_key("Mean($close, 20)", engine="builtin")
+        akquant = ComputeCache.make_persistent_key("Mean($close, 20)", engine="akquant")
+
+        assert builtin != akquant
+
+    def test_get_does_not_reuse_another_evaluation_context(self):
+        cache = ComputeCache()
+        context = {
+            "symbols": ["600519.SH"],
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2024, 12, 31),
+            "engine": "builtin",
+        }
+        result = {"600519.SH": pd.Series([1.0])}
+
+        with patch("app.compute.cache._get_redis_client") as mock_get:
+            mock_get.return_value.get.return_value = None
+            cache.set("Mean($close, 20)", result, **context)
+
+            assert cache.get("Mean($close, 20)", **context) is result
+            assert cache.get(
+                "Mean($close, 20)",
+                **{**context, "symbols": ["000001.SZ"]},
+            ) is None
+
+    def test_generation_change_invalidates_l1_across_cache_instances(self, monkeypatch, tmp_path):
+        generation_path = tmp_path / "compute-cache-generation"
+        monkeypatch.setattr(cache_module, "_CACHE_GENERATION_PATH", generation_path)
+        first_process = ComputeCache()
+        second_process = ComputeCache()
+        context = {
+            "symbols": ["600519.SH"],
+            "start_date": date(2024, 1, 1),
+            "end_date": date(2024, 12, 31),
+            "engine": "builtin",
+            "data_version": second_process.current_data_version(),
+        }
+        result = {"600519.SH": pd.Series([1.0])}
+
+        with patch("app.compute.cache._get_redis_client") as mock_get:
+            mock_get.return_value.get.return_value = None
+            second_process.set("Mean($close, 20)", result, **context)
+            assert second_process.get("Mean($close, 20)", **context) is result
+
+            first_process.clear()
+
+            assert second_process.get("Mean($close, 20)", **context) is None
 
     def test_l1_cache(self):
         reset_compute_cache()
@@ -117,7 +191,7 @@ class TestComputeCacheRedis:
             written = kwargs.get("value") if "value" in kwargs else _args[1]
             if isinstance(written, str):
                 data = json.loads(written)
-                assert "000001.SZ" in data
+                assert "000001.SZ" in data["series"]
 
     # ------------------------------------------------------------------
     # 序列化 / 反序列化单元测试
@@ -133,6 +207,20 @@ class TestComputeCacheRedis:
         assert "A" in restored
         assert restored["A"]["x"] == 1.0
         assert restored["A"]["y"] == 2.0
+
+    def test_serialize_deserialize_preserves_datetime_index(self):
+        original = {
+            "A": pd.Series(
+                [1.0, 2.0],
+                index=pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            )
+        }
+
+        restored = ComputeCache._deserialize_result(ComputeCache._serialize_result(original))
+
+        assert restored is not None
+        assert isinstance(restored["A"].index, pd.DatetimeIndex)
+        assert restored["A"].index[0].date() == date(2024, 1, 2)
 
     def test_deserialize_invalid_json_returns_none(self):
         """非法 JSON → _deserialize_result 返回 None"""
@@ -150,9 +238,9 @@ class TestComputeCacheRedis:
             cache = ComputeCache()
             cache.set(expr, TestComputeCacheRedis.RESULT)
 
-            # 验证 Redis.set 的 key = make_key(expr)
+            # Redis keys are namespaced so invalidation cannot touch unrelated data.
             args, _kwargs = mock_redis.set.call_args
-            assert args[0] == expected_key
+            assert args[0] == f"compute:v2:{expected_key}"
 
     # ------------------------------------------------------------------
     # 降级场景 —— Redis 不可用
@@ -205,3 +293,15 @@ class TestComputeCacheRedis:
 
             # Redis.get 未被调用（L1 直接返回）
             mock_redis.get.assert_not_called()
+
+    def test_clear_invalidates_l1_and_compute_redis_namespace(self):
+        with patch("app.compute.cache._get_redis_client") as mock_get:
+            cache = ComputeCache()
+            cache.l1.set(TestComputeCacheRedis.KEY, TestComputeCacheRedis.RESULT)
+            mock_get.return_value.delete_prefix.return_value = 3
+
+            deleted = cache.clear()
+
+            assert len(cache.l1) == 0
+            assert deleted == 3
+            mock_get.return_value.delete_prefix.assert_called_once_with("compute:v2:")

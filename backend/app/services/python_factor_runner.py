@@ -1,14 +1,17 @@
 """Python 因子本地可信执行器。
 
 按照 2026-05-19 因子研究通用化文档，提供固定 compute(data, context) 接口的执行环境。
-第一版在后端进程内执行，不做强沙箱（使用场景为个人本地研究）。
+用户计算在可终止的子进程中执行并限制常见文件/进程入口，但这不是操作系统级沙箱；
+仅应运行本机受信任的研究代码。
 """
 
 from __future__ import annotations
 
+import ast
+import asyncio
+import multiprocessing
 import traceback
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeoutError
+from collections.abc import Mapping
 from datetime import date, datetime, timedelta
 from typing import Any, Sequence
 
@@ -19,6 +22,137 @@ from app.data_stores import get_market_data_store
 
 # 默认超时 120 秒（文档要求）
 DEFAULT_TIMEOUT_SECONDS = 120.0
+
+_SAFE_BUILTINS: Mapping[str, Any] = {
+    "abs": abs,
+    "all": all,
+    "any": any,
+    "bool": bool,
+    "dict": dict,
+    "enumerate": enumerate,
+    "filter": filter,
+    "float": float,
+    "int": int,
+    "isinstance": isinstance,
+    "len": len,
+    "list": list,
+    "map": map,
+    "max": max,
+    "min": min,
+    "next": next,
+    "range": range,
+    "reversed": reversed,
+    "round": round,
+    "set": set,
+    "slice": slice,
+    "sorted": sorted,
+    "str": str,
+    "sum": sum,
+    "tuple": tuple,
+    "zip": zip,
+    "Exception": Exception,
+    "KeyError": KeyError,
+    "RuntimeError": RuntimeError,
+    "TypeError": TypeError,
+    "ValueError": ValueError,
+}
+_DISALLOWED_CALLS = {"__import__", "breakpoint", "compile", "eval", "exec", "input", "open"}
+_DISALLOWED_ATTRIBUTE_PARTS = {
+    "builtins",
+    "ctypes",
+    "ctypeslib",
+    "importlib",
+    "os",
+    "pathlib",
+    "pickle",
+    "popen",
+    "shutil",
+    "socket",
+    "spawn",
+    "subprocess",
+    "sys",
+    "system",
+    "tempfile",
+}
+_DISALLOWED_ATTRIBUTE_NAMES = {
+    "dump",
+    "dumps",
+    "eval",
+    "exec",
+    "fromfile",
+    "load",
+    "loads",
+    "memmap",
+    "open_memmap",
+    "read_pickle",
+    "save",
+    "savetxt",
+    "savez",
+    "savez_compressed",
+    "to_clipboard",
+    "to_csv",
+    "to_excel",
+    "to_feather",
+    "to_hdf",
+    "to_json",
+    "to_parquet",
+    "to_pickle",
+    "to_sql",
+    "to_stata",
+    "tofile",
+    "to_xml",
+}
+
+
+def _attribute_path(node: ast.Attribute) -> list[str]:
+    parts = [node.attr]
+    value: ast.expr = node.value
+    while isinstance(value, ast.Attribute):
+        parts.append(value.attr)
+        value = value.value
+    if isinstance(value, ast.Name):
+        parts.append(value.id)
+    return list(reversed(parts))
+
+
+def validate_python_factor_source(code: str) -> str | None:
+    """Return a policy error for source that should not enter the worker."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as exc:
+        return f"Python 语法错误: {exc}"
+
+    has_compute = False
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            return "Python 因子不允许 import；可直接使用预置的 pd 和 np"
+        if isinstance(node, ast.FunctionDef) and node.name == "compute":
+            has_compute = True
+        if isinstance(node, ast.Attribute):
+            attribute_path = _attribute_path(node)
+            lowered = [part.casefold() for part in attribute_path]
+            blocked_part = next(
+                (
+                    part
+                    for part in lowered
+                    if part.startswith("_")
+                    or part in _DISALLOWED_ATTRIBUTE_PARTS
+                    or part in _DISALLOWED_ATTRIBUTE_NAMES
+                    or part.startswith("read_")
+                ),
+                None,
+            )
+            if blocked_part:
+                return f"Python 因子不允许访问属性 {'.'.join(attribute_path)}"
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in _DISALLOWED_CALLS
+        ):
+            return f"Python 因子不允许调用 {node.func.id}()"
+    if not has_compute:
+        return "代码中未定义 compute(data, context) 函数"
+    return None
 
 
 def run_python_factor(
@@ -49,6 +183,15 @@ def run_python_factor(
     """
     started = datetime.now()
     try:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        source_error = validate_python_factor_source(code)
+        if source_error:
+            return {
+                "rows": [],
+                "errors": [source_error],
+                "elapsed_seconds": round((datetime.now() - started).total_seconds(), 3),
+            }
         daily_bars = _load_daily_bars(symbols, start_date, end_date)
         trading_days = _resolve_trading_days(symbols, start_date, end_date)
         context = {
@@ -66,19 +209,15 @@ def run_python_factor(
             "financial": _load_financial(symbols),
             "factor_values": {},
         }
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(_execute_python_code, code, data, context)
-            result = future.result(timeout=timeout_seconds)
-        rows, errors = _validate_and_normalize(result, context)
+        rows, errors = _execute_in_subprocess(
+            code=code,
+            data=data,
+            context=context,
+            timeout_seconds=timeout_seconds,
+        )
         return {
             "rows": rows,
             "errors": errors,
-            "elapsed_seconds": round((datetime.now() - started).total_seconds(), 3),
-        }
-    except FutureTimeoutError:
-        return {
-            "rows": [],
-            "errors": [f"执行超时（{timeout_seconds} 秒）"],
             "elapsed_seconds": round((datetime.now() - started).total_seconds(), 3),
         }
     except Exception:
@@ -89,19 +228,87 @@ def run_python_factor(
         }
 
 
+async def run_python_factor_async(**kwargs: Any) -> dict[str, Any]:
+    """Run data loading and process orchestration without blocking the event loop."""
+    return await asyncio.to_thread(run_python_factor, **kwargs)
+
+
+def _execute_in_subprocess(
+    *,
+    code: str,
+    data: dict[str, Any],
+    context: dict[str, Any],
+    timeout_seconds: float,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    process_context = multiprocessing.get_context("spawn")
+    receiver, sender = process_context.Pipe(duplex=False)
+    process = process_context.Process(
+        target=_python_factor_worker,
+        args=(sender, code, data, context),
+        daemon=True,
+        name="gaoshou-python-factor",
+    )
+    process.start()
+    sender.close()
+    try:
+        if not receiver.poll(timeout_seconds):
+            _stop_process(process)
+            return [], [f"执行超时（{timeout_seconds} 秒）"]
+        try:
+            payload = receiver.recv()
+        except EOFError:
+            process.join(timeout=1)
+            return [], [f"Python 因子子进程异常退出（exitcode={process.exitcode}）"]
+        process.join(timeout=1)
+        if process.is_alive():
+            _stop_process(process)
+        if not isinstance(payload, dict):
+            return [], ["Python 因子子进程返回了无效结果"]
+        return list(payload.get("rows") or []), list(payload.get("errors") or [])
+    finally:
+        receiver.close()
+        if process.is_alive():
+            _stop_process(process)
+
+
+def _stop_process(process: multiprocessing.Process) -> None:
+    process.terminate()
+    process.join(timeout=1)
+    if process.is_alive():
+        process.kill()
+        process.join(timeout=1)
+
+
+def _python_factor_worker(
+    sender: Any,
+    code: str,
+    data: dict[str, Any],
+    context: dict[str, Any],
+) -> None:
+    try:
+        raw_result = _execute_python_code(code, data, context)
+        rows, errors = _validate_and_normalize(raw_result, context)
+        sender.send({"rows": rows, "errors": errors})
+    except BaseException:
+        sender.send({"rows": [], "errors": [traceback.format_exc()]})
+    finally:
+        sender.close()
+
+
 def _execute_python_code(
     code: str,
     data: dict[str, Any],
     context: dict[str, Any],
 ) -> Any:
-    """在同步上下文中执行用户 Python 代码。
+    """Execute trusted local factor source inside the isolated worker."""
+    namespace: dict[str, Any] = {
+        "pd": pd,
+        "np": np,
+        "__builtins__": dict(_SAFE_BUILTINS),
+    }
+    exec(code, namespace, namespace)
 
-    此函数在 executor 线程中运行。
-    """
-    local_ns: dict[str, Any] = {}
-    exec(code, {"pd": pd, "np": np, "__builtins__": __builtins__}, local_ns)
-
-    compute_fn = local_ns.get("compute")
+    compute_fn = namespace.get("compute")
     if compute_fn is None:
         raise ValueError("代码中未定义 compute(data, context) 函数")
 
@@ -151,24 +358,28 @@ def _validate_and_normalize(
         if missing:
             return rows, errors
 
-    set(context.get("symbols", []))
+    allowed_symbols = {
+        str(symbol).strip().upper()
+        for symbol in context.get("symbols", [])
+        if str(symbol).strip()
+    }
     start = date.fromisoformat(context["start_date"])
     end = date.fromisoformat(context["end_date"])
 
     for _, row in df.iterrows():
         try:
             symbol = str(row["symbol"]).strip().upper()
-            if not symbol or "." not in symbol:
+            if not symbol or "." not in symbol or symbol not in allowed_symbols:
                 continue
 
             # 标准化 trade_date
             td_raw = row["trade_date"]
-            if isinstance(td_raw, date):
-                td = td_raw
+            if isinstance(td_raw, pd.Timestamp):
+                td = td_raw.date()
             elif isinstance(td_raw, datetime):
                 td = td_raw.date()
-            elif isinstance(td_raw, pd.Timestamp):
-                td = td_raw.date()
+            elif isinstance(td_raw, date):
+                td = td_raw
             else:
                 td = date.fromisoformat(str(td_raw)[:10])
 
@@ -232,7 +443,7 @@ def _load_stock_info(symbols: Sequence[str]) -> pd.DataFrame:
     from app.core.config import settings
 
     db_path = Path(settings.data_dir) / "gaoshou.db"
-    if not db_path.exists():
+    if not symbols or not db_path.exists():
         return pd.DataFrame()
     placeholders = ",".join("?" for _ in symbols)
     with sqlite3.connect(db_path) as conn:
@@ -251,7 +462,7 @@ def _load_financial(symbols: Sequence[str]) -> pd.DataFrame:
     from app.core.config import settings
 
     db_path = Path(settings.data_dir) / "gaoshou.db"
-    if not db_path.exists():
+    if not symbols or not db_path.exists():
         return pd.DataFrame()
     placeholders = ",".join("?" for _ in symbols)
     with sqlite3.connect(db_path) as conn:

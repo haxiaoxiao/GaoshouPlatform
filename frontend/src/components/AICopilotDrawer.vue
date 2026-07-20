@@ -61,7 +61,7 @@ import { Close, Plus, Promotion } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
 import { aiApi, type AIApproval, type AIConversation, type AIMessage, type AIStatus } from '@/api/ai'
 
-const props = defineProps<{ open: boolean }>()
+const props = defineProps<{ open: boolean; initialConversationId?: string }>()
 defineEmits<{ close: [] }>()
 const route = useRoute()
 const status = ref<AIStatus | null>(null)
@@ -78,6 +78,11 @@ const pageContext = computed(() => ({ route: route.path, params: route.params, q
 async function initialize() {
   status.value = await aiApi.status()
   conversations.value = await aiApi.conversations()
+  if (props.initialConversationId) {
+    conversationId.value = props.initialConversationId
+    await loadConversation()
+    return
+  }
   if (conversations.value.length) {
     conversationId.value = conversations.value[0].id
     await loadConversation()
@@ -142,6 +147,12 @@ async function scrollBottom() {
 
 watch(() => props.open, value => {
   if (value && !status.value) void initialize()
+})
+
+watch(() => props.initialConversationId, value => {
+  if (!props.open || !status.value || !value || value === conversationId.value) return
+  conversationId.value = value
+  void loadConversation()
 })
 </script>
 

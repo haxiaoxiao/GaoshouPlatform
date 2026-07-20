@@ -100,8 +100,15 @@ async def evaluate(req: EvaluateRequest):
         return {"code": 1, "message": f"Unknown compute engine: {req.engine}", "data": None}
 
     result = None
+    cache_context = {
+        "symbols": req.symbols,
+        "start_date": req.start_date,
+        "end_date": req.end_date,
+        "engine": req.engine,
+        "data_version": cache.current_data_version(),
+    }
     if req.use_cache:
-        result = cache.get(req.expression)
+        result = cache.get(req.expression, **cache_context)
 
     if result is None:
         from app.data_stores import get_market_data_store
@@ -118,7 +125,7 @@ async def evaluate(req: EvaluateRequest):
         result = evaluate_expression(req.expression, data)
 
         if req.use_cache:
-            cache.set(req.expression, result)
+            cache.set(req.expression, result, **cache_context)
     else:
         cache_hit = True
 

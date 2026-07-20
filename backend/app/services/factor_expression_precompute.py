@@ -47,7 +47,7 @@ async def precompute_factor_expressions(
             result["rows_written"] += written
             result["expressions"].append({
                 "expression": expression,
-                "expr_hash": cache.make_key(expression),
+                "expr_hash": cache.make_persistent_key(expression, engine=engine),
                 "rows_written": written,
             })
         return result
@@ -80,7 +80,7 @@ async def precompute_factor_expressions(
         result["rows_written"] += written
         result["expressions"].append({
             "expression": expression,
-            "expr_hash": cache.make_key(expression),
+            "expr_hash": cache.make_persistent_key(expression, engine=engine),
             "rows_written": written,
         })
     return result
@@ -97,7 +97,7 @@ def _persist_api_result(cache, expression: str, engine: str, out: dict[str, list
             by_date.setdefault(trade_date, {})[str(symbol)] = float(value)
 
     written = 0
-    expr_hash = cache.make_key(expression)
+    expr_hash = cache.make_persistent_key(expression, engine=engine)
     for trade_date, values in by_date.items():
         series = pd.Series(values, dtype=float)
         cache.save_to_parquet(expr_hash, trade_date, series, expression=expression, engine=engine)
@@ -115,7 +115,7 @@ def _persist_expression_result(
     *,
     fallback_symbol: str = "result",
 ) -> int:
-    expr_hash = cache.make_key(expression)
+    expr_hash = cache.make_persistent_key(expression, engine=engine)
     by_date: dict[date, dict[str, float]] = {}
 
     if isinstance(values, dict):

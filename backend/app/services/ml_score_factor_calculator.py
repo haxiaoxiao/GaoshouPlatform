@@ -9,6 +9,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 import pandas as pd
 
+from app.core.config import settings
 from app.db.duckdb import get_duckdb
 from app.services.factor_value_store import factor_params_hash, get_factor_value_store
 
@@ -180,7 +181,9 @@ def _expand_signal_to_daily(frame: pd.DataFrame, start_date: date, end_date: dat
 
 
 def _trading_dates(start_date: date, end_date: date) -> list[date]:
-    data_glob = str(Path(r"E:\Projects\Data\parquet\klines_daily\**\*.parquet")).replace("\\", "/")
+    data_glob = str(Path(settings.parquet_data_dir) / "klines_daily" / "**" / "*.parquet").replace(
+        "\\", "/"
+    )
     rows = get_duckdb().execute(
         f"""
         SELECT DISTINCT trade_date

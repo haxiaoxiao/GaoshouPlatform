@@ -45,7 +45,7 @@ class RedisClient:
             r.ping()
             self._available = True
             logger.info(
-                "Redis connected at %s:%s/%s",
+                "Redis connected at {}:{}/{}",
                 host,
                 port,
                 db,
@@ -53,7 +53,7 @@ class RedisClient:
         except Exception as e:
             self._available = False
             self._pool = None  # type: ignore[assignment]
-            logger.warning("Redis unavailable at %s:%s: %s", host, port, e)
+            logger.warning("Redis unavailable at {}:{}: {}", host, port, e)
 
     @property
     def available(self) -> bool:
@@ -67,7 +67,7 @@ class RedisClient:
             r = redis.Redis(connection_pool=self._pool)
             return r.get(key)
         except Exception as e:
-            logger.warning("Redis get(%s) failed: %s", key, e)
+            logger.warning("Redis get({}) failed: {}", key, e)
             return None
 
     def set(self, key: str, value: str | bytes, ttl: int = 3600) -> None:
@@ -80,13 +80,13 @@ class RedisClient:
         else:
             size = len(value)
         if size > max_bytes:
-            logger.info("Redis set(%s) skipped: value too large (%s bytes)", key, size)
+            logger.info("Redis set({}) skipped: value too large ({} bytes)", key, size)
             return
         try:
             r = redis.Redis(connection_pool=self._pool)
             r.set(key, value, ex=ttl)
         except Exception as e:
-            logger.warning("Redis set(%s) failed: %s", key, e)
+            logger.warning("Redis set({}) failed: {}", key, e)
 
     def delete(self, key: str) -> None:
         """删除缓存键"""
@@ -96,7 +96,20 @@ class RedisClient:
             r = redis.Redis(connection_pool=self._pool)
             r.delete(key)
         except Exception as e:
-            logger.warning("Redis delete(%s) failed: %s", key, e)
+            logger.warning("Redis delete({}) failed: {}", key, e)
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete keys in one namespace without using Redis KEYS."""
+        if not self._available or self._pool is None:
+            return 0
+        deleted = 0
+        try:
+            client = redis.Redis(connection_pool=self._pool)
+            for key in client.scan_iter(match=f"{prefix}*", count=500):
+                deleted += int(client.delete(key) or 0)
+        except Exception as e:
+            logger.warning("Redis delete_prefix({}) failed: {}", prefix, e)
+        return deleted
 
     def exists(self, key: str) -> bool:
         """检查缓存键是否存在"""
@@ -107,7 +120,7 @@ class RedisClient:
             result = r.exists(key)
             return bool(result)
         except Exception as e:
-            logger.warning("Redis exists(%s) failed: %s", key, e)
+            logger.warning("Redis exists({}) failed: {}", key, e)
             return False
 
     def serialize(self, value: Any) -> str:
@@ -119,7 +132,7 @@ class RedisClient:
         try:
             return json.loads(value)
         except (json.JSONDecodeError, TypeError) as e:
-            logger.warning("Redis deserialize failed: %s", e)
+            logger.warning("Redis deserialize failed: {}", e)
             return None
 
     def close(self) -> None:
@@ -128,7 +141,7 @@ class RedisClient:
             try:
                 self._pool.disconnect()
             except Exception as e:
-                logger.warning("Redis disconnect error: %s", e)
+                logger.warning("Redis disconnect error: {}", e)
         self._available = False
 
 

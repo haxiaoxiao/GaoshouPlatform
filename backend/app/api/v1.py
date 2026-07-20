@@ -1,21 +1,25 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.live_trading import LivePreflightRequest
 from app.backtest.api import RunBacktestRequest, run_backtest
 from app.core.config import settings
 from app.core.contracts import Environment
+from app.db.models.live_trading import LiveStrategyProfile
 from app.db.models.research_lineage import DataSnapshot, JobEvent, PersistentJob, StrategyRelease
 from app.db.models.strategy import Strategy
-from app.db.sqlite import get_async_session
+from app.db.sqlite import async_session_factory, get_async_session
 from app.services.dataset_manifest import evaluate_dataset_readiness, read_dataset_manifest
 from app.services.live_control import live_control_sessions
 from app.services.live_trading import live_trading_service
@@ -69,13 +73,67 @@ class LiveControlUnlockRequest(BaseModel):
     expected_account_mask: str
 
 
+class V1LiveOrder(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    strategy_id: int = Field(gt=0, strict=True)
+    profile_key: str = Field(min_length=1)
+    symbol: str = Field(min_length=1)
+    side: Literal["BUY", "SELL"]
+    quantity: int = Field(gt=0, strict=True)
+    signal_hash: str | None = Field(default=None, max_length=96)
+
+    @field_validator("profile_key", mode="before")
+    @classmethod
+    def strip_required_text(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
+
+    @field_validator("symbol", mode="before")
+    @classmethod
+    def normalize_symbol(cls, value: Any) -> str:
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+        normalized = value.strip().upper()
+        if re.fullmatch(r"\d{6}\.(?:SH|SZ|BJ)", normalized) is None:
+            raise ValueError("must use NNNNNN.SH, NNNNNN.SZ, or NNNNNN.BJ format")
+        return normalized
+
+    @field_validator("signal_hash", mode="before")
+    @classmethod
+    def normalize_signal_hash(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+        return value.strip() or None
+
+
 class V1LiveSubmitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     mode: Literal["paper", "live"] = "paper"
-    orders: list[dict[str, Any]] = Field(default_factory=list)
-    confirm: bool = False
-    release_id: str | None = None
-    idempotency_key: str | None = None
-    expected_account_mask: str | None = None
+    orders: list[V1LiveOrder] = Field(min_length=1)
+    confirm: bool = Field(default=False, strict=True)
+    release_id: str | None = Field(default=None, max_length=64)
+    idempotency_key: str | None = Field(default=None, max_length=256)
+    expected_account_mask: str | None = Field(default=None, max_length=64)
+
+    @field_validator("release_id", "idempotency_key", "expected_account_mask", mode="before")
+    @classmethod
+    def strip_optional_command_text(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("must be a string")
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("must not be blank")
+        return normalized
 
 
 class V1BacktestRequest(RunBacktestRequest):
@@ -348,20 +406,98 @@ async def v1_live_preflight(req: LivePreflightRequest) -> dict[str, Any]:
     )
 
 
+async def _reserve_live_submit_job(
+    session: AsyncSession,
+    *,
+    job_id: str,
+    release: StrategyRelease,
+    profile_key: str,
+    account_mask: str,
+    idempotency_hash: str,
+    order_count: int,
+) -> None:
+    payload = {
+        "release_id": release.id,
+        "strategy_id": release.strategy_id,
+        "profile_key": profile_key,
+        "account_mask": account_mask,
+        "idempotency_hash": idempotency_hash,
+        "order_count": order_count,
+    }
+    session.add(
+        PersistentJob(
+            id=job_id,
+            kind="live_order_submit",
+            title=f"Live order submit {release.id}",
+            status="running",
+            progress=0.0,
+            payload=payload,
+            heartbeat_at=datetime.now(),
+        )
+    )
+    session.add(JobEvent(job_id=job_id, event_type="started", data=payload))
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise HTTPException(status_code=409, detail="Duplicate live submit idempotency key") from exc
+
+
+async def _finalize_live_submit_job(
+    job_id: str,
+    *,
+    status: Literal["succeeded", "failed"],
+    result_ref: str | None = None,
+    error: str | None = None,
+) -> None:
+    async with async_session_factory() as session:
+        job = await session.get(PersistentJob, job_id)
+        if job is None:
+            raise RuntimeError(f"Live submit reservation {job_id} is missing")
+        job.status = status
+        job.progress = 1.0
+        job.result_ref = result_ref
+        job.error = error
+        job.finished_at = datetime.now()
+        session.add(
+            JobEvent(
+                job_id=job_id,
+                event_type=status,
+                data={"result_ref": result_ref} if status == "succeeded" else {"error": error},
+            )
+        )
+        await session.commit()
+
+
 @router.post("/live/orders/submit")
 async def v1_submit_live_orders(
     req: V1LiveSubmitRequest,
     x_gaoshou_control_token: str | None = Header(default=None),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
+    strategy_ids = {order.strategy_id for order in req.orders}
+    profile_keys = {order.profile_key for order in req.orders}
+    if len(strategy_ids) != 1:
+        raise HTTPException(status_code=400, detail="Orders must use one strategy_id")
+    if len(profile_keys) != 1:
+        raise HTTPException(status_code=400, detail="Orders must use one profile_key")
+    strategy_id = next(iter(strategy_ids))
+    profile_key = next(iter(profile_keys))
+    signal_hashes = {order.signal_hash or "" for order in req.orders}
+    if len(signal_hashes) != 1:
+        raise HTTPException(status_code=400, detail="Orders must share one signal_hash")
+    order_payloads = [order.model_dump() for order in req.orders]
     if req.mode == "paper":
         return await live_trading_service.submit_orders(
-            req.orders,
+            order_payloads,
             mode="paper",
             confirm=req.confirm,
             trigger_source="manual",
         )
-    if not all((req.release_id, req.idempotency_key, req.expected_account_mask, x_gaoshou_control_token)):
+    if req.confirm is not True:
+        raise HTTPException(status_code=400, detail="Live submit requires confirm=true")
+    control_token = str(x_gaoshou_control_token or "").strip()
+    if not all((req.release_id, req.idempotency_key, req.expected_account_mask, control_token)):
         raise HTTPException(
             status_code=400,
             detail="Live submit requires release_id, idempotency_key, expected_account_mask, and control token",
@@ -369,68 +505,71 @@ async def v1_submit_live_orders(
     release = await session.get(StrategyRelease, req.release_id)
     if release is None or release.status != "live_approved":
         raise HTTPException(status_code=403, detail="Strategy release is not live_approved")
-    mismatched = [
-        order for order in req.orders if int(order.get("strategy_id") or 0) != int(release.strategy_id)
-    ]
-    if mismatched:
+    if strategy_id != release.strategy_id:
         raise HTTPException(status_code=400, detail="Order strategy_id does not match release")
     qmt_status = await qmt_trading_service.status()
     actual_mask = str(qmt_status.get("account_id") or "")
     try:
-        live_control_sessions.validate(
-            token=x_gaoshou_control_token,
+        control_session = live_control_sessions.validate(
+            token=control_token,
             expected_account_mask=req.expected_account_mask,
             actual_account_mask=actual_mask,
         )
     except ValueError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
+    profile = await session.scalar(
+        select(LiveStrategyProfile).where(LiveStrategyProfile.profile_key == profile_key)
+    )
+    if profile is None:
+        raise HTTPException(status_code=400, detail="Live strategy profile does not exist")
+    if profile.strategy_id != release.strategy_id:
+        raise HTTPException(status_code=400, detail="Live strategy profile does not match release")
+    if not profile.enabled:
+        raise HTTPException(status_code=403, detail="Live strategy profile is disabled")
+    execution_policy = dict(profile.execution_policy or {})
+    if not bool(execution_policy.get("allow_manual_submit", True)):
+        raise HTTPException(status_code=403, detail="Live strategy profile does not allow manual submit")
+    if not bool(execution_policy.get("allow_live_submit", True)):
+        raise HTTPException(status_code=403, detail="Live strategy profile does not allow live submit")
+
     idempotency_hash = hashlib.sha256(req.idempotency_key.encode("utf-8")).hexdigest()[:48]
     job_id = f"live-submit:{idempotency_hash}"
-    if await session.get(PersistentJob, job_id) is not None:
-        raise HTTPException(status_code=409, detail="Duplicate live submit idempotency key")
-    job = PersistentJob(
-        id=job_id,
-        kind="live_order_submit",
-        title=f"Live order submit {release.id}",
-        status="running",
-        progress=0.0,
-        payload={"release_id": release.id, "order_count": len(req.orders)},
-        heartbeat_at=datetime.now(),
+    await _reserve_live_submit_job(
+        session,
+        job_id=job_id,
+        release=release,
+        profile_key=profile_key,
+        account_mask=actual_mask,
+        idempotency_hash=idempotency_hash,
+        order_count=len(order_payloads),
     )
-    session.add(job)
-    await session.flush()
-    session.add(JobEvent(
-        job_id=job.id,
-        event_type="started",
-        data={"release_id": release.id, "order_count": len(req.orders)},
-    ))
     try:
+        live_authorization = live_control_sessions.issue_submission_authorization(
+            control_session=control_session,
+            release_id=release.id,
+            strategy_id=release.strategy_id,
+            profile_key=profile_key,
+            account_mask=actual_mask,
+            idempotency_hash=idempotency_hash,
+            reservation_id=job_id,
+        )
         result = await live_trading_service.submit_orders(
-            req.orders,
+            order_payloads,
             mode="live",
             confirm=req.confirm,
             trigger_source="manual",
+            run_id=job_id,
+            live_authorization=live_authorization,
         )
+        if not result.get("submitted"):
+            raise RuntimeError("Live order batch was not fully submitted")
     except Exception as exc:
-        job.status = "failed"
-        job.progress = 1.0
-        job.error = str(exc)
-        job.finished_at = datetime.now()
-        session.add(JobEvent(
-            job_id=job.id,
-            event_type="failed",
-            data={"error": str(exc)},
-        ))
-        await session.commit()
+        await _finalize_live_submit_job(job_id, status="failed", error=str(exc))
         raise HTTPException(status_code=502, detail="Live order submission failed") from exc
-    job.status = "succeeded"
-    job.progress = 1.0
-    job.finished_at = datetime.now()
-    job.result_ref = str(result.get("run_id") or "")
-    session.add(JobEvent(
-        job_id=job.id,
-        event_type="succeeded",
-        data={"result_ref": job.result_ref},
-    ))
+    await _finalize_live_submit_job(
+        job_id,
+        status="succeeded",
+        result_ref=str(result.get("run_id") or ""),
+    )
     return result

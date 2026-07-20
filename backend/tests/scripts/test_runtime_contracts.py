@@ -32,11 +32,12 @@ def test_prod_frontend_uses_preview_with_dynamic_port_fallback():
     deploy_script = (ROOT / "tools" / "deploy-windows.ps1").read_text(encoding="utf-8")
     vite_config = (ROOT / "frontend" / "vite.config.ts").read_text(encoding="utf-8")
 
-    assert 'FRONTEND_PORT=3500' in start_script
+    assert 'FRONTEND_PORT=3511' in start_script
     assert ':resolve_frontend_port' in start_script
     assert 'frontend-port.txt' in start_script
-    assert 'FrontendPort = "3500"' in deploy_script
-    assert "port: 3500" in vite_config
+    assert 'FrontendPort = "3511"' in deploy_script
+    assert '.runtime\\frontend-port.txt' in deploy_script
+    assert "port: 3511" in vite_config
     assert "npm run preview" in start_script
     assert "npm run dev" not in start_script
 

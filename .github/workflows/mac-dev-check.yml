@@ -16,13 +16,13 @@ jobs:
       - gaoshou-mac-dev
     env:
       MARKET_DATA_BACKEND: parquet
-      CLICKHOUSE_ENABLED: "false"
       DATABASE_URL: sqlite+aiosqlite:///./ci-gaoshou.db
       PARQUET_DATA_DIR: ./data/parquet-ci
       DUCKDB_PATH: ":memory:"
       ENABLE_SYNC_SCHEDULER: "false"
       DEBUG: "false"
-      GRID_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      LIVE_TRADING_ENABLE_ORDER_SUBMIT: "false"
+      LIVE_TRADING_AUTO_EXECUTE_ENABLED: "false"
       PIP_INDEX_URL: https://pypi.org/simple
       PIP_DEFAULT_TIMEOUT: "60"
       PIP_RETRIES: "5"

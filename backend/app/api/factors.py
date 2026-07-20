@@ -218,22 +218,10 @@ async def list_templates():
 @router.post("/validate-python")
 async def validate_python_code(req: PythonFactorValidateRequest = Body(...)):
     """Validate Python factor code by checking syntax and compute() signature."""
-    import ast
-    try:
-        tree = ast.parse(req.code)
-    except SyntaxError as e:
-        return {"valid": False, "error": f"Python 语法错误: {e}"}
+    from app.services.python_factor_runner import validate_python_factor_source
 
-    # 检查是否定义了 compute 函数
-    has_compute = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "compute":
-            has_compute = True
-            break
-    if not has_compute:
-        return {"valid": False, "error": "代码中未定义 compute(data, context) 函数"}
-
-    return {"valid": True, "error": None}
+    error = validate_python_factor_source(req.code)
+    return {"valid": error is None, "error": error}
 
 
 @router.post("/validate", response_model=ValidateResponse)
@@ -389,8 +377,8 @@ async def run_python_factor(
     if not code:
         raise HTTPException(status_code=400, detail="Factor has no Python code")
     symbols = await _resolve_symbols(request.symbols, request.stock_pool)
-    from app.services.python_factor_runner import run_python_factor
-    result = run_python_factor(
+    from app.services.python_factor_runner import run_python_factor_async
+    result = await run_python_factor_async(
         code=code,
         symbols=symbols,
         start_date=request.start_date,
@@ -414,8 +402,8 @@ async def preview_factor(
     meta = _factor_metadata(factor)
     symbols = await _resolve_symbols(request.symbols, request.stock_pool or meta["stock_pool"])
     if meta["source_type"] == "python":
-        from app.services.python_factor_runner import run_python_factor
-        result = run_python_factor(
+        from app.services.python_factor_runner import run_python_factor_async
+        result = await run_python_factor_async(
             code=meta["expression"],
             symbols=symbols,
             start_date=request.start_date,
@@ -453,8 +441,8 @@ async def precompute_factor(
     params.setdefault("engine", meta["engine"])
     symbols = await _resolve_symbols(request.symbols, request.stock_pool or meta["stock_pool"])
     if meta["source_type"] == "python":
-        from app.services.python_factor_runner import run_python_factor
-        result = run_python_factor(
+        from app.services.python_factor_runner import run_python_factor_async
+        result = await run_python_factor_async(
             code=meta["expression"],
             symbols=symbols,
             start_date=request.start_date,
@@ -566,9 +554,9 @@ async def analyze_factor(
                 IndustryIC,
                 TurnoverPoint,
             )
-            from app.services.python_factor_runner import run_python_factor
+            from app.services.python_factor_runner import run_python_factor_async
 
-            result = run_python_factor(
+            result = await run_python_factor_async(
                 code=expression,
                 symbols=symbols,
                 start_date=request.start_date,

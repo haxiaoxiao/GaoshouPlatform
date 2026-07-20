@@ -1,11 +1,8 @@
 """Exponential backoff retry utility for async operations."""
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import Any, TypeVar
 
 from loguru import logger
-
-T = TypeVar("T")
 
 DEFAULT_RETRYABLE = (
     ConnectionError,
@@ -14,14 +11,14 @@ DEFAULT_RETRYABLE = (
 )
 
 
-async def async_retry(
-    func: Callable[..., Awaitable[T]],
-    *args: Any,
+async def async_retry[**P, T](
+    func: Callable[P, Awaitable[T]],
+    *args: P.args,
     max_retries: int = 3,
     base_delay: float = 1.0,
     backoff: float = 2.0,
     retryable_exceptions: tuple[type[Exception], ...] = DEFAULT_RETRYABLE,
-    **kwargs: Any,
+    **kwargs: P.kwargs,
 ) -> T:
     """对异步函数执行指数退避重试。
 

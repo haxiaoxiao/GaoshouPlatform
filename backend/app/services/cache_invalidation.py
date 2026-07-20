@@ -29,11 +29,12 @@ def invalidate_after_sync(sync_type: str) -> dict[str, object]:
         "sentiment_nga": [],
     }
     patterns = patterns_by_sync.get(sync_type, [])
-    get_compute_cache().clear_l1()
+    compute_deleted = get_compute_cache().clear()
     deleted = _delete_backtest_cache_patterns(patterns)
     return {
         "sync_type": sync_type,
         "compute_l1_cleared": True,
+        "compute_redis_deleted": compute_deleted,
         "redis_patterns": patterns,
         "redis_deleted": deleted,
     }

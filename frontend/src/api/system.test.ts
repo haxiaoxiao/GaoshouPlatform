@@ -70,6 +70,6 @@ describe('readiness context', () => {
     expect(first).toBe(payload)
     expect(second).toBe(payload)
     expect(request.get).toHaveBeenCalledOnce()
-    expect(request.get).toHaveBeenCalledWith('/v1/readiness')
+    expect(request.get).toHaveBeenCalledWith('/v1/readiness', { notifyError: false })
   })
 })

@@ -1,5 +1,6 @@
 """Factor research API route compatibility tests."""
 
+import pandas as pd
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -68,6 +69,65 @@ async def test_akquant_compute_evaluate_api_level(monkeypatch):
     assert body["code"] == 0
     assert body["meta"]["engine"] == "akquant"
     assert body["data"]["000001.SZ"][0]["value"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_builtin_compute_cache_is_scoped_to_request_context(monkeypatch):
+    calls = []
+
+    class FakeCache:
+        def current_data_version(self):
+            return "test-version"
+
+        def get(self, expression, **context):
+            calls.append((expression, context))
+            return {
+                "000001.SZ": pd.Series(
+                    [1.0],
+                    index=pd.to_datetime(["2025-01-02"]),
+                )
+            }
+
+    monkeypatch.setattr("app.compute.api.get_compute_cache", lambda: FakeCache())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/compute/evaluate",
+            json={
+                "engine": "builtin",
+                "expression": "Mean($close, 5)",
+                "symbols": ["000001.SZ"],
+                "start_date": "2025-01-01",
+                "end_date": "2025-01-31",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["meta"]["cache_hit"] is True
+    assert calls == [
+        (
+            "Mean($close, 5)",
+            {
+                "symbols": ["000001.SZ"],
+                "start_date": pd.Timestamp("2025-01-01").date(),
+                "end_date": pd.Timestamp("2025-01-31").date(),
+                "engine": "builtin",
+                "data_version": "test-version",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_python_factor_validation_rejects_imports():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.post(
+            "/api/factors/validate-python",
+            json={"code": "import os\ndef compute(data, context):\n    return []"},
+        )
+
+    assert resp.status_code == 200
+    assert resp.json()["valid"] is False
+    assert "import" in resp.json()["error"]
 
 
 @pytest.mark.asyncio

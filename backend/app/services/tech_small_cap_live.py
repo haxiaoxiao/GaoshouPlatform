@@ -183,33 +183,6 @@ class TechSmallCapLiveService:
             "excluded_symbol_count": int(len(result.excluded_symbols)),
         }
 
-    async def submit_orders(self, orders: list[dict[str, Any]], *, confirm: bool = False) -> dict[str, Any]:
-        """把目标订单提交给 QMT；未确认时只返回草稿。"""
-        if not settings.live_trading_enable_order_submit:
-            return {
-                "enabled": False,
-                "submitted": False,
-                "message": "LIVE_TRADING_ENABLE_ORDER_SUBMIT=false，当前仅生成手动执行信号。",
-                "orders": orders,
-            }
-        if not confirm:
-            return {
-                "enabled": True,
-                "submitted": False,
-                "message": "真实委托需要 confirm=true。",
-                "orders": orders,
-            }
-        results = []
-        for order in orders:
-            if str(order.get("side") or "").upper() not in {"BUY", "SELL"}:
-                continue
-            results.append(await qmt_trading_service.submit_order({**order, "confirm": True}))
-        return {
-            "enabled": True,
-            "submitted": all(bool(item.get("submitted")) for item in results) if results else False,
-            "results": results,
-        }
-
     def _normalize_params(self, raw: dict[str, Any]) -> dict[str, Any]:
         # 兼容旧别名：历史 payload 或旧 UI 选择仍然要能归一到同一个预设键。
         variant = get_tech_small_cap_variant(str(raw.get("strategy_variant") or raw.get("variant") or ""))

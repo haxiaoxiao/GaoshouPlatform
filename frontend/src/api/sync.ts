@@ -127,7 +127,7 @@ export const syncApi = {
     request.post<SyncStatus>('/data/sync', params),
 
   getStatus: () =>
-    request.get<SyncStatus>('/data/sync/status'),
+    request.get<SyncStatus>('/data/sync/status', { notifyError: false }),
 
   cancel: () =>
     request.post<{ cancelled: boolean }>('/data/sync/cancel', {}),

@@ -15,7 +15,7 @@ from sqlalchemy import select, update
 from app.db.models import SyncTask
 from app.db.sqlite import async_session_factory
 from app.services.market_radar_runtime import notify_market_radar_sync_completed
-from app.services.task_queue import QueuedTask, get_task_queue
+from app.services.task_queue import SYNC_QUEUE_NAME, QueuedTask, get_task_queue
 
 # 单例调度器实例
 _scheduler: AsyncIOScheduler | None = None
@@ -53,7 +53,7 @@ def stop_scheduler() -> None:
 async def _execute_sync_job(task_id: int, sync_type: str, **kwargs: Any) -> None:
     """Serialize scheduled work with API-triggered syncs."""
     queued_id = f"scheduled-sync-{task_id}-{datetime.now().timestamp()}"
-    await get_task_queue("sync").submit(
+    await get_task_queue(SYNC_QUEUE_NAME).submit(
         QueuedTask(
             task_id=queued_id,
             title=f"scheduled sync {sync_type}",
@@ -146,7 +146,15 @@ async def _run_scheduled_sync_job(
             )
             await session.commit()
 
-            logger.info("Sync job completed: task_id={}", task_id)
+            from app.services.cache_invalidation import invalidate_after_sync
+
+            invalidation = invalidate_after_sync(sync_type)
+
+            logger.info(
+                "Sync job completed: task_id={}, cache_invalidation={}",
+                task_id,
+                invalidation,
+            )
             if run_id is not None:
                 try:
                     await notify_market_radar_sync_completed(run_id, sync_type)

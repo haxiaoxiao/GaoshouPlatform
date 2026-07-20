@@ -10,16 +10,14 @@ default size.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from threading import Lock
-from typing import Any, Callable, TypeVar
 
 from loguru import logger
 
 from app.core.config import settings
-
-_T = TypeVar("_T")
 
 _executor: ThreadPoolExecutor | None = None
 _executor_lock = Lock()
@@ -48,19 +46,19 @@ def install_default_executor() -> None:
     logger.info("Installed shared blocking executor with {} workers", _configured_workers())
 
 
-async def run_blocking(func: Callable[..., _T], /, *args: Any, **kwargs: Any) -> _T:
+async def run_blocking[**P, R](func: Callable[P, R], /, *args: P.args, **kwargs: P.kwargs) -> R:
     """Run a synchronous callable on the shared blocking executor."""
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(get_blocking_executor(), partial(func, *args, **kwargs))
 
 
-async def run_detached_blocking_with_timeout(
-    func: Callable[[], _T],
+async def run_detached_blocking_with_timeout[R](
+    func: Callable[[], R],
     /,
     *,
     timeout: int | float,
     thread_name_prefix: str = "gaoshou-timeout",
-) -> _T:
+) -> R:
     """Run one blocking callable with an asyncio timeout without occupying the shared pool.
 
     Python cannot forcibly stop a thread already inside a third-party SDK call.
@@ -72,7 +70,7 @@ async def run_detached_blocking_with_timeout(
     shutdown_now = False
     try:
         return await asyncio.wait_for(asyncio.wrap_future(future), timeout=timeout)
-    except asyncio.TimeoutError:
+    except TimeoutError:
         shutdown_now = True
         future.cancel()
         raise

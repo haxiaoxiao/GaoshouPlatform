@@ -4,12 +4,13 @@
 def test_invalidate_after_sync_clears_compute_and_matching_redis(monkeypatch):
     from app.services.cache_invalidation import invalidate_after_sync
 
-    cleared = {"l1": False}
+    cleared = {"all": False}
     deleted = []
 
     class FakeComputeCache:
-        def clear_l1(self):
-            cleared["l1"] = True
+        def clear(self):
+            cleared["all"] = True
+            return 4
 
     class FakeBinaryClient:
         def scan_iter(self, match, count):
@@ -34,6 +35,7 @@ def test_invalidate_after_sync_clears_compute_and_matching_redis(monkeypatch):
 
     result = invalidate_after_sync("kline_minute")
 
-    assert cleared["l1"] is True
+    assert cleared["all"] is True
+    assert result["compute_redis_deleted"] == 4
     assert result["redis_deleted"] == 1
     assert deleted == [b"bt:test:timer_coverage:abc"]

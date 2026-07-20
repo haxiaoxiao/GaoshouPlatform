@@ -20,12 +20,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { usePageContext } from '@/app/pageContext'
 import ProvenanceStrip from '@/components/ProvenanceStrip.vue'
-import FactorBoard from './FactorBoard.vue'
-import FactorValueStore from './FactorValueStore.vue'
+
+const FactorBoard = defineAsyncComponent(() => import('./FactorBoard.vue'))
+const FactorValueStore = defineAsyncComponent(() => import('./FactorValueStore.vue'))
 
 const route = useRoute()
 const router = useRouter()

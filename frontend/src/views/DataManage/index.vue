@@ -670,10 +670,14 @@ async function selectRecentStock(symbol: string) {
   await handleStockChange()
 }
 
+let stockSearchVersion = 0
+
 async function searchStocks(query: string) {
+  const requestVersion = ++stockSearchVersion
   const keyword = query.trim()
   if (!keyword) {
     stockOptions.value = recentStocks.value
+    stockSearchLoading.value = false
     return
   }
   stockSearchLoading.value = true
@@ -681,11 +685,11 @@ async function searchStocks(query: string) {
     const response = await request.get<{ items: StockOption[] }>('/data/stocks', {
       params: { search: keyword, page_size: 20 },
     })
-    stockOptions.value = response.items || []
+    if (requestVersion === stockSearchVersion) stockOptions.value = response.items || []
   } catch {
-    stockOptions.value = []
+    if (requestVersion === stockSearchVersion) stockOptions.value = []
   } finally {
-    stockSearchLoading.value = false
+    if (requestVersion === stockSearchVersion) stockSearchLoading.value = false
   }
 }
 

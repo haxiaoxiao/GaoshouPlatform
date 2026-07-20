@@ -24,7 +24,6 @@ jobs:
         working-directory: backend
     env:
       MARKET_DATA_BACKEND: parquet
-      CLICKHOUSE_ENABLED: "false"
       DATABASE_URL: sqlite+aiosqlite:///./ci-gaoshou.db
       PARQUET_DATA_DIR: ./data/parquet-ci
       DUCKDB_PATH: ":memory:"
@@ -52,6 +51,10 @@ jobs:
 
       - name: Ruff
         run: python -m ruff check app tests
+
+      - name: Source encoding
+        working-directory: .
+        run: python tools/check_mojibake.py
 
       - name: Pytest
         run: python -m pytest tests -q

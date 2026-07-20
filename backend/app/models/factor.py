@@ -8,14 +8,14 @@ and produces its own result type (FactorMatrix, FactorReport, BacktestReport).
 from __future__ import annotations
 
 import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 # ── Enums ────────────────────────────────────────────────────────────────────
 
-class StockPool(str, Enum):
+class StockPool(StrEnum):
     HS300 = "hs300"
     ZZ500 = "zz500"
     ZZ800 = "zz800"
@@ -23,29 +23,29 @@ class StockPool(str, Enum):
     ZZ_QUANZHI = "zz_quanzhi"
 
 
-class FactorDirection(str, Enum):
+class FactorDirection(StrEnum):
     ASC = "asc"    # smaller factor value is better
     DESC = "desc"  # larger factor value is better
 
 
-class ICMethod(str, Enum):
+class ICMethod(StrEnum):
     PEARSON = "pearson"
     SPEARMAN = "spearman"
 
 
-class OutlierHandling(str, Enum):
+class OutlierHandling(StrEnum):
     NONE = "none"
     WINSORIZE = "winsorize"
     STANDARDIZE = "standardize"
 
 
-class RebalancePeriod(str, Enum):
+class RebalancePeriod(StrEnum):
     DAILY = "daily"
     WEEKLY = "weekly"
     MONTHLY = "monthly"
 
 
-class PortfolioType(str, Enum):
+class PortfolioType(StrEnum):
     LONG_ONLY = "long_only"
     LONG_SHORT_I = "long_short_i"
     LONG_SHORT_II = "long_short_ii"
@@ -222,7 +222,7 @@ class BoardResponse(BaseModel):
 
 # ── Factor Template ──────────────────────────────────────────────────────────
 
-class TemplateType(str, Enum):
+class TemplateType(StrEnum):
     FINANCIAL = "financial"
     TECHNICAL = "technical"
     CUSTOM_OPERATOR = "custom_operator"

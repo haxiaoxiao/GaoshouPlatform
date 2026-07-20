@@ -107,6 +107,12 @@ const router = createRouter({
       meta: routeMetaForPath('/trade'),
     },
     {
+      path: '/trade/intraday-t',
+      name: 'IntradayT',
+      component: () => import('@/views/IntradayT/index.vue'),
+      meta: routeMetaForPath('/trade/intraday-t'),
+    },
+    {
       path: '/monitor',
       name: 'SystemMonitor',
       component: () => import('@/views/SystemMonitor/index.vue'),
@@ -117,6 +123,10 @@ const router = createRouter({
       name: 'Docs',
       component: () => import('@/views/Docs/index.vue'),
       meta: routeMetaForPath('/docs'),
+    },
+    {
+      path: '/:pathMatch(.*)*',
+      redirect: '/home',
     },
   ],
 })

@@ -377,6 +377,7 @@ import { Refresh, Search, View } from '@element-plus/icons-vue'
 import { indexCatalogApi, type IndexCatalogItem } from '@/api/data'
 import { syncApi, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
+import { isPollingAborted, pollUntil } from '@/utils/polling'
 import {
   factorValueApi,
   type FactorCoverageGap,
@@ -826,19 +827,27 @@ const loadIndexCatalog = async () => {
   }
 }
 
+let coverageRequestVersion = 0
+let previewRequestVersion = 0
+let autoQueryVersion = 0
+
 const loadCoverage = async () => {
+  const requestVersion = ++coverageRequestVersion
   coverageLoading.value = true
   coverageError.value = ''
   try {
-    coverage.value = await factorValueApi.coverage({
+    const nextCoverage = await factorValueApi.coverage({
       ...buildQueryParams(),
       full_range: true,
     })
+    if (requestVersion !== coverageRequestVersion) return
+    coverage.value = nextCoverage
   } catch (error) {
+    if (requestVersion !== coverageRequestVersion) return
     coverage.value = null
     coverageError.value = formatRequestError(error)
   } finally {
-    coverageLoading.value = false
+    if (requestVersion === coverageRequestVersion) coverageLoading.value = false
   }
 }
 
@@ -1168,23 +1177,37 @@ const syncStatusId = (status: SyncStatus | Record<string, unknown> | null | unde
   return String(status.run_id || status.task_id || '')
 }
 
+let dependencySyncController: AbortController | null = null
+
 const waitForDependencySync = async (started?: SyncStatus) => {
   const targetId = syncStatusId(started)
-  for (;;) {
-    const status = await syncApi.getStatus()
-    dependencySyncStatus.value = status
-    const lastRun = (status.last_run || null) as Record<string, unknown> | null
-    const lastRunId = syncStatusId(lastRun)
-    const lastRunMatches = !targetId || lastRunId === targetId
-    if (lastRunMatches && lastRun?.status === 'completed') return
-    if (lastRunMatches && lastRun?.status === 'failed') {
-      throw new Error(String(lastRun.error_message || '数据同步失败'))
-    }
-    if (status.status === 'completed') return
-    if (status.status === 'failed') {
-      throw new Error(status.error_message || '数据同步失败')
-    }
-    await new Promise(resolve => window.setTimeout(resolve, 3000))
+  dependencySyncController?.abort()
+  const controller = new AbortController()
+  dependencySyncController = controller
+  try {
+    await pollUntil({
+      request: () => syncApi.getStatus(),
+      isTerminal: status => {
+        const lastRun = (status.last_run || null) as Record<string, unknown> | null
+        const lastRunMatches = !targetId || syncStatusId(lastRun) === targetId
+        return Boolean((lastRunMatches && lastRun?.status === 'completed') || status.status === 'completed')
+      },
+      onValue: status => {
+        dependencySyncStatus.value = status
+        const lastRun = (status.last_run || null) as Record<string, unknown> | null
+        const lastRunMatches = !targetId || syncStatusId(lastRun) === targetId
+        if (lastRunMatches && lastRun?.status === 'failed') {
+          throw new Error(String(lastRun.error_message || '数据同步失败'))
+        }
+        if (status.status === 'failed') throw new Error(status.error_message || '数据同步失败')
+      },
+      intervalMs: 3000,
+      timeoutMs: 2 * 60 * 60 * 1000,
+      timeoutMessage: '依赖数据同步等待超时，请在数据管理中查看任务状态',
+      signal: controller.signal,
+    })
+  } finally {
+    if (dependencySyncController === controller) dependencySyncController = null
   }
 }
 
@@ -1223,7 +1246,7 @@ const runPrecompute = async () => {
   try {
     await prepareAndRunPrecompute('single')
   } catch (error) {
-    if (!isUserDismissedDialog(error)) throw error
+    if (!isUserDismissedDialog(error) && !isPollingAborted(error)) throw error
   } finally {
     precomputeLoading.value = false
   }
@@ -1234,28 +1257,32 @@ const runGroupPrecompute = async () => {
   try {
     await prepareAndRunPrecompute('group')
   } catch (error) {
-    if (!isUserDismissedDialog(error)) throw error
+    if (!isUserDismissedDialog(error) && !isPollingAborted(error)) throw error
   } finally {
     groupPrecomputeLoading.value = false
   }
 }
 
 const loadPreview = async () => {
+  const requestVersion = ++previewRequestVersion
   previewLoading.value = true
   previewError.value = ''
   try {
-    preview.value = await factorValueApi.preview({
+    const nextPreview = await factorValueApi.preview({
       ...buildQueryParams(),
       trade_date: previewTradeDate.value,
       limit: 80,
     })
-    if (preview.value?.items?.length)
-      await loadStockNames(preview.value.items.map(item => item.symbol))
+    if (requestVersion !== previewRequestVersion) return
+    preview.value = nextPreview
+    if (nextPreview?.items?.length)
+      await loadStockNames(nextPreview.items.map(item => item.symbol))
   } catch (error) {
+    if (requestVersion !== previewRequestVersion) return
     preview.value = null
     previewError.value = formatRequestError(error)
   } finally {
-    previewLoading.value = false
+    if (requestVersion === previewRequestVersion) previewLoading.value = false
   }
 }
 
@@ -1302,6 +1329,9 @@ const formatValue = (value: number) => {
 }
 
 const resetQueryResults = () => {
+  coverageRequestVersion += 1
+  previewRequestVersion += 1
+  autoQueryVersion += 1
   coverage.value = null
   coverageError.value = ''
   preview.value = null
@@ -1310,7 +1340,9 @@ const resetQueryResults = () => {
 }
 
 const autoQuery = async () => {
+  const requestVersion = ++autoQueryVersion
   await loadCoverage()
+  if (requestVersion !== autoQueryVersion) return
   if (coverageError.value) return
   await loadPreview()
 }
@@ -1352,6 +1384,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   clearPrecomputePolling()
+  dependencySyncController?.abort()
+  dependencySyncController = null
 })
 </script>
 

@@ -2,6 +2,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
+import httpx
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -16,8 +17,8 @@ from app.services.sentiment import (
     SentimentPostInput,
     SentimentService,
     _BuiltinXueqiuCrawler,
-    _inject_xueqiu_cookie,
     _finance_sentiment_v2,
+    _inject_xueqiu_cookie,
     _parse_jisilu_detail,
     _parse_jisilu_list_posts,
     _parse_laohu8_stock_posts,
@@ -75,6 +76,71 @@ class FlockPostStub:
         }
 
 
+def test_xueqiu_crawl_blocked_response_raises_sanitized_typed_error():
+    class Page:
+        def evaluate(self, script, payload):
+            return {
+                "ok": False,
+                "error": "non_json_response",
+                "status": 405,
+                "text": "<html>sensitive login page</html>",
+            }
+
+    crawler = _BuiltinXueqiuCrawler.__new__(_BuiltinXueqiuCrawler)
+    crawler._page = Page()
+
+    with pytest.raises(sentiment_module.XueqiuCrawlBlockedError) as caught:
+        crawler.get_stock_posts("SH600519")
+
+    assert caught.value.reason == "non_json_response"
+    assert caught.value.status_code == 405
+    assert "sensitive login page" not in str(caught.value)
+
+
+class TrackingSyncByteStream(httpx.SyncByteStream):
+    def __init__(self, chunks, *, on_yield=None):
+        self.chunks = list(chunks)
+        self.on_yield = on_yield
+        self.yield_count = 0
+        self.closed = False
+
+    def __iter__(self):
+        for chunk in self.chunks:
+            self.yield_count += 1
+            if self.on_yield is not None:
+                self.on_yield()
+            yield chunk
+
+    def close(self):
+        self.closed = True
+
+
+class FailingSyncByteStream(httpx.SyncByteStream):
+    def __init__(self, error):
+        self.error = error
+        self.read_count = 0
+        self.closed = False
+
+    def __iter__(self):
+        self.read_count += 1
+        raise self.error
+        yield b""  # pragma: no cover
+
+    def close(self):
+        self.closed = True
+
+
+class ManualClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, seconds):
+        self.now += seconds
+
+
 @pytest.fixture
 async def sentiment_session():
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", future=True)
@@ -84,6 +150,693 @@ async def sentiment_session():
     async with factory() as session:
         yield session
     await engine.dispose()
+
+
+def test_crawl_forum_thread_url_rejects_loopback_before_request(monkeypatch):
+    requests = []
+
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("127.0.0.1", port))],
+    )
+
+    def fail_request(*_args, **_kwargs):
+        requests.append("request")
+        raise AssertionError("loopback URL must be rejected before an HTTP request")
+
+    monkeypatch.setattr(sentiment_module.requests, "get", fail_request)
+    monkeypatch.setattr(sentiment_module.httpx, "Client", fail_request)
+
+    with pytest.raises(ValueError, match=r"public HTTP\(S\)"):
+        sentiment_module.crawl_forum_thread_url("http://localhost/private")
+
+    assert requests == []
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ftp://public.example/thread",
+        "https://user:secret@public.example/thread",
+    ],
+)
+def test_crawl_forum_thread_url_rejects_invalid_or_credentialed_url_before_request(
+    monkeypatch,
+    url,
+):
+    requests = []
+
+    def fail_resolution(*_args, **_kwargs):
+        raise AssertionError("invalid URL must be rejected before DNS resolution")
+
+    def fail_request(*_args, **_kwargs):
+        requests.append("request")
+        raise AssertionError("invalid URL must be rejected before an HTTP request")
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", fail_resolution)
+    monkeypatch.setattr(sentiment_module.requests, "get", fail_request)
+    monkeypatch.setattr(sentiment_module.httpx, "Client", fail_request)
+
+    with pytest.raises(ValueError, match=r"HTTP\(S\)"):
+        sentiment_module.crawl_forum_thread_url(url)
+
+    assert requests == []
+
+
+def test_fetch_public_forum_html_pins_dns_host_and_sni(monkeypatch):
+    resolutions = []
+    requests = []
+    client_options = {}
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            stream=httpx.ByteStream(b"<html><body>public thread</body></html>"),
+        )
+
+    real_client = httpx.Client
+
+    def client_factory(*args, **kwargs):
+        client_options.update(kwargs)
+        return real_client(*args, **kwargs)
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    monkeypatch.setattr(sentiment_module, "httpx", httpx, raising=False)
+    monkeypatch.setattr(httpx, "Client", client_factory)
+
+    html_text = sentiment_module._fetch_public_forum_html(
+        "https://forum.example:8443/thread?id=7",
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert resolutions == [("forum.example", 8443)]
+    assert html_text.content == b"<html><body>public thread</body></html>"
+    assert html_text.declared_encoding == "utf-8"
+    assert html_text.logical_url == "https://forum.example:8443/thread?id=7"
+    assert client_options["follow_redirects"] is False
+    assert client_options["trust_env"] is False
+    assert client_options["timeout"].read == sentiment_module._FORUM_URL_IO_TIMEOUT_SECONDS
+    assert len(requests) == 1
+    request = requests[0]
+    assert str(request.url) == "https://93.184.216.34:8443/thread?id=7"
+    assert request.headers["host"] == "forum.example:8443"
+    assert request.headers["accept-encoding"] == "identity"
+    assert request.extensions["sni_hostname"] == "forum.example"
+
+
+def test_fetch_public_forum_html_rejects_redirect_to_private_before_second_request(monkeypatch):
+    requests = []
+    resolutions = []
+
+    def resolve(host, port, **_kwargs):
+        resolutions.append((host, port))
+        address = "93.184.216.34" if host == "forum.example" else "127.0.0.1"
+        return [(2, 1, 6, "", (address, port))]
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "http://127.0.0.1/private"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+
+    with pytest.raises(ValueError, match=r"public HTTP\(S\)"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(redirect),
+        )
+
+    assert resolutions == [("forum.example", 443), ("127.0.0.1", 80)]
+    assert len(requests) == 1
+
+
+def test_crawl_forum_thread_url_extracts_only_clean_visible_title_and_body(monkeypatch):
+    html_text = """
+    <html>
+      <head>
+        <title>  Example &amp; Thread  </title>
+        <style>.secret { display: none }</style>
+      </head>
+      <body>
+        <nav>Site navigation</nav>
+        <article>
+          <h1>Alpha &amp; Beta</h1>
+          <p>First <strong>line</strong></p>
+          <script>stealCookies()</script>
+          <p hidden>Hidden copy</p>
+          <p aria-hidden="TRUE">Also hidden</p>
+          <p style="DISPLAY: none !important">Inline display hidden</p>
+          <p style="visibility: HIDDEN">Inline visibility hidden</p>
+          <p class="secret">Stylesheet governed copy</p>
+          <p>Second&nbsp;line</p>
+        </article>
+      </body>
+    </html>
+    """
+
+    monkeypatch.setattr(
+        sentiment_module,
+        "_fetch_public_forum_content_isolated",
+        lambda _url: sentiment_module._parse_forum_visible_content(
+            sentiment_module._ForumHtmlDocument(
+                content=html_text.encode(),
+                declared_encoding="utf-8",
+                logical_url="https://forum.example/thread",
+            )
+        ),
+        raising=False,
+    )
+
+    def fail_legacy_request(*_args, **_kwargs):
+        raise AssertionError("generic forum crawl must use the bounded public fetcher")
+
+    monkeypatch.setattr(sentiment_module.requests, "get", fail_legacy_request)
+
+    result = sentiment_module.crawl_forum_thread_url("https://forum.example/thread")
+
+    assert result["title"] == "Example & Thread"
+    assert result["content"] == "Alpha & Beta First line Stylesheet governed copy Second line"
+    assert "stylesheet-driven visibility is not evaluated" in result["warning"]
+
+
+def test_forum_url_isolated_fetch_terminates_worker_at_wall_clock_deadline(monkeypatch):
+    events = []
+
+    class FakeReadConnection:
+        def poll(self, timeout):
+            events.append(("poll", timeout))
+            return False
+
+        def close(self):
+            events.append(("read_close", None))
+
+    class FakeWriteConnection:
+        def close(self):
+            events.append(("write_close", None))
+
+    class FakeProcess:
+        def __init__(self, **_kwargs):
+            self.alive = False
+
+        def start(self):
+            self.alive = True
+            events.append(("start", None))
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.alive = False
+            events.append(("terminate", None))
+
+        def join(self, timeout=None):
+            events.append(("join", timeout))
+
+        def close(self):
+            events.append(("process_close", None))
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(duplex=False):  # noqa: N802 - mirrors multiprocessing context API
+            assert duplex is False
+            return FakeReadConnection(), FakeWriteConnection()
+
+        @staticmethod
+        def Process(**kwargs):  # noqa: N802 - mirrors multiprocessing context API
+            return FakeProcess(**kwargs)
+
+    monkeypatch.setattr(
+        sentiment_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext() if method == "spawn" else None,
+    )
+
+    with pytest.raises(RuntimeError, match="operation deadline exceeded.*fetch"):
+        sentiment_module._fetch_public_forum_content_isolated(
+            "https://forum.example/thread",
+            timeout_seconds=0.25,
+        )
+
+    assert ("poll", 0.25) in events
+    assert ("terminate", None) in events
+    assert any(event[0] == "join" for event in events)
+
+
+def test_fetch_public_forum_html_rejects_oversized_response(monkeypatch):
+    stream = TrackingSyncByteStream([b"1234", b"5", b"must-not-be-read"])
+
+    def resolve(_host, port, **_kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            stream=stream,
+        )
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+
+    with pytest.raises(RuntimeError, match="response body exceeds 4 bytes"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            max_response_bytes=4,
+            transport=httpx.MockTransport(respond),
+        )
+
+    assert stream.yield_count == 2
+    assert stream.closed is True
+
+
+def test_fetch_public_forum_html_limits_redirect_count(monkeypatch):
+    requests = []
+
+    def resolve(_host, port, **_kwargs):
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    def redirect(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(302, headers={"Location": "/next"})
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+
+    with pytest.raises(RuntimeError, match="redirect limit of 1"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            max_redirects=1,
+            transport=httpx.MockTransport(redirect),
+        )
+
+    assert len(requests) == 2
+
+
+def test_fetch_public_forum_html_rejects_compression_before_reading_body(monkeypatch):
+    stream = TrackingSyncByteStream([b"compressed-body"])
+    requests = []
+
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={
+                "Content-Type": "text/html; charset=utf-8",
+                "Content-Encoding": "gzip",
+            },
+            stream=stream,
+        )
+
+    with pytest.raises(RuntimeError, match="unsupported Content-Encoding"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(respond),
+        )
+
+    assert requests[0].headers["accept-encoding"] == "identity"
+    assert stream.yield_count == 0
+    assert stream.closed is True
+
+
+@pytest.mark.parametrize("content_type", ["image/png", None])
+def test_fetch_public_forum_html_rejects_non_html_content_type_before_reading_body(
+    monkeypatch,
+    content_type,
+):
+    stream = TrackingSyncByteStream([b"not-html"])
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        headers = {"Content-Type": content_type} if content_type else {}
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    with pytest.raises(RuntimeError, match="HTML Content-Type"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(respond),
+        )
+
+    assert stream.yield_count == 0
+    assert stream.closed is True
+
+
+def test_forum_redirect_preserves_same_host_cookie_on_logical_url(monkeypatch):
+    requests = []
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "/thread/next",
+                    "Set-Cookie": "session=abc; Secure; Path=/thread; HttpOnly",
+                },
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=utf-8"},
+            stream=httpx.ByteStream(b"<html><body>ok</body></html>"),
+        )
+
+    sentiment_module._fetch_public_forum_html(
+        "https://forum.example/thread/start",
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert [request.headers.get("cookie") for request in requests] == [None, "session=abc"]
+
+
+def test_forum_redirect_does_not_leak_host_cookie_to_same_ip_cross_host(monkeypatch):
+    requests = []
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={
+                    "Location": "https://other.example/next",
+                    "Set-Cookie": "host_only=secret; Secure; Path=/",
+                },
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=httpx.ByteStream(b"<html><body>ok</body></html>"),
+        )
+
+    sentiment_module._fetch_public_forum_html(
+        "https://forum.example/start",
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert [request.headers.get("cookie") for request in requests] == [None, None]
+    assert [request.url.host for request in requests] == ["93.184.216.34", "93.184.216.34"]
+    assert [request.headers["host"] for request in requests] == [
+        "forum.example",
+        "other.example",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("start_url", "set_cookie", "redirect_url", "expected_cookie"),
+    [
+        (
+            "https://a.example.test/start",
+            "domain_cookie=1; Domain=example.test; Secure; Path=/area",
+            "https://b.example.test/area/next",
+            "domain_cookie=1",
+        ),
+        (
+            "https://a.example.test/start",
+            "secure_cookie=1; Secure; Path=/",
+            "http://a.example.test/next",
+            None,
+        ),
+        (
+            "https://a.example.test/start",
+            "path_cookie=1; Path=/private",
+            "https://a.example.test/public",
+            None,
+        ),
+    ],
+)
+def test_forum_redirect_cookie_jar_enforces_domain_secure_and_path(
+    monkeypatch,
+    start_url,
+    set_cookie,
+    redirect_url,
+    expected_cookie,
+):
+    requests = []
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                302,
+                headers={"Location": redirect_url, "Set-Cookie": set_cookie},
+            )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=httpx.ByteStream(b"<html><body>ok</body></html>"),
+        )
+
+    sentiment_module._fetch_public_forum_html(
+        start_url,
+        transport=httpx.MockTransport(respond),
+    )
+
+    assert requests[1].headers.get("cookie") == expected_cookie
+
+
+@pytest.mark.parametrize("charset_source", ["http", "meta"])
+def test_forum_html_preserves_gb18030_from_http_or_meta_charset(monkeypatch, charset_source):
+    meta = '<meta charset="gb18030">' if charset_source == "meta" else ""
+    raw_html = (
+        f"<html><head>{meta}<title>中文标题</title></head>"
+        "<body><article>上涨机会</article></body></html>"
+    ).encode("gb18030")
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        content_type = (
+            "text/html; charset=gb18030" if charset_source == "http" else "text/html"
+        )
+        return httpx.Response(
+            200,
+            headers={"Content-Type": content_type},
+            stream=httpx.ByteStream(raw_html),
+        )
+
+    document = sentiment_module._fetch_public_forum_html(
+        "https://forum.example/thread",
+        transport=httpx.MockTransport(respond),
+    )
+    title, content = sentiment_module._parse_forum_visible_content(document)
+
+    assert title == "中文标题"
+    assert content == "上涨机会"
+
+
+def test_fetch_public_forum_html_rejects_invalid_charset_with_logical_host(monkeypatch):
+    stream = TrackingSyncByteStream([b"<html></html>"])
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html; charset=not-a-real-charset"},
+            stream=stream,
+        )
+
+    with pytest.raises(RuntimeError, match="decode failed for host forum.example"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(respond),
+        )
+
+    assert stream.yield_count == 0
+
+
+def test_fetch_public_forum_html_uses_one_deadline_across_redirects(monkeypatch):
+    clock = ManualClock()
+    requests = []
+    read_timeouts = []
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        read_timeouts.append(request.extensions["timeout"]["read"])
+        clock.advance(0.6)
+        if len(requests) == 1:
+            return httpx.Response(302, headers={"Location": "/next"})
+        return httpx.Response(
+            200,
+            content=b"<html></html>",
+            headers={"Content-Type": "text/html"},
+        )
+
+    with pytest.raises(RuntimeError, match="operation deadline exceeded"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/start",
+            timeout_seconds=1.0,
+            transport=httpx.MockTransport(respond),
+            clock=clock,
+        )
+
+    assert len(requests) == 2
+    assert read_timeouts[0] == pytest.approx(1.0)
+    assert read_timeouts[1] == pytest.approx(0.4)
+
+
+def test_fetch_public_forum_html_stops_drip_stream_at_operation_deadline(monkeypatch):
+    clock = ManualClock()
+    stream = TrackingSyncByteStream(
+        [b"a", b"b", b"c", b"must-not-be-read"],
+        on_yield=lambda: clock.advance(0.4),
+    )
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=stream,
+        )
+
+    with pytest.raises(RuntimeError, match="operation deadline exceeded"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            timeout_seconds=1.0,
+            transport=httpx.MockTransport(respond),
+            clock=clock,
+        )
+
+    assert stream.yield_count == 3
+    assert stream.closed is True
+
+
+def test_fetch_public_forum_html_checks_deadline_after_dns_before_request(monkeypatch):
+    clock = ManualClock()
+    client_calls = []
+
+    def resolve(_host, port, **_kwargs):
+        clock.advance(1.1)
+        return [(2, 1, 6, "", ("93.184.216.34", port))]
+
+    def fail_client(*_args, **_kwargs):
+        client_calls.append("client")
+        raise AssertionError("expired DNS phase must not reach the HTTP client")
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", resolve)
+    monkeypatch.setattr(sentiment_module.httpx, "Client", fail_client)
+
+    with pytest.raises(RuntimeError, match="operation deadline exceeded"):
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            timeout_seconds=1.0,
+            clock=clock,
+        )
+
+    assert client_calls == []
+
+
+def test_parse_forum_html_shares_fetch_operation_deadline(monkeypatch):
+    clock = ManualClock()
+    real_beautiful_soup = sentiment_module.BeautifulSoup
+    document = sentiment_module._ForumHtmlDocument(
+        content=b"<html><body><article>text</article></body></html>",
+        declared_encoding="utf-8",
+        logical_url="https://forum.example/thread",
+        deadline=1.0,
+        clock=clock,
+    )
+
+    def delayed_parse(*args, **kwargs):
+        clock.advance(1.1)
+        return real_beautiful_soup(*args, **kwargs)
+
+    monkeypatch.setattr(sentiment_module, "BeautifulSoup", delayed_parse)
+
+    with pytest.raises(RuntimeError, match="operation deadline exceeded.*decode"):
+        sentiment_module._parse_forum_visible_content(document)
+
+
+def test_fetch_public_forum_html_wraps_safe_phase_diagnostics(monkeypatch):
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def fail_connect(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("pinned 93.184.216.34 secret", request=request)
+
+    with pytest.raises(RuntimeError, match="connect failed for host forum.example") as caught:
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(fail_connect),
+        )
+
+    assert "93.184.216.34" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_fetch_public_forum_html_wraps_read_diagnostic_with_logical_host(monkeypatch):
+    stream = FailingSyncByteStream(httpx.ReadError("pinned 93.184.216.34 secret"))
+    monkeypatch.setattr(
+        "app.ai.gateway.socket.getaddrinfo",
+        lambda _host, port, **_kwargs: [(2, 1, 6, "", ("93.184.216.34", port))],
+    )
+
+    def respond(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/html"},
+            stream=stream,
+        )
+
+    with pytest.raises(RuntimeError, match="read failed for host forum.example") as caught:
+        sentiment_module._fetch_public_forum_html(
+            "https://forum.example/thread",
+            transport=httpx.MockTransport(respond),
+        )
+
+    assert "93.184.216.34" not in str(caught.value)
+    assert "secret" not in str(caught.value)
+
+
+def test_fetch_public_forum_html_resolve_error_does_not_expose_credentials(monkeypatch):
+    def fail_resolution(*_args, **_kwargs):
+        raise OSError("resolver detail must not escape")
+
+    monkeypatch.setattr("app.ai.gateway.socket.getaddrinfo", fail_resolution)
+
+    with pytest.raises(ValueError, match="resolve failed for host forum.example") as caught:
+        sentiment_module._fetch_public_forum_html(
+            "https://user:top-secret@forum.example/thread"
+        )
+
+    assert "user" not in str(caught.value)
+    assert "top-secret" not in str(caught.value)
+    assert "resolver detail" not in str(caught.value)
 
 
 def test_parse_sources_validates_supported_values():

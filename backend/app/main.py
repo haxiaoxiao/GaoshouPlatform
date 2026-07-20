@@ -219,14 +219,6 @@ async def add_contract_headers(request: Request, call_next):
     with logger.contextualize(request_id=request_id):
         response = await call_next(request)
     response.headers["X-Request-ID"] = request_id
-    if (
-        request.url.path.startswith("/api/")
-        and not request.url.path.startswith("/api/v1")
-        and not request.url.path.startswith("/api/ai")
-    ):
-        response.headers["Deprecation"] = "true"
-        response.headers["Sunset"] = "Thu, 10 Sep 2026 00:00:00 GMT"
-        response.headers["Link"] = '</api/v1>; rel="successor-version"'
     return response
 
 

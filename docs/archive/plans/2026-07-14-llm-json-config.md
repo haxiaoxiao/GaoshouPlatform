@@ -444,7 +444,7 @@ At `http://127.0.0.1:3511/monitor`, verify desktop and `390x844` mobile flows: o
 
 - [ ] **Step 5: Request final code review**
 
-Review the complete branch against `docs/superpowers/specs/2026-07-14-llm-json-config-design.md`, fixing all P0-P2 findings and rerunning affected tests.
+Review the complete branch against `docs/archive/plans/2026-07-14-llm-json-config-design.md`, fixing all P0-P2 findings and rerunning affected tests.
 
 - [ ] **Step 6: Merge and restart affected services**
 

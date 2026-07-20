@@ -736,8 +736,8 @@ class FactorResearchRunService:
         from app.api.factors import _compute_factor_rows, _factor_metadata, _rows_to_factor_matrix
         meta = _factor_metadata(factor)
         if meta["source_type"] == "python":
-            from app.services.python_factor_runner import run_python_factor
-            result = run_python_factor(
+            from app.services.python_factor_runner import run_python_factor_async
+            result = await run_python_factor_async(
                 code=meta["expression"],
                 symbols=symbols,
                 start_date=start_date,

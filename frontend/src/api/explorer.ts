@@ -73,20 +73,6 @@ export function getTableSchema(tableName: string) {
   return request.get<ColumnInfo[]>(`/explorer/tables/${tableName}/schema`)
 }
 
-export function previewTable(
-  tableName: string,
-  params: {
-    page?: number
-    page_size?: number
-    order_by?: string
-    order_dir?: 'ASC' | 'DESC'
-    where?: string
-    include_total?: boolean
-  } = {}
-) {
-  return request.get<PreviewResult>(`/explorer/tables/${tableName}/preview`, { params })
-}
-
 export function searchTable(tableName: string, data: ExplorerSearchRequest) {
   return request.post<PreviewResult>(`/explorer/tables/${tableName}/search`, data)
 }
@@ -94,11 +80,5 @@ export function searchTable(tableName: string, data: ExplorerSearchRequest) {
 export function getDistinctValues(tableName: string, column: string, limit?: number, q?: string) {
   return request.get<any[]>(`/explorer/tables/${tableName}/distinct`, {
     params: { column, limit, q }
-  })
-}
-
-export function executeQuery(sql: string, limit?: number) {
-  return request.post<any>('/explorer/query', null, {
-    params: { sql, limit }
   })
 }

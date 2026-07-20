@@ -21,7 +21,7 @@ function Resolve-Defaults {
             Branch = "main"
             BackendPort = "8800"
             SyncPort = "8810"
-            FrontendPort = "3500"
+            FrontendPort = "3511"
         }
     }
 
@@ -207,7 +207,10 @@ function Invoke-StartScriptChecked {
 function Wait-StartupHealthy {
     param(
         [pscustomobject]$Startup,
-        [string[]]$HealthUrls
+        [string]$Root,
+        [string]$BackendPort,
+        [string]$SyncPort,
+        [string]$FrontendPort
     )
 
     Start-Sleep -Seconds 1
@@ -216,9 +219,24 @@ function Wait-StartupHealthy {
         throw "Startup script failed with exit code $($Startup.Process.ExitCode). See log: $($Startup.LogPath)"
     }
 
-    foreach ($url in $HealthUrls) {
+    foreach ($url in @(
+        "http://127.0.0.1:$BackendPort/health",
+        "http://127.0.0.1:$SyncPort/health"
+    )) {
         Wait-HttpOk -Url $url -TimeoutSeconds 60
     }
+
+    $runtimePortFile = Join-Path $Root ".runtime\frontend-port.txt"
+    $activeFrontendPort = $FrontendPort
+    if (Test-Path -LiteralPath $runtimePortFile) {
+        $candidatePort = (Get-Content -LiteralPath $runtimePortFile -Raw).Trim()
+        $parsedPort = 0
+        if ([int]::TryParse($candidatePort, [ref]$parsedPort) -and $parsedPort -ge 1 -and $parsedPort -le 65535) {
+            $activeFrontendPort = [string]$parsedPort
+        }
+    }
+    Wait-HttpOk -Url "http://127.0.0.1:$activeFrontendPort" -TimeoutSeconds 60
+    Write-Host "Frontend healthy on port $activeFrontendPort"
 
     $Startup.Process.Refresh()
     if (-not $Startup.Process.HasExited) {
@@ -339,22 +357,14 @@ try {
 
     Invoke-NpmChecked -ArgumentList @("run", "build") -WorkingDirectory $frontendDir
     $startup = Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
-    Wait-StartupHealthy -Startup $startup -HealthUrls @(
-        "http://127.0.0.1:$backendPort/health",
-        "http://127.0.0.1:$syncPort/health",
-        "http://127.0.0.1:$frontendPort"
-    )
+    Wait-StartupHealthy -Startup $startup -Root $Root -BackendPort $backendPort -SyncPort $syncPort -FrontendPort $frontendPort
     $servicesStarted = $true
 } catch {
     if ($servicesStopped -and -not $servicesStarted) {
         Write-Warning "Deployment failed before restart. Attempting to bring the target environment back online."
         try {
             $startup = Invoke-StartScriptChecked -StartScript $startScript -WorkingDirectory $Root
-            Wait-StartupHealthy -Startup $startup -HealthUrls @(
-                "http://127.0.0.1:$backendPort/health",
-                "http://127.0.0.1:$syncPort/health",
-                "http://127.0.0.1:$frontendPort"
-            )
+            Wait-StartupHealthy -Startup $startup -Root $Root -BackendPort $backendPort -SyncPort $syncPort -FrontendPort $frontendPort
             $servicesStarted = $true
         } catch {
             Write-Warning "Automatic restart after deploy failure also failed: $($_.Exception.Message)"

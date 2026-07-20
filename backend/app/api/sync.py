@@ -23,7 +23,7 @@ from app.services.sync_run_store import (
     upsert_sync_run,
 )
 from app.services.sync_service import SyncProgress, SyncService
-from app.services.task_queue import QueuedTask, get_task_queue
+from app.services.task_queue import SYNC_QUEUE_NAME, QueuedTask, get_task_queue
 
 router = APIRouter()
 
@@ -72,12 +72,13 @@ VALID_SYNC_TYPES = (
 def _attach_sync_availability(data: dict[str, Any]) -> dict[str, Any]:
     status = str(data.get("status") or "idle")
     is_busy = status in {"queued", "running"}
-    queue = get_task_queue("data_sync")
+    queue = get_task_queue(SYNC_QUEUE_NAME)
     queue_snapshot = queue.snapshot()
+    queue_busy = bool(queue_snapshot["active"] or queue_snapshot["pending_count"])
     details = dict(data.get("details") or {})
     details.update({
         "queue_mode": True,
-        "queue_busy": is_busy,
+        "queue_busy": is_busy or queue_busy,
         "queue_pending_count": queue_snapshot["pending_count"],
         "queue_active_task_id": queue_snapshot["active_task_id"],
         "queue_active_task": queue_snapshot["active"],
@@ -120,7 +121,7 @@ async def _cancel_all_sync_work(session: AsyncSession) -> dict[str, Any]:
     service = SyncService(session)
     persisted = await service.get_persisted_sync_status()
     current_cancelled = await service.cancel_sync()
-    queue_result = get_task_queue("data_sync").cancel_all()
+    queue_result = get_task_queue(SYNC_QUEUE_NAME).cancel_all()
     cancelled_run_ids: set[str] = set()
 
     for task in [queue_result.get("active"), *list(queue_result.get("pending") or [])]:
@@ -485,8 +486,7 @@ async def trigger_sync(
         status="queued",
         request=request.model_dump(mode="json"),
     )
-    queue_name = "sentiment_sync" if request.sync_type.startswith("sentiment") else "data_sync"
-    await get_task_queue(queue_name).submit(
+    await get_task_queue(SYNC_QUEUE_NAME).submit(
         QueuedTask(
             task_id=run_id,
             title=f"data sync {request.sync_type}",
@@ -598,6 +598,10 @@ async def cancel_sync(
 ) -> dict[str, Any]:
     service = SyncService(session)
     cancelled = await service.cancel_sync()
+    queue = get_task_queue(SYNC_QUEUE_NAME)
+    active_task_id = queue.snapshot().get("active_task_id")
+    if active_task_id:
+        cancelled = queue.cancel(str(active_task_id)) or cancelled
     persisted = await service.get_persisted_sync_status()
     run_id = persisted.get("run_id") if persisted else None
     if run_id and persisted.get("status") in {"queued", "running"}:

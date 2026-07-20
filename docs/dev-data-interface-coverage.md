@@ -1,8 +1,8 @@
 # Dev 数据接口覆盖审计
 
-Last updated: 2026-06-01.
+Last updated: 2026-07-17.
 
-本审计回答：逐页开发/重构时，当前公共目录样本 `E:\Projects\Data\dev_sample` 是否能覆盖各数据接口需要的 SQLite/Parquet 存储。
+本审计回答：逐页开发/重构时，公共目录样本 `E:\Projects\data\BaiduSyncdisk\dev_sample` 是否能覆盖各数据接口需要的 SQLite/Parquet 存储。当前临时开发边界是 prod 仓库；这里只保留 dev 样本隔离方法，不表示应切换到 dev 仓库。
 
 ## 结论
 
@@ -75,9 +75,9 @@ Parquet:
 ## 审计命令
 
 ```powershell
-cd E:\Projects\GaoshouPlatform-dev\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m app.scripts.validate_dev_sample_data `
-  --json-report E:\Projects\Data\dev_sample\validation-report.json
+  --json-report E:\Projects\data\BaiduSyncdisk\dev_sample\validation-report.json
 ```
 
 `validation-report.json` 在公共数据目录的 ignored 样本目录里，适合每次重切样本后检查，不提交到仓库。

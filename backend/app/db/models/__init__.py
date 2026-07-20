@@ -3,6 +3,7 @@
 from .base import Base, TimestampMixin
 from .factor import Factor, FactorAnalysis, FactorResearchRun, FactorResearchRunItem
 from .financial import FinancialData
+from .intraday_t import IntradayTSession, IntradayTTrade
 from .live_trading import (
     LiveEquitySnapshot,
     LiveOrderAudit,
@@ -22,7 +23,13 @@ from .research_lineage import (
     ResearchArtifact,
     StrategyRelease,
 )
-from .sentiment import SentimentAnalysis, SentimentMention, SentimentPost, SentimentThread
+from .sentiment import (
+    SentimentAnalysis,
+    SentimentFocusSnapshot,
+    SentimentMention,
+    SentimentPost,
+    SentimentThread,
+)
 from .stock import Stock, StockConceptMembership
 from .strategy import Backtest, Order, Strategy, Trade
 from .sync import SyncLog, SyncRun, SyncTask
@@ -42,6 +49,8 @@ __all__ = [
     "FactorResearchRun",
     "FactorResearchRunItem",
     "FinancialData",
+    "IntradayTSession",
+    "IntradayTTrade",
     "LiveStrategyProfile",
     "LiveTradingRun",
     "LiveEquitySnapshot",
@@ -63,6 +72,7 @@ __all__ = [
     "SentimentThread",
     "SentimentMention",
     "SentimentAnalysis",
+    "SentimentFocusSnapshot",
     "WatchlistGroup",
     "WatchlistStock",
     "SyncTask",

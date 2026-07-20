@@ -23,7 +23,7 @@
       </div>
     </header>
 
-    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: flex; height: calc(100vh - 60px);">
+    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: flex;">
       <aside class="docs-sidebar" style="width: 260px; border-right: 1px solid var(--border-default); padding: 24px; overflow-y: auto;">
         <div class="sidebar-title">文档中心</div>
         <nav class="sidebar-nav">
@@ -51,7 +51,7 @@
       </div>
     </div>
 
-    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="padding: 48px 24px; max-width: 720px; margin: 0 auto; overflow-y: auto; height: calc(100vh - 60px);">
+    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="padding: 48px 24px; max-width: 720px; margin: 0 auto; overflow-y: auto;">
       <h1 style="font-size: var(--text-3xl); margin-bottom: 48px; color: var(--text-bright);">平台操作手册</h1>
       <template v-for="sec in contentSections" :key="sec.id">
         <section :id="sec.id" v-html="sec.html" class="doc-section" style="margin-bottom: 48px;"></section>
@@ -339,6 +339,15 @@ function onCardClick(id: string) {
   height: 100%;
   background: var(--bg-void);
   overflow: hidden;
+}
+
+.layout-wrapper-a,
+.layout-wrapper-b,
+.layout-wrapper-c {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
 }
 
 .docs-sidebar {

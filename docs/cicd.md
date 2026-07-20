@@ -1,5 +1,7 @@
 # CI/CD
 
+Last updated: 2026-07-17
+
 GaoshouPlatform uses GitHub Actions with one Windows self-hosted runner for
 local development and production deployments, plus an optional Mac self-hosted
 runner for manual development compatibility checks.
@@ -79,6 +81,11 @@ The deploy script defaults pip to `https://pypi.org/simple` to avoid inherited
 machine-level mirror errors. Set `GAOSHOU_PIP_INDEX_URL` or pass `-PipIndexUrl`
 if a local mirror is required.
 
+The frontend normally binds the environment-specific port shown above. If that
+port is occupied, the launcher chooses the next available port and records it in
+`.runtime/frontend-port.txt`. Deployment health checks read that runtime file;
+they do not assume the preferred port stayed available.
+
 Deployment notes:
 
 - The script stops the target services before `npm ci` so Windows file locks
@@ -94,6 +101,7 @@ Deployment notes:
 
 ## Validation policy
 
-The current repository has pre-existing Ruff findings, so CI treats Ruff as a
-non-blocking report. The hard gates are backend tests and frontend build. Tighten
-Ruff to a blocking step after a dedicated lint cleanup.
+Ruff, backend tests, frontend unit tests, and the frontend production build are
+blocking CI gates. Dependency declarations live in `backend/pyproject.toml`;
+`backend/requirements.txt` installs the editable project with its development
+extras instead of maintaining a second dependency list.

@@ -1,4 +1,4 @@
-﻿"""AKQuant engine adapter for the platform backtest interface."""
+"""AKQuant engine adapter for the platform backtest interface."""
 from __future__ import annotations
 
 import asyncio
@@ -355,7 +355,7 @@ class AkquantEngine(IBacktestEngine):
         while True:
             try:
                 return await asyncio.wait_for(asyncio.shield(future), timeout=5.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 elapsed = time.monotonic() - started_at
                 snapshot = adapter.progress_snapshot
                 bar_ratio = float(snapshot.get("bar_progress_ratio") or 0.0)

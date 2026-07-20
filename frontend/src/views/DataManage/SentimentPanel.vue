@@ -369,7 +369,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Connection, Refresh } from '@element-plus/icons-vue'
 import request from '@/api/request'
@@ -385,6 +385,7 @@ import {
   type SentimentSummary,
   type SentimentSummarySource,
 } from '@/api/sentiment'
+import { isPollingAborted, pollUntil } from '@/utils/polling'
 
 const props = defineProps<{
   initialSymbol?: string
@@ -564,9 +565,13 @@ function sentimentTagType(value?: string | null) {
   return 'info'
 }
 
+let stockSearchVersion = 0
+
 async function searchStocks(query: string) {
+  const requestVersion = ++stockSearchVersion
   if (!query) {
     stockOptions.value = []
+    stockSearchLoading.value = false
     return
   }
   stockSearchLoading.value = true
@@ -574,9 +579,9 @@ async function searchStocks(query: string) {
     const response = await request.get<{ items: StockOption[] }>('/data/stocks', {
       params: { search: query, page: 1, page_size: 20 },
     })
-    stockOptions.value = response.items || []
+    if (requestVersion === stockSearchVersion) stockOptions.value = response.items || []
   } finally {
-    stockSearchLoading.value = false
+    if (requestVersion === stockSearchVersion) stockSearchLoading.value = false
   }
 }
 
@@ -657,16 +662,27 @@ function batchResultFromRun(run: SentimentIngestRun): SentimentIngestBatchResult
   }
 }
 
+const ingestPollControllers = new Set<AbortController>()
+
 async function waitForIngestRun(initial: SentimentIngestRun) {
+  const controller = new AbortController()
+  ingestPollControllers.add(controller)
   activeRun.value = initial
-  const deadline = Date.now() + 30 * 60 * 1000
-  while (Date.now() < deadline) {
-    const run = await sentimentApi.ingestRun(initial.run_id)
-    activeRun.value = run
-    if (['completed', 'failed', 'cancelled'].includes(run.status)) return run
-    await new Promise(resolve => window.setTimeout(resolve, 1000))
+  try {
+    return await pollUntil({
+      request: () => sentimentApi.ingestRun(initial.run_id),
+      isTerminal: run => ['completed', 'failed', 'cancelled'].includes(run.status),
+      onValue: run => {
+        activeRun.value = run
+      },
+      intervalMs: 1000,
+      timeoutMs: 30 * 60 * 1000,
+      timeoutMessage: '舆情任务等待超时，请在系统监控中查看任务状态',
+      signal: controller.signal,
+    })
+  } finally {
+    ingestPollControllers.delete(controller)
   }
-  throw new Error('舆情任务等待超时，请在系统监控中查看任务状态')
 }
 
 async function runIngest() {
@@ -716,6 +732,8 @@ async function runIngest() {
     }
 
     await reloadAll()
+  } catch (error) {
+    if (!isPollingAborted(error)) throw error
   } finally {
     ingesting.value = false
   }
@@ -740,6 +758,8 @@ async function runThreadIngest() {
       ElMessage.success(`完整抓取 ${Number(run.details.floor_count || 0)} 楼`)
     }
     await loadOverview()
+  } catch (error) {
+    if (!isPollingAborted(error)) throw error
   } finally {
     threadIngesting.value = false
   }
@@ -757,6 +777,11 @@ watch(
 
 onMounted(() => {
   void reloadAll()
+})
+
+onBeforeUnmount(() => {
+  ingestPollControllers.forEach(controller => controller.abort())
+  ingestPollControllers.clear()
 })
 </script>
 

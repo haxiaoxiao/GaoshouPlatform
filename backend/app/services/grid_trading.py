@@ -107,9 +107,6 @@ class GridTradingService:
             "order_preview": payload,
         }
 
-    async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
-        return await qmt_trading_service.submit_order(payload)
-
     def _normalize_params(self, raw: dict[str, Any]) -> dict[str, Any]:
         symbol_weights = raw.get("symbol_weights") or {"002624.SZ": 0.5, "300418.SZ": 0.5}
         return {

@@ -1,6 +1,6 @@
 # 前端信息架构与页面职责
 
-Last updated: 2026-06-03.
+Last updated: 2026-07-20.
 
 本文记录当前前端的页面分工、菜单结构、同步页状态语义和颜色规范。目标是避免不同页面互相复刻，减少“看起来都像工作台”的信息重复。
 
@@ -22,11 +22,14 @@ Last updated: 2026-06-03.
 | `/data/sync` | 数据同步 | 同步任务目录、预设方案、执行参数、队列、运行进度、Relay Key 和同步日志。 |
 | `/explorer` | 数据浏览器 | Parquet/DuckDB 表结构与预览；未知行数显示“未统计”，精确行数显式触发。 |
 | `/watchlist` | 自选股 | 研究股票池分组和个股详情入口。 |
+| `/stock/:symbol` | 个股详情 | 行情、财务、指标和研究上下文。 |
 | `/factor` | 因子定义 | 因子目录、覆盖率、参数版本和预计算入口；表达式创建/编辑时才展开。 |
 | `/factor/detail/:factorName` | 因子详情 | 因子公式、人话解释、覆盖率、缓存和研究结果。 |
 | `/factor/evaluation` | 因子评估 | IC、ICIR、多空收益、回撤、换手和已计算组合；只消费预计算缓存。 |
 | `/research` | 研究实验室 | 研究假设、外部链接、Obsidian/本地知识库衔接、证据链、实验记录和失败复盘。 |
 | `/backtest` | 策略回测 | 代码编辑、参数配置、运行日志、回测报告和优化入口。 |
+| `/backtest/factor/:id` | 因子回测 | 指定因子的回测配置与结果。 |
+| `/backtest/optimization/:id` | 优化报告 | Grid Search / Walk-forward 优化结果。 |
 | `/trade` | 模拟 / 实盘 | 信号、账户、订单预览、真实下单二次确认和风控护栏。 |
 | `/monitor` | 系统运维控制台 | 服务拓扑、值班排障清单、运行控制、任务表、存储巡检和同步审计日志。 |
 | `/docs` | 文档中心 | 用户手册、数据源、因子、AKQuant、运维说明等入口。 |
@@ -84,6 +87,9 @@ Last updated: 2026-06-03.
 ## 开发注意事项
 
 - 新增页面需同步更新 `frontend/src/router/index.ts`、`frontend/src/app/navigation.ts` 和本文档。
+- 顶部搜索只接受页面名称/关键字或标准 A 股代码；股票代码规范化后进入 `/stock/:symbol`，`Ctrl K` 聚焦输入框。
+- 移动端关闭侧栏时必须同时 `aria-hidden` 和 `inert`，避免不可见导航仍进入键盘焦点顺序。
+- 通知跳转使用显式内部路由 allowlist；外部 URL、路径穿越和未知 API 路径不进入路由器。
 - 页面使用 `usePageContext` 时，右侧上下文应提供该页面的决策摘要，不复制主表格。
 - 修改前端后至少运行 `cd frontend; npm run build`。
 - 如果改了同步页与同步状态契约，同时更新 `frontend/src/api/sync.ts`、相关后端测试和本文“数据同步状态语义”。

@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { marketRadarApi, type MarketRadarAlert } from '@/api/marketRadar'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
+import { resolveNotificationRoute } from './notificationRoutes'
 
 export interface Notification {
   id: string
@@ -143,7 +144,7 @@ export const useNotificationStore = defineStore('notification', () => {
       message,
       time: task.finished_at ? new Date(task.finished_at * 1000) : new Date(),
       read: false,
-      route: task.result_ref,
+      route: resolveNotificationRoute(task.result_ref),
     }
   }
 

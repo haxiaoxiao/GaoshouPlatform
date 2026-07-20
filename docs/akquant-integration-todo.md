@@ -2,7 +2,7 @@
 
 本文只记录当前仍有效的 AKQuant 集成状态和后续事项。历史执行计划已归档到 `docs/archive/`。
 
-Last updated: 2026-06-20.
+Last updated: 2026-07-17.
 
 ## 当前状态
 
@@ -39,7 +39,6 @@ Last updated: 2026-06-20.
 | P1 | 动态参数表单 | 前端基于 `strategy-params/schema` 自动生成更完整的策略参数表单 |
 | P1 | 风控配置 UI | 暴露 AKQuant 风控参数和组合约束 |
 | P2 | AKQuant/JQ 语义对齐报告 | 对比成交时点、涨跌停、停牌、ST、退市、行业集中度等规则 |
-| P2 | 年度 debug 前端页 | 后端已有 yearly debug API，前端对比页仍需产品化 |
 | P3 | ML 工作流入口 | Walk-forward 训练、模型注册、预测缓存 |
 | P3 | 实盘 runner 规划 | AKQuant live runner 与 miniQMT 执行网关的边界设计 |
 
@@ -48,14 +47,14 @@ Last updated: 2026-06-20.
 修改 AKQuant 回测、优化、数据 provider 或策略参数相关代码后至少运行：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m pytest tests\backtest\test_akquant_integration.py -q
 ```
 
 修改前端回测页面后运行：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\frontend
+cd E:\Projects\GaoshouPlatform-prod\frontend
 npm run build
 ```
 

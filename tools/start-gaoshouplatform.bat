@@ -21,7 +21,7 @@ if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else
 if defined GAOSHOU_SYNC_HOST (set "SYNC_HOST=%GAOSHOU_SYNC_HOST%") else (set "SYNC_HOST=127.0.0.1")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
 if defined GAOSHOU_FRONTEND_HOST (set "FRONTEND_HOST=%GAOSHOU_FRONTEND_HOST%") else (set "FRONTEND_HOST=127.0.0.1")
-if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3511")
 
 set "NO_PAUSE=0"
 if /i "%~1"=="--no-pause" set "NO_PAUSE=1"
@@ -269,7 +269,7 @@ exit /b 0
 :resolve_frontend_port
 set "PREFERRED_FRONTEND_PORT=%FRONTEND_PORT%"
 set "FRONTEND_PORT="
-for /f "usebackq delims=" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$candidates=@([int]'%PREFERRED_FRONTEND_PORT%') + (3511..3599); foreach($port in $candidates){ $listener=$null; try { $listener=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,$port); $listener.Start(); $listener.Stop(); Write-Output $port; exit 0 } catch { if($listener){$listener.Stop()} } }; exit 1"`) do set "FRONTEND_PORT=%%p"
+for /f "usebackq delims=" %%p in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$candidates=@([int]'%PREFERRED_FRONTEND_PORT%') + (3511..3599); $seen=@{}; foreach($port in $candidates){ if($seen.ContainsKey($port)){ continue }; $seen[$port]=$true; $listener=$null; try { $listener=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,$port); $listener.Start(); $listener.Stop(); Write-Output $port; exit 0 } catch { if($listener){$listener.Stop()} } }; exit 1"`) do set "FRONTEND_PORT=%%p"
 if not defined FRONTEND_PORT exit /b 1
 if not "%FRONTEND_PORT%"=="%PREFERRED_FRONTEND_PORT%" echo       WARN: frontend port %PREFERRED_FRONTEND_PORT% is unavailable; using %FRONTEND_PORT%.
 if not exist "%ROOT%\.runtime" mkdir "%ROOT%\.runtime" >nul 2>&1

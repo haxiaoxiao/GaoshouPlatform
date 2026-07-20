@@ -8,9 +8,11 @@ from httpx import ASGITransport, AsyncClient
 
 from app.core.config import settings
 from app.db.models.live_trading import LiveStrategyProfile, LiveTradeRecord
+from app.db.models.research_lineage import DataSnapshot, PersistentJob, StrategyRelease
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory, init_db
 from app.main import app
+from app.services.live_control import LiveControlSessionManager
 from app.services.live_trading import (
     LiveAccountSnapshot,
     StrategyProfileBundle,
@@ -48,6 +50,90 @@ CASH_AWARE_BUY_FEE_BUFFER_PCT = 0.001
 REQUIRE_CURRENT_MARKET_DATA_FOR_ORDERS = False
 ENABLE_LIMIT_UP_HEAT_FILTER = False
 """
+
+
+def _live_authorization(
+    strategy_id: int,
+    profile_key: str,
+) -> tuple[LiveControlSessionManager, object, str]:
+    manager = LiveControlSessionManager(secret="control-secret", ttl_seconds=60)
+    control = manager.unlock(
+        secret="control-secret",
+        expected_account_mask="66***80",
+        actual_account_mask="66***80",
+    )
+    idempotency_hash = f"test-idempotency-{strategy_id}"
+    reservation_id = f"live-submit:{idempotency_hash}"
+    authorization = manager.issue_submission_authorization(
+        control_session=control,
+        release_id=f"test-release-{strategy_id}",
+        strategy_id=strategy_id,
+        profile_key=profile_key,
+        account_mask="66***80",
+        idempotency_hash=idempotency_hash,
+        reservation_id=reservation_id,
+    )
+    return manager, authorization, reservation_id
+
+
+async def _seed_live_reservation(
+    *,
+    strategy_id: int,
+    profile_key: str,
+    reservation_id: str,
+    order_count: int,
+) -> None:
+    idempotency_hash = reservation_id.removeprefix("live-submit:")
+    async with async_session_factory() as session:
+        release_id = f"test-release-{strategy_id}"
+        snapshot_id = f"test-snapshot-{strategy_id}"
+        if await session.get(DataSnapshot, snapshot_id) is None:
+            session.add(
+                DataSnapshot(
+                    id=snapshot_id,
+                    environment="research",
+                    dataset_versions={},
+                    freshness={},
+                    schema_hash=f"snapshot-{strategy_id}",
+                    status="ready",
+                )
+            )
+        if await session.get(StrategyRelease, release_id) is None:
+            session.add(
+                StrategyRelease(
+                    id=release_id,
+                    strategy_id=strategy_id,
+                    data_snapshot_id=snapshot_id,
+                    code_hash=f"code-{strategy_id}",
+                    git_commit="test-commit",
+                    engine="akquant",
+                    engine_version="test",
+                    parameters={},
+                    universe={},
+                    cost_model={},
+                    factor_params_hashes={},
+                    status="live_approved",
+                    approved_at=datetime.now(),
+                )
+            )
+        session.add(
+            PersistentJob(
+                id=reservation_id,
+                kind="live_order_submit",
+                title=f"Live order submit {release_id}",
+                status="running",
+                progress=0.0,
+                payload={
+                    "release_id": release_id,
+                    "strategy_id": strategy_id,
+                    "profile_key": profile_key,
+                    "account_mask": "66***80",
+                    "idempotency_hash": idempotency_hash,
+                    "order_count": order_count,
+                },
+            )
+        )
+        await session.commit()
 
 
 async def _prepare_live_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -251,7 +337,7 @@ def test_lunch_break_blocks_runner_but_not_manual_signal_generation():
 
 
 @pytest.mark.asyncio
-async def test_auto_execute_disabled_is_not_a_preflight_blocker(monkeypatch):
+async def test_live_preflight_disables_runner_but_keeps_signal_generation(monkeypatch):
     profile = LiveStrategyProfile(
         id=996,
         strategy_id=996,
@@ -311,9 +397,9 @@ async def test_auto_execute_disabled_is_not_a_preflight_blocker(monkeypatch):
     )
 
     assert preflight["can_generate"] is True
-    assert preflight["can_start_runner"] is True
+    assert preflight["can_start_runner"] is False
     assert preflight["can_auto_submit"] is False
-    assert all("LIVE_TRADING_AUTO_EXECUTE_ENABLED" not in item for item in preflight["runner_blocking_reasons"])
+    assert any("/api/v1/live/orders/submit" in item for item in preflight["runner_blocking_reasons"])
 
 
 @pytest.mark.asyncio
@@ -677,9 +763,15 @@ async def test_live_submit_two_stage_waits_for_sell_sync_before_buy(monkeypatch)
         return {"ok": True}
 
     async def fake_status():
-        return {"account_configured": True, "xttrader_available": True, "quote_connected": True}
+        return {
+            "account_id": "66***80",
+            "account_configured": True,
+            "xttrader_available": True,
+            "quote_connected": True,
+        }
 
-    async def fake_submit_order(order):
+    async def fake_submit_order(order, *, broker_permit=None):
+        assert broker_permit is not None
         events.append(f"submit:{order['side']}:{order['symbol']}")
         return {"enabled": True, "submitted": True, "order_id": f"order-{order['side']}", "order": order}
 
@@ -706,6 +798,17 @@ async def test_live_submit_two_stage_waits_for_sell_sync_before_buy(monkeypatch)
     monkeypatch.setattr(live_trading_service, "_pending_live_order_ids", fake_pending_live_order_ids)
     monkeypatch.setattr(live_trading_service, "_write_submit_audit", fake_write_submit_audit)
     monkeypatch.setattr(live_trading_service, "_write_control_audit", fake_write_control_audit)
+    manager, authorization, reservation_id = _live_authorization(
+        profile.strategy_id,
+        profile.profile_key,
+    )
+    await _seed_live_reservation(
+        strategy_id=profile.strategy_id,
+        profile_key=profile.profile_key,
+        reservation_id=reservation_id,
+        order_count=2,
+    )
+    monkeypatch.setattr("app.services.live_trading.live_control_sessions", manager)
 
     result = await live_trading_service.submit_orders(
         [
@@ -733,6 +836,8 @@ async def test_live_submit_two_stage_waits_for_sell_sync_before_buy(monkeypatch)
         mode="live",
         confirm=True,
         trigger_source="manual",
+        run_id=reservation_id,
+        live_authorization=authorization,
     )
 
     assert result["two_stage"] is True
@@ -902,6 +1007,17 @@ async def test_live_mode_guardrails_block_runner_and_order_submit(monkeypatch, t
     monkeypatch.setattr("app.services.live_trading.qmt_trading_service.status", fake_qmt_status)
     monkeypatch.setattr(settings, "live_trading_enable_order_submit", False)
     monkeypatch.setattr(settings, "live_trading_auto_execute_enabled", True)
+    manager, authorization, reservation_id = _live_authorization(
+        fake_profile.strategy_id,
+        fake_profile.profile_key,
+    )
+    await _seed_live_reservation(
+        strategy_id=fake_profile.strategy_id,
+        profile_key=fake_profile.profile_key,
+        reservation_id=reservation_id,
+        order_count=1,
+    )
+    monkeypatch.setattr("app.services.live_trading.live_control_sessions", manager)
 
     submit_resp = await live_trading_service.submit_orders(
         [
@@ -920,9 +1036,11 @@ async def test_live_mode_guardrails_block_runner_and_order_submit(monkeypatch, t
         mode="live",
         confirm=True,
         trigger_source="manual",
+        run_id=reservation_id,
+        live_authorization=authorization,
     )
 
-    with pytest.raises(ValueError, match="LIVE_TRADING_ENABLE_ORDER_SUBMIT=false"):
+    with pytest.raises(PermissionError, match="disabled"):
         await live_trading_service.start_runner(
             profile_key=fake_profile.profile_key,
             mode="live",

@@ -46,7 +46,7 @@ BACKEND_PORT="${GAOSHOU_BACKEND_PORT:-${BACKEND_PORT:-8800}}"
 SYNC_HOST="${GAOSHOU_SYNC_HOST:-127.0.0.1}"
 SYNC_PORT="${GAOSHOU_SYNC_PORT:-${SYNC_SERVICE_PORT:-${SYNC_PORT:-8810}}}"
 FRONTEND_HOST="${GAOSHOU_FRONTEND_HOST:-127.0.0.1}"
-FRONTEND_PORT="${GAOSHOU_FRONTEND_PORT:-${FRONTEND_PORT:-3500}}"
+FRONTEND_PORT="${GAOSHOU_FRONTEND_PORT:-${FRONTEND_PORT:-3511}}"
 MARKET_DATA_BACKEND="${MARKET_DATA_BACKEND:-parquet}"
 REDIS_PORT="${REDIS_PORT:-16379}"
 LIVE_TRADING_ENABLE_ORDER_SUBMIT="${LIVE_TRADING_ENABLE_ORDER_SUBMIT:-false}"
@@ -90,6 +90,22 @@ assert_ports_free() {
     fi
   done
   [[ "$busy" == "0" ]]
+}
+
+resolve_frontend_port() {
+  local preferred="$FRONTEND_PORT"
+  local candidate
+  for candidate in "$preferred" $(seq 3511 3599); do
+    if [[ -z "$(pids_for_port "$candidate")" ]]; then
+      FRONTEND_PORT="$candidate"
+      FRONTEND_URL="http://$FRONTEND_HOST:$FRONTEND_PORT"
+      mkdir -p "$ROOT/.runtime"
+      printf '%s\n' "$FRONTEND_PORT" >"$ROOT/.runtime/frontend-port.txt"
+      [[ "$candidate" == "$preferred" ]] || echo "      WARN: frontend port $preferred is unavailable; using $candidate."
+      return 0
+    fi
+  done
+  return 1
 }
 
 wait_http_ok() {
@@ -185,6 +201,11 @@ mkdir -p "$LOG_DIR"
 echo "[1/8] Stopping stale project processes on configured ports..."
 stop_project_processes
 sleep 1
+if ! resolve_frontend_port; then
+  echo "      ERROR: no usable frontend port in 3511..3599"
+  pause_if_needed "${1:-}"
+  exit 1
+fi
 if ! assert_ports_free; then
   pause_if_needed "${1:-}"
   exit 1

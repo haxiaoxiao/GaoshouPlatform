@@ -10,6 +10,7 @@ from fastapi import FastAPI
 
 from app.services.task_queue import (
     MARKET_RADAR_QUEUE_NAME,
+    SYNC_QUEUE_NAME,
     QueuedTask,
     get_task_queue,
     reset_task_queues,
@@ -153,14 +154,12 @@ async def test_api_triggered_sync_cannot_overlap_radar(monkeypatch):
             await asyncio.wait_for(radar_started.wait(), timeout=1)
             await asyncio.gather(
                 get_task_queue("sync").join(),
-                get_task_queue("data_sync").join(),
                 radar_queue.join(),
             )
     finally:
         release_sync.set()
         await asyncio.gather(
             get_task_queue("sync").join(),
-            get_task_queue("data_sync").join(),
             get_task_queue(MARKET_RADAR_QUEUE_NAME).join(),
         )
         sync_app.dependency_overrides.clear()
@@ -680,7 +679,7 @@ async def test_sync_lifespan_owns_radar_runtime_and_stops_it(monkeypatch):
         await runtime.notify_sync_completed("recovered-run", "kline_daily")
 
     async def shutdown_sync_queues(names):
-        assert names == ("sync", "data_sync", "sentiment_sync")
+        assert names == (SYNC_QUEUE_NAME, "data_sync", "sentiment_sync")
         assert runtime.started is True
         calls.append("sync_queues_stop")
         calls.append("sync_completion_notified")
@@ -743,7 +742,7 @@ async def test_sync_lifespan_awaits_sync_queue_worker_shutdown(monkeypatch):
     reset_task_queues()
 
     async with sync_main.lifespan(FastAPI()):
-        queue = get_task_queue("sync")
+        queue = get_task_queue(SYNC_QUEUE_NAME)
         await queue.submit(QueuedTask("sync-idle", "sync idle", noop_async))
         await asyncio.wait_for(queue.join(), timeout=1)
         worker = queue._worker

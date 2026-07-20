@@ -1,11 +1,11 @@
 """事件类型与事件数据结构"""
 from dataclasses import dataclass, field
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 
-class EventType(str, Enum):
+class EventType(StrEnum):
     """回测事件类型 — 按生命周期排序"""
 
     # 引擎生命周期

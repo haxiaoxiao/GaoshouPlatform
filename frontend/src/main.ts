@@ -1,6 +1,5 @@
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
-import { VueQueryPlugin, QueryClient } from '@tanstack/vue-query'
 import { ElLoading, ElMessage } from 'element-plus'
 import 'element-plus/theme-chalk/el-message.css'
 import 'element-plus/theme-chalk/el-message-box.css'
@@ -12,21 +11,8 @@ import router from './router'
 
 const app = createApp(App)
 setRequestErrorNotifier(message => ElMessage.error(message))
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      staleTime: 10_000,
-      refetchOnWindowFocus: false,
-      retry: 1,
-    },
-    mutations: {
-      retry: 0,
-    },
-  },
-})
 
 app.use(createPinia())
-app.use(VueQueryPlugin, { queryClient })
 app.use(router)
 app.use(ElLoading)
 

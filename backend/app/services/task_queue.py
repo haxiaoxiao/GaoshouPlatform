@@ -11,6 +11,7 @@ from typing import Any
 from loguru import logger
 
 TaskHandler = Callable[[], Awaitable[None]]
+SYNC_QUEUE_NAME = "sync"
 MARKET_RADAR_QUEUE_NAME = "market_radar"
 MARKET_DATA_WRITE_GROUP = "market_data_writes"
 

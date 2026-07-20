@@ -441,7 +441,7 @@ export function getPlatformReadiness(force = false): Promise<PlatformReadiness> 
     return Promise.resolve(readinessCache)
   }
   if (!force && readinessRequest) return readinessRequest
-  readinessRequest = request.get<PlatformReadiness>('/v1/readiness')
+  readinessRequest = request.get<PlatformReadiness>('/v1/readiness', { notifyError: false })
     .then(payload => {
       readinessCache = payload
       readinessCacheUntil = Date.now() + 30_000
