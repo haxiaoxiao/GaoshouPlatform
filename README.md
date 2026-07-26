@@ -400,7 +400,9 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 v3 继续验证市场残差、温和日内位移、波动带和残差趋势/跳跃等正交状态。为避开后段数据缺口，冻结 2024-07-19 至 2026-03-13 的 398 个完整共同交易日，股票与固定基准各 191,040 bars，精确涨跌停覆盖 796/796 个股票日。六个独立候选中仅 `0 <= sign(z) * session_return < 100bp` 为正：74 对、三折合计 `+1,038.90` 元；冻结同一信号集后，5bp/边压力仅 `+105.37` 元，10bp/边转为 `-1,450.49` 元。603629.SH 仍为 `-519.12` 元且样本低于 80 对门槛，因此同样为 `research_only`，不修改运行默认值。产物位于 `.runtime/intraday-t-v3-research/2024-07-19_2026-03-13/`。
 
-后续源头研究不支持继续堆 RSI、MACD、KDJ 等同源变换。v4 将先把机制验证扩展到固定 24 股横截面，再预注册方向位移复现、因果量价交互和个股/指数共跳三项检验；Amihud 价格冲击只作流动性与容量分层。所有截至 2026-07-20 的历史数据均已污染，正式证据只能来自代码和股票清单冻结后的 120 个新交易日。协议见 `docs/superpowers/specs/2026-07-20-intraday-t-v4-forward-protocol.md`。
+v4 按最终范围继续只研究 `603629.SH` 和 `688008.SH`，没有扩展股票池，也没有继续堆 RSI、MACD、KDJ 等同源变换。398 个完整交易日上的四个独立变体均为 `research_only`：量价在线预测在名义/5bp/10bp 下分别为 `+1,181.44/+754.67/+43.40` 元、仅 29 对，并且 603629.SH 仍为 `-147.52` 元；独立跳跃否决和 5 分钟 Amihud 冲击门控在 10bp 下分别为 `-1,292.87/-1,281.84` 元。48 个运行全部恢复，2/5/10bp 信号账本一致，2.5% 成交量参与率另行通过安全审计。历史数据已经参与假设形成，结果不是样本外证据，不修改页面、模拟盘或实盘默认参数。详见 `docs/superpowers/specs/2026-07-20-intraday-t-v4-two-stock-research.md`。
+
+v5 用全市场 canonical JQ 分钟线和精确涨跌停价构造 10:00 点时情绪，并将涨跌停广度、昨日连板队列的触板/在板晋级率及复合情绪分别叠加到 v4 量价候选。连板晋级门控在名义/5bp/10bp 下为 `+1,799.38/+1,511.68/+1,032.18` 元、19 对，复合情绪为 `+1,485.95/+1,150.33/+590.95` 元、23 对；涨跌停广度没有过滤交易。最强候选的 603629.SH 仍为 `-67.16` 元，且样本过少、历史已参与假设形成，因此仍为 `research_only`，不修改页面、模拟盘或实盘。详见 `docs/superpowers/specs/2026-07-20-intraday-t-v5-market-sentiment-results.md`。
 
 模拟盘可读取 QMT 账户只读快照或手工底仓，状态与模拟成交写入 `intraday_t_sessions`、`intraday_t_trades`。Runner 默认每 30 秒评估并按会话串行化；会话可跨交易日延续，跨日时清除前日待成交信号、重置当日额度，并在新开仓前优先恢复未平配对。进程重启后会话可恢复，但 Runner 需手工重启。该模块不注册真实委托提交接口；止损阈值触发时优先恢复，上午 `11:29`、下午 `14:49` 生成底仓恢复信号，默认日内已实现亏损达到 `45bp` 后锁定新开仓，持仓未恢复时不能停止会话。
 
@@ -420,6 +422,19 @@ cd E:\Projects\GaoshouPlatform-prod\backend
   --start-date 2024-07-19 --end-date 2026-03-13 `
   --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
   --output-dir ..\.runtime\intraday-t-v3-research\2024-07-19_2026-03-13
+
+# v4 两股微观结构门控研究（只读，不修改运行参数）
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v4 `
+  --start-date 2024-07-19 --end-date 2026-03-13 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --output-dir ..\.runtime\intraday-t-v4-research\2024-07-19_2026-03-13
+
+# v5 两股大盘情绪增量研究（只读，不修改运行参数）
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v5 `
+  --start-date 2024-07-19 --end-date 2026-03-13 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --parquet-root E:\Projects\data\BaiduSyncdisk\parquet `
+  --output-dir ..\.runtime\intraday-t-v5-sentiment-research\2024-07-19_2026-03-13
 ```
 
 ---

@@ -8,9 +8,12 @@ from typing import Any
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from loguru import logger
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 import app.services.sync_service as sync_service_module
+from app.core.scheduler import get_scheduler, reload_scheduler_tasks
+from app.db.models.sync import SyncTask
 from app.db.sqlite import get_async_session
 from app.engines.qmt_gateway import qmt_gateway
 from app.services.cache_invalidation import invalidate_after_sync
@@ -26,6 +29,8 @@ from app.services.sync_service import SyncProgress, SyncService
 from app.services.task_queue import SYNC_QUEUE_NAME, QueuedTask, get_task_queue
 
 router = APIRouter()
+
+DAILY_SENTIMENT_TASK_NAME = "每日舆情增量"
 
 
 class SyncRequest(BaseModel):
@@ -45,6 +50,10 @@ class SyncRequest(BaseModel):
     min_reply: int = Field(default=20, ge=0, le=10000)
     force_refresh: bool = False
     thread_url: str | None = None
+
+
+class DailySentimentScheduleUpdate(BaseModel):
+    enabled: bool
 
 
 VALID_SYNC_TYPES = (
@@ -518,10 +527,72 @@ async def get_sync_run_status(
     return {"code": 0, "message": "success", "data": run_to_status(run)}
 
 
+async def _get_daily_sentiment_task(session: AsyncSession) -> SyncTask:
+    result = await session.execute(
+        select(SyncTask).where(SyncTask.name == DAILY_SENTIMENT_TASK_NAME).limit(1)
+    )
+    task = result.scalar_one_or_none()
+    if task is None:
+        raise HTTPException(status_code=404, detail="daily sentiment schedule not found")
+    return task
+
+
+def _daily_sentiment_schedule_payload(task: SyncTask) -> dict[str, Any]:
+    scheduler = get_scheduler()
+    return {
+        "task_id": task.id,
+        "name": task.name,
+        "enabled": bool(task.enabled),
+        "cron_expression": task.cron_expression,
+        "last_run_at": task.last_run_at.isoformat() if task.last_run_at else None,
+        "next_run_at": task.next_run_at.isoformat() if task.next_run_at else None,
+        "scheduler_job_present": scheduler.get_job(f"sync_task_{task.id}") is not None,
+    }
+
+
+@router.get("/sync/scheduler/daily-sentiment")
+async def get_daily_sentiment_schedule(
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    task = await _get_daily_sentiment_task(session)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": _daily_sentiment_schedule_payload(task),
+    }
+
+
+@router.put("/sync/scheduler/daily-sentiment")
+async def update_daily_sentiment_schedule(
+    payload: DailySentimentScheduleUpdate,
+    session: AsyncSession = Depends(get_async_session),
+) -> dict[str, Any]:
+    task = await _get_daily_sentiment_task(session)
+    task.enabled = payload.enabled
+    if not payload.enabled:
+        task.next_run_at = None
+    await session.commit()
+    try:
+        await reload_scheduler_tasks()
+    except Exception as exc:
+        logger.opt(exception=True).error(
+            "Failed to reload scheduler after daily sentiment update: {}",
+            type(exc).__name__,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail="daily sentiment scheduler reload failed",
+        ) from exc
+    await session.refresh(task)
+    return {
+        "code": 0,
+        "message": "success",
+        "data": _daily_sentiment_schedule_payload(task),
+    }
+
+
 @router.get("/sync/scheduler")
 async def get_sync_scheduler_status() -> dict[str, Any]:
-    from app.core.scheduler import get_scheduler
-
     scheduler = get_scheduler()
     jobs = [
         {

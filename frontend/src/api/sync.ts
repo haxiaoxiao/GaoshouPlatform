@@ -35,6 +35,16 @@ export interface SyncLog {
   created_at: string
 }
 
+export interface DailySentimentSchedule {
+  task_id: number
+  name: string
+  enabled: boolean
+  cron_expression: string
+  last_run_at: string | null
+  next_run_at: string | null
+  scheduler_job_present: boolean
+}
+
 export interface SyncRequest {
   sync_type:
     | 'datasync'
@@ -145,4 +155,16 @@ export const syncApi = {
 
   getLogs: (params?: SyncLogsParams) =>
     request.get<SyncLog[]>('/data/sync/logs', { params }),
+
+  getDailySentimentSchedule: () =>
+    request.get<DailySentimentSchedule>(
+      '/data/sync/scheduler/daily-sentiment',
+      { notifyError: false },
+    ),
+
+  updateDailySentimentSchedule: (enabled: boolean) =>
+    request.put<DailySentimentSchedule>(
+      '/data/sync/scheduler/daily-sentiment',
+      { enabled },
+    ),
 }

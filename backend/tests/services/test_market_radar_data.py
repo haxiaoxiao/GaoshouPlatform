@@ -18,6 +18,7 @@ from app.db.models.stock import Stock
 from app.services.market_radar_data import MarketRadarDataService
 
 NOW = datetime(2026, 7, 20, 15, 30)
+RECORDED_BEFORE_NOW = NOW - timedelta(days=1)
 
 
 class StaticCalendar:
@@ -1126,10 +1127,10 @@ async def test_sentiment_batch_uses_scores_and_analysis_without_future_leakage(t
         async with sessions() as session:
             session.add_all(
                 [
-                    SentimentPost(source="guba", source_post_id="fresh", symbol="600001.SH", title="market crash and earnings warning", content="negative demand collapse across factories", published_at=as_of - timedelta(hours=6), sentiment_score=-0.8, sentiment_label="negative", reply_count=10, like_count=5, comment_count=0),
-                    SentimentPost(source="xueqiu", source_post_id="analyzed", symbol="600001.SH", title="new product launch growth outlook", content="positive orders and expanding customer demand", published_at=as_of - timedelta(hours=2), sentiment_score=None, reply_count=0, like_count=0, comment_count=0),
-                    SentimentPost(source="guba", source_post_id="future", symbol="600001.SH", published_at=as_of + timedelta(minutes=1), sentiment_score=1.0, reply_count=100, like_count=100, comment_count=100),
-                    SentimentPost(source="guba", source_post_id="empty", symbol="600001.SH", published_at=as_of - timedelta(hours=1), sentiment_score=None, reply_count=0, like_count=0, comment_count=0),
+                    SentimentPost(source="guba", source_post_id="fresh", symbol="600001.SH", title="market crash and earnings warning", content="negative demand collapse across factories", published_at=as_of - timedelta(hours=6), sentiment_score=-0.8, sentiment_label="negative", reply_count=10, like_count=5, comment_count=0, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
+                    SentimentPost(source="xueqiu", source_post_id="analyzed", symbol="600001.SH", title="new product launch growth outlook", content="positive orders and expanding customer demand", published_at=as_of - timedelta(hours=2), sentiment_score=None, reply_count=0, like_count=0, comment_count=0, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
+                    SentimentPost(source="guba", source_post_id="future", symbol="600001.SH", published_at=as_of + timedelta(minutes=1), sentiment_score=1.0, reply_count=100, like_count=100, comment_count=100, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
+                    SentimentPost(source="guba", source_post_id="empty", symbol="600001.SH", published_at=as_of - timedelta(hours=1), sentiment_score=None, reply_count=0, like_count=0, comment_count=0, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
                     SentimentAnalysis(source="xueqiu", source_item_id="analyzed", symbol="600001.SH", model_version="model-v2", score=0.4, label="positive", confidence=0.8, analyzed_at=as_of - timedelta(hours=1)),
                 ]
             )
@@ -1157,7 +1158,7 @@ async def test_sentiment_freshness_uses_six_and_twenty_four_hour_boundaries_and_
     engine, sessions = await _database(tmp_path, [_stock("600001.SH")])
     try:
         async with sessions() as session:
-            session.add(SentimentPost(source="guba", source_post_id="edge", symbol="600001.SH", published_at=NOW - timedelta(hours=7), sentiment_score=-0.2, reply_count=0, like_count=0, comment_count=0))
+            session.add(SentimentPost(source="guba", source_post_id="edge", symbol="600001.SH", published_at=NOW - timedelta(hours=7), sentiment_score=-0.2, reply_count=0, like_count=0, comment_count=0, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW))
             await session.commit()
             service = MarketRadarDataService(session, now=lambda: NOW)
             intraday = await service.load_sentiment_inputs(as_of=NOW, mode="intraday")
@@ -1180,8 +1181,8 @@ async def test_sentiment_current_window_is_not_diluted_by_121_day_history(tmp_pa
         async with sessions() as session:
             session.add_all(
                 [
-                    SentimentPost(source="guba", source_post_id="current", symbol="600001.SH", published_at=NOW - timedelta(hours=2), sentiment_score=-0.5, reply_count=0, like_count=0, comment_count=0),
-                    SentimentPost(source="guba", source_post_id="history", symbol="600001.SH", published_at=NOW - timedelta(days=30), sentiment_score=1.0, reply_count=10000, like_count=10000, comment_count=10000),
+                    SentimentPost(source="guba", source_post_id="current", symbol="600001.SH", published_at=NOW - timedelta(hours=2), sentiment_score=-0.5, reply_count=0, like_count=0, comment_count=0, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
+                    SentimentPost(source="guba", source_post_id="history", symbol="600001.SH", published_at=NOW - timedelta(days=30), sentiment_score=1.0, reply_count=10000, like_count=10000, comment_count=10000, created_at=RECORDED_BEFORE_NOW, updated_at=RECORDED_BEFORE_NOW),
                 ]
             )
             await session.commit()
@@ -1217,6 +1218,8 @@ async def test_sentiment_uses_weighted_dispersion_and_text_event_clusters(tmp_pa
                         reply_count=9,
                         like_count=0,
                         comment_count=0,
+                        created_at=RECORDED_BEFORE_NOW,
+                        updated_at=RECORDED_BEFORE_NOW,
                     ),
                     SentimentPost(
                         source="guba",
@@ -1229,6 +1232,8 @@ async def test_sentiment_uses_weighted_dispersion_and_text_event_clusters(tmp_pa
                         reply_count=0,
                         like_count=0,
                         comment_count=0,
+                        created_at=RECORDED_BEFORE_NOW,
+                        updated_at=RECORDED_BEFORE_NOW,
                     ),
                 ]
             )
@@ -1271,6 +1276,8 @@ async def test_sentiment_cluster_intensity_uses_only_the_hundred_cluster_candida
                         reply_count=0,
                         like_count=0,
                         comment_count=0,
+                        created_at=RECORDED_BEFORE_NOW,
+                        updated_at=RECORDED_BEFORE_NOW,
                     )
                     for index in range(120)
                 ]
