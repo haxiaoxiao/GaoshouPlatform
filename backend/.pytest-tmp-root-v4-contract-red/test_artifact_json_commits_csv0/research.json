@@ -1,0 +1,25 @@
+{
+  "data_quality": {
+    "implementation_fingerprint": "4c8b03166c8232a12b68dc39b96f30b4f6c52b02df370f0052c3988349b512f9"
+  },
+  "runs": [
+    {
+      "fold": "fold_01",
+      "sample": "retrospective_test",
+      "variant": "directional_move_0_100",
+      "scenario": "nominal",
+      "period_start": "2025-01-01",
+      "period_end": "2025-01-02",
+      "trade_days": 2,
+      "bars": 960,
+      "metrics": {
+        "net_t_pnl": -1.0
+      }
+    }
+  ],
+  "artifact_integrity": {
+    "commit_marker": "research.json",
+    "runs_csv_sha256": "d1dfbf00b7b1fe24b31bc574ed5539728aaaa265fc7d85f2f498506b63442a19",
+    "signal_ledger_csv_sha256": "806bf1004573aff222d54d1abdac08a8d6e339506e9525b4cc4d7713797368a3"
+  }
+}

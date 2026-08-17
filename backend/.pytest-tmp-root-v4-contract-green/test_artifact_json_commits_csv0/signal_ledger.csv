@@ -1,0 +1,2 @@
+fold,variant,scenario,pair_id,symbol,direction,leg,signal_at,fill_at,quantity,reason
+fold_01,directional_move_0_100,nominal,pair-1,603629.SH,POSITIVE,entry,2026-07-14T10:00:00,2026-07-14T10:01:00,500,positive_t_entry

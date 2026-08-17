@@ -1,0 +1,2 @@
+kind,fold,sample,variant,scenario,period_start,period_end,bars,trade_days,completed_pairs,net_t_pnl,restoration_failures
+ablation,fold_01,test,realized_vol_gate,nominal,2024-01-02,2024-01-12,100,5,4,123.4,0

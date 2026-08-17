@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "coverage": {
+    "bars": 200,
+    "trade_days": 10
+  },
+  "recommendation": {
+    "decision": "do_not_promote",
+    "auto_promoted": false
+  },
+  "runs": [
+    {
+      "kind": "ablation",
+      "fold": "fold_01",
+      "sample": "test",
+      "variant": "realized_vol_gate",
+      "scenario": "nominal",
+      "period_start": "2024-01-02",
+      "period_end": "2024-01-12",
+      "bars": 100,
+      "trade_days": 5,
+      "metrics": {
+        "net_t_pnl": 123.4,
+        "completed_pairs": 4,
+        "restoration_failures": 0
+      }
+    }
+  ]
+}

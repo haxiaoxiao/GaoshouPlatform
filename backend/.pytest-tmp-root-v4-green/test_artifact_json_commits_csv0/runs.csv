@@ -1,0 +1,2 @@
+fold,sample,variant,scenario,period_start,period_end,trade_days,bars,signal_ledger_sha256,net_t_pnl
+fold_01,retrospective_test,directional_move_0_100,nominal,2025-01-01,2025-01-02,2,960,,-1.0

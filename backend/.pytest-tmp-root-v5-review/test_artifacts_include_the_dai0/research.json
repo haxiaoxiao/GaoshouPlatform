@@ -1,0 +1,27 @@
+{
+  "runs": [
+    {
+      "fold": "fold_1",
+      "sample": "retrospective_test",
+      "variant": "directional_move_0_100",
+      "scenario": "nominal",
+      "period_start": "2025-01-01",
+      "period_end": "2025-01-31",
+      "trade_days": 20,
+      "bars": 9600,
+      "signal_ledger_sha256": "abc",
+      "metrics": {
+        "net_t_pnl": 1.0
+      }
+    }
+  ],
+  "recommendation": {
+    "decision": "research_only"
+  },
+  "artifact_integrity": {
+    "commit_marker": "research.json",
+    "runs_csv_sha256": "e6061fde052e2fae4bdd2fdfb2335db0fb7e44f9a8fb6fae2cba889853efb6b8",
+    "signal_ledger_csv_sha256": "d109eb0ec95ae1fd7ac5241c8048e74dc32665cbc4d7da91dd1225e5821e898f",
+    "market_sentiment_daily_csv_sha256": "a56e6d7d492eb30d313242871beaa0d8f4c6aeace94906d8ba976b3d7f73acac"
+  }
+}

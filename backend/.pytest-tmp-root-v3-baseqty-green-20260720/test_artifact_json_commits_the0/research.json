@@ -1,0 +1,21 @@
+{
+  "runs": [
+    {
+      "fold": "fold_01",
+      "sample": "retrospective_test",
+      "variant": "baseline_time_window",
+      "scenario": "nominal",
+      "period_start": "2025-01-01",
+      "period_end": "2025-01-02",
+      "trade_days": 2,
+      "bars": 960,
+      "metrics": {
+        "net_t_pnl": -1.0
+      }
+    }
+  ],
+  "artifact_integrity": {
+    "commit_marker": "research.json",
+    "runs_csv_sha256": "9de0d8e1a6efc0f158edca8dce1d49a3e482e35229b6581458140884f953965a"
+  }
+}
