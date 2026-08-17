@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import hashlib
 import html
 import json
 import math
+import multiprocessing
 import os
 import re
 import subprocess
@@ -17,10 +19,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterable
 from urllib.parse import parse_qs, urlencode, urljoin, urlparse
 
+import httpx
 import requests
+from bs4 import BeautifulSoup, ParserRejectedMarkup
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.gateway import PinnedHttpDestination, resolve_public_http_destination
 from app.core.config import settings
 from app.db.models.sentiment import (
     SentimentAnalysis,
@@ -87,6 +92,14 @@ LEGACY_SOURCE_NAMES = {
 SUPPORTED_SOURCES = set(SOURCE_ALIASES)
 SentimentProgressCallback = Callable[[dict[str, Any]], None]
 SENTIMENT_MODEL_VERSION = "finance_lexicon_v2"
+_FORUM_URL_MAX_REDIRECTS = 3
+_FORUM_URL_TIMEOUT_SECONDS = 15.0
+# Connect/read calls have short per-operation limits; the full arbitrary-URL flow is
+# also isolated in a killable process so DNS and HTML parsing obey the wall-clock deadline.
+_FORUM_URL_IO_TIMEOUT_SECONDS = 1.0
+_FORUM_URL_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+_FORUM_URL_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
+_FORUM_URL_HTML_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 SOURCE_SENTIMENT_WEIGHTS = {
     "xueqiu_spyder": 1.0,
     "eastmoney_guba": 0.8,
@@ -257,6 +270,15 @@ class NgaIngestStats:
     analyzed_posts: int = 0
     matched_posts: int = 0
     thread_upserted: int = 0
+
+
+@dataclass(frozen=True)
+class _ForumHtmlDocument:
+    content: bytes
+    declared_encoding: str | None
+    logical_url: str
+    deadline: float | None = None
+    clock: Callable[[], float] = time_module.monotonic
 
 
 def normalize_sentiment_source(source: str) -> str:
@@ -1452,6 +1474,14 @@ def _xueqiu_debug_port() -> int:
         return 9222
 
 
+class XueqiuCrawlBlockedError(RuntimeError):
+    def __init__(self, *, reason: str, status_code: int | None = None) -> None:
+        self.reason = reason
+        self.status_code = status_code
+        suffix = f" (HTTP {status_code})" if status_code is not None else ""
+        super().__init__(f"Xueqiu request blocked: {reason}{suffix}")
+
+
 class _BuiltinXueqiuCrawler:
     def __init__(self):
         self._playwright = None
@@ -1513,21 +1543,31 @@ class _BuiltinXueqiuCrawler:
                 const resp = await fetch(url, {credentials: 'include'});
                 const ct = resp.headers.get('content-type') || '';
                 const text = await resp.text();
+                if (resp.status === 405) {
+                    return {ok: false, error: 'http_405', status: resp.status};
+                }
                 if (!ct.includes('json')) {
-                    return {ok: false, error: 'non_json_response', text: text.slice(0, 240)};
+                    return {ok: false, error: 'non_json_response', status: resp.status};
                 }
                 try {
                     const payload = JSON.parse(text);
-                    return {ok: true, data: payload};
+                    return {ok: true, data: payload, status: resp.status};
                 } catch (error) {
-                    return {ok: false, error: String(error), text: text.slice(0, 240)};
+                    return {ok: false, error: 'invalid_json_response', status: resp.status};
                 }
             }""",
             {"symbol": symbol, "sort": sort, "page": page, "count": count},
         )
         if not isinstance(result, dict) or not result.get("ok"):
-            snippet = result.get("text") if isinstance(result, dict) else None
-            raise RuntimeError(f"Xueqiu stock posts request failed: {result!r} snippet={snippet!r}")
+            reason = str(result.get("error") or "invalid_response") if isinstance(result, dict) else "invalid_response"
+            raw_status = result.get("status") if isinstance(result, dict) else None
+            try:
+                status_code = int(raw_status) if raw_status is not None else None
+            except (TypeError, ValueError):
+                status_code = None
+            if reason in {"http_405", "non_json_response", "invalid_json_response"}:
+                raise XueqiuCrawlBlockedError(reason=reason, status_code=status_code)
+            raise RuntimeError(f"Xueqiu stock posts request failed: {reason}")
         payload = result.get("data") or {}
         return list(payload.get("list") or [])
 
@@ -4193,13 +4233,457 @@ def _fetch_nga_thread_posts(
     return [posts_by_floor[floor] for floor in sorted(posts_by_floor)]
 
 
+def _forum_logical_hostname(url: str) -> str:
+    try:
+        hostname = urlparse(url).hostname
+    except ValueError:
+        hostname = None
+    if not hostname:
+        return "<invalid-host>"
+    safe_hostname = "".join(
+        character
+        for character in hostname
+        if character.isalnum() or character in {".", "-", ":", "_"}
+    )
+    return safe_hostname[:253] or "<invalid-host>"
+
+
+def _resolve_public_forum_destination(url: str) -> PinnedHttpDestination:
+    hostname = _forum_logical_hostname(url)
+    try:
+        return resolve_public_http_destination(url)
+    except ValueError:
+        raise ValueError(
+            f"forum URL resolve failed for host {hostname}: destination must be public HTTP(S)"
+        ) from None
+
+
+def _forum_remaining_budget(
+    deadline: float,
+    clock: Callable[[], float],
+    *,
+    hostname: str,
+    phase: str,
+) -> float:
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise RuntimeError(
+            "forum URL operation deadline exceeded "
+            f"during {phase} for host {hostname}; synchronous connect/read I/O "
+            f"uses at most {_FORUM_URL_IO_TIMEOUT_SECONDS:.1f}s per operation"
+        )
+    return remaining
+
+
+def _extract_forum_response_cookies(
+    cookies: httpx.Cookies,
+    response: httpx.Response,
+    logical_request: httpx.Request,
+) -> None:
+    logical_response = httpx.Response(
+        response.status_code,
+        headers=response.headers,
+        request=logical_request,
+    )
+    cookies.extract_cookies(logical_response)
+
+
+def _forum_response_encoding(response: httpx.Response, hostname: str) -> str | None:
+    content_encodings = response.headers.get_list("Content-Encoding", split_commas=True)
+    if any(
+        encoding.strip().casefold() not in {"", "identity"}
+        for encoding in content_encodings
+    ):
+        raise RuntimeError(
+            f"forum URL read failed for host {hostname}: unsupported Content-Encoding"
+        )
+
+    content_type = response.headers.get("Content-Type", "")
+    media_type = content_type.partition(";")[0].strip().casefold()
+    if media_type not in _FORUM_URL_HTML_CONTENT_TYPES:
+        raise RuntimeError(
+            f"forum URL read failed for host {hostname}: response requires an HTML Content-Type"
+        )
+
+    declared_encoding = response.charset_encoding
+    if declared_encoding:
+        try:
+            codecs.lookup(declared_encoding)
+        except LookupError:
+            raise RuntimeError(
+                f"forum URL decode failed for host {hostname}: unsupported response charset"
+            ) from None
+    return declared_encoding
+
+
+def _fetch_public_forum_html(
+    url: str,
+    *,
+    max_redirects: int = _FORUM_URL_MAX_REDIRECTS,
+    timeout_seconds: float = _FORUM_URL_TIMEOUT_SECONDS,
+    max_response_bytes: int = _FORUM_URL_MAX_RESPONSE_BYTES,
+    transport: httpx.BaseTransport | None = None,
+    clock: Callable[[], float] | None = None,
+) -> _ForumHtmlDocument:
+    if max_redirects < 0:
+        raise ValueError("max_redirects must be non-negative")
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    if max_response_bytes <= 0:
+        raise ValueError("max_response_bytes must be positive")
+
+    clock = clock or time_module.monotonic
+    deadline = clock() + timeout_seconds
+    current_url = url
+    current_hostname = _forum_logical_hostname(current_url)
+    _forum_remaining_budget(
+        deadline,
+        clock,
+        hostname=current_hostname,
+        phase="resolve",
+    )
+    destination = _resolve_public_forum_destination(current_url)
+    _forum_remaining_budget(
+        deadline,
+        clock,
+        hostname=current_hostname,
+        phase="resolve",
+    )
+    redirects_followed = 0
+    cookies = httpx.Cookies()
+    while True:
+        remaining = _forum_remaining_budget(
+            deadline,
+            clock,
+            hostname=current_hostname,
+            phase="connect",
+        )
+        io_timeout = min(remaining, _FORUM_URL_IO_TIMEOUT_SECONDS)
+        with httpx.Client(
+            transport=transport,
+            timeout=httpx.Timeout(io_timeout),
+            follow_redirects=False,
+            trust_env=False,
+        ) as client:
+            logical_request = httpx.Request("GET", current_url)
+            cookies.set_cookie_header(logical_request)
+            request_headers = {
+                "Accept-Encoding": "identity",
+                "Host": destination.host_header,
+                "User-Agent": _nga_headers()["User-Agent"],
+            }
+            logical_cookie = logical_request.headers.get("Cookie")
+            if logical_cookie:
+                request_headers["Cookie"] = logical_cookie
+            request = client.build_request(
+                "GET",
+                destination.url,
+                headers=request_headers,
+            )
+            request.extensions["sni_hostname"] = destination.sni_hostname
+            send_remaining = _forum_remaining_budget(
+                deadline,
+                clock,
+                hostname=current_hostname,
+                phase="connect",
+            )
+            request.extensions["timeout"] = httpx.Timeout(
+                min(send_remaining, _FORUM_URL_IO_TIMEOUT_SECONDS)
+            ).as_dict()
+            try:
+                response = client.send(request, stream=True)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(
+                    f"forum URL connect failed for host {current_hostname}: {type(exc).__name__}"
+                ) from None
+            try:
+                _forum_remaining_budget(
+                    deadline,
+                    clock,
+                    hostname=current_hostname,
+                    phase="connect",
+                )
+                _extract_forum_response_cookies(cookies, response, logical_request)
+                _forum_remaining_budget(
+                    deadline,
+                    clock,
+                    hostname=current_hostname,
+                    phase="read",
+                )
+                if response.status_code in _FORUM_URL_REDIRECT_STATUSES:
+                    location = response.headers.get("Location", "").strip()
+                    if not location:
+                        raise RuntimeError(
+                            f"forum URL redirect failed for host {current_hostname}: "
+                            f"HTTP {response.status_code} omitted Location"
+                        )
+                    if redirects_followed >= max_redirects:
+                        raise RuntimeError(
+                            f"forum URL redirect limit of {max_redirects} exceeded "
+                            f"for host {current_hostname}"
+                        )
+                    try:
+                        next_url = urljoin(current_url, location)
+                    except ValueError:
+                        raise ValueError(
+                            "forum URL resolve failed for host <invalid-host>: "
+                            "destination must be public HTTP(S)"
+                        ) from None
+                    next_hostname = _forum_logical_hostname(next_url)
+                    _forum_remaining_budget(
+                        deadline,
+                        clock,
+                        hostname=next_hostname,
+                        phase="resolve",
+                    )
+                    destination = _resolve_public_forum_destination(next_url)
+                    _forum_remaining_budget(
+                        deadline,
+                        clock,
+                        hostname=next_hostname,
+                        phase="resolve",
+                    )
+                    current_url = next_url
+                    current_hostname = next_hostname
+                    redirects_followed += 1
+                elif 300 <= response.status_code < 400:
+                    raise RuntimeError(
+                        f"forum URL redirect failed for host {current_hostname}: "
+                        f"unsupported HTTP {response.status_code}"
+                    )
+                else:
+                    if response.status_code < 200 or response.status_code >= 300:
+                        raise RuntimeError(
+                            f"forum URL HTTP failed for host {current_hostname}: "
+                            f"status {response.status_code}"
+                        )
+                    declared_encoding = _forum_response_encoding(
+                        response,
+                        current_hostname,
+                    )
+                    _forum_remaining_budget(
+                        deadline,
+                        clock,
+                        hostname=current_hostname,
+                        phase="read",
+                    )
+                    content_length = response.headers.get("Content-Length", "")
+                    if content_length.isdecimal() and int(content_length) > max_response_bytes:
+                        raise RuntimeError(
+                            f"forum URL response body exceeds {max_response_bytes} bytes"
+                        )
+                    content = bytearray()
+                    try:
+                        raw_chunks = response.iter_raw()
+                        for chunk in raw_chunks:
+                            _forum_remaining_budget(
+                                deadline,
+                                clock,
+                                hostname=current_hostname,
+                                phase="read",
+                            )
+                            if len(content) + len(chunk) > max_response_bytes:
+                                raise RuntimeError(
+                                    f"forum URL response body exceeds {max_response_bytes} bytes"
+                                )
+                            content.extend(chunk)
+                    except httpx.HTTPError as exc:
+                        raise RuntimeError(
+                            f"forum URL read failed for host {current_hostname}: "
+                            f"{type(exc).__name__}"
+                        ) from None
+                    _forum_remaining_budget(
+                        deadline,
+                        clock,
+                        hostname=current_hostname,
+                        phase="read",
+                    )
+                    return _ForumHtmlDocument(
+                        content=bytes(content),
+                        declared_encoding=declared_encoding,
+                        logical_url=current_url,
+                        deadline=deadline,
+                        clock=clock,
+                    )
+            finally:
+                response.close()
+
+
+def _clean_forum_visible_text(value: str | None) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _inline_style_hides_element(style: str | None) -> bool:
+    for declaration in str(style or "").split(";"):
+        property_name, separator, value = declaration.partition(":")
+        if not separator:
+            continue
+        property_name = property_name.strip().casefold()
+        value = value.split("!", 1)[0].strip().casefold()
+        if (property_name == "display" and value == "none") or (
+            property_name == "visibility" and value == "hidden"
+        ):
+            return True
+    return False
+
+
+def _parse_forum_visible_content(document: _ForumHtmlDocument) -> tuple[str, str]:
+    hostname = _forum_logical_hostname(document.logical_url)
+    if document.deadline is not None:
+        _forum_remaining_budget(
+            document.deadline,
+            document.clock,
+            hostname=hostname,
+            phase="decode",
+        )
+    try:
+        soup = BeautifulSoup(
+            document.content,
+            "html.parser",
+            from_encoding=document.declared_encoding,
+        )
+    except (LookupError, ParserRejectedMarkup, UnicodeError) as exc:
+        raise RuntimeError(
+            f"forum URL decode failed for host {hostname}: {type(exc).__name__}"
+        ) from None
+    if document.deadline is not None:
+        _forum_remaining_budget(
+            document.deadline,
+            document.clock,
+            hostname=hostname,
+            phase="decode",
+        )
+    always_hidden_tags = {"script", "style", "noscript", "template"}
+    for node_index, node in enumerate(list(soup.find_all(True))):
+        if document.deadline is not None and node_index % 256 == 0:
+            _forum_remaining_budget(
+                document.deadline,
+                document.clock,
+                hostname=hostname,
+                phase="decode",
+            )
+        if node.parent is None:
+            continue
+        aria_hidden = str(node.get("aria-hidden") or "").strip().casefold() == "true"
+        if (
+            node.name in always_hidden_tags
+            or node.has_attr("hidden")
+            or aria_hidden
+            or _inline_style_hides_element(node.get("style"))
+        ):
+            node.decompose()
+    title = _clean_forum_visible_text(
+        soup.title.get_text(" ", strip=True) if soup.title else ""
+    )
+    content_node = soup.select_one("article, main, .post-content, .post_content, .content")
+    if content_node is None:
+        content_node = soup.body
+    content = _clean_forum_visible_text(
+        content_node.get_text(" ", strip=True) if content_node else ""
+    )
+    if document.deadline is not None:
+        _forum_remaining_budget(
+            document.deadline,
+            document.clock,
+            hostname=hostname,
+            phase="decode",
+        )
+    return title, content
+
+
+def _forum_url_fetch_worker(connection: Any, url: str) -> None:
+    try:
+        document = _fetch_public_forum_html(url)
+        title, content = _parse_forum_visible_content(document)
+        connection.send(("ok", title, content))
+    except ValueError as exc:
+        connection.send(("value_error", str(exc), ""))
+    except RuntimeError as exc:
+        connection.send(("runtime_error", str(exc), ""))
+    except Exception as exc:
+        connection.send(("worker_error", type(exc).__name__, ""))
+    finally:
+        connection.close()
+
+
+def _stop_forum_url_process(process: Any) -> None:
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=0.5)
+    if process.is_alive() and hasattr(process, "kill"):
+        process.kill()
+        process.join(timeout=0.5)
+
+
+def _fetch_public_forum_content_isolated(
+    url: str,
+    *,
+    timeout_seconds: float = _FORUM_URL_TIMEOUT_SECONDS,
+) -> tuple[str, str]:
+    if timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive")
+    hostname = _forum_logical_hostname(url)
+    context = multiprocessing.get_context("spawn")
+    receive_connection, send_connection = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_forum_url_fetch_worker,
+        args=(send_connection, url),
+        daemon=True,
+    )
+    try:
+        try:
+            process.start()
+        except (OSError, RuntimeError):
+            raise RuntimeError(
+                f"forum URL fetch failed for host {hostname}: worker could not start"
+            ) from None
+        finally:
+            send_connection.close()
+
+        if not receive_connection.poll(timeout_seconds):
+            _stop_forum_url_process(process)
+            raise RuntimeError(
+                "forum URL operation deadline exceeded "
+                f"during fetch for host {hostname}"
+            )
+        try:
+            status, first, second = receive_connection.recv()
+        except (EOFError, OSError):
+            raise RuntimeError(
+                f"forum URL fetch failed for host {hostname}: worker exited without a result"
+            ) from None
+        process.join(timeout=0.5)
+        if status == "ok":
+            return str(first), str(second)
+        if status == "value_error":
+            raise ValueError(str(first))
+        if status == "runtime_error":
+            raise RuntimeError(str(first))
+        raise RuntimeError(
+            f"forum URL fetch failed for host {hostname}: worker {first}"
+        )
+    finally:
+        _stop_forum_url_process(process)
+        receive_connection.close()
+        try:
+            process.close()
+        except ValueError:
+            pass
+
+
 def crawl_forum_thread_url(
     url: str,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    parsed_url = urlparse(str(url or "").strip())
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
-        raise ValueError("thread URL must be an absolute HTTP(S) URL")
+    url = str(url or "").strip()
+    parsed_url = urlparse(url)
+    if (
+        parsed_url.scheme not in {"http", "https"}
+        or not parsed_url.hostname
+        or parsed_url.username is not None
+        or parsed_url.password is not None
+    ):
+        raise ValueError("thread URL must be an absolute HTTP(S) URL without credentials")
     hostname = parsed_url.hostname.lower()
     if hostname.endswith("nga.cn") or hostname.endswith("nga.178.com") or hostname.endswith("bbs.nga.cn"):
         query = parse_qs(parsed_url.query)
@@ -4253,14 +4737,7 @@ def crawl_forum_thread_url(
             "complete": True,
         }
 
-    response = requests.get(url, headers={"User-Agent": _nga_headers()["User-Agent"]}, timeout=30)
-    response.raise_for_status()
-    from bs4 import BeautifulSoup
-
-    soup = BeautifulSoup(response.text, "html.parser")
-    title = _clean_text(soup.title.get_text(" ", strip=True) if soup.title else "")
-    content_node = soup.select_one("article, main, .post-content, .post_content, .content") or soup.body
-    content = _clean_text(content_node.get_text("\n", strip=True) if content_node else "")
+    title, content = _fetch_public_forum_content_isolated(url)
     source_id = hashlib.sha256(url.encode("utf-8")).hexdigest()[:24]
     return {
         "source": "forum_url",
@@ -4276,7 +4753,10 @@ def crawl_forum_thread_url(
         "all_floors": [],
         "page_count": 1,
         "complete": False,
-        "warning": "No dedicated adapter for this domain; only the visible page body was captured.",
+        "warning": (
+            "No dedicated adapter for this domain; only parsed HTML text was captured, "
+            "and stylesheet-driven visibility is not evaluated."
+        ),
     }
 
 

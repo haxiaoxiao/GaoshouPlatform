@@ -14,7 +14,7 @@ if defined GAOSHOU_ENV_FILE (
 )
 if defined GAOSHOU_BACKEND_PORT (set "BACKEND_PORT=%GAOSHOU_BACKEND_PORT%") else (set "BACKEND_PORT=8800")
 if defined GAOSHOU_SYNC_PORT (set "SYNC_PORT=%GAOSHOU_SYNC_PORT%") else (set "SYNC_PORT=8810")
-if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3500")
+if defined GAOSHOU_FRONTEND_PORT (set "FRONTEND_PORT=%GAOSHOU_FRONTEND_PORT%") else (set "FRONTEND_PORT=3511")
 set "STOP_REDIS=0"
 set "NO_PAUSE=0"
 
@@ -46,10 +46,9 @@ echo Env file:  %ENV_FILE%
 echo Ports:     backend=%BACKEND_PORT% sync=%SYNC_PORT% frontend=%FRONTEND_PORT%
 echo.
 
-echo [1/3] Stopping backend/sync/frontend processes on configured ports...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$ports=@([int]'%BACKEND_PORT%',[int]'%SYNC_PORT%',[int]'%FRONTEND_PORT%'); $ids=@(); Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $ports -contains $_.LocalPort } | ForEach-Object { $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $_.OwningProcess) -ErrorAction SilentlyContinue; if($p -and $p.CommandLine -and ($p.CommandLine -match 'uvicorn app\.(main|sync_main):app|npm run (dev|preview)|node_modules.*vite|vite\.js')) { $ids += [int]$p.ProcessId } }; $ids | Select-Object -Unique | ForEach-Object { Write-Host ('      Killing PID ' + $_); Stop-Process -Id $_ -Force -ErrorAction SilentlyContinue }"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Sleep -Seconds 1"
+echo [1/3] Stopping backend and sync services gracefully; stopping frontend processes...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\stop-gaoshouplatform-services.ps1" -ProjectRoot "%ROOT%" -BackendPort "%BACKEND_PORT%" -SyncPort "%SYNC_PORT%" -FrontendPort "%FRONTEND_PORT%" -GracefulTimeoutSeconds 20
+if errorlevel 1 echo       WARN: shutdown helper failed; configured ports will still be verified.
 echo       OK
 
 echo [2/3] Docker service handling...
@@ -80,6 +79,7 @@ if "%PORTS_BUSY%"=="1" (
   exit /b 1
 )
 echo       Done
+echo       Backend/sync policy: graceful request, bounded wait, forced termination only as fallback.
 echo       miniQMT client is external and was left running.
 
 echo.

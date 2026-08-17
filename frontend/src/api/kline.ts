@@ -45,10 +45,20 @@ export interface KlineParams {
   period?: KlineType
   start_date?: string
   end_date?: string
+  page?: number
+  page_size?: number
+}
+
+export interface KlinePage {
+  items: KlineData[]
+  total: number
+  page: number
+  page_size: number
+  total_pages: number
 }
 
 export const klineApi = {
   // 获取K线数据
   getKlines: (params: KlineParams) =>
-    request.get<{ items: KlineData[], total: number }>('/data/klines', { params }),
+    request.get<KlinePage>('/data/klines', { params }),
 }

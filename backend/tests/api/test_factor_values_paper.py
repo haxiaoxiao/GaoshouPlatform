@@ -225,3 +225,49 @@ async def test_param_hashes_endpoint_returns_cached_hashes(monkeypatch) -> None:
     assert data[0]["params_hash"] == "abc123"
     assert captured["factor_names"] == ["paper_pb_roe_residual"]
     assert captured["kwargs"]["symbols"] == ["000001.SZ"]
+
+
+@pytest.mark.asyncio
+async def test_coverage_full_range_with_filtered_request_uses_bounded_scan(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeStore:
+        def coverage(self, factor_name, **kwargs):
+            captured["coverage"] = {"factor_name": factor_name, **kwargs}
+            return {
+                "factor_name": factor_name,
+                "total_rows": 1,
+                "symbol_count": 1,
+                "date_count": 1,
+                "min_date": "2026-01-01",
+                "max_date": "2026-01-01",
+                "symbols_sample": [],
+            }
+
+        def coverage_many(self, *args, **kwargs):
+            raise AssertionError("filtered full-range coverage must not scan the full dataset")
+
+    async def fake_resolve_symbols(*, symbols, index_symbol, start_date, end_date):
+        assert index_symbol == "399101.SZ"
+        return ["000001.SZ"]
+
+    monkeypatch.setattr(factor_values_api, "_resolve_precompute_symbols", fake_resolve_symbols)
+    monkeypatch.setattr(factor_values_api, "get_factor_value_store", lambda: FakeStore())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        resp = await client.get(
+            "/api/factor-values/coverage",
+            params={
+                "factor_name": "is_paused",
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-31",
+                "index_symbol": "399101.SZ",
+                "full_range": "true",
+            },
+        )
+
+    assert resp.status_code == 200
+    assert captured["coverage"]["start_date"].isoformat() == "2026-01-01"
+    assert captured["coverage"]["end_date"].isoformat() == "2026-01-31"
+    assert captured["coverage"]["symbols"] == ["000001.SZ"]
+    assert captured["coverage"]["params"] == {"time": "10:30"}

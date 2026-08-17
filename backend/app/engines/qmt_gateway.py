@@ -20,7 +20,7 @@ QMT_INSTRUMENT_DETAIL_TIMEOUT_SECONDS = int(os.getenv("QMT_INSTRUMENT_DETAIL_TIM
 async def _run_blocking_with_timeout(func, timeout: int | float = QMT_MINUTE_CALL_TIMEOUT_SECONDS):
     try:
         return await run_detached_blocking_with_timeout(func, timeout=timeout, thread_name_prefix="qmt-timeout")
-    except asyncio.TimeoutError as exc:
+    except TimeoutError as exc:
         raise TimeoutError(f"QMT call timed out after {timeout}s") from exc
 
 
@@ -271,7 +271,7 @@ class QMTGateway:
                     loop.run_in_executor(None, xt.download_sector_data),
                     timeout=30,
                 )
-            except (asyncio.TimeoutError, Exception) as e:
+            except Exception as e:
                 logger.warning(f"download_sector_data failed: {e}")
 
             stock_codes = await loop.run_in_executor(

@@ -1,6 +1,6 @@
 # 策略数据契约
 
-Last updated: 2026-06-10.
+Last updated: 2026-07-17.
 
 本文定义策略脚本、因子缓存和底层行情/派生缓存之间的边界，目标是避免策略绕过公共接口直接依赖内部数据集，后续维护时不会出现隐形依赖。
 
@@ -29,7 +29,7 @@ AKQuant strategy scripts / UserScript strategies
 
 ## 策略禁止直读
 
-- 不直接 `read_parquet` 或硬编码 `E:/Projects/Data/parquet`。
+- 不直接 `read_parquet` 或硬编码 `E:/Projects/data/BaiduSyncdisk/parquet`。
 - 不直接查询 DuckDB 或底层存储。
 - 不直接读取 `klines_minute_cum_timer` 这类派生行情缓存。
 - 不把 `klines_minute_timer` 当作因子来源；timer bar 只能通过 AKQuant data feed 进入撮合/事件循环。
@@ -48,14 +48,14 @@ AKQuant strategy scripts / UserScript strategies
 
 ## 新策略上线检查
 
-新增或修改策略脚本后，运行：
+新增或修改策略脚本后，至少运行现有策略与 AKQuant 契约测试：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform-prod
-.\backend\.venv\Scripts\python.exe .\factor_eval_runs\strategy_scripts\validate_strategy_contract.py .\factor_eval_runs\strategy_scripts\tech_small_cap_multi_factor_akquant.py
+cd E:\Projects\GaoshouPlatform-prod\backend
+.\.venv\Scripts\python.exe -m pytest tests\backtest\test_multi_factor_strategy.py tests\backtest\test_akquant_integration.py -q
 ```
 
-如果校验失败，应优先把底层数据读取迁移到因子预计算任务，再让策略读取 `factor_values`。只有明确、临时、可审计的例外才允许在对应行添加 `strategy-contract: allow` 注释。
+如果校验失败，应优先把底层数据读取迁移到因子预计算任务，再让策略读取 `factor_values`。不要引用仓库外或已删除的 `factor_eval_runs` 校验脚本。
 
 ## 本策略推荐口径
 

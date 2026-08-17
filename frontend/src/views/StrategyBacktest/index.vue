@@ -507,7 +507,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick, watch } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, Document, ArrowDown, Loading } from '@element-plus/icons-vue'
@@ -523,6 +523,7 @@ import {
 } from '@/api/backtest'
 import { factorApi, type Factor } from '@/api/factor'
 import { indexCatalogApi, watchlistApi, type IndexCatalogItem, type WatchlistGroup } from '@/api/data'
+import { isPollingAborted, pollUntil } from '@/utils/polling'
 import BacktestList from './BacktestList.vue'
 import RunningPanel from './RunningPanel.vue'
 import ReportOverlay from './ReportOverlay.vue'
@@ -1506,6 +1507,8 @@ const confirmCoverageBeforeRun = async () => {
   }
 }
 
+let backtestPollController: AbortController | null = null
+
 const pollBacktestTask = async (request: any, taskId: string, label = 'Backtest') => {
   btTaskId.value = taskId
   appendBtLog(`${label} task submitted (${taskId}), polling status`)
@@ -1515,62 +1518,61 @@ const pollBacktestTask = async (request: any, taskId: string, label = 'Backtest'
     optimizationLabel.value = `${label} 已提交`
     optimizationProgress.value = 0
   }
-  let terminal = false
-  while (!terminal) {
-    const statusData = await request.get(`/backtest/status/${taskId}`)
-    btProgress.value = statusData?.progress ?? 0
-    if (isOptimization) {
-      optimizationProgress.value = btProgress.value
-      optimizationLabel.value = statusData?.live?.metadata?.progress_message || `${label} 运行中`
-    }
-    if (statusData?.live) {
-      btLiveData.value = statusData.live
-      syncLiveLogs(statusData.live, btProgress.value)
-    }
+  backtestPollController?.abort()
+  const controller = new AbortController()
+  backtestPollController = controller
+  try {
+    const statusData = await pollUntil<any>({
+      request: () => request.get(`/backtest/status/${taskId}`, { notifyError: false }),
+      isTerminal: status => ['done', 'failed', 'cancelled'].includes(status?.status),
+      onValue: status => {
+        btProgress.value = status?.progress ?? 0
+        if (isOptimization) {
+          optimizationProgress.value = btProgress.value
+          optimizationLabel.value = status?.live?.metadata?.progress_message || `${label} 运行中`
+        }
+        if (status?.live) {
+          btLiveData.value = status.live
+          syncLiveLogs(status.live, btProgress.value)
+        }
+      },
+      intervalMs: 2000,
+      timeoutMs: 24 * 60 * 60 * 1000,
+      timeoutMessage: `${label} 状态等待超时，请在回测记录中查看任务结果`,
+      signal: controller.signal,
+    })
 
     if (statusData?.status === 'done') {
       const data = await request.get(`/backtest/result/${taskId}`)
-      if (data) {
-        btFullResult.value = data as BacktestResultData
-        if (Array.isArray(data.rows)) {
-          optimizationRows.value = compactOptimizationRows(data, label)
-          optimizationBacktestId.value = Number(data.backtest_id || 0) || null
-          appendBtLog(`${label} completed, ${data.count ?? data.rows.length} results`)
-        } else {
-          appendBtLog(`${label}完成`)
-          btLiveData.value = mergeResultIntoLive(data as BacktestResultData, btLiveData.value)
-        }
-        if (isOptimization) {
-          optimizationProgress.value = 1
-          optimizationLabel.value = `${label} 完成`
-          optimizationRunning.value = false
-        }
-        saveBtSettings()
+      if (!data) return
+      btFullResult.value = data as BacktestResultData
+      if (Array.isArray(data.rows)) {
+        optimizationRows.value = compactOptimizationRows(data, label)
+        optimizationBacktestId.value = Number(data.backtest_id || 0) || null
+        appendBtLog(`${label} completed, ${data.count ?? data.rows.length} results`)
+      } else {
+        appendBtLog(`${label}完成`)
+        btLiveData.value = mergeResultIntoLive(data as BacktestResultData, btLiveData.value)
       }
-      terminal = true
-    } else if (statusData?.status === 'failed') {
-      const errData = await request.get(`/backtest/result/${taskId}`)
-      btErrors.value = [errData?.error || `${label}失败`]
-      appendBtLog(`${label}失败: ${btErrors.value[0]}`)
       if (isOptimization) {
         optimizationProgress.value = 1
-        optimizationLabel.value = `${label} 失败`
+        optimizationLabel.value = `${label} 完成`
         optimizationRunning.value = false
       }
-      terminal = true
-    } else if (statusData?.status === 'cancelled') {
-      const errData = await request.get(`/backtest/result/${taskId}`).catch(() => null)
-      btErrors.value = [errData?.error || `${label}已停止`]
-      appendBtLog(`${label}已停止`)
-      if (isOptimization) {
-        optimizationProgress.value = 1
-        optimizationLabel.value = `${label} 已停止`
-        optimizationRunning.value = false
-      }
-      terminal = true
+      saveBtSettings()
     } else {
-      await new Promise(r => setTimeout(r, 2000))
+      const errData = await request.get(`/backtest/result/${taskId}`, { notifyError: false }).catch(() => null)
+      const cancelled = statusData?.status === 'cancelled'
+      btErrors.value = [errData?.error || `${label}${cancelled ? '已停止' : '失败'}`]
+      appendBtLog(cancelled ? `${label}已停止` : `${label}失败: ${btErrors.value[0]}`)
+      if (isOptimization) {
+        optimizationProgress.value = 1
+        optimizationLabel.value = `${label} ${cancelled ? '已停止' : '失败'}`
+        optimizationRunning.value = false
+      }
     }
+  } finally {
+    if (backtestPollController === controller) backtestPollController = null
   }
 }
 
@@ -1763,6 +1765,7 @@ const runBacktestTask = async () => {
 
     await pollBacktestTask(request, taskId, 'Backtest')
   } catch (e: any) {
+    if (isPollingAborted(e)) return
     btErrors.value = [e?.message || 'Backtest failed']
     appendBtLog(`Backtest failed: ${btErrors.value[0]}`)
   } finally {
@@ -1824,6 +1827,7 @@ const runOptimizationTask = async (type: 'grid' | 'walk_forward') => {
     }
     await pollBacktestTask(request, taskId, type === 'grid' ? 'Grid Search' : 'Walk-forward')
   } catch (e: any) {
+    if (isPollingAborted(e)) return
     btErrors.value = [e?.message || 'Optimization failed']
     appendBtLog(`Optimization failed: ${btErrors.value[0]}`)
     optimizationRunning.value = false
@@ -2033,6 +2037,11 @@ onMounted(async () => {
   if (queryTaskId) {
     await loadBacktestTaskResult(queryTaskId)
   }
+})
+
+onBeforeUnmount(() => {
+  backtestPollController?.abort()
+  backtestPollController = null
 })
 </script>
 

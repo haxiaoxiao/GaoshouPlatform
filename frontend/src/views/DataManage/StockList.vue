@@ -317,6 +317,8 @@ const quickRanges = [
   { label: '2年', days: 730 }
 ]
 
+let stockListRequestVersion = 0
+
 // Pagination
 const totalPages = computed(() => Math.ceil(total.value / pageSize.value))
 
@@ -341,6 +343,7 @@ const visiblePages = computed(() => {
 
 // Methods
 const loadStocks = async () => {
+  const requestVersion = ++stockListRequestVersion
   loading.value = true
   try {
     const params: Record<string, unknown> = {
@@ -352,14 +355,16 @@ const loadStocks = async () => {
     if (selectedMarket.value) params.exchange = selectedMarket.value
 
     const response = await request.get<{ items: StockInfo[]; total: number }>('/data/stocks', { params })
+    if (requestVersion !== stockListRequestVersion) return
     stockList.value = response.items || []
     total.value = response.total || 0
   } catch {
+    if (requestVersion !== stockListRequestVersion) return
     ElMessage.error('加载股票列表失败')
     stockList.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (requestVersion === stockListRequestVersion) loading.value = false
   }
 }
 

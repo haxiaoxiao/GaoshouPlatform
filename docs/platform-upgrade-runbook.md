@@ -1,5 +1,7 @@
 # Platform Upgrade Runbook
 
+Last updated: 2026-07-17.
+
 This runbook applies the research-lineage and live-safety upgrade without modifying the
 active database or Factor Value Store in place.
 
@@ -20,7 +22,7 @@ cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m alembic -c alembic.ini upgrade head
 ```
 
-Expected revision: `20260710_0001`. Rehearse `upgrade head`, `downgrade base`, and a
+Expected head revision: `20260714_0001`. Rehearse `upgrade head`, `downgrade base`, and a
 second `upgrade head` on a SQLite online-backup copy before changing production.
 
 ## Dataset Manifests
@@ -74,7 +76,7 @@ The launcher refuses an override without a manifest. Rollback removes the overri
 restarts the affected services. Retain the original directory for at least one release
 cycle.
 
-The currently verified candidate is
+The following is a 2026-07-10 audit snapshot, not a live capacity report. The candidate is
 `E:/Projects/data/BaiduSyncdisk/parquet/factor_values_compacted_20260710`: 79 Parquet
 files, 223,259,144 effective rows, 35 indexed factors. It is a candidate only; production
 continues to use the original path until a declared maintenance window.
@@ -103,8 +105,11 @@ history and keep the release blocked instead.
    execution mismatch.
 
 V1 live order submission requires a `live_approved` release, stable idempotency key,
-expected masked account, and a non-expired in-memory control session. Mobile trading is
-read-only.
+expected masked account, and a non-expired in-memory control session. The request is
+durably reserved before the external broker call; the internal capability is single-use
+and bound to release, strategy, profile, account, idempotency key, reservation, and
+control session. The legacy `/api/live-trading/orders/submit` endpoint returns 410,
+and runner/cancel-resubmit paths cannot submit real orders. Mobile trading is read-only.
 
 ## TSMF Revalidation
 

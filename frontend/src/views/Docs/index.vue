@@ -23,7 +23,7 @@
       </div>
     </header>
 
-    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: flex; height: calc(100vh - 60px);">
+    <div v-if="layoutMode === 'A'" class="layout-wrapper-a" style="display: flex;">
       <aside class="docs-sidebar" style="width: 260px; border-right: 1px solid var(--border-default); padding: 24px; overflow-y: auto;">
         <div class="sidebar-title">文档中心</div>
         <nav class="sidebar-nav">
@@ -51,7 +51,7 @@
       </div>
     </div>
 
-    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="padding: 48px 24px; max-width: 720px; margin: 0 auto; overflow-y: auto; height: calc(100vh - 60px);">
+    <div v-else-if="layoutMode === 'C'" class="layout-wrapper-c" style="padding: 48px 24px; max-width: 720px; margin: 0 auto; overflow-y: auto;">
       <h1 style="font-size: var(--text-3xl); margin-bottom: 48px; color: var(--text-bright);">平台操作手册</h1>
       <template v-for="sec in contentSections" :key="sec.id">
         <section :id="sec.id" v-html="sec.html" class="doc-section" style="margin-bottom: 48px;"></section>
@@ -70,6 +70,7 @@ const route = useRoute()
 
 const sections = [
   { id: 'overview', title: '概览', excerpt: '平台以 AKQuant 事件驱动回测为主路径，同时保留内置回测能力。' },
+  { id: 'market-radar', title: '市场雷达', excerpt: '查看全 A 盈亏分布、指数趋势、连板、拥挤度、行业温度和分级预警。' },
   { id: 'engine-architecture', title: '引擎架构', excerpt: '前端提交 payload 后，后端通过统一回测引擎路由运行任务。' },
   { id: 'akquant-strategy', title: 'AKQuant 策略语法', excerpt: '推荐使用类风格策略，在 on_start 初始化，在 on_bar 处理行情并下单。' },
   { id: 'akquant-expression', title: '表达式模式', excerpt: '适合快速验证因子信号，例如 Mean($close, 5) 或 Alpha101 风格公式。' },
@@ -88,6 +89,20 @@ const contentSections = [
     html: `
       <h2>概览</h2>
       <p>平台以 AKQuant 事件驱动回测为主路径，同时保留内置回测能力。新回测接口统一使用 <code>/api/backtest/*</code>。</p>
+    `
+  },
+  {
+    id: 'market-radar',
+    html: `
+      <h2>市场雷达</h2>
+      <p>进入 <code>/market-radar</code> 查看全 A 盈亏分布、上证/深证/中证全指与全 A 中位数趋势、连板生态、交易拥挤度、行业温度和预警中心。它只做观察和预警，不会提交订单。</p>
+      <ul>
+        <li><code>push</code> 表示 miniQMT 全市场推送正常；<code>polling_30s</code> 表示后端已自动切换到 30 秒轮询。</li>
+        <li><code>offline</code> 仍可查看最近日终快照；miniQMT 未启动不会阻塞平台。</li>
+        <li>每个组件都显示真实数据日期和 <code>fresh/partial/stale/unavailable</code>，缺失数据不会按零处理。</li>
+        <li>高严重度预警立即进入通知中心；确认、忽略和自动解除状态由后端持久化。</li>
+      </ul>
+      <p>详细公式、新鲜度、默认阈值、接口和排障见仓库文档 <code>docs/market-radar.md</code>。</p>
     `
   },
   {
@@ -324,6 +339,15 @@ function onCardClick(id: string) {
   height: 100%;
   background: var(--bg-void);
   overflow: hidden;
+}
+
+.layout-wrapper-a,
+.layout-wrapper-b,
+.layout-wrapper-c {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow-y: auto;
 }
 
 .docs-sidebar {

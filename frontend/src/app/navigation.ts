@@ -82,6 +82,35 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
     ],
   },
   {
+    key: 'market-radar',
+    path: '/market-radar',
+    section: 'research',
+    label: '市场雷达',
+    hint: 'Radar',
+    subtitle: '观察全 A 盈亏分布、指数体感、连板生态、交易拥挤和风险预警。',
+    kicker: 'MARKET TREND RADAR',
+    badge: 'Live',
+    icon: icons.monitor,
+    context: [
+      {
+        title: '市场状态',
+        rows: [
+          { label: 'Feed', value: 'Push / 30s fallback', tone: 'good' },
+          { label: 'Breadth', value: '全 A 10 档分布' },
+          { label: 'Alert', value: '事件生命周期', tone: 'warn' },
+        ],
+      },
+      {
+        title: '数据口径',
+        rows: [
+          { label: 'Intraday', value: 'QMT 聚合' },
+          { label: 'EOD', value: '交易日快照' },
+          { label: 'Missing', value: '不补零', tone: 'good' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'data',
     path: '/data',
     activePatterns: ['/stock/*'],
@@ -286,6 +315,27 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
     ],
   },
   {
+    key: 'intraday-t',
+    path: '/trade/intraday-t',
+    section: 'research',
+    label: '日内做 T',
+    hint: 'T0',
+    subtitle: '固定利通电子与澜起科技，验证底仓日内降本并运行持久化模拟盘。',
+    kicker: 'INTRADAY T DESK',
+    icon: icons.trade,
+    context: [
+      {
+        title: '策略边界',
+        rows: [
+          { label: 'Universe', value: '603629 / 688008' },
+          { label: 'Mode', value: '回测 + 模拟', tone: 'good' },
+          { label: 'Restore', value: '14:49', tone: 'warn' },
+          { label: 'Submit', value: '不可用', tone: 'good' },
+        ],
+      },
+    ],
+  },
+  {
     key: 'monitor',
     path: '/monitor',
     section: 'operations',
@@ -299,7 +349,7 @@ export const APP_NAV_ITEMS: AppNavItem[] = [
         title: '服务健康',
         rows: [
           { label: 'Backend', value: '8800' },
-          { label: 'Frontend', value: '3500' },
+          { label: 'Frontend', value: '3511' },
           { label: 'Sync', value: '8810' },
           { label: 'QMT', value: 'Optional' },
         ],
@@ -353,6 +403,33 @@ export function resolveNavItem(path: string): AppNavItem | undefined {
   return APP_NAV_ITEMS
     .filter(item => isRouteMatch(normalizedPath, item))
     .sort((left, right) => right.path.length - left.path.length)[0]
+}
+
+export function resolveGlobalSearchTarget(query: string): string | null {
+  const normalized = query.trim()
+  if (!normalized) return null
+
+  const stockMatch = normalized.toUpperCase().match(/^(\d{6})(?:\.(SH|SZ|BJ))?$/)
+  if (stockMatch) {
+    const [, symbol, explicitExchange] = stockMatch
+    const exchange = explicitExchange
+      || (/^(?:[48]|920)/.test(symbol) ? 'BJ' : /^[569]/.test(symbol) ? 'SH' : 'SZ')
+    return `/stock/${symbol}.${exchange}`
+  }
+
+  const needle = normalized.toLocaleLowerCase()
+  const searchableText = (item: AppNavItem) => [
+    item.key,
+    item.path.replace(/^\//, ''),
+    item.label,
+    item.hint,
+    item.kicker,
+  ].map(value => value.toLocaleLowerCase())
+
+  const exact = APP_NAV_ITEMS.find(item => searchableText(item).includes(needle))
+  if (exact) return exact.path
+
+  return APP_NAV_ITEMS.find(item => searchableText(item).some(value => value.includes(needle)))?.path || null
 }
 
 function isRouteMatch(path: string, item: AppNavItem): boolean {

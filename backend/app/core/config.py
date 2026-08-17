@@ -2,6 +2,7 @@ import os
 import socket
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _BACKEND_DIR = Path(__file__).resolve().parents[2]
@@ -102,6 +103,10 @@ class Settings(BaseSettings):
     qmt_financial_compute_indicators_after_sync: bool = False
     qmt_minute_clean_cache_after_sync: bool = False
     qmt_minute_compute_indicators_after_sync: bool = False
+    market_radar_realtime_enabled: bool = True
+    market_radar_push_stale_seconds: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    market_radar_poll_interval_seconds: float = Field(default=30.0, gt=0, allow_inf_nan=False)
+    market_radar_resubscribe_seconds: float = Field(default=60.0, gt=0, allow_inf_nan=False)
     sync_service_url: str = "http://127.0.0.1:8810"
     sync_service_port: int = 8810
     enable_sync_scheduler: bool = True
@@ -127,6 +132,10 @@ class Settings(BaseSettings):
     xueqiu_chrome_path: str = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
     xueqiu_debug_port: int = 9222
     xueqiu_user_data_dir: str = str(_DATA_DIR / "sentiment" / "xueqiu-profile")
+    sentiment_focus_vault_dir: str = str(
+        _DATA_DIR / "TheLandsBetween" / "wiki" / "03 实体" / "待观察"
+    )
+    xueqiu_stock_delay_seconds: float = 2.0
     xueqiu_spyder_dir: str = r"E:\Projects\xueqiu-spyder"
     xueqiu_cookie: str = ""
     flocktrader_dir: str = r"E:\Projects\flocktrader"

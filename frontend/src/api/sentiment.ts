@@ -234,5 +234,7 @@ export const sentimentApi = {
     request.post<SentimentIngestRun>('/sentiment/ingest/thread', { url }),
 
   ingestRun: (runId: string) =>
-    request.get<SentimentIngestRun>(`/sentiment/ingest/runs/${runId}`),
+    request.get<SentimentIngestRun>(`/sentiment/ingest/runs/${runId}`, {
+      notifyError: false,
+    }),
 }

@@ -1,8 +1,8 @@
-# 数据源小抄：miniQMT、Tushare、AKShare
+# 数据源小抄：miniQMT、Tushare 与本地归档
 
-本文记录 ID=43 小市值策略对齐聚宽过程中验证过的数据源经验。平台默认仍以 miniQMT/xtquant 为主数据源；Tushare 和 AKShare 用作补历史缺口、指数成分和退市股数据的兜底。
+本文记录 ID=43 小市值策略对齐聚宽过程中验证过的数据源经验。平台以 miniQMT/xtquant 为主数据源，Tushare Relay 和本地归档补历史缺口、指数成分和退市股数据。AKShare 只用于人工诊断，不接入平台自动兜底链路。
 
-Last updated: 2026-06-20.
+Last updated: 2026-07-20.
 
 Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。第一批接入 `adj_factor`、`moneyflow`、`ths_index`、`ths_member`、`block_moneyflow`、`stk_auction_replay`，统一落到本地 Parquet；新闻、公告、研报保留为受限补充源，默认不做全量抓取。
 
@@ -13,12 +13,16 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 | 场景 | 首选 | 兜底 | 说明 |
 |---|---|---|---|
 | 实时行情、实盘相关 | miniQMT | 无 | 本地券商/QMT 环境最可靠，外部接口不适合实盘。 |
-| 当前 A 股基础信息 | miniQMT | Tushare / AKShare | QMT 能给当前 instrument detail；Tushare/AKShare 可补名称、行业等。 |
-| 普通在市股票日线 | miniQMT | Tushare, AKShare | QMT 本地缓存优先；Tushare/AKShare 可补历史区间。 |
-| 退市/历史股票日线 | Tushare | AKShare | QMT 对部分退市股会返回成交量但 OHLC 为 0，不能直接入库。 |
+| 市场雷达盘中宽度/指数 | miniQMT 全推 | miniQMT `get_full_tick` 30 秒轮询 | 两种模式都由后端聚合；浏览器不直接连接 QMT。 |
+| 市场雷达日终宽度/拥挤度 | 本地日线 Parquet + SQLite 股票池 | 无 | 每项携带真实交易日；缺失或冲突不按零处理。 |
+| 市场雷达连板 | 当日 Tushare 涨跌停/连板表 | 从新鲜涨停明细按连续交易日推导 | 旧交易日梯队不能覆盖目标日。 |
+| 市场雷达舆情 | 本地已评分舆情记录 | 分项退出评分 | 盘中 6 小时、日终 24 小时，并展示来源覆盖。 |
+| 当前 A 股基础信息 | miniQMT | Tushare Relay / 本地快照 | QMT 提供当前 instrument detail；增强源只补缺口。 |
+| 普通在市股票日线 | miniQMT | Tushare Relay / 本地归档 | QMT 本地缓存优先。 |
+| 退市/历史股票日线 | Tushare Relay / 本地归档 | 无 | QMT 对部分退市股会返回成交量但 OHLC 为 0，不能直接入库。 |
 | 指数日线 | miniQMT | Tushare `index_daily` | `000001.SH` 这类指数 QMT 可用；Tushare 指数接口也可用。 |
 | 指数历史成分 | Tushare `index_weight` | 手工快照 / 现有自选池临时降级 | 小市值指数成分必须 point-in-time，不能用当前 960 只代替。 |
-| 财务/股本/历史市值 | Tushare `daily_basic` | miniQMT 财务缓存 / AKShare 个股信息 | 退市股股本和市值用 Tushare 更完整。 |
+| 财务/股本/历史市值 | Tushare `daily_basic` | miniQMT 财务缓存 | 退市股股本和市值用 Tushare 更完整。 |
 | 固定时间点分钟线 | Parquet/DuckDB 已落库分钟线 | miniQMT 本地缓存 | 回测只读本地列式库；不要在策略运行时反复打 QMT。 |
 | 完整历史 1 分钟线 | 本地 JQ 分钟文件 → Parquet `klines_minute` | miniQMT/Indevs 补缺口 | 已导入 2005-01-04 至 2026-05-15 全 A 分钟线，适合回测和 timer 抽点。 |
 | JQ 个股资金流 | 本地 Parquet `jq_money_flow_daily` | 后续清洗数据 | 日期字段统一用 `trade_date_1`，覆盖 2010-01-04 至 2026-04-17；不要用空的 `trade_date`。 |
@@ -34,7 +38,7 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 适用场景：
 - 常规同步：`stock_info`、`stock_full`、`kline_daily`、`kline_minute`、`realtime_mv`。
 - 回测前补当前股票池中仍在市股票的数据。
-- 实盘/盘中数据，不应依赖 Tushare/AKShare。
+- 实盘/盘中数据不依赖 Tushare 或 AKShare。
 
 注意事项：
 - xtquant 是同步阻塞 SDK，必须通过 `asyncio.get_running_loop().run_in_executor()` 或 `asyncio.to_thread()` 包装。
@@ -66,7 +70,7 @@ Implementation note (2026-05-26): 平台已新增 `sync_type="tushare_relay"`。
 推荐检查：
 
 ```powershell
-$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform-prod\backend'
 .\backend\.venv\Scripts\python.exe backend/app/scripts/sync_timer_minute_points.py `
   --index-symbol 399101.SZ `
   --start 20210515 `
@@ -97,7 +101,7 @@ E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版\01_�
 目标数据集：
 
 ```text
-E:\Projects\Data\parquet\klines_minute\year=YYYY\month=MM\part-*.parquet
+E:\Projects\data\BaiduSyncdisk\parquet\klines_minute\year=YYYY\month=MM\part-*.parquet
 ```
 
 当前导入覆盖：
@@ -107,13 +111,13 @@ E:\Projects\Data\parquet\klines_minute\year=YYYY\month=MM\part-*.parquet
 | 时间范围 | `2005-01-04 09:31:00` 至 `2026-05-15 15:00:00` |
 | 行数 | 约 `3,753,384,618` |
 | 股票数 | `5580` |
-| 状态库 | `E:\Projects\Data\parquet\import_state\jq_minute_import.sqlite` |
+| 状态库 | `E:\Projects\data\BaiduSyncdisk\parquet\import_state\jq_minute_import.sqlite` |
 | 异常清理 | 已删除 `2026-05-01/04/05` 节假日碎片 |
 
 常用命令：
 
 ```powershell
-$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform-prod\backend'
 $src='E:\Projects\QuantData\JQ_a_minute\闲鱼商品_A股1分钟数据_聚宽版\01_数据文件'
 
 # 导入 JoinQuant 风格 parquet
@@ -197,7 +201,7 @@ E:\Projects\data\BaiduSyncdisk\parquet
 - `index_weight` 不是每天都有快照。策略应在调仓日用 `trade_date <= as_of` 的最近一次快照，而不是要求当天必须有成分。
 - `stock_basic` 默认只查在市股票；退市股要显式 `list_status='D'`。
 
-## AKShare
+## AKShare（仅人工诊断）
 
 优势：
 - 无 token，适合临时补单只股票、快速验证行情。
@@ -213,7 +217,7 @@ E:\Projects\data\BaiduSyncdisk\parquet
 - 批量连续请求容易被东财接口断开，需要限速、重试。
 - `stock_zh_a_daily` 对部分退市股会 JSONDecodeError；退市股优先试 `stock_zh_a_hist`。
 - `stock_individual_info_em` 对退市股常只返回简称，股本/市值为 `-`，不能依赖它做历史市值。
-- AKShare 可作为补充，但不要替代 miniQMT 成为平台主数据源。
+- AKShare 不进入平台生产同步或自动兜底链路，也不得替代 miniQMT；只可在人工排障时临时交叉验证。
 
 ## 小市值策略的关键数据原则
 
@@ -254,11 +258,11 @@ E:\Projects\data\BaiduSyncdisk\parquet
 常用检查：
 
 ```powershell
-$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform-prod\backend'
 ```
 
 ```powershell
-$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform-prod\backend'
 @'
 import asyncio
 from datetime import date

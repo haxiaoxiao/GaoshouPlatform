@@ -6,8 +6,8 @@ import json
 
 from sqlalchemy import select
 
-from app.db.sqlite import async_session_factory, init_db
 from app.db.models.sentiment import SentimentPost, SentimentThread
+from app.db.sqlite import async_session_factory, init_db
 from app.services.sentiment import (
     SentimentPostInput,
     SentimentService,

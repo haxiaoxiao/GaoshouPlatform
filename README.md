@@ -1,6 +1,6 @@
 # GaoshouPlatform - 量化投研平台
 
-Last updated: 2026-06-20.
+Last updated: 2026-07-20.
 
 基于 Vue 3 + FastAPI 的 A 股量化投研平台，支持数据管理、因子研究、策略回测和实盘交易。
 
@@ -14,15 +14,18 @@ Last updated: 2026-06-20.
 - 默认且当前支持链路为 `MARKET_DATA_BACKEND=parquet`，零运维启动，不依赖外部列式数据库服务。
 - 指数池：回测可通过 `index_symbol` 使用动态指数成分池，例如中小综指 `399101.SZ`，避免用当前自选股静态替代历史股票池。
 - 因子能力：既有指标注册体系，也有表达式 Compute Engine；Factor Value Store 已承载 TA-Lib、研究因子、小市值因子和 Alpha101 缓存；Alpha101 101 个公式已接入宽表向量化批量计算。
-- 前端信息架构：`/home` 是投研决策工作台，`/monitor` 是系统运维控制台；数据查看 `/data` 与数据同步 `/data/sync` 已拆分，因子定义 `/factor` 与因子评估 `/factor/evaluation` 已拆分。
+- 市场雷达：`/market-radar` 汇总全 A 盈亏分布、核心指数、连板生态、拥挤度、行业温度和个股预警；miniQMT 推送异常时自动降级到 30 秒轮询。
+- 前端信息架构：`/home` 是投研决策工作台，`/monitor` 是系统运维控制台；数据查看 `/data` 与数据同步 `/data/sync` 已拆分，因子定义 `/factor` 与因子评估 `/factor/evaluation` 已拆分。默认主题为 Ivory & Pine。
 - 同步状态语义：`/api/data/sync/status` 中 `can_trigger=true` 表示“同步服务可接收新提交/排队”，不表示当前没有任务运行；前端展示为“提交入口/运行说明”，避免把运行中任务误判为空闲。
+- 安全边界：数据同步统一进入单 worker FIFO；数据浏览器只接受结构化筛选；Python 因子运行于可终止子进程并限制内置能力，但仍只允许可信本地代码；真实下单只允许 V1 release/control-session/account/idempotency 流程。
 
 关键文档：
 
 | 文档 | 用途 |
 |---|---|
 | `docs/user-manual.md` | 使用手册：启动、数据同步、AKQuant 回测、ID=43 小市值流程 |
-| `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare、AKShare 的优先级和适用场景 |
+| `docs/market-radar.md` | 市场雷达：指标口径、新鲜度、实时降级、预警规则、接口和排障 |
+| `docs/data-source-cheatsheet.md` | 数据源小抄：miniQMT、Tushare Relay、本地归档及 AKShare 仅人工诊断的边界 |
 | `docs/local-data-onboarding.md` | 本地数据接入配置：SQLite + Parquet/DuckDB + 前端验证流程 |
 | `docs/relay-long-tail-data-notes.md` | 长尾 Parquet/JQ 数据目录、日期字段口径和新资金流因子 |
 | `docs/indevs-tushare-pro-guide.md` | Indevs Tushare Pro Replay 新接口：历史分钟、集合竞价、财务、公告、指数等已验证能力 |
@@ -33,6 +36,8 @@ Last updated: 2026-06-20.
 | `docs/alpha101-factor-guide.md` | Alpha101 因子说明：真实公式、宽表计算、覆盖率、IC 解读和使用建议 |
 | `docs/frontend-information-architecture.md` | 新版前端页面职责、菜单分层、工作台/运维差异化和颜色语义 |
 | `docs/platform-upgrade-runbook.md` | 数据 manifest、Alembic、Factor Store 原子切换、发布审批与 live canary 运行手册 |
+| `docs/cicd.md` | CI/CD、环境端口、依赖安装和部署约束 |
+| `docs/data-storage-inventory.md` | 带审计日期的数据集保留/收敛快照；不作为实时容量源 |
 | `docs/archive/README.md` | 已完成或过期的历史计划、旧 specs 和调研报告归档 |
 | `AGENTS.md` | AI coding agent 项目指南和关键约束 |
 
@@ -46,7 +51,7 @@ Last updated: 2026-06-20.
 | ORM | SQLAlchemy (async) + aiosqlite | SQLite 存储元数据（股票信息、同步日志、自选股等） |
 | 时序库(默认) | DuckDB + Parquet | 文件型分析数据，零运维 |
 | 数据源 | 华泰 QMT (miniQMT) via xtquant | A 股行情 + 财务数据 |
-| 前端 | Vue 3 + TypeScript + Element Plus | 暗色主题 UI |
+| 前端 | Vue 3 + TypeScript + Element Plus | Ivory & Pine 默认主题，支持多套浅色主题 |
 | 图表 | ECharts | K 线图、因子分析 |
 | 构建 | Vite | 前端构建 |
 
@@ -90,9 +95,8 @@ GaoshouPlatform/
 │   │       ├── factor_service.py
 │   │       └── backtest_service.py
 │   ├── data/                    # SQLite 数据文件 + 运行时数据
-│   ├── .opencode/skills/        # 技能文件
-│   │   └── xtquant-data-api.md  # ⭐ xtquant API 完整参考
-│   └── requirements.txt
+│   ├── pyproject.toml           # 依赖与工具配置权威源
+│   └── requirements.txt         # 兼容安装入口
 ├── frontend/                    # Vue 3 前端
 │   ├── src/
 │   │   ├── api/                 # API 调用封装
@@ -113,7 +117,7 @@ GaoshouPlatform/
 │   │   │   └── MainLayout.vue   # 主布局（含侧边导航）
 │   │   ├── router/index.ts      # 路由配置
 │   │   └── styles/
-│   │       └── design-system.css# 暗色主题变量
+│   │       └── design-system.css# Ivory & Pine 主题变量
 │   └── package.json
 └── docs/
     ├── user-manual.md
@@ -129,24 +133,26 @@ GaoshouPlatform/
 
 | 软件 | 版本 | 说明 |
 |------|------|------|
-| Python | 3.12+ | 后端 |
-| Node.js | 18+ | 前端 |
-| 华泰 QMT / miniQMT | - | 数据源（必须在线） |
+| Python | 3.12+ | 后端与测试 |
+| Node.js | `>=20.19` 或 `>=22.12`，推荐 24 | Vite 8 前端 |
+| 华泰 QMT / miniQMT | - | 同步、实时行情和交易时需要；离线研究可不启动 |
 
 ### 1. 初始化后端
 
 ```powershell
-cd E:\projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 python -m venv .venv
 .venv\Scripts\activate
-pip install -r requirements.txt
+python -m pip install -e ".[dev]"
 ```
+
+`backend/pyproject.toml` 是依赖权威源；`backend/requirements.txt` 仅保留为兼容安装入口。
 
 ### 2. 初始化前端
 
 ```powershell
-cd E:\projects\gaoshouplatform\frontend
-npm install
+cd E:\Projects\GaoshouPlatform-prod\frontend
+npm ci
 ```
 
 ### 3. 启动服务
@@ -158,33 +164,35 @@ npm install
 | dev | `E:\Projects\GaoshouPlatform-dev` | `18800` | `18810` | `13500` |
 | prod | `E:\Projects\GaoshouPlatform-prod` | `8800` | `8810` | `3511` |
 
+当前默认直接运行 prod。桌面启动脚本会加载 `.env.local`、运行迁移、启动三个服务并做健康检查；也可手工启动：
+
 **后端：**
 ```powershell
-cd E:\Projects\GaoshouPlatform-dev\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .venv\Scripts\activate
-uvicorn app.main:app --host 127.0.0.1 --port 18800
+uvicorn app.main:app --host 127.0.0.1 --port 8800
 ```
 
 **同步服务：**
 ```powershell
-cd E:\Projects\GaoshouPlatform-dev\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .venv\Scripts\activate
-uvicorn app.sync_main:app --host 127.0.0.1 --port 18810
+uvicorn app.sync_main:app --host 127.0.0.1 --port 8810
 ```
 
 **前端：**
 ```powershell
-cd E:\Projects\GaoshouPlatform-dev\frontend
-npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
+cd E:\Projects\GaoshouPlatform-prod\frontend
+npm run dev -- --host 127.0.0.1 --port 3511 --strictPort
 ```
 
-- 后端 API 文档：http://localhost:18800/docs
-- 同步服务健康：http://localhost:18810/health
-- 前端页面：http://localhost:13500
-- 健康检查：http://localhost:18800/health
+- 后端 API 文档：http://localhost:8800/docs
+- 同步服务健康：http://localhost:8810/health
+- 前端页面：http://localhost:3511
+- 健康检查：http://localhost:8800/health
 
 > 后端启动时会自动创建 SQLite 表，并通过 DuckDB 按需扫描 Parquet 数据集。
-> 生产环境对应端口为 `8800/8810/3511`，不要把 dev 前端代理到 prod API，也不要从 dev 页面触发 prod 写入任务。
+> Prod 标准端口为 `8800/8810/3511`。启动器只在 `3511` 被占用时回退到 `3512..3599`，实际端口写入 `.runtime/frontend-port.txt`。Dev 仍固定为 `18800/18810/13500`，不要跨环境代理或写入。
 
 ---
 
@@ -241,7 +249,7 @@ Parquet klines_minute_timer / klines_minute
 AKQuant bar_type="minute_timer" 回测
 ```
 
-本地聚宽版全 A 1 分钟线已可直接作为 Parquet 数据源使用：
+本地聚宽版全 A 1 分钟线已可直接作为 Parquet 数据源使用。以下覆盖和规模是导入完成时快照，实时状态以数据浏览器/覆盖接口为准：
 
 - 数据集：`E:\Projects\data\BaiduSyncdisk\parquet\klines_minute\year=YYYY\month=MM\part-*.parquet`
 - 当前覆盖：`2005-01-04 09:31:00` 至 `2026-05-15 15:00:00`
@@ -253,7 +261,7 @@ AKQuant bar_type="minute_timer" 回测
 新增 BaiduSyncdisk/JQ Parquet 数据已纳入数据目录和因子目录：
 
 - 默认数据根：`E:\Projects\data\BaiduSyncdisk`，Parquet 根：`E:\Projects\data\BaiduSyncdisk\parquet`
-- `jq_money_flow_daily` 覆盖 `13,424,052` 行，日期字段必须使用 `trade_date_1`，范围 `2010-01-04` 至 `2026-04-17`；不要使用空的 `trade_date`
+- `jq_money_flow_daily` 日期字段必须使用 `trade_date_1`；不要使用空的 `trade_date`。行数和覆盖日期按需从数据浏览器刷新
 - `jq_financial_income`、`jq_financial_balance`、`jq_financial_cash_flow` 以 `available_date` 作为 PIT 可用日期
 - `jq_index_daily_bars`、`jq_etf_daily_bars`、`jq_index_minute_bars` 已登记到 Parquet 数据集目录
 - 因子目录新增 `jq_moneyflow_net_amount_main`、`jq_moneyflow_net_pct_main`、`jq_moneyflow_net_amount_xl`、`jq_moneyflow_net_pct_xl`、`jq_moneyflow_net_amount_l`、`jq_moneyflow_net_pct_l`、`jq_moneyflow_net_mf_amount`
@@ -297,7 +305,7 @@ AKQuant bar_type="minute_timer" 回测
 常用脚本：
 
 ```powershell
-$env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
+$env:PYTHONPATH='E:\Projects\GaoshouPlatform-prod\backend'
 
 # 同步中小综指动态成分所需的稀疏分钟点
 .\backend\.venv\Scripts\python.exe backend/app/scripts/sync_timer_minute_points.py `
@@ -306,9 +314,8 @@ $env:PYTHONPATH='E:\Projects\GaoshouPlatform\backend'
   --end 20260508 `
   --times 10:00,10:30,14:30,14:50
 
-# 自动从最早可用 timer 数据起跑 ID=43
-
-# 年度切片调试，便于和聚宽日志逐年对比
+# 回测前通过 API 检查指数池与 timer 数据的共同覆盖范围
+Invoke-RestMethod 'http://127.0.0.1:8800/api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&end_date=2026-05-08&times=10:00,10:30,14:30,14:50'
 ```
 
 ---
@@ -358,7 +365,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 
 **永远不要用 `asyncio.get_event_loop()`**（Python 3.10+ 已废弃），用 `asyncio.get_running_loop()`。
 
-完整 API 参考见 `backend/.opencode/skills/xtquant-data-api.md`。数据源选择经验见 `docs/data-source-cheatsheet.md`。
+数据源选择、xtquant 约束和已验证调用经验见 `docs/data-source-cheatsheet.md`。
 
 ---
 
@@ -367,6 +374,7 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 | 路由 | 页面职责 |
 |---|---|
 | `/home` | 今日投研工作台：研究就绪度、今日行动建议、投研输入口径和流水线推进 |
+| `/market-radar` | 市场雷达：全 A 盈亏分布、指数趋势、连板、拥挤度、行业温度与预警中心 |
 | `/data` | 数据查看：最新日线、分钟线、基础股票、财务、指标、概念和舆情口径 |
 | `/data/sync` | 数据同步：任务目录、预设、执行参数、队列、进度、同步日志 |
 | `/explorer` | 数据浏览器：按需预览 Parquet/DuckDB 表，不默认全量 `count(*)` |
@@ -375,19 +383,69 @@ data = await loop.run_in_executor(None, lambda: xt.get_market_data_ex(...))
 | `/research` | 研究实验室：假设、证据链、外部链接、实验记录和复盘 |
 | `/backtest` | 策略回测：代码编辑、参数配置、运行日志和报告入口 |
 | `/trade` | 模拟/实盘：信号、账户、订单预览和真实下单护栏 |
+| `/trade/intraday-t` | 日内做 T：利通电子/澜起科技分钟回测、底仓恢复与持久化模拟盘 |
 | `/monitor` | 系统运维控制台：服务拓扑、值班排障、任务表、存储巡检、同步审计 |
 
 颜色语义：平台状态中红色表示需要关注/异常，绿色表示正常/就绪；A 股行情中上涨为红、下跌为绿。
 
 ---
 
+## 日内做 T 服务
+
+`/trade/intraday-t` 固定服务 `603629.SH`（利通电子）和 `688008.SH`（澜起科技）。回测从本地 `klines_minute` 读取完整分钟线，按信号后下一根 K 线成交，计入佣金、最低佣金、印花税、过户费、滑点、成交量容量和 SQLite 精确涨跌停价；结果以相对被动持有底仓的增量收益与每股降本为主。
+
+当前安全默认值为 `1.75 <= abs(zscore) < 2.40`、仅 `10:00 <= time < 10:30` 开新配对、每日最多 1 对、冷却 20 分钟。10 分钟最低实现波动保留为研究控件，但两年样本外未验证其增益，因此运行默认值为 `0bp`（关闭）。回测中的未恢复配对会跨交易日保留并优先恢复，不会把长期方向暴露伪装成做 T 收益。
+
+2024-07-19 至 2026-07-14 的冻结协议研究覆盖 223,282 根分钟线、466 个观测交易日和 4 个连续测试折。修正后的 v1 兼容基线合计 `-88,824.88` 元；极端 Z 与频次护栏为 `-29,100.62` 元；当前默认时段门控为 `-5,397.65` 元；再加 20bp 最低波动反而降至 `-10,551.55` 元，其 5bp/边和 10bp/边滑点压力分别为 `-21,516.60`、`-39,226.65` 元。50bp 日内方向门控虽为 `+7,972.03` 元，但只有 21 对且仅 2/4 折为正，不能晋级。14 个权威交易日无分钟数据、24 个观测股票日缺精确涨跌停价；最终结论为 `do_not_promote`，仅用于模拟研究。产物位于 `.runtime/intraday-t-v2-research/2024-07-19_2026-07-19/`。
+
+v3 继续验证市场残差、温和日内位移、波动带和残差趋势/跳跃等正交状态。为避开后段数据缺口，冻结 2024-07-19 至 2026-03-13 的 398 个完整共同交易日，股票与固定基准各 191,040 bars，精确涨跌停覆盖 796/796 个股票日。六个独立候选中仅 `0 <= sign(z) * session_return < 100bp` 为正：74 对、三折合计 `+1,038.90` 元；冻结同一信号集后，5bp/边压力仅 `+105.37` 元，10bp/边转为 `-1,450.49` 元。603629.SH 仍为 `-519.12` 元且样本低于 80 对门槛，因此同样为 `research_only`，不修改运行默认值。产物位于 `.runtime/intraday-t-v3-research/2024-07-19_2026-03-13/`。
+
+v4 按最终范围继续只研究 `603629.SH` 和 `688008.SH`，没有扩展股票池，也没有继续堆 RSI、MACD、KDJ 等同源变换。398 个完整交易日上的四个独立变体均为 `research_only`：量价在线预测在名义/5bp/10bp 下分别为 `+1,181.44/+754.67/+43.40` 元、仅 29 对，并且 603629.SH 仍为 `-147.52` 元；独立跳跃否决和 5 分钟 Amihud 冲击门控在 10bp 下分别为 `-1,292.87/-1,281.84` 元。48 个运行全部恢复，2/5/10bp 信号账本一致，2.5% 成交量参与率另行通过安全审计。历史数据已经参与假设形成，结果不是样本外证据，不修改页面、模拟盘或实盘默认参数。详见 `docs/superpowers/specs/2026-07-20-intraday-t-v4-two-stock-research.md`。
+
+v5 用全市场 canonical JQ 分钟线和精确涨跌停价构造 10:00 点时情绪，并将涨跌停广度、昨日连板队列的触板/在板晋级率及复合情绪分别叠加到 v4 量价候选。连板晋级门控在名义/5bp/10bp 下为 `+1,799.38/+1,511.68/+1,032.18` 元、19 对，复合情绪为 `+1,485.95/+1,150.33/+590.95` 元、23 对；涨跌停广度没有过滤交易。最强候选的 603629.SH 仍为 `-67.16` 元，且样本过少、历史已参与假设形成，因此仍为 `research_only`，不修改页面、模拟盘或实盘。详见 `docs/superpowers/specs/2026-07-20-intraday-t-v5-market-sentiment-results.md`。
+
+模拟盘可读取 QMT 账户只读快照或手工底仓，状态与模拟成交写入 `intraday_t_sessions`、`intraday_t_trades`。Runner 默认每 30 秒评估并按会话串行化；会话可跨交易日延续，跨日时清除前日待成交信号、重置当日额度，并在新开仓前优先恢复未平配对。进程重启后会话可恢复，但 Runner 需手工重启。该模块不注册真实委托提交接口；止损阈值触发时优先恢复，上午 `11:29`、下午 `14:49` 生成底仓恢复信号，默认日内已实现亏损达到 `45bp` 后锁定新开仓，持仓未恢复时不能停止会话。
+
+API 前缀为 `/api/intraday-t`，能力、覆盖、回测和模拟盘生命周期均可从 Swagger 检查。
+
+复跑冻结研究：
+
+```powershell
+cd E:\Projects\GaoshouPlatform-prod\backend
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v2 `
+  --start-date 2024-07-19 --end-date 2026-07-19 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --output-dir ..\.runtime\intraday-t-v2-research\2024-07-19_2026-07-19
+
+# v3 因果市场状态研究（只读，不修改运行参数）
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v3 `
+  --start-date 2024-07-19 --end-date 2026-03-13 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --output-dir ..\.runtime\intraday-t-v3-research\2024-07-19_2026-03-13
+
+# v4 两股微观结构门控研究（只读，不修改运行参数）
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v4 `
+  --start-date 2024-07-19 --end-date 2026-03-13 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --output-dir ..\.runtime\intraday-t-v4-research\2024-07-19_2026-03-13
+
+# v5 两股大盘情绪增量研究（只读，不修改运行参数）
+.\.venv\Scripts\python.exe -m app.scripts.research_intraday_t_v5 `
+  --start-date 2024-07-19 --end-date 2026-03-13 `
+  --limit-price-db E:\Projects\data\BaiduSyncdisk\gaoshou.db `
+  --parquet-root E:\Projects\data\BaiduSyncdisk\parquet `
+  --output-dir ..\.runtime\intraday-t-v5-sentiment-research\2024-07-19_2026-03-13
+```
+
+---
+
 ## 数据浏览器
 
-dev 环境访问 `http://localhost:13500/explorer` 可以浏览 Parquet/DuckDB 数据：
+prod 环境访问 `http://localhost:3511/explorer`（或启动器输出的回退端口）可以浏览 Parquet/DuckDB 数据：
 - 自动列出可查询表和分区/元数据
 - 动态展示表结构（不硬编码字段）
-- 支持 WHERE 过滤、排序、分页
-- 支持自定义 SQL 查询（仅 SELECT/SHOW/DESCRIBE）
+- 支持后端校验的结构化字段筛选、快速搜索、排序和分页
+- 不接受任意 SQL 或自由文本 WHERE；列名、操作符和值均经过 allowlist/参数化处理
 - Parquet 表未知行数显示为“未统计”，精确行数需要显式触发，避免默认全量扫描
 
 后端 API：`/api/explorer/tables`、`/api/explorer/tables/{name}/schema`、`/api/explorer/tables/{name}/preview`
@@ -445,8 +503,8 @@ chore: 构建/工具
 | 文件 | 说明 |
 |------|------|
 | `backend/app/core/config.py` | 后端配置（DB绝对路径、Parquet路径、dev数据模式） |
-| `frontend/vite.config.ts` | 前端代理（dev 默认指向 localhost:18800） |
-| `frontend/src/styles/design-system.css` | 暗色主题变量 |
+| `frontend/vite.config.ts` | 前端端口与 API 代理（prod 默认 `3511 -> 8800`，dev 通过启动参数覆盖） |
+| `frontend/src/styles/design-system.css` | Ivory & Pine 默认主题及其它主题变量 |
 
 ### 代码风格
 
@@ -457,4 +515,4 @@ chore: 构建/工具
 
 ---
 
-*最后更新: 2026-06-20*
+*最后更新: 2026-07-17*

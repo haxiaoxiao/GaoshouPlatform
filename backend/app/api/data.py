@@ -10,11 +10,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.sqlite import get_async_session
 from app.services import DataService, SyncService
-from app.services.cache_invalidation import invalidate_after_sync
 from app.services.index_catalog import list_index_catalog
-from app.services.runtime_tasks import update_task
 from app.services.sync_proxy import proxy_sync_request, sync_service_health
-from app.services.task_queue import get_task_queue
+from app.services.task_queue import SYNC_QUEUE_NAME, get_task_queue
 
 router = APIRouter()
 
@@ -27,7 +25,7 @@ def _attach_sync_availability(
 ) -> dict[str, Any]:
     status = str(data.get("status") or "idle")
     is_busy = status in {"queued", "running"}
-    queue = get_task_queue("data_sync")
+    queue = get_task_queue(SYNC_QUEUE_NAME)
     queue_snapshot = queue.snapshot()
     details = dict(data.get("details") or {})
     details.setdefault("queue_mode", True)
@@ -499,7 +497,7 @@ async def get_klines(
     start_date: date | None = Query(default=None, description="开始日期"),
     end_date: date | None = Query(default=None, description="结束日期"),
     page: int = Query(default=1, ge=1, description="页码"),
-    page_size: int = Query(default=100, ge=1, le=1000, description="每页数量"),
+    page_size: int = Query(default=250, ge=1, le=1000, description="每页数量"),
     session: AsyncSession = Depends(get_async_session),
 ) -> dict[str, Any]:
     """
@@ -542,6 +540,9 @@ async def get_klines(
     return {
         "items": items,
         "total": result.total,
+        "page": result.page,
+        "page_size": result.page_size,
+        "total_pages": result.total_pages,
     }
 
 
@@ -752,118 +753,6 @@ async def remove_from_watchlist(
 
 
 # ============== Sync Endpoints ==============
-
-
-async def _run_sync_task(
-    task_id: str,
-    sync_type: str,
-    symbols: list[str] | None,
-    start_date: date | None,
-    end_date: date | None,
-    failure_strategy: str,
-    full_sync: bool,
-) -> None:
-    """在后台运行同步任务（使用独立的数据库会话）"""
-    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-
-    from app.core.config import settings
-    from app.services.sync_service import SyncService
-
-    engine = create_async_engine(settings.database_url)
-    async_session = async_sessionmaker(engine, expire_on_commit=False)
-
-    # 快速检查 QMT 连接
-    from app.engines.qmt_gateway import qmt_gateway as gw
-    if not await gw.check_connection():
-        update_task(task_id, status="failed", progress=1.0, result_ref="/data",
-                    error="QMT (miniQMT) 未连接，请先启动华泰 miniQMT 客户端后再同步")
-        await engine.dispose()
-        return
-
-    async with async_session() as session:
-        service = SyncService(session)
-        try:
-            update_task(task_id, status="running", progress=0)
-            logger.info(f"symbols={symbols}, start_date={start_date}, end_date={end_date}")
-            progress = None
-            if sync_type == "datasync":
-                progress = await service.sync_datasync(
-                    symbols=symbols,
-                    end_date=end_date,
-                    failure_strategy=failure_strategy,
-                    full_sync=full_sync,
-                )
-            elif sync_type == "stock_info":
-                progress = await service.sync_stock_info(
-                    failure_strategy=failure_strategy,
-                    full_sync=full_sync,
-                )
-            elif sync_type == "stock_full":
-                progress = await service.sync_stock_full(
-                    failure_strategy=failure_strategy,
-                    run_id=task_id,
-                )
-            elif sync_type == "financial_data":
-                progress = await service.sync_financial_data(
-                    failure_strategy=failure_strategy,
-                )
-            elif sync_type == "realtime_mv":
-                progress = await service.sync_realtime_mv(
-                    symbols=symbols,
-                    failure_strategy=failure_strategy,
-                )
-            elif sync_type == "kline_daily":
-                progress = await service.sync_kline_daily(
-                    symbols=symbols,
-                    start_date=start_date,
-                    end_date=end_date,
-                    failure_strategy=failure_strategy,
-                    full_sync=full_sync,
-                    run_id=task_id,
-                )
-            elif sync_type == "kline_weekly":
-                progress = await service.sync_kline_weekly(
-                    symbols=symbols,
-                    start_date=start_date,
-                    end_date=end_date,
-                    failure_strategy=failure_strategy,
-                    full_sync=full_sync,
-                )
-            elif sync_type == "dividends":
-                progress = await service.sync_dividends(
-                    symbols=symbols,
-                    start_date=start_date,
-                    end_date=end_date,
-                    failure_strategy=failure_strategy,
-                )
-            elif sync_type == "kline_minute":
-                progress = await service.sync_kline_minute(
-                    symbols=symbols,
-                    start_date=start_date,
-                    end_date=end_date,
-                    failure_strategy=failure_strategy,
-                    full_sync=full_sync,
-                )
-            if getattr(progress, "status", None) == "failed":
-                update_task(
-                    task_id,
-                    status="failed",
-                    progress=1.0,
-                    result_ref="/data",
-                    error=getattr(progress, "error_message", None) or "Data sync failed",
-                )
-            else:
-                update_task(task_id, status="done", progress=1.0, result_ref="/data")
-        except Exception as e:
-            logger.opt(exception=True).error(f"Sync task {sync_type} failed: {e}")
-            update_task(task_id, status="failed", progress=1.0, result_ref="/data", error=str(e))
-        finally:
-            try:
-                invalidated = invalidate_after_sync(sync_type)
-                logger.info("Cache invalidated after {} sync: {}", sync_type, invalidated)
-            except Exception as exc:
-                logger.warning("Cache invalidation after {} sync failed: {}", sync_type, exc)
-            await engine.dispose()
 
 
 @router.post("/sync", summary="触发数据同步")

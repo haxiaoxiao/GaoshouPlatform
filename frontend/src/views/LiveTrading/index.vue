@@ -1126,6 +1126,7 @@ import ProvenanceStrip from '@/components/ProvenanceStrip.vue'
 import * as echarts from '@/lib/echarts'
 import { systemApi, type LiveTradingGuardrails } from '@/api/system'
 import { syncApi, type SyncStatus } from '@/api/sync'
+import { createScopedRequestGate } from './accountRequestGate'
 import {
   buildV1LiveOrderRequest,
   isLiveControlSessionActive,
@@ -1162,6 +1163,7 @@ const mode = ref<LiveTradingMode>('live')
 const tradeDate = ref(new Date().toISOString().slice(0, 10))
 const indexSymbol = ref('399101.SZ')
 const selectedProfileKey = ref('')
+const accountRequestGate = createScopedRequestGate(`${mode.value}:${selectedProfileKey.value}`)
 const status = ref<LiveTradingStatus | null>(null)
 const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
 const guardrailDraft = reactive({
@@ -1220,6 +1222,7 @@ let flowChart: echarts.ECharts | null = null
 let statusChart: echarts.ECharts | null = null
 let accountEventSource: EventSource | null = null
 let accountPollTimer: number | null = null
+let accountLoadSequence = 0
 let orderSyncTimer: number | null = null
 let orderSyncBurstUntil = 0
 let orderSyncInFlight = false
@@ -1979,9 +1982,11 @@ async function findLiveHoldingProfile(nextProfiles = profiles.value) {
     liveHoldingProfileSnapshot.value = null
     return null
   }
+  const contextToken = accountRequestGate.captureScope()
   for (const profile of nextProfiles) {
     try {
-      const snapshot = await liveTradingApi.account('live', profile.profile_key, false)
+      const snapshot = await liveTradingApi.account('live', profile.profile_key, false, { notifyError: false })
+      if (!accountRequestGate.isScopeCurrent(contextToken)) return null
       if (snapshot?.meta?.initialized && Number(snapshot.position_count || 0) > 0) {
         liveHoldingProfileSnapshot.value = { profile, account: snapshot }
         return liveHoldingProfileSnapshot.value
@@ -1990,7 +1995,9 @@ async function findLiveHoldingProfile(nextProfiles = profiles.value) {
       // Keep probing other profiles; this hint should never block trading page loading.
     }
   }
-  liveHoldingProfileSnapshot.value = null
+  if (accountRequestGate.isScopeCurrent(contextToken)) {
+    liveHoldingProfileSnapshot.value = null
+  }
   return null
 }
 
@@ -2014,7 +2021,7 @@ async function resolveInitialProfile(nextProfiles: LiveStrategyProfile[], nextSt
   if (mode.value === 'live') {
     for (const profileKey of preferred) {
       try {
-        const snapshot = await liveTradingApi.account('live', profileKey, false)
+        const snapshot = await liveTradingApi.account('live', profileKey, false, { notifyError: false })
         if (snapshot?.meta?.initialized && Number(snapshot.position_count || 0) > 0) {
           return profileKey
         }
@@ -2025,6 +2032,16 @@ async function resolveInitialProfile(nextProfiles: LiveStrategyProfile[], nextSt
   }
   return preferred[0] || ''
 }
+
+function accountScopeKey(nextMode = mode.value, nextProfile = selectedProfileKey.value) {
+  return `${nextMode}:${nextProfile}`
+}
+
+watch([mode, selectedProfileKey], ([nextMode, nextProfile]) => {
+  accountRequestGate.setScope(accountScopeKey(nextMode, nextProfile))
+  accountLoading.value = false
+  accountSnapshot.value = null
+}, { flush: 'sync' })
 
 watch(mode, async () => {
   if (!selectedProfileKey.value) return
@@ -2051,14 +2068,21 @@ watch([weeklyAnalysis, accountSnapshot, strategyReviewDialogOpen], async () => {
 })
 
 async function loadAccount() {
+  const loadSequence = ++accountLoadSequence
+  const requestedMode = mode.value
+  const requestedProfile = selectedProfileKey.value
+  const token = accountRequestGate.begin(accountScopeKey(requestedMode, requestedProfile))
   accountLoading.value = true
   try {
-    applyAccountSnapshot(await liveTradingApi.account(mode.value, selectedProfileKey.value || undefined))
-    if (shouldSwitchFromEmptyProfile()) {
+    const snapshot = await liveTradingApi.account(requestedMode, requestedProfile || undefined)
+    const applied = accountRequestGate.commit(token, () => applyAccountSnapshot(snapshot))
+    if (applied && shouldSwitchFromEmptyProfile()) {
       void findLiveHoldingProfile()
     }
   } finally {
-    accountLoading.value = false
+    if (loadSequence === accountLoadSequence && accountRequestGate.isScopeCurrent(token)) {
+      accountLoading.value = false
+    }
   }
 }
 
@@ -2094,13 +2118,19 @@ function startAccountPolling() {
   if (accountPollTimer != null) return
   liveStreamState.value = 'polling'
   accountPollTimer = window.setInterval(() => {
-    if (document.hidden || mode.value !== 'live' || !selectedProfileKey.value) return
-    liveTradingApi.account(mode.value, selectedProfileKey.value, false)
+    if (document.hidden || accountLoading.value || mode.value !== 'live' || !selectedProfileKey.value) return
+    const requestedMode = mode.value
+    const requestedProfile = selectedProfileKey.value
+    const token = accountRequestGate.begin(accountScopeKey(requestedMode, requestedProfile))
+    liveTradingApi.account(requestedMode, requestedProfile, false, { notifyError: false })
       .then(snapshot => {
-        applyAccountSnapshot(snapshot)
-        liveStreamState.value = 'polling'
+        accountRequestGate.commit(token, () => {
+          applyAccountSnapshot(snapshot)
+          liveStreamState.value = 'polling'
+        })
       })
       .catch(error => {
+        if (!accountRequestGate.isLatest(token)) return
         liveStreamState.value = 'error'
         liveStreamError.value = error?.message || '账户轮询失败'
       })
@@ -2113,9 +2143,13 @@ function startAccountRealtime() {
   liveStreamState.value = 'connecting'
   liveStreamError.value = ''
   try {
-    const source = new EventSource(liveTradingApi.accountStreamUrl(mode.value, selectedProfileKey.value, 5))
+    const streamMode = mode.value
+    const streamProfile = selectedProfileKey.value
+    const scopeToken = accountRequestGate.captureScope()
+    const source = new EventSource(liveTradingApi.accountStreamUrl(streamMode, streamProfile, 5))
     accountEventSource = source
     source.addEventListener('account', event => {
+      if (accountEventSource !== source || !accountRequestGate.isScopeCurrent(scopeToken)) return
       try {
         applyAccountSnapshot(JSON.parse((event as MessageEvent).data) as LiveAccountSnapshot)
         liveStreamState.value = 'live'
@@ -2126,6 +2160,7 @@ function startAccountRealtime() {
       }
     })
     source.addEventListener('stream-error', event => {
+      if (accountEventSource !== source || !accountRequestGate.isScopeCurrent(scopeToken)) return
       try {
         const detail = JSON.parse((event as MessageEvent).data || '{}')
         liveStreamError.value = detail.message || '实时流异常'

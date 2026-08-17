@@ -20,9 +20,10 @@
         <span>暂无通知</span>
       </div>
 
-      <div
+      <button
         v-for="n in store.notifications"
         :key="n.id"
+        type="button"
         class="notification-item"
         :class="{ 'notification-item--unread': !n.read }"
         @click="handleNotificationClick(n)"
@@ -33,7 +34,7 @@
           <div class="notif-message">{{ n.message }}</div>
           <div class="notif-time">{{ formatTime(n.time) }}</div>
         </div>
-      </div>
+      </button>
     </div>
   </div>
 </template>
@@ -41,14 +42,24 @@
 <script setup lang="ts">
 import { useRouter } from 'vue-router'
 import { useNotificationStore, type Notification } from '@/stores/notification'
+import { resolveNotificationRoute } from '@/stores/notificationRoutes'
 
 const store = useNotificationStore()
 const router = useRouter()
 
-function handleNotificationClick(notification: Notification) {
-  store.markAsRead(notification.id)
-  if (notification.route) {
-    router.push(notification.route)
+async function handleNotificationClick(notification: Notification) {
+  if (notification.marketAlertId) {
+    try {
+      await store.acknowledgeMarketAlert(notification.id)
+    } catch {
+      return
+    }
+  } else {
+    store.markAsRead(notification.id)
+  }
+  const route = resolveNotificationRoute(notification.route)
+  if (route) {
+    await router.push(route)
   }
 }
 
@@ -133,9 +144,15 @@ function formatTime(date: Date): string {
 }
 
 .notification-item {
+  width: 100%;
   display: flex;
   gap: 12px;
   padding: 12px 16px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
   transition: background var(--duration-normal);
   border-bottom: 1px solid var(--border-subtle);
@@ -147,6 +164,11 @@ function formatTime(date: Date): string {
 
 .notification-item:hover {
   background: var(--bg-hover);
+}
+
+.notification-item:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: -2px;
 }
 
 .notification-item--unread {

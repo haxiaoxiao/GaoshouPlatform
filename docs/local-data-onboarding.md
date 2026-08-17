@@ -1,6 +1,6 @@
 # 本地数据接入配置指南
 
-Last updated: 2026-06-20.
+Last updated: 2026-07-17.
 
 本文说明如何让平台读取本地 SQLite + Parquet 数据目录，并跑通数据管理、数据浏览器、因子研究和回测页面。
 
@@ -97,35 +97,27 @@ DEBUG=false
 
 ## 启动
 
-后端：
+生产仓库：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
-.\.venv\Scripts\activate
-uvicorn app.main:app --host 127.0.0.1 --port 18800
+cd E:\Projects\GaoshouPlatform-prod
+.\tools\start-gaoshouplatform.bat --no-pause
 ```
 
-前端：
-
-```powershell
-cd E:\Projects\GaoshouPlatform\frontend
-npm run dev -- --host 127.0.0.1 --port 13500 --strictPort
-```
-
-dev 使用 `13500`/`18800`/`18810`，prod 使用 `3511`/`8800`/`8810`；以启动脚本输出为准。
+Prod 使用 `3511`/`8800`/`8810`，前端冲突时回退到 `3512..3599` 并写入 `.runtime/frontend-port.txt`。Dev 使用 `13500`/`18800`/`18810`，不要混用。
 
 ## 验证
 
 系统状态：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/system/status
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8800/api/system/status
 ```
 
 健康检查：
 
 ```powershell
-Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18800/api/system/health
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:8800/api/system/health
 ```
 
 数据浏览器表：
@@ -175,7 +167,7 @@ GET /api/backtest/timer-coverage?index_symbol=399101.SZ&start_date=2021-05-15&en
 需要迁移时运行：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m app.scripts.migrate_feature_values_to_factor_values --overwrite
 ```
 

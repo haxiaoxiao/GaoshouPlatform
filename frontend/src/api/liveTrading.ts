@@ -1,4 +1,4 @@
-import request from './request'
+import request, { type RequestConfig } from './request'
 
 export const isMobileTradingReadOnly = (viewportWidth: number) => viewportWidth <= 760
 
@@ -465,10 +465,15 @@ export interface LiveAccountSnapshot {
 
 export const liveTradingApi = {
   status: () => request.get<LiveTradingStatus>('/live-trading/status'),
-  account: (mode: LiveTradingMode = 'live', profileKey?: string, includeBroker = true) => {
+  account: (
+    mode: LiveTradingMode = 'live',
+    profileKey?: string,
+    includeBroker = true,
+    config?: RequestConfig,
+  ) => {
     const query = new URLSearchParams({ mode, include_broker: includeBroker ? 'true' : 'false' })
     if (profileKey) query.set('profile_key', profileKey)
-    return request.get<LiveAccountSnapshot>(`/live-trading/account?${query.toString()}`)
+    return request.get<LiveAccountSnapshot>(`/live-trading/account?${query.toString()}`, config)
   },
   accountStreamUrl: (mode: LiveTradingMode = 'live', profileKey?: string, intervalSeconds = 5) => {
     const query = new URLSearchParams({ mode, interval_seconds: String(intervalSeconds) })

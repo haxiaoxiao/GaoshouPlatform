@@ -67,7 +67,7 @@ class ComputeScheduler:
         if isinstance(result, pd.DataFrame):
             result = result.iloc[:, 0]
 
-        expr_hash = self.cache.make_key(expression)
+        expr_hash = self.cache.make_persistent_key(expression, engine="builtin")
         if isinstance(result, dict):
             for symbol, series in result.items():
                 ts_date = pd.Timestamp(trade_date)

@@ -212,10 +212,15 @@ const formatDate = (date: Date): string => {
   return `${year}-${month}-${day}`
 }
 
+let stockSearchVersion = 0
+let klineQueryVersion = 0
+
 // 搜索股票
 const searchStocks = async (query: string) => {
+  const requestVersion = ++stockSearchVersion
   if (!query) {
     stockOptions.value = []
+    stockSearchLoading.value = false
     return
   }
   stockSearchLoading.value = true
@@ -223,11 +228,11 @@ const searchStocks = async (query: string) => {
     const response = await request.get<{ items: StockOption[] }>('/data/stocks', {
       params: { search: query, page_size: 20 },
     })
-    stockOptions.value = response.items || []
+    if (requestVersion === stockSearchVersion) stockOptions.value = response.items || []
   } catch {
-    stockOptions.value = []
+    if (requestVersion === stockSearchVersion) stockOptions.value = []
   } finally {
-    stockSearchLoading.value = false
+    if (requestVersion === stockSearchVersion) stockSearchLoading.value = false
   }
 }
 
@@ -244,6 +249,7 @@ const handleQuery = async () => {
     return
   }
 
+  const requestVersion = ++klineQueryVersion
   // 更新日期参数
   loading.value = true
   try {
@@ -265,16 +271,18 @@ const handleQuery = async () => {
       params,
     })
 
+    if (requestVersion !== klineQueryVersion) return
     tableData.value = response.items || []
     total.value = response.total || 0
 
   } catch (error: unknown) {
+    if (requestVersion !== klineQueryVersion) return
     const err = error as { response?: { data?: { detail?: string } } }
     ElMessage.error(err.response?.data?.detail || '查询失败')
     tableData.value = []
     total.value = 0
   } finally {
-    loading.value = false
+    if (requestVersion === klineQueryVersion) loading.value = false
   }
 }
 

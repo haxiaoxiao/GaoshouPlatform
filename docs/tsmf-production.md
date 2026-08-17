@@ -1,12 +1,14 @@
 # TSMF 科技小市值生产化运行说明
 
-本文记录 `entry_filter_relaxed_risk` 与 `us_entry_filter_combined` 两个生产候选在 dev 环境内的端到端入口。
+Last updated: 2026-07-17.
+
+本文记录 `entry_filter_relaxed_risk` 与 `us_entry_filter_combined` 两个生产候选的端到端入口。当前代码、配置和验证直接在 prod 仓库进行。
 
 ## 数据
 
 - A 股行情与分钟 timer：走现有 `kline_daily`、`kline_minute`、`factor_dependency` 同步链路。
 - 因子预计算：至少准备 `small_cap_v4_core`、`cn_paper_implemented`、`cn_paper_style_rotation`。
-- 美股隔夜过滤：使用 `sync_type="us_market"` 同步 QQQ、SMH、SOXX、NVDA 到 `E:\Projects\Data\external\us_market\us_market_daily.csv`。
+- 美股隔夜过滤：使用 `sync_type="us_market"` 同步 QQQ、SMH、SOXX、NVDA 到 `E:\Projects\data\BaiduSyncdisk\external\us_market\us_market_daily.csv`。
 
 示例请求：
 
@@ -33,5 +35,6 @@
 - API 入口：
   - `GET /api/live-trading/strategy-profiles`
   - `POST /api/live-trading/signals`
-  - `POST /api/live-trading/orders/submit`
-- 真实下单必须设置 `LIVE_TRADING_ENABLE_ORDER_SUBMIT=true`，且提交接口需要 `confirm=true`。
+  - `POST /api/v1/live/orders/submit`
+- 旧 `POST /api/live-trading/orders/submit` 固定返回 `410 Gone`，不得作为真实下单入口。
+- 真实下单除启用提交开关和严格 `confirm=true` 外，还必须使用 `live_approved` release、有效 control session、预期账户掩码、信号哈希和 idempotency key。broker 只接受服务层签发的一次性 opaque permit；失败批次不会被标记为成功。

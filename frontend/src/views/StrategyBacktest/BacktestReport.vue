@@ -143,7 +143,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, watch, computed, nextTick } from 'vue'
+import { ref, watch, computed, nextTick, onBeforeUnmount } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Download } from '@element-plus/icons-vue'
 import * as echarts from '@/lib/echarts'
@@ -166,6 +166,13 @@ const navChartRef = ref<HTMLDivElement | null>(null)
 const returnChartRef = ref<HTMLDivElement | null>(null)
 let navChart: echarts.ECharts | null = null
 let returnChart: echarts.ECharts | null = null
+
+const disposeCharts = () => {
+  navChart?.dispose()
+  returnChart?.dispose()
+  navChart = null
+  returnChart = null
+}
 
 const loadReport = async () => {
   loading.value = true
@@ -314,8 +321,11 @@ const downloadTradesCSV = () => {
 }
 
 watch(() => props.backtestId, () => {
+  disposeCharts()
   if (props.backtestId) loadReport()
 }, { immediate: true })
+
+onBeforeUnmount(disposeCharts)
 </script>
 
 <style scoped>

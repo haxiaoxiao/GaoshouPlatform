@@ -285,7 +285,7 @@ class FactorEvaluationService:
                     ir=round(ir, 4),
                 ))
             except Exception:
-                logger.exception("board_query failed for template: %s", tmpl.name)
+                logger.exception("board_query failed for template: {}", tmpl.name)
                 continue
 
         total = len(rows)
@@ -461,7 +461,7 @@ class FactorEvaluationService:
                 row.coverage_max_date = coverage.get("max_date")
                 row.coverage_status = self._coverage_status(row.coverage_total_rows, row.coverage_max_date, end_date)
             except Exception:
-                logger.exception("Failed to attach factor board coverage: %s", row.factor_name)
+                logger.exception("Failed to attach factor board coverage: {}", row.factor_name)
                 row.coverage_status = "unknown"
 
     async def _attach_latest_research_runs(self, rows: list[BoardRow], query: BoardQuery) -> None:

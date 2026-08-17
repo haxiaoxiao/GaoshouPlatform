@@ -20,6 +20,9 @@ export const runtimeTaskApi = {
   list: (includeFinished = true) =>
     request.get<RuntimeTask[]>('/system/tasks', {
       params: { include_finished: includeFinished },
+      notifyError: false,
     }),
-  get: (taskId: string) => request.get<RuntimeTask>(`/system/tasks/${taskId}`),
+  get: (taskId: string) => request.get<RuntimeTask>(`/system/tasks/${taskId}`, {
+    notifyError: false,
+  }),
 }

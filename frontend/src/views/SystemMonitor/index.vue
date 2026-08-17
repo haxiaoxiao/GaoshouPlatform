@@ -179,6 +179,39 @@
         </el-button>
       </section>
 
+      <section class="dock-group">
+        <div class="dock-row">
+          <strong>每日自动爬取</strong>
+          <el-tag
+            :type="dailySentimentSchedule?.enabled ? 'success' : dailySentimentSchedule ? 'info' : 'warning'"
+            effect="plain"
+            size="small"
+          >
+            {{ loadingDailySentimentSchedule ? 'LOAD' : dailySentimentSchedule?.enabled ? 'ON' : dailySentimentSchedule ? 'OFF' : 'N/A' }}
+          </el-tag>
+        </div>
+        <p>控制每日 22:30 舆情增量任务；关闭后手动抓取仍可使用。</p>
+        <label class="guardrail-row" :class="{ 'guardrail-row--on': dailySentimentSchedule?.enabled }">
+          <span>
+            <strong>每日舆情增量</strong>
+            <small>
+              {{ dailySentimentSchedule?.enabled
+                ? `下次 ${formatDateTime(dailySentimentSchedule.next_run_at)}`
+                : dailySentimentSchedule ? '已关闭' : '同步服务状态不可用' }}
+            </small>
+          </span>
+          <el-switch
+            :model-value="dailySentimentSchedule?.enabled ?? false"
+            :loading="savingDailySentimentSchedule"
+            :disabled="loadingDailySentimentSchedule || savingDailySentimentSchedule || !dailySentimentSchedule"
+            active-text="ON"
+            inactive-text="OFF"
+            inline-prompt
+            @change="handleDailySentimentScheduleChange"
+          />
+        </label>
+      </section>
+
       <section v-if="liveGuardrails" class="dock-group" :class="{ 'dock-group--danger': guardrailDraft.enable_order_submit || guardrailDraft.auto_execute_enabled }">
         <div class="dock-row">
           <strong>实盘交易护栏</strong>
@@ -261,6 +294,7 @@ import { getLlmGatewayView, systemApi, type DataSummary, type DataSummaryItem, t
 import { syncApi, type SyncLog, type SyncStatus } from '@/api/sync'
 import { runtimeTaskApi, type RuntimeTask } from '@/api/runtimeTasks'
 import { liveTradingApi, type LiveTradingStatus } from '@/api/liveTrading'
+import { useDailySentimentSchedule } from './useDailySentimentSchedule'
 
 type Tone = 'good' | 'warn' | 'bad' | 'neutral'
 
@@ -343,6 +377,13 @@ const liveGuardrails = ref<LiveTradingGuardrails | null>(null)
 const llmEndpoints = ref<LlmEndpoint[]>([])
 const llmEndpointLoadState = ref<LlmEndpointLoadState>('loading')
 const llmManagerOpen = ref(false)
+const {
+  schedule: dailySentimentSchedule,
+  loading: loadingDailySentimentSchedule,
+  saving: savingDailySentimentSchedule,
+  load: loadDailySentimentSchedule,
+  setEnabled: setDailySentimentScheduleEnabled,
+} = useDailySentimentSchedule()
 const guardrailDraft = ref({
   enable_order_submit: false,
   auto_execute_enabled: false,
@@ -816,6 +857,7 @@ async function loadOps() {
       systemApi.getDevDataMode(),
       systemApi.getLiveTradingGuardrails(),
       systemApi.listLlmEndpoints(),
+      loadDailySentimentSchedule(),
     ])
     if (systemResult.status === 'fulfilled') systemStatus.value = systemResult.value
     if (syncStatusResult.status === 'fulfilled') syncStatus.value = syncStatusResult.value
@@ -836,6 +878,15 @@ async function loadOps() {
     }
   } finally {
     loading.value = false
+  }
+}
+
+async function handleDailySentimentScheduleChange(value: string | number | boolean) {
+  try {
+    const updated = await setDailySentimentScheduleEnabled(Boolean(value))
+    ElMessage.success(updated?.enabled ? '每日自动爬取已开启' : '每日自动爬取已关闭')
+  } catch {
+    ElMessage.error('每日自动爬取设置失败，已保留原状态')
   }
 }
 

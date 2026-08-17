@@ -7,11 +7,16 @@ from types import SimpleNamespace
 import pytest
 
 from app.services import sync_service as sync_service_module
+from app.services.sentiment import XueqiuCrawlBlockedError
+from app.services.sentiment_focus_pool import FocusTarget, ResolvedFocusPool
 from app.services.sync_service import SyncService
 
 
 class FakeSession:
     async def commit(self) -> None:
+        return None
+
+    async def rollback(self) -> None:
         return None
 
 
@@ -278,6 +283,213 @@ async def test_sync_sentiment_cancellation_disconnects_xueqiu_session(monkeypatc
     assert instance is not None
     assert instance.symbols == ["600519.SH"]
     assert instance.disconnect_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_uses_focus_pool_page_limits_and_pacing(monkeypatch):
+    instances = []
+    delays = []
+
+    class FakeResolver:
+        def __init__(self, session):
+            assert isinstance(session, FakeAsyncSession)
+
+        async def resolve(self):
+            return ResolvedFocusPool(
+                targets=(
+                    FocusTarget("002313.SZ", ("qmt_holding",)),
+                    FocusTarget("600114.SH", ("qmt_holding", "vault_active")),
+                    FocusTarget("002138.SZ", ("vault_active",), "valid.md"),
+                ),
+                qmt_status="fresh",
+                vault_count=2,
+                overlap_count=1,
+                snapshot_captured_at=datetime(2026, 7, 17, 10, 0),
+            )
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            self.calls = []
+            instances.append(self)
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="authenticated", auth={"server_verified": True})
+
+        async def collect(self, symbol, **kwargs):
+            self.calls.append((symbol, kwargs["max_pages"]))
+            return [], {"raw_count": 0}
+
+        async def disconnect(self):
+            return None
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("fake session handles collection")
+
+        async def upsert_posts(self, posts):
+            return 0
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(sync_service_module, "SentimentFocusPoolResolver", FakeResolver, raising=False)
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr(sync_service_module.asyncio, "sleep", fake_sleep)
+    monkeypatch.setattr(sync_service_module.app_settings, "xueqiu_stock_delay_seconds", 2.0)
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        max_pages=3,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert instances[0].calls == [
+        ("002313.SZ", 3),
+        ("600114.SH", 3),
+        ("002138.SZ", 2),
+    ]
+    assert delays == [2.0, 2.0]
+    assert progress.details["target_pool"]["symbol_count"] == 3
+    assert progress.details["target_pool"]["qmt_status"] == "fresh"
+    assert progress.details["target_pool"]["overlap_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_explicit_xueqiu_symbol_bypasses_focus_pool(monkeypatch):
+    calls = []
+
+    class FailResolver:
+        def __init__(self, session):
+            raise AssertionError("explicit symbols must bypass focus pool resolution")
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            return None
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="authenticated", auth={"server_verified": True})
+
+        async def collect(self, symbol, **kwargs):
+            calls.append((symbol, kwargs["max_pages"]))
+            return [], {"raw_count": 0}
+
+        async def disconnect(self):
+            return None
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("fake session handles collection")
+
+        async def upsert_posts(self, posts):
+            return 0
+
+    monkeypatch.setattr(sync_service_module, "SentimentFocusPoolResolver", FailResolver, raising=False)
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        symbols=["600519.SH"],
+        max_pages=4,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert calls == [("600519.SH", 4)]
+    assert "target_pool" not in progress.details
+
+
+@pytest.mark.asyncio
+async def test_sync_sentiment_circuit_breaker_stops_remaining_xueqiu_targets(monkeypatch):
+    attempted = []
+
+    class FakeResolver:
+        def __init__(self, session):
+            return None
+
+        async def resolve(self):
+            return ResolvedFocusPool(
+                targets=(
+                    FocusTarget("002313.SZ", ("qmt_holding",)),
+                    FocusTarget("600114.SH", ("qmt_holding",)),
+                    FocusTarget("002138.SZ", ("vault_active",)),
+                ),
+                qmt_status="fresh",
+                vault_count=1,
+                overlap_count=0,
+                snapshot_captured_at=datetime(2026, 7, 17, 10, 0),
+            )
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            return None
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="authenticated", auth={"server_verified": True})
+
+        async def collect(self, symbol, **kwargs):
+            attempted.append(symbol)
+            if symbol == "600114.SH":
+                raise XueqiuCrawlBlockedError(reason="http_405", status_code=405)
+            return [], {"raw_count": 0}
+
+        async def disconnect(self):
+            return None
+
+    class FakeSentimentIngestService:
+        def __init__(self, session, progress_callback=None):
+            self.service = self
+
+        def _collect_xueqiu(self, *args, **kwargs):
+            raise AssertionError("fake session handles collection")
+
+        async def upsert_posts(self, posts):
+            return 0
+
+    monkeypatch.setattr(sync_service_module, "SentimentFocusPoolResolver", FakeResolver)
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr(sync_service_module.app_settings, "xueqiu_stock_delay_seconds", 0.0)
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", FakeSentimentIngestService)
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+
+    progress = await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        max_pages=3,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert attempted == ["002313.SZ", "600114.SH"]
+    assert progress.status == "completed"
+    assert progress.details["outcome"] == "partial"
+    assert progress.details["target_pool"]["crawl_limited_reason"] == "http_405"
+    assert [result.get("error_code") for result in progress.details["results"]] == [
+        None,
+        "xueqiu_circuit_breaker",
+        "xueqiu_circuit_open",
+    ]
 
 
 @pytest.mark.asyncio

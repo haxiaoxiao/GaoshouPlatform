@@ -29,14 +29,40 @@ def invalidate_after_sync(sync_type: str) -> dict[str, object]:
         "sentiment_nga": [],
     }
     patterns = patterns_by_sync.get(sync_type, [])
-    get_compute_cache().clear_l1()
+    compute_deleted = get_compute_cache().clear()
     deleted = _delete_backtest_cache_patterns(patterns)
+    dataset_metadata = _invalidate_dataset_metadata(sync_type)
     return {
         "sync_type": sync_type,
         "compute_l1_cleared": True,
+        "compute_redis_deleted": compute_deleted,
         "redis_patterns": patterns,
         "redis_deleted": deleted,
+        "dataset_metadata": dataset_metadata,
     }
+
+
+def _invalidate_dataset_metadata(sync_type: str) -> dict[str, object]:
+    datasets_by_sync = {
+        "kline_daily": ("klines_daily",),
+        "index_daily": ("klines_daily",),
+        "kline_minute": ("klines_minute",),
+        "datasync": ("klines_daily", "klines_minute"),
+        "kline_weekly": ("klines_weekly",),
+    }
+    datasets = datasets_by_sync.get(sync_type, ())
+    if not datasets:
+        return {
+            "datasets": [],
+            "coverage_cache_entries_deleted": 0,
+            "catalog_cache_cleared": False,
+            "manifests_deleted": [],
+            "manifest_delete_failed": [],
+        }
+
+    from app.services.tushare_relay_sync import invalidate_dataset_metadata
+
+    return invalidate_dataset_metadata(datasets)
 
 
 def _delete_backtest_cache_patterns(patterns: list[str]) -> int:

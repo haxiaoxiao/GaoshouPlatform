@@ -14,8 +14,8 @@ async def test_precompute_factor_expressions_builtin(monkeypatch):
 
     class FakeCache:
         @staticmethod
-        def make_key(expression):
-            return f"hash-{expression}"
+        def make_persistent_key(expression, *, engine):
+            return f"hash-{engine}-{expression}"
 
         def save_to_parquet(self, expr_hash, trade_date, series, expression="", engine="builtin"):
             saved.append((expr_hash, trade_date, series.to_dict(), engine))
@@ -41,7 +41,7 @@ async def test_precompute_factor_expressions_builtin(monkeypatch):
     )
 
     assert result["rows_written"] == 1
-    assert result["expressions"][0]["expr_hash"] == "hash-ts_delta($close, 1)"
+    assert result["expressions"][0]["expr_hash"] == "hash-builtin-ts_delta($close, 1)"
     assert saved[0][1] == date(2025, 1, 3)
     assert saved[0][2]["000001.SZ"] == 1.0
 

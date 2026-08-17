@@ -106,3 +106,20 @@ class SentimentAnalysis(Base, TimestampMixin):
     evidence_json: Mapped[str | None] = mapped_column(Text)
     keywords_json: Mapped[str | None] = mapped_column(Text)
     analyzed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
+class SentimentFocusSnapshot(Base, TimestampMixin):
+    """Sanitized target resolution used by scheduled sentiment ingestion."""
+
+    __tablename__ = "sentiment_focus_snapshots"
+    __table_args__ = (
+        Index("ix_sentiment_focus_snapshot_key_captured", "snapshot_key", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    snapshot_key: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    captured_at: Mapped[datetime | None] = mapped_column(DateTime)
+    symbols_json: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_json: Mapped[str] = mapped_column(Text, nullable=False)
+    error_summary: Mapped[str | None] = mapped_column(String(500))

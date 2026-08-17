@@ -1167,7 +1167,9 @@ function toneName(value: number | null | undefined): 'good' | 'bad' | 'neutral' 
 
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
   box-sizing: border-box;
   padding: 16px 20px;
   background:
@@ -2089,7 +2091,7 @@ function toneName(value: number | null | undefined): 'good' | 'bad' | 'neutral' 
 @media (max-width: 900px) {
   .theme-pine-quant {
     height: auto;
-    min-height: 100vh;
+    min-height: 100%;
     overflow: auto;
   }
 

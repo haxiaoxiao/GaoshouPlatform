@@ -6,6 +6,7 @@ explicitly enables it in config and sends a confirmation flag with the request.
 from __future__ import annotations
 
 import asyncio
+import hmac
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,6 +15,7 @@ from typing import Any, Sequence
 
 from app.core.config import settings
 from app.engines.qmt_gateway import qmt_gateway
+from app.services.live_control import live_control_sessions
 from app.services.security_symbols import normalize_security_symbol
 
 
@@ -206,7 +208,7 @@ class QmtTradingService:
                     self._account_snapshot_cache = self._copy_account_snapshot(snapshot)
                     self._account_snapshot_cached_at = datetime.now()
                     return snapshot
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     last_exc = RuntimeError(
                         f"QMT account snapshot timed out after {self._account_snapshot_timeout_seconds:.0f}s"
                     )
@@ -224,7 +226,13 @@ class QmtTradingService:
                 raise last_exc
             raise RuntimeError("QMT account snapshot failed")
 
-    async def submit_order(self, payload: dict[str, Any]) -> dict[str, Any]:
+    async def submit_order(
+        self,
+        payload: dict[str, Any],
+        *,
+        broker_permit: object | None = None,
+    ) -> dict[str, Any]:
+        live_context = live_control_sessions.validate_broker_permit(broker_permit)
         if not settings.live_trading_enable_order_submit:
             return {
                 "enabled": False,
@@ -241,12 +249,17 @@ class QmtTradingService:
             }
 
         def _submit() -> dict[str, Any]:
+            config = self._runtime_config()
+            self._ensure_runtime_config(config)
+            actual_account_mask = self._mask_account(config.account_id)
+            if not hmac.compare_digest(actual_account_mask, live_context.account_mask):
+                raise PermissionError("Live QMT account changed before broker submission")
+
             from xtquant import xtconstant
             from xtquant.xttrader import XtQuantTrader
             from xtquant.xttype import StockAccount
+
             trader = None
-            config = self._runtime_config()
-            self._ensure_runtime_config(config)
 
             side = str(payload.get("side") or payload.get("action") or "").upper()
             symbol = str(payload.get("symbol") or "")
@@ -295,6 +308,8 @@ class QmtTradingService:
         try:
             async with self._account_snapshot_lock:
                 return await asyncio.to_thread(_submit)
+        except PermissionError:
+            raise
         except Exception as exc:
             return {
                 "enabled": True,
@@ -399,7 +414,7 @@ class QmtTradingService:
                     asyncio.to_thread(_query),
                     timeout=self._order_query_timeout_seconds,
                 )
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise RuntimeError(
                     f"QMT order update query timed out after {self._order_query_timeout_seconds:.0f}s"
                 ) from exc

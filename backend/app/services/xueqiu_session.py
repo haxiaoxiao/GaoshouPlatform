@@ -52,7 +52,7 @@ class XueqiuSession:
 
     @staticmethod
     def _default_disconnector(crawler: Any) -> None:
-        disconnect = getattr(crawler, "disconnect", None) or getattr(crawler, "close")
+        disconnect = getattr(crawler, "disconnect", None) or crawler.close
         disconnect()
 
     async def _run(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:

@@ -833,41 +833,15 @@ class FactorValueStore:
         if parquet_expr is None:
             return self._empty_coverage(factor_name)
         stats_sql = f"""
-            WITH factor_values_normalized AS (
-                SELECT
-                    symbol,
-                    trade_date,
-                    as_of_time,
-                    {name_expr} AS factor_name,
-                    params_hash,
-                    value,
-                    created_at,
-                    year,
-                    month
-                FROM {parquet_expr}
-            ),
-            factor_values_latest AS (
-                SELECT *
-                FROM (
-                    SELECT
-                        *,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
-                            ORDER BY created_at DESC NULLS LAST
-                        ) AS row_num
-                    FROM factor_values_normalized
-                    WHERE {where_sql}
-                      {partition_filter}
-                )
-                WHERE row_num = 1
-            )
             SELECT
-                COUNT(*) AS total_rows,
+                COUNT(DISTINCT (symbol, trade_date, as_of_time, {name_expr}, params_hash)) AS total_rows,
                 COUNT(DISTINCT symbol) AS symbol_count,
                 COUNT(DISTINCT trade_date) AS date_count,
                 MIN(trade_date) AS min_date,
                 MAX(trade_date) AS max_date
-            FROM factor_values_latest
+            FROM {parquet_expr}
+            WHERE {where_sql}
+              {partition_filter}
         """
         stats = get_duckdb().execute(stats_sql).fetchone()
         total_rows = int(stats[0] or 0) if stats else 0
@@ -877,36 +851,10 @@ class FactorValueStore:
         sample_symbols: list[str] = []
         if include_symbols_sample:
             sample_sql = f"""
-                WITH factor_values_normalized AS (
-                    SELECT
-                        symbol,
-                        trade_date,
-                        as_of_time,
-                        {name_expr} AS factor_name,
-                        params_hash,
-                        value,
-                        created_at,
-                        year,
-                        month
-                    FROM {parquet_expr}
-                ),
-                factor_values_latest AS (
-                    SELECT *
-                    FROM (
-                        SELECT
-                            *,
-                            ROW_NUMBER() OVER (
-                                PARTITION BY symbol, trade_date, as_of_time, factor_name, params_hash
-                                ORDER BY created_at DESC NULLS LAST
-                            ) AS row_num
-                        FROM factor_values_normalized
-                        WHERE {where_sql}
-                          {partition_filter}
-                    )
-                    WHERE row_num = 1
-                )
                 SELECT DISTINCT symbol
-                FROM factor_values_latest
+                FROM {parquet_expr}
+                WHERE {where_sql}
+                  {partition_filter}
                 ORDER BY symbol
                 LIMIT 20
             """

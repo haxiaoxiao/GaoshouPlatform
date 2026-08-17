@@ -282,6 +282,11 @@ async def takeover_runner(req: LiveRunnerTakeoverRequest) -> dict[str, Any]:
 
 @router.post("/orders/submit")
 async def submit_orders(req: LiveSubmitOrdersRequest) -> dict[str, Any]:
+    if req.mode == "live":
+        raise HTTPException(
+            status_code=410,
+            detail="Live order submission moved to /api/v1/live/orders/submit",
+        )
     try:
         return _ok(
             await live_trading_service.submit_orders(

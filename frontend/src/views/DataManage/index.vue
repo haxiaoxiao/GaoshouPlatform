@@ -103,7 +103,12 @@
             </div>
 
             <div class="chart-panel" v-loading="klineLoading">
-              <KlineChart v-if="klineChartRows.length" :data="klineChartRows" />
+              <KlineChart
+                v-if="klineChartRows.length"
+                :data="klineChartRows"
+                :query-key="klineQueryKey"
+                @request-older="loadOlderKlines"
+              />
               <el-empty v-else description="暂无行情数据，请调整日期或同步数据" :image-size="72" />
             </div>
 
@@ -406,21 +411,15 @@ import { klineApi, toDisplayFormat, type KlineDataDisplay, type KlineType } from
 import { systemApi, type DataSummary, type DataSummaryItem } from '@/api/system'
 import { syncApi, type SyncLog } from '@/api/sync'
 import KlineChart from './KlineChart.vue'
+import { hasOlderKlinePage, mergeKlinePages } from './klinePagination'
+import { loadRecentStocks, rememberRecentStock, type RecentStock } from './recentStocks'
 import SentimentPanel from './SentimentPanel.vue'
 
 type FreshnessTone = 'good' | 'warn' | 'bad' | 'neutral'
 type TabKey = 'market' | 'financial' | 'capital' | 'sentiment' | 'schema'
 type FinancialPeriodFilter = 'all' | 'annual' | 'quarter'
 
-interface StockOption {
-  symbol: string
-  name: string
-  exchange?: string | null
-  industry?: string | null
-  theme?: string
-  total_mv?: number | null
-  circ_mv?: number | null
-}
+type StockOption = RecentStock
 
 interface StockDetail {
   symbol: string
@@ -478,6 +477,7 @@ interface DisplayMetric {
 const router = useRouter()
 const loading = ref(false)
 const klineLoading = ref(false)
+const klineLoadingOlder = ref(false)
 const financialLoading = ref(false)
 const stockSearchLoading = ref(false)
 const dataSummary = ref<DataSummary | null>(null)
@@ -504,13 +504,16 @@ const domainTabs: { key: TabKey; label: string; hint: string }[] = [
   { key: 'schema', label: '原始数据/口径', hint: '来源与字段' },
 ]
 
-const recentStocks = ref<StockOption[]>([
-  { symbol: '600519.SH', name: '贵州茅台', industry: '食品饮料', theme: '白酒 / 高股息' },
-  { symbol: '000001.SZ', name: '平安银行', industry: '银行', theme: '金融 / 低估值' },
-  { symbol: '300750.SZ', name: '宁德时代', industry: '电力设备', theme: '新能源 / 成长' },
-  { symbol: '000333.SZ', name: '美的集团', industry: '家用电器', theme: '家电 / 现金流' },
-  { symbol: '399101.SZ', name: '中小综指', industry: '指数', theme: '小市值策略池' },
-])
+const recentStocks = ref<StockOption[]>(loadRecentStocks())
+const klinePage = ref(0)
+const klineTotalPages = ref(0)
+const klinePageSize = computed(() => klinePeriod.value === 'daily' ? 250 : 1000)
+const klineQueryKey = computed(() => [
+  selectedSymbol.value,
+  klinePeriod.value,
+  ...klineDateRange.value,
+].join(':'))
+let klineRequestVersion = 0
 
 const selectedStockOption = computed(() =>
   stockOptions.value.find(item => item.symbol === selectedSymbol.value)
@@ -670,10 +673,14 @@ async function selectRecentStock(symbol: string) {
   await handleStockChange()
 }
 
+let stockSearchVersion = 0
+
 async function searchStocks(query: string) {
+  const requestVersion = ++stockSearchVersion
   const keyword = query.trim()
   if (!keyword) {
     stockOptions.value = recentStocks.value
+    stockSearchLoading.value = false
     return
   }
   stockSearchLoading.value = true
@@ -681,11 +688,11 @@ async function searchStocks(query: string) {
     const response = await request.get<{ items: StockOption[] }>('/data/stocks', {
       params: { search: keyword, page_size: 20 },
     })
-    stockOptions.value = response.items || []
+    if (requestVersion === stockSearchVersion) stockOptions.value = response.items || []
   } catch {
-    stockOptions.value = []
+    if (requestVersion === stockSearchVersion) stockOptions.value = []
   } finally {
-    stockSearchLoading.value = false
+    if (requestVersion === stockSearchVersion) stockSearchLoading.value = false
   }
 }
 
@@ -724,7 +731,12 @@ async function loadFinancialReports(symbol = selectedSymbol.value) {
 }
 
 async function loadKlines() {
+  const requestVersion = ++klineRequestVersion
   klineLoading.value = true
+  klineLoadingOlder.value = false
+  klineRows.value = []
+  klinePage.value = 0
+  klineTotalPages.value = 0
   try {
     const [startDate, endDate] = klineDateRange.value
     const response = await klineApi.getKlines({
@@ -732,12 +744,53 @@ async function loadKlines() {
       period: klinePeriod.value,
       start_date: startDate,
       end_date: endDate,
+      page: 1,
+      page_size: klinePageSize.value,
     })
+    if (requestVersion !== klineRequestVersion) return
     klineRows.value = toDisplayFormat(response.items || [])
+    klinePage.value = response.page
+    klineTotalPages.value = response.total_pages
   } catch {
-    klineRows.value = []
+    if (requestVersion === klineRequestVersion) klineRows.value = []
   } finally {
-    klineLoading.value = false
+    if (requestVersion === klineRequestVersion) klineLoading.value = false
+  }
+}
+
+async function loadOlderKlines() {
+  if (!hasOlderKlinePage({
+    page: klinePage.value,
+    totalPages: klineTotalPages.value,
+    loading: klineLoading.value || klineLoadingOlder.value,
+  })) return
+
+  const requestVersion = klineRequestVersion
+  const nextPage = klinePage.value + 1
+  klineLoadingOlder.value = true
+  try {
+    const [startDate, endDate] = klineDateRange.value
+    const response = await klineApi.getKlines({
+      symbol: selectedSymbol.value,
+      period: klinePeriod.value,
+      start_date: startDate,
+      end_date: endDate,
+      page: nextPage,
+      page_size: klinePageSize.value,
+    })
+    if (requestVersion !== klineRequestVersion) return
+    klineRows.value = mergeKlinePages(
+      klineRows.value,
+      toDisplayFormat(response.items || []),
+    )
+    klinePage.value = response.page
+    klineTotalPages.value = response.total_pages
+  } catch {
+    if (requestVersion === klineRequestVersion) {
+      ElMessage.warning('更早行情加载失败，可继续拖动重试')
+    }
+  } finally {
+    if (requestVersion === klineRequestVersion) klineLoadingOlder.value = false
   }
 }
 
@@ -773,7 +826,7 @@ function addRecentStock(symbol: string) {
     industry: detail?.industry || undefined,
     theme: detail?.concept || undefined,
   }
-  recentStocks.value = [nextStock, ...recentStocks.value.filter(stock => stock.symbol !== symbol)].slice(0, 6)
+  recentStocks.value = rememberRecentStock(nextStock, recentStocks.value)
 }
 
 function sourceRow(key: string, label: string) {

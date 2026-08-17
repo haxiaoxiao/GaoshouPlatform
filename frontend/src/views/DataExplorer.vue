@@ -42,8 +42,8 @@
       </div>
     </header>
 
-    <!-- LAYOUT A (sql) -->
-    <div v-if="layoutMode === 'A'" class="layout-sql-grid">
+    <!-- LAYOUT A (preview) -->
+    <div v-if="layoutMode === 'A'" class="layout-preview-grid">
       <!-- Left Sidebar (220px): Schema tree (tables and columns) -->
       <aside class="schema-sidebar">
         <!-- Tables section -->
@@ -95,40 +95,15 @@
               >
                 {{ hiddenColumns.has(column.name) ? '□' : '☑' }}
               </button>
-              <span class="col-name" @click="insertColumnToSql(column.name)">{{ column.name }}</span>
-              <span class="col-type" @click="insertColumnToSql(column.name)">{{ column.type }}</span>
+              <span class="col-name">{{ column.name }}</span>
+              <span class="col-type">{{ column.type }}</span>
             </div>
           </div>
         </div>
       </aside>
 
       <!-- Right side -->
-      <main class="sql-workspace">
-        <!-- Top: SQL input textarea with Run Query button -->
-        <div class="sql-input-panel">
-          <div class="panel-header-inline">
-            <div class="block-title-sql">
-              <div class="block-title-sql__main">
-                <strong>WHERE 过滤子句 (SQL IDE)</strong>
-                <el-button text size="small" class="detail-toggle-btn" @click="showSql = !showSql">
-                  {{ showSql ? '收起说明' : '详细说明' }}
-                </el-button>
-              </div>
-              <span v-if="showSql" class="sql-help-text">调试模式：双击或单击左侧字段可自动插入。支持标准 SQL WHERE 过滤语法。</span>
-              <span v-else class="sql-help-text">支持输入 SQL WHERE 语法过滤行。</span>
-            </div>
-            <el-button type="primary" :disabled="!selectedTable" @click="loadLegacyPreview" :loading="loading">
-              运行查询 (Run Query)
-            </el-button>
-          </div>
-          <el-input
-            v-model="whereClause"
-            type="textarea"
-            :rows="3"
-            placeholder="例如: symbol = '600519.SH' AND trade_date >= '2026-05-01'"
-          />
-        </div>
-
+      <main class="preview-workspace">
         <!-- Bottom: Data Grid result table -->
         <div class="result-table-panel">
           <div class="result-header-inline">
@@ -292,7 +267,7 @@
           </div>
         </div>
 
-        <!-- Dynamic WHERE filters list -->
+        <!-- Structured filters list -->
         <div v-if="selectedTable && filters.length" class="dynamic-filters-list">
           <div
             v-for="(filter, index) in filters"
@@ -547,7 +522,6 @@ import {
   getDistinctValues,
   getTableSchema,
   getTables,
-  previewTable,
   searchTable,
   type ColumnInfo,
   type ExplorerFilter,
@@ -574,7 +548,7 @@ type ExplorerRow = Record<string, unknown> & {
 type LayoutMode = 'A' | 'B' | 'C'
 const layoutMode = ref<LayoutMode>('A')
 const layoutModes: { key: LayoutMode; label: string; hint: string }[] = [
-  { key: 'A', label: 'SQL 终端', hint: 'SQL IDE 混合布局' },
+  { key: 'A', label: '表预览', hint: '字段与数据预览' },
   { key: 'B', label: '快捷筛选', hint: '无代码可视化过滤器' },
   { key: 'C', label: '物理分析', hint: 'Parquet 分区物理结构树' },
 ]
@@ -584,14 +558,12 @@ const selectedTable = ref('')
 const schema = ref<ColumnInfo[]>([])
 const tableSearch = ref('')
 const fieldSearch = ref('')
-const whereClause = ref('')
 const orderBy = ref('')
 const orderDir = ref<'ASC' | 'DESC'>('ASC')
 const page = ref(1)
 const pageSize = ref(50)
 const hiddenColumns = ref(new Set<string>())
 const filters = ref<FilterRow[]>([])
-const showSql = ref(false)
 const tablesLoading = ref(false)
 const loading = ref(false)
 const error = ref('')
@@ -751,7 +723,6 @@ async function selectTable(tableName: string) {
   selectedTable.value = tableName
   schema.value = []
   filters.value = []
-  whereClause.value = ''
   orderBy.value = ''
   orderDir.value = 'ASC'
   page.value = 1
@@ -828,26 +799,6 @@ async function loadData(includeTotal = false) {
   }
 }
 
-async function loadLegacyPreview() {
-  if (!selectedTable.value) return
-  loading.value = true
-  error.value = ''
-  try {
-    result.value = await previewTable(selectedTable.value, {
-      page: page.value,
-      page_size: pageSize.value,
-      order_by: orderBy.value || undefined,
-      order_dir: orderDir.value,
-      where: whereClause.value || undefined,
-      include_total: true,
-    })
-  } catch (err: any) {
-    error.value = err?.message || '查询失败'
-  } finally {
-    loading.value = false
-  }
-}
-
 function applySearch() {
   page.value = 1
   loadData()
@@ -855,7 +806,6 @@ function applySearch() {
 
 function resetFilters() {
   filters.value = []
-  whereClause.value = ''
   orderBy.value = ''
   orderDir.value = 'ASC'
   page.value = 1
@@ -939,20 +889,6 @@ function exportCsv() {
   ElMessage.success('CSV 已导出')
 }
 
-// SQL IDE Append Column Helper
-function insertColumnToSql(columnName: string) {
-  if (!whereClause.value) {
-    whereClause.value = columnName
-  } else {
-    const trimmed = whereClause.value.trim()
-    if (trimmed.endsWith('AND') || trimmed.endsWith('OR') || trimmed.endsWith('WHERE') || trimmed.endsWith('=')) {
-      whereClause.value = `${whereClause.value} ${columnName}`
-    } else {
-      whereClause.value = `${whereClause.value} AND ${columnName}`
-    }
-  }
-}
-
 // Physical partition mocking logic
 interface ParquetFile {
   path: string
@@ -1029,7 +965,7 @@ const pageContextBlocks = computed(() => [
   {
     title: 'Layout & View',
     rows: [
-      { label: '布局模式', value: layoutMode.value === 'A' ? 'SQL 终端' : layoutMode.value === 'B' ? '快捷筛选' : '物理分析' },
+      { label: '布局模式', value: layoutMode.value === 'A' ? '表预览' : layoutMode.value === 'B' ? '快捷筛选' : '物理分析' },
       { label: '当前数据表', value: selectedTable.value || '未选择' },
       { label: '表数量', value: `${filteredTables.value.length} / ${tables.value.length}` },
       { label: '字段数', value: selectedTable.value ? `${filteredSchema.value.length}` : '-' },
@@ -1168,7 +1104,7 @@ onMounted(async () => {
 }
 
 /* General layout styles */
-.layout-sql-grid {
+.layout-preview-grid {
   display: grid;
   grid-template-columns: 220px minmax(0, 1fr);
   gap: 0;
@@ -1328,28 +1264,13 @@ onMounted(async () => {
   font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
 }
 
-/* SQL IDE workspace */
-.sql-workspace {
+/* Preview workspace */
+.preview-workspace {
   display: flex;
   flex-direction: column;
   min-height: 0;
   flex: 1;
   background-color: #fdfbf7;
-}
-
-.sql-input-panel {
-  padding: 12px;
-  border-bottom: 1px solid #e5dfd3;
-  background-color: #fdfbf7;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.panel-header-inline {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
 }
 
 .block-title {
@@ -1723,8 +1644,7 @@ onMounted(async () => {
 
 /* Deep overrides for Element Plus inside theme-pine-quant */
 .theme-pine-quant :deep(.el-input__wrapper),
-.theme-pine-quant :deep(.el-select__wrapper),
-.theme-pine-quant :deep(.el-textarea__inner) {
+.theme-pine-quant :deep(.el-select__wrapper) {
   background-color: #fdfbf7 !important;
   color: #22302a !important;
   box-shadow: 0 0 0 1px #e5dfd3 inset !important;
@@ -1732,8 +1652,7 @@ onMounted(async () => {
 }
 
 .theme-pine-quant :deep(.el-input__inner),
-.theme-pine-quant :deep(.el-select__text),
-.theme-pine-quant :deep(.el-textarea__inner) {
+.theme-pine-quant :deep(.el-select__text) {
   color: #22302a !important;
 }
 
@@ -1840,7 +1759,7 @@ onMounted(async () => {
 }
 
 @media (max-width: 1180px) {
-  .layout-sql-grid,
+  .layout-preview-grid,
   .layout-physical-grid {
     grid-template-columns: 1fr;
   }

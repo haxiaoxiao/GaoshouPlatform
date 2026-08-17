@@ -72,19 +72,19 @@
 已跑验证命令：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m py_compile app\services\factor_catalog.py app\services\cn_paper_factor_calculator.py app\services\cn_paper_ml_experiment.py app\api\factor_values.py app\backtest\strategies\cn_paper_style_rotation_akquant.py app\backtest\strategies\builtin_templates.py
 .\.venv\Scripts\python.exe -m pytest tests\services\test_cn_paper_factor_calculator.py tests\services\test_cn_paper_ml_experiment.py tests\services\test_factor_catalog.py tests\services\test_factor_dependency_sync.py tests\backtest\test_multi_factor_strategy.py -q
 .\.venv\Scripts\python.exe -m pytest tests\services\test_factor_pipeline.py tests\services\test_factor_evaluation.py tests\api\test_evaluation_api.py tests\backtest\test_akquant_integration.py -q
 
-cd E:\Projects\GaoshouPlatform\frontend
+cd E:\Projects\GaoshouPlatform-prod\frontend
 npm run build
 ```
 
 补充接口测试覆盖：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m pytest tests\api\test_factor_values_paper.py -q
 ```
 

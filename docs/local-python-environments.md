@@ -1,5 +1,7 @@
 # Local Python Environments
 
+Last updated: 2026-07-17.
+
 This workstation has multiple Python environments. Use the right one to avoid
 surprise "package not found" failures.
 
@@ -8,7 +10,7 @@ surprise "package not found" failures.
 Use these for project-specific runtime and tests:
 
 ```powershell
-# Gaoshou dev backend
+# Gaoshou dev backend (currently parked; use only when explicitly requested)
 E:\Projects\GaoshouPlatform-dev\backend\.venv\Scripts\python.exe
 
 # Gaoshou prod backend
@@ -54,4 +56,5 @@ E:\PythonEnvs\quant-tools\Scripts\python.exe -m pip cache dir
 
 Use the Gaoshou backend venv for Gaoshou runtime or tests. Use
 `E:\PythonEnvs\quant-tools\Scripts\python.exe` for quick parquet inspection,
-one-off notebooks, or cross-project data checks.
+one-off notebooks, or cross-project data checks. During the current temporary
+development boundary, Gaoshou commands run from the prod checkout and its venv.

@@ -12,6 +12,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import hmac
 import json
 import sqlite3
 import uuid
@@ -38,6 +39,7 @@ from app.db.models.live_trading import (
     LiveTradeRecord,
     LiveTradingRun,
 )
+from app.db.models.research_lineage import PersistentJob, StrategyRelease
 from app.db.models.stock import Stock
 from app.db.models.strategy import Strategy
 from app.db.sqlite import async_session_factory
@@ -58,6 +60,7 @@ from app.services.factor_value_store import (
     normalize_factor_time,
 )
 from app.services.index_components import load_index_symbols_as_of
+from app.services.live_control import LiveSubmissionContext, live_control_sessions
 from app.services.qmt_trading import QmtAccountSnapshot, qmt_trading_service
 from app.services.stock_universe import is_all_a_universe, load_all_a_symbols
 from app.services.sync_service import SyncProgress, SyncService
@@ -701,7 +704,7 @@ class LiveTradingService:
                     updated_count=pending_sync.get("updated_count"),
                     synced=pending_sync.get("synced"),
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 message = f"QMT pending order sync timed out after {pending_sync_timeout:.0f}s"
                 pending_sync = {"synced": False, "timeout": True, "error": message}
                 logger.warning("Live signal generation skips pending order sync: {}", message)
@@ -986,8 +989,38 @@ class LiveTradingService:
         confirm: bool = False,
         trigger_source: str = "manual",
         run_id: str | None = None,
+        live_authorization: object | None = None,
     ) -> dict[str, Any]:
+        broker_permit: object | None = None
+        live_context: LiveSubmissionContext | None = None
+        if mode == "live":
+            broker_permit = live_control_sessions.consume_submission_authorization(live_authorization)
+            live_context = live_control_sessions.validate_broker_permit(broker_permit)
         order_list = self._submission_order_sort([dict(order) for order in orders])
+        if live_context is not None:
+            if not order_list:
+                raise PermissionError("Live submission orders must not be empty")
+            if run_id != live_context.reservation_id:
+                raise PermissionError("Live submission idempotency reservation does not match authorization")
+            raw_strategy_ids: set[int] = set()
+            raw_profile_keys: set[str] = set()
+            for order in order_list:
+                strategy_id = order.get("strategy_id")
+                if not isinstance(strategy_id, int) or isinstance(strategy_id, bool) or strategy_id <= 0:
+                    raise PermissionError("Every live order requires a positive strategy_id")
+                profile_key = str(order.get("profile_key") or "").strip()
+                if not profile_key:
+                    raise PermissionError("Every live order requires a profile_key")
+                raw_strategy_ids.add(strategy_id)
+                raw_profile_keys.add(profile_key)
+            if raw_strategy_ids != {live_context.strategy_id}:
+                raise PermissionError("Live order strategy does not match authorization")
+            if raw_profile_keys != {live_context.profile_key}:
+                raise PermissionError("Live order profile does not match authorization")
+            await self._validate_live_submission_reservation(
+                live_context,
+                order_count=len(order_list),
+            )
         if not order_list:
             return {"submitted": False, "message": "没有可提交的订单", "results": []}
         if mode not in {"paper", "live"}:
@@ -1002,6 +1035,11 @@ class LiveTradingService:
             raise ValueError("orders must belong to one profile_key")
         profile_key = next(iter(profile_keys), "")
         bundle = await self._load_profile_bundle(profile_key or None)
+        if live_context is not None:
+            if bundle.profile.profile_key != live_context.profile_key:
+                raise PermissionError("Loaded live profile does not match authorization")
+            if bundle.profile.strategy_id != live_context.strategy_id:
+                raise PermissionError("Loaded live strategy does not match authorization")
         strategy_ids = {
             int(order.get("strategy_id") or 0)
             for order in order_list
@@ -1104,6 +1142,12 @@ class LiveTradingService:
                 "orders": order_list,
             }
         qmt_status = await qmt_trading_service.status()
+        actual_account_mask = str(qmt_status.get("account_id") or "")
+        if live_context is None or not actual_account_mask or not hmac.compare_digest(
+            actual_account_mask,
+            live_context.account_mask,
+        ):
+            raise PermissionError("Live QMT account changed after submission authorization")
         if not qmt_status.get("account_configured"):
             return await blocked("QMT account is not configured.")
         if not qmt_status.get("xttrader_available"):
@@ -1124,6 +1168,7 @@ class LiveTradingService:
                 trigger_source=trigger_source,
                 run_id=run_id,
                 params=submit_params,
+                broker_permit=broker_permit,
             )
 
         results = await self._submit_live_order_batch(
@@ -1131,6 +1176,7 @@ class LiveTradingService:
             mode=mode,
             trigger_source=trigger_source,
             run_id=run_id,
+            broker_permit=broker_permit,
         )
         return {
             "enabled": True,
@@ -1139,6 +1185,37 @@ class LiveTradingService:
             "results": results,
         }
 
+    async def _validate_live_submission_reservation(
+        self,
+        context: LiveSubmissionContext,
+        *,
+        order_count: int,
+    ) -> None:
+        async with async_session_factory() as session:
+            reservation = await session.get(PersistentJob, context.reservation_id)
+            release = await session.get(StrategyRelease, context.release_id)
+        if reservation is None or reservation.kind != "live_order_submit" or reservation.status != "running":
+            raise PermissionError("Live submission reservation is missing or inactive")
+        if (
+            release is None
+            or release.status != "live_approved"
+            or release.strategy_id != context.strategy_id
+        ):
+            raise PermissionError("Live submission release is not live_approved for the authorized strategy")
+        payload = self._json_dict(reservation.payload)
+        if str(payload.get("release_id") or "") != context.release_id:
+            raise PermissionError("Live submission release does not match reservation")
+        if payload.get("strategy_id") != context.strategy_id:
+            raise PermissionError("Live submission strategy does not match reservation")
+        if str(payload.get("profile_key") or "") != context.profile_key:
+            raise PermissionError("Live submission profile does not match reservation")
+        if not hmac.compare_digest(str(payload.get("account_mask") or ""), context.account_mask):
+            raise PermissionError("Live submission account does not match reservation")
+        if str(payload.get("idempotency_hash") or "") != context.idempotency_hash:
+            raise PermissionError("Live submission idempotency does not match reservation")
+        if payload.get("order_count") != order_count:
+            raise PermissionError("Live submission order count does not match reservation")
+
     async def _submit_live_order_batch(
         self,
         orders: Sequence[dict[str, Any]],
@@ -1146,12 +1223,16 @@ class LiveTradingService:
         mode: str,
         trigger_source: str,
         run_id: str | None,
+        broker_permit: object | None,
     ) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []
         for order in orders:
             if str(order.get("side") or "").upper() not in {"BUY", "SELL"}:
                 continue
-            result = await qmt_trading_service.submit_order({**order, "confirm": True})
+            result = await qmt_trading_service.submit_order(
+                {**order, "confirm": True},
+                broker_permit=broker_permit,
+            )
             if result.get("submitted"):
                 result["status"] = "live_pending"
                 result["pending"] = True
@@ -1172,6 +1253,7 @@ class LiveTradingService:
         trigger_source: str,
         run_id: str | None,
         params: dict[str, Any],
+        broker_permit: object | None,
     ) -> dict[str, Any]:
         sell_orders = [order for order in orders if str(order.get("side") or "").upper() == "SELL"]
         buy_orders = [order for order in orders if str(order.get("side") or "").upper() == "BUY"]
@@ -1180,6 +1262,7 @@ class LiveTradingService:
             mode=mode,
             trigger_source=trigger_source,
             run_id=run_id,
+            broker_permit=broker_permit,
         )
         sell_order_ids = [
             str(result.get("order_id") or "")
@@ -1274,6 +1357,7 @@ class LiveTradingService:
             mode=mode,
             trigger_source=trigger_source,
             run_id=run_id,
+            broker_permit=broker_permit,
         )
         results = [*sell_results, *buy_results]
         return {
@@ -1580,82 +1664,7 @@ class LiveTradingService:
     ) -> dict[str, Any]:
         if mode != "live":
             raise ValueError("cancel is only supported in live mode")
-        pending_rows = await self._load_live_trade_rows(
-            profile_key=profile_key,
-            mode=mode,
-            limit=limit,
-            record_ids=record_ids,
-            order_ids=order_ids,
-            only_pending=True,
-            min_age_seconds=min_age_seconds,
-        )
-        cancel_targets = [row for row in pending_rows if row.order_id]
-        if not cancel_targets:
-            return {"cancelled": False, "cancel_count": 0, "orders": [], "message": "没有可撤销的待成交真实委托"}
-        if not confirm:
-            return {
-                "cancelled": False,
-                "cancel_count": len(cancel_targets),
-                "orders": [self._pending_order_dict(row) for row in cancel_targets],
-                "message": "批量撤单需要 confirm=true。",
-            }
-
-        results: list[dict[str, Any]] = []
-        cancel_requested_records: list[str] = []
-        for row in cancel_targets:
-            result = await qmt_trading_service.cancel_order(row.order_id)
-            if result.get("cancelled"):
-                result["status"] = "cancel_requested"
-                cancel_requested_records.append(row.record_id)
-            results.append(result)
-            await self._write_control_audit(
-                profile_key=row.profile_key,
-                strategy_id=row.strategy_id,
-                trade_date=row.trade_date,
-                signal_hash=row.signal_hash,
-                trigger_source="manual_cancel",
-                mode=mode,
-                run_id=row.run_id,
-                status="cancel_requested" if result.get("cancelled") else "cancel_failed",
-                reason=str(result.get("message") or ""),
-                payload={"order_id": row.order_id, "record_id": row.record_id, "result": result},
-            )
-        if cancel_requested_records:
-            async with async_session_factory() as session:
-                rows = (
-                    await session.execute(
-                        select(LiveTradeRecord).where(LiveTradeRecord.record_id.in_(cancel_requested_records))
-                    )
-                ).scalars().all()
-                for row in rows:
-                    payload = self._json_dict(row.result_payload)
-                    payload.update({"status": "cancel_requested", "pending": True, "message": "已向 QMT 发送撤单请求，等待确认。"})
-                    row.status = "cancel_requested"
-                    row.message = "已向 QMT 发送撤单请求，等待确认。"
-                    row.result_payload = payload
-                    session.add(row)
-                await session.commit()
-        sync_result = await self.sync_order_status(
-            profile_key=profile_key,
-            mode=mode,
-            limit=limit,
-            record_ids=[row.record_id for row in cancel_targets],
-            order_ids=[row.order_id for row in cancel_targets if row.order_id],
-        )
-        remaining = await self._load_live_trade_rows(
-            profile_key=profile_key,
-            mode=mode,
-            limit=limit,
-            only_pending=True,
-            min_age_seconds=min_age_seconds,
-        )
-        return {
-            "cancelled": all(bool(item.get("cancelled")) for item in results),
-            "cancel_count": len(results),
-            "results": results,
-            "sync_result": sync_result,
-            "orders": [self._pending_order_dict(row) for row in remaining],
-        }
+        raise PermissionError("Live order cancellation is disabled until a V1 authorized endpoint is available")
 
     async def cancel_and_resubmit_pending_orders(
         self,
@@ -1670,54 +1679,11 @@ class LiveTradingService:
         confirm_cancel: bool = False,
         confirm_submit: bool = False,
     ) -> dict[str, Any]:
-        cancel_result = await self.cancel_pending_orders(
-            profile_key=profile_key,
-            mode=mode,
-            limit=limit,
-            min_age_seconds=min_age_seconds,
-            record_ids=record_ids,
-            order_ids=order_ids,
-            confirm=confirm_cancel,
+        if mode != "live":
+            raise ValueError("cancel-and-resubmit is only supported in live mode")
+        raise PermissionError(
+            "Live cancel-and-resubmit is disabled until a V1 authorized endpoint is available"
         )
-        if not confirm_cancel:
-            return {"cancel_result": cancel_result, "submitted": False, "message": cancel_result.get("message")}
-        post_cancel_pending = cancel_result.get("orders") or []
-        if post_cancel_pending:
-            return {
-                "cancel_result": cancel_result,
-                "submitted": False,
-                "message": "QMT 撤单尚未完全确认，先等待状态同步后再重提。",
-            }
-        signal_result = await self.signals(
-            profile_key=profile_key,
-            mode=mode,
-            params=params or {},
-            trigger_source="manual",
-            include_preflight=True,
-        )
-        orders = list(signal_result.get("orders") or [])
-        if not orders:
-            return {
-                "cancel_result": cancel_result,
-                "signal_result": signal_result,
-                "submitted": False,
-                "message": "撤单完成，但当前没有新的差额订单需要提交。",
-            }
-        submit_result = {"submitted": False, "results": [], "message": "未确认提交"}
-        if confirm_submit:
-            submit_result = await self.submit_orders(
-                orders,
-                mode=mode,
-                confirm=True,
-                trigger_source="manual",
-            )
-        return {
-            "cancel_result": cancel_result,
-            "signal_result": signal_result,
-            "submit_result": submit_result,
-            "submitted": bool(submit_result.get("submitted")),
-            "message": submit_result.get("message") or "撤单并重提完成",
-        }
 
     async def list_audits(self, *, limit: int = 100, profile_key: str | None = None, mode: str | None = None) -> list[dict[str, Any]]:
         async with async_session_factory() as session:
@@ -1986,6 +1952,8 @@ class LiveTradingService:
     ) -> dict[str, Any]:
         if mode not in {"paper", "live"}:
             raise ValueError("mode must be paper or live")
+        if mode == "live":
+            raise PermissionError("Live auto runner is disabled; submit through /api/v1/live/orders/submit")
         bundle = await self._load_profile_bundle(profile_key)
         if not bundle.profile.enabled:
             await self._write_control_audit(
@@ -2120,6 +2088,8 @@ class LiveTradingService:
         interval_seconds: int,
     ) -> None:
         assert self._runner_stop is not None
+        if mode == "live":
+            raise PermissionError("Live auto runner is disabled; submit through /api/v1/live/orders/submit")
         while not self._runner_stop.is_set():
             try:
                 gate = self._execution_gate(params)
@@ -2177,7 +2147,7 @@ class LiveTradingService:
                 await self._update_run_status(run_id, "error", last_error=message)
             try:
                 await asyncio.wait_for(self._runner_stop.wait(), timeout=interval_seconds)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def _load_profile_bundle(self, profile_key: str | None) -> StrategyProfileBundle:
@@ -2682,6 +2652,9 @@ class LiveTradingService:
             signal_blocks.append("因子截面为空或过滤后无候选")
 
         if mode == "live":
+            runner_blocks.append(
+                "Live auto runner is disabled; submit through /api/v1/live/orders/submit"
+            )
             if not bool(policy.get("allow_live_submit", True)):
                 runner_blocks.append(f"profile {bundle.profile.profile_key} does not allow live submit")
             if not settings.live_trading_enable_order_submit:

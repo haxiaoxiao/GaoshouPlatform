@@ -1,6 +1,6 @@
 # 因子值缓存
 
-Last updated: 2026-06-10.
+Last updated: 2026-07-17.
 
 因子值缓存（Factor Value Store）是因子研究模块的持久化层，用于保存可复用、point-in-time 的因子或指标截面值。
 
@@ -15,7 +15,7 @@ Last updated: 2026-06-10.
 当前 Parquet 目录：
 
 ```text
-E:/Projects/Data/parquet/factor_values/year=YYYY/month=MM/part-*.parquet
+E:/Projects/data/BaiduSyncdisk/parquet/factor_values/year=YYYY/month=MM/part-*.parquet
 ```
 
 逻辑主键：
@@ -30,10 +30,10 @@ symbol, trade_date, as_of_time, factor_name, params_hash
 symbol, trade_date, as_of_time, factor_name, params_hash, value, source, created_at
 ```
 
-旧 `E:/Projects/Data/parquet/feature_values` 只作为历史数据源保留，不再被因子值缓存 API 使用。迁移脚本：
+旧 `feature_values` 目录只作为历史数据源保留，不再被因子值缓存 API 使用。迁移脚本：
 
 ```powershell
-cd E:\Projects\GaoshouPlatform\backend
+cd E:\Projects\GaoshouPlatform-prod\backend
 .\.venv\Scripts\python.exe -m app.scripts.migrate_feature_values_to_factor_values --overwrite
 ```
 
@@ -178,3 +178,11 @@ cs_zscore($turnover_rate)
 ```
 
 旧 `Mean/Std/Rank` 等算子仍在底层注册表中存在，但新模板、文档和页面示例应推广 `ts_*` 与 `cs_*`，避免时序和截面语义混淆。
+
+## 表达式缓存一致性
+
+Compute Engine 的兼容缓存位于 `factor_cache/`，与上述策略级
+`factor_values/` 契约分开。缓存键包含表达式、股票池、日期区间、计算
+引擎和数据版本；持久化记录也按引擎隔离。任一成功数据同步会推进共享
+缓存代际并清理进程内 L1 与 Redis L2，其他 API/同步进程会在下一次访问
+时观察到新代际，避免继续返回同步前结果。

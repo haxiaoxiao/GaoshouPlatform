@@ -98,10 +98,12 @@ def test_data_explorer_preview_skips_count_by_default(monkeypatch, tmp_path):
 
     result = data_explorer.preview_table(
         "klines_daily",
-        page=1,
-        page_size=50,
-        order_dir="ASC",
-        include_total=False,
+        data_explorer.ExplorerPreviewRequest(
+            page=1,
+            page_size=50,
+            order_dir="ASC",
+            include_total=False,
+        ),
     )
 
     assert result["code"] == 0

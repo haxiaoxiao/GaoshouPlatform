@@ -16,7 +16,7 @@ from app.db.duckdb import get_duckdb
 _DAILY_COLS = ["symbol", "trade_date", "open", "high", "low", "close", "volume", "amount"]
 _MINUTE_COLS = ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"]
 _DATASET_KEY_COLS = {
-    "factor_cache": ["symbol", "trade_date", "expr_hash"],
+    "factor_cache": ["symbol", "trade_date", "expr_hash", "engine"],
     "adj_factors": ["symbol", "trade_date"],
     "moneyflow": ["symbol", "trade_date"],
     "block_moneyflow": ["block_code", "trade_date"],

@@ -1,9 +1,9 @@
 """Data explorer API for local Parquet/DuckDB."""
 import calendar
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.config import settings
 from app.data_stores.parquet_store import ParquetMarketDataStore
@@ -52,6 +52,16 @@ class ExplorerSearchRequest(BaseModel):
     include_total: bool = False
 
 
+class ExplorerPreviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    page: int = Field(default=1, ge=1)
+    page_size: int = Field(default=50, ge=1, le=500)
+    order_by: str | None = None
+    order_dir: str = "ASC"
+    include_total: bool = False
+
+
 def _use_parquet() -> bool:
     return True
 
@@ -84,7 +94,8 @@ def _safe_identifier(name: str, columns: list[str]) -> str | None:
 
 
 def _quoted_identifier(name: str, *, backend: str) -> str:
-    return f'"{name}"'
+    del backend
+    return '"' + name.replace('"', '""') + '"'
 
 
 def _validate_table(table_name: str) -> None:
@@ -324,31 +335,29 @@ def get_table_schema(table_name: str):
 @router.get("/tables/{table_name}/preview", summary="Preview table rows")
 def preview_table(
     table_name: str,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(50, ge=1, le=500),
-    order_by: str | None = Query(None),
-    order_dir: str = Query("ASC"),
-    where: str | None = Query(None),
-    include_total: bool = Query(False),
+    request: Annotated[ExplorerPreviewRequest, Query()],
 ):
     try:
         pattern = _parquet_pattern(table_name)
         columns = [col["name"] for col in _parquet_schema(table_name)]
-        safe_dir = "ASC" if order_dir.upper() == "ASC" else "DESC"
-        where_clause = f"WHERE {where}" if where else ""
-        safe_order = _safe_identifier(order_by, columns) if order_by else None
-        order_clause = f'ORDER BY "{safe_order}" {safe_dir}' if safe_order else ""
-        offset = (page - 1) * page_size
+        safe_dir = "ASC" if request.order_dir.upper() == "ASC" else "DESC"
+        safe_order = _safe_identifier(request.order_by, columns) if request.order_by else None
+        order_clause = (
+            f"ORDER BY {_quoted_identifier(safe_order, backend='parquet')} {safe_dir}"
+            if safe_order
+            else ""
+        )
+        offset = (request.page - 1) * request.page_size
         source = f"read_parquet({_sql_literal(pattern)}, hive_partitioning=true)"
         db = get_duckdb()
         raw_rows = db.execute(
-            f"SELECT * FROM {source} {where_clause} {order_clause} LIMIT {page_size} OFFSET {offset}"
+            f"SELECT * FROM {source} {order_clause} LIMIT {request.page_size} OFFSET {offset}"
         ).fetchall()
-        total_estimated = not include_total
-        if include_total:
-            total = int(db.execute(f"SELECT count(*) FROM {source} {where_clause}").fetchone()[0] or 0)
+        total_estimated = not request.include_total
+        if request.include_total:
+            total = int(db.execute(f"SELECT count(*) FROM {source}").fetchone()[0] or 0)
         else:
-            total = _estimated_total(offset, len(raw_rows), page_size)
+            total = _estimated_total(offset, len(raw_rows), request.page_size)
         rows = [
             {col: _normalize_value(raw[i]) for i, col in enumerate(columns)}
             for raw in raw_rows
@@ -360,9 +369,9 @@ def preview_table(
                 "rows": rows,
                 "total": int(total or 0),
                 "total_estimated": total_estimated,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": (int(total or 0) + page_size - 1) // page_size,
+                "page": request.page,
+                "page_size": request.page_size,
+                "total_pages": (int(total or 0) + request.page_size - 1) // request.page_size,
             },
         }
     except Exception as e:
@@ -438,36 +447,14 @@ def get_distinct_values(
         if not safe_column:
             return {"code": 1, "message": f"Unknown column: {column}"}
         where_sql = ""
+        quoted_column = _quoted_identifier(safe_column, backend="parquet")
         if q:
-            where_sql = f'WHERE CAST("{safe_column}" AS VARCHAR) LIKE {_sql_literal("%" + q + "%")}'
+            where_sql = f"WHERE CAST({quoted_column} AS VARCHAR) LIKE {_sql_literal('%' + q + '%')}"
         rows = get_duckdb().execute(
-            f'SELECT DISTINCT "{safe_column}" FROM read_parquet({_sql_literal(pattern)}, hive_partitioning=true) {where_sql} LIMIT {limit}'
+            f"SELECT DISTINCT {quoted_column} FROM "
+            f"read_parquet({_sql_literal(pattern)}, hive_partitioning=true) "
+            f"{where_sql} LIMIT {limit}"
         ).fetchall()
         return {"code": 0, "data": [_normalize_value(row[0]) for row in rows]}
-    except Exception as e:
-        return {"code": 1, "message": str(e)}
-
-
-@router.post("/query", summary="Run a read-only SQL query")
-def execute_query(
-    sql: str = Query(..., description="SQL query", max_length=2000),
-    limit: int = Query(200, ge=1, le=1000),
-):
-    upper = sql.strip().upper()
-    if not upper.startswith("SELECT"):
-        return {"code": 1, "message": "Only SELECT queries are allowed"}
-
-    if "LIMIT" not in upper:
-        sql = f"{sql.rstrip(';')} LIMIT {limit}"
-
-    try:
-        relation = get_duckdb().execute(sql)
-        columns = [desc[0] for desc in (relation.description or [])]
-        raw_rows = relation.fetchall()
-        rows = [
-            {column: _normalize_value(raw[index]) for index, column in enumerate(columns)}
-            for raw in raw_rows
-        ]
-        return {"code": 0, "data": {"columns": columns, "rows": rows, "total": len(rows)}}
     except Exception as e:
         return {"code": 1, "message": str(e)}
