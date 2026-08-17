@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import threading
 
 import pytest
@@ -95,6 +96,40 @@ async def test_login_timeout_does_not_collect_and_disconnects():
     assert collected == []
     assert [event["stage"] for event in events] == ["xueqiu_spyder.waiting_for_login"]
     assert crawler.disconnected is True
+
+
+@pytest.mark.asyncio
+async def test_default_login_wait_pauses_until_manual_login():
+    crawler = FakeCrawler()
+    events: list[dict] = []
+
+    session = XueqiuSession(
+        crawler_factory=lambda: crawler,
+        login_verifier=lambda value: {"server_verified": False},
+        collector=lambda value, symbol, **kwargs: ([], {}),
+        disconnector=lambda value: setattr(value, "disconnected", True),
+        progress_callback=events.append,
+    )
+
+    await session.start()
+    wait_task = asyncio.create_task(session.wait_for_login())
+    while not events:
+        await asyncio.sleep(0)
+
+    assert not wait_task.done()
+    assert events == [
+        {
+            **events[0],
+            "stage": "xueqiu_spyder.waiting_for_login",
+            "login_wait_timeout_seconds": None,
+            "login_check_interval_seconds": 60.0,
+        }
+    ]
+
+    wait_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await wait_task
+    await session.disconnect()
 
 
 @pytest.mark.asyncio

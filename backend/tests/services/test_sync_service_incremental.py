@@ -163,6 +163,42 @@ async def test_sync_sentiment_gates_xueqiu_once_for_all_symbols(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_sync_sentiment_xueqiu_waits_for_manual_login_with_configured_cadence(monkeypatch):
+    constructor_kwargs = []
+
+    class FakeXueqiuSession:
+        def __init__(self, **kwargs):
+            constructor_kwargs.append(kwargs)
+
+        async def start(self):
+            return None
+
+        async def wait_for_login(self):
+            return SimpleNamespace(status="login_timeout", auth={"server_verified": False})
+
+        async def disconnect(self):
+            return None
+
+    monkeypatch.setattr(sync_service_module, "XueqiuSession", FakeXueqiuSession, raising=False)
+    monkeypatch.setattr(sync_service_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr("app.services.sentiment.SentimentIngestService", lambda *args, **kwargs: SimpleNamespace())
+    monkeypatch.setattr(SyncService, "create_sync_log", noop_create_sync_log)
+    monkeypatch.setattr(sync_service_module.app_settings, "xueqiu_login_poll_interval_seconds", 75.0, raising=False)
+    monkeypatch.setattr(sync_service_module.app_settings, "xueqiu_login_timeout_seconds", 0, raising=False)
+
+    await SyncService(FakeAsyncSession()).sync_sentiment(
+        sources=["xueqiu_spyder"],
+        symbols=["600519.SH"],
+        max_pages=1,
+        min_reply=0,
+        sync_mode="full",
+    )
+
+    assert constructor_kwargs[0]["poll_interval"] == 75.0
+    assert constructor_kwargs[0]["login_timeout"] is None
+
+
+@pytest.mark.asyncio
 async def test_sync_sentiment_login_timeout_skips_all_xueqiu_symbols(monkeypatch):
     instances = []
 

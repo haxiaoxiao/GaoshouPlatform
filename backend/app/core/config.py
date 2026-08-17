@@ -138,6 +138,8 @@ class Settings(BaseSettings):
     xueqiu_stock_delay_seconds: float = 2.0
     xueqiu_spyder_dir: str = r"E:\Projects\xueqiu-spyder"
     xueqiu_cookie: str = ""
+    xueqiu_login_poll_interval_seconds: float = 60.0
+    xueqiu_login_timeout_seconds: int = 0
     flocktrader_dir: str = r"E:\Projects\flocktrader"
     nga_cookie: str = ""
     nga_data_dir: str = str(_DATA_DIR / "sentiment" / "NGAdata")

@@ -3304,6 +3304,12 @@ class SyncService:
 
                     xueqiu_session = XueqiuSession(
                         collector=collect,
+                        poll_interval=app_settings.xueqiu_login_poll_interval_seconds,
+                        login_timeout=(
+                            app_settings.xueqiu_login_timeout_seconds
+                            if app_settings.xueqiu_login_timeout_seconds > 0
+                            else None
+                        ),
                         progress_callback=on_progress,
                     )
                     batch_results: list[dict[str, Any]] = []

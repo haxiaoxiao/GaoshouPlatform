@@ -23,8 +23,8 @@ class XueqiuSession:
         login_verifier: Callable[[Any], dict[str, Any]] | None = None,
         collector: Callable[..., Any],
         disconnector: Callable[[Any], None] | None = None,
-        poll_interval: float = 2.0,
-        login_timeout: float = 900.0,
+        poll_interval: float = 60.0,
+        login_timeout: float | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> None:
         self._crawler_factory = crawler_factory or self._default_crawler_factory
@@ -32,7 +32,7 @@ class XueqiuSession:
         self._collector = collector
         self._disconnector = disconnector or self._default_disconnector
         self._poll_interval = max(0.0, poll_interval)
-        self._login_timeout = max(0.0, login_timeout)
+        self._login_timeout = max(0.0, login_timeout) if login_timeout is not None else None
         self._progress_callback = progress_callback
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="xueqiu")
         self._crawler: Any | None = None
@@ -79,7 +79,7 @@ class XueqiuSession:
             raise RuntimeError("Xueqiu session has not been started")
 
         started_at = datetime.now().isoformat()
-        deadline = time.monotonic() + self._login_timeout
+        deadline = time.monotonic() + self._login_timeout if self._login_timeout is not None else None
         waiting_emitted = False
         while True:
             auth = await self._run(self._login_verifier, self._crawler)
@@ -93,11 +93,12 @@ class XueqiuSession:
                     "xueqiu_spyder.waiting_for_login",
                     login_wait_started_at=started_at,
                     login_wait_timeout_seconds=self._login_timeout,
+                    login_check_interval_seconds=self._poll_interval,
                     login_url="https://xueqiu.com/",
                 )
                 waiting_emitted = True
 
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 return XueqiuLoginResult(status="login_timeout", auth=auth)
             await asyncio.sleep(self._poll_interval)
 
