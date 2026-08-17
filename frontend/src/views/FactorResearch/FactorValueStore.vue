@@ -838,7 +838,7 @@ const loadCoverage = async () => {
   try {
     const nextCoverage = await factorValueApi.coverage({
       ...buildQueryParams(),
-      full_range: true,
+      full_range: false,
     })
     if (requestVersion !== coverageRequestVersion) return
     coverage.value = nextCoverage

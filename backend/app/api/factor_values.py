@@ -304,7 +304,8 @@ async def coverage(
     params = _build_params(factor_name, as_of_time, window, threshold, daily_volume_to_share_multiplier)
     store = get_factor_value_store()
     effective_as_of_time = _effective_as_of_time(factor_name, as_of_time, params)
-    if full_range:
+    bounded_full_range_request = bool(symbol_list) or params is not None or effective_as_of_time is not None
+    if full_range and not bounded_full_range_request:
         coverage_many = await asyncio.to_thread(
             store.coverage_many,
             [factor_name],

@@ -89,3 +89,38 @@ def test_coverage_many_uses_valid_manifest_index_for_full_range(tmp_path, monkey
     assert result["market_cap"]["total_rows"] == 1
     assert result["market_cap"]["min_date"] == "2026-01-05"
     assert result["missing_factor"]["total_rows"] == 0
+
+
+def test_coverage_uses_distinct_key_aggregate_instead_of_window_dedup(tmp_path, monkeypatch):
+    store = FactorValueStore(str(tmp_path))
+    store.append(pd.DataFrame([{
+        "symbol": "000001.SZ",
+        "trade_date": date(2026, 1, 5),
+        "factor_name": "market_cap",
+        "value": 1.0,
+    }]))
+    captured: list[str] = []
+
+    class FakeResult:
+        def fetchone(self):
+            return (1, 1, 1, date(2026, 1, 5), date(2026, 1, 5))
+
+    class FakeDuckDB:
+        def execute(self, sql):
+            captured.append(sql)
+            return FakeResult()
+
+    monkeypatch.setattr(factor_value_store, "get_duckdb", lambda: FakeDuckDB())
+
+    result = store.coverage(
+        "market_cap",
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 1, 31),
+        symbols=["000001.SZ"],
+        include_symbols_sample=False,
+    )
+
+    assert result["total_rows"] == 1
+    assert captured
+    assert "ROW_NUMBER()" not in captured[0]
+    assert "COUNT(DISTINCT (symbol, trade_date" in captured[0]
