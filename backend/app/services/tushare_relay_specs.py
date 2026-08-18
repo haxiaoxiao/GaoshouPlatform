@@ -12,6 +12,12 @@ STRUCTURED_RELAY_DATASETS = (
     "stk_auction_replay",
 )
 
+MARKET_RADAR_RELAY_DATASETS = (
+    "tushare_limit_list_d",
+    "tushare_limit_step",
+    "tushare_margin",
+)
+
 INSTITUTION_RELAY_DATASETS = (
     "moneyflow_hsgt",
     "hk_hold",
@@ -142,6 +148,47 @@ RELAY_DATASET_SPECS: dict[str, RelayDatasetSpec] = {
         symbol_scoped=True,
         default_enabled=True,
         default_params={"mode": "summary"},
+    ),
+    "tushare_limit_list_d": RelayDatasetSpec(
+        name="tushare_limit_list_d",
+        display_name="涨跌停明细",
+        api_name="limit_list_d",
+        storage_dataset="tushare_limit_list_d",
+        date_col="trade_date",
+        category="relay_market_radar",
+        description="每日涨停、跌停和炸板明细，用于市场雷达的涨跌停统计与炸板率。",
+        recommended_frequency="daily",
+        risk_level="medium",
+        default_enabled=False,
+        default_params={
+            "fields": "trade_date,ts_code,name,close,pct_chg,amount,limit_amount,float_mv,total_mv,turnover_ratio,fd_amount,first_time,last_time,open_times,up_stat,limit_times,limit",
+        },
+    ),
+    "tushare_limit_step": RelayDatasetSpec(
+        name="tushare_limit_step",
+        display_name="连板梯队",
+        api_name="limit_step",
+        storage_dataset="tushare_limit_step",
+        date_col="trade_date",
+        category="relay_market_radar",
+        description="每日连续涨停梯队，用于最高板、晋级率和连板明细。",
+        recommended_frequency="daily",
+        risk_level="medium",
+        default_enabled=False,
+        default_params={"fields": "trade_date,ts_code,name,nums"},
+    ),
+    "tushare_margin": RelayDatasetSpec(
+        name="tushare_margin",
+        display_name="两融余额",
+        api_name="margin",
+        storage_dataset="tushare_margin",
+        date_col="trade_date",
+        category="relay_market_radar",
+        description="沪深京市场融资融券余额，用于拥挤度与风险偏好计算。",
+        recommended_frequency="daily",
+        risk_level="medium",
+        default_enabled=False,
+        default_params={"fields": "trade_date,exchange_id,rzye,rzmre,rzche,rqye,rqmcl,rzrqye,rqyl"},
     ),
     "moneyflow_hsgt": RelayDatasetSpec(
         name="moneyflow_hsgt",

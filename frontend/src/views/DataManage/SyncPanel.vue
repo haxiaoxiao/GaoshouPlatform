@@ -146,6 +146,7 @@
                 <el-option label="行情" value="market" />
                 <el-option label="概念" value="concept" />
                 <el-option label="Relay 结构化" value="relay_structured" />
+                <el-option label="市场雷达" value="relay_market_radar" />
                 <el-option label="分析师研报" value="relay_analyst" />
                 <el-option label="北向基金" value="relay_institution" />
                 <el-option label="三表财务" value="relay_financial_statement" />
@@ -870,6 +871,7 @@ const recommendedRunbook = computed(() => {
   const preferred = [
     ...presets.filter((preset) => preset.include_by_default),
     ...presets.filter((preset) => preset.name.includes('daily') || preset.name.includes('core')),
+    ...presets.filter((preset) => preset.name === 'market_radar'),
     ...presets.filter((preset) => preset.name.includes('relay')),
   ]
   const deduped = new Map<string, SyncPreset>()
@@ -1483,6 +1485,7 @@ function categoryLabel(value: string) {
     market: '行情',
     concept: '概念',
     relay_structured: 'Relay 结构化',
+    relay_market_radar: '市场雷达',
     relay_analyst: '分析师研报',
     relay_institution: '北向基金',
     relay_financial_statement: '三表财务',

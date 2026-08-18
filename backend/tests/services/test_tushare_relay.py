@@ -1,15 +1,18 @@
 from datetime import date
+from types import SimpleNamespace
 
 import pandas as pd
+import pytest
 
 from app.services import tushare_relay_sync
 from app.services.dataset_manifest import DatasetManifest, write_dataset_manifest
-from app.services.tushare_relay import parse_relay_rows
+from app.services.tushare_relay import TushareRelayMeta, TushareRelayResult, parse_relay_rows
 from app.services.tushare_relay_sync import (
     ANALYST_RELAY_DATASETS,
     FINANCIAL_STATEMENT_RELAY_DATASETS,
     INSTITUTION_RELAY_DATASETS,
     STRUCTURED_RELAY_DATASETS,
+    _estimate_total,
     _normalize_dataset_rows,
     build_sync_catalog,
 )
@@ -114,6 +117,97 @@ def test_sync_catalog_exposes_relay_guardrails() -> None:
     assert presets["relay_financial_statement"]["relay_datasets"] == list(FINANCIAL_STATEMENT_RELAY_DATASETS)
     assert presets["relay_text"]["include_by_default"] is False
     assert catalog["guardrails"]["news_default_daily_limit"] == 200
+
+
+def test_sync_catalog_exposes_market_radar_relay_datasets() -> None:
+    catalog = build_sync_catalog(refresh=True)
+    datasets = {item["name"]: item for item in catalog["datasets"]}
+    presets = {item["name"]: item for item in catalog["presets"]}
+
+    expected = {
+        "tushare_limit_list_d": ("tushare_limit_list_d", "trade_date"),
+        "tushare_limit_step": ("tushare_limit_step", "trade_date"),
+        "tushare_margin": ("tushare_margin", "trade_date"),
+    }
+    for name, (storage_dataset, date_col) in expected.items():
+        assert name in datasets
+        assert datasets[name]["category"] == "relay_market_radar"
+        assert datasets[name]["storage_dataset"] == storage_dataset
+        assert datasets[name]["date_col"] == date_col
+
+    assert presets["market_radar"]["display_name"] == "市场雷达数据"
+    assert presets["market_radar"]["relay_datasets"] == list(expected)
+
+
+def test_normalize_market_radar_rows_adds_trade_date_dt_and_numeric_fields() -> None:
+    limit_detail = _normalize_dataset_rows(
+        "tushare_limit_list_d",
+        [{"ts_code": "000001.SZ", "trade_date": "20260817", "limit": "U", "limit_times": "2"}],
+        {},
+    )
+    limit_step = _normalize_dataset_rows(
+        "tushare_limit_step",
+        [{"ts_code": "000001.SZ", "trade_date": "20260817", "nums": "3"}],
+        {},
+    )
+    margin = _normalize_dataset_rows(
+        "tushare_margin",
+        [{"trade_date": "20260817", "exchange_id": "SSE", "rzye": "123.4"}],
+        {},
+    )
+
+    assert limit_detail.iloc[0]["symbol"] == "000001.SZ"
+    assert str(limit_detail.iloc[0]["trade_date"].date()) == "2026-08-17"
+    assert str(limit_detail.iloc[0]["trade_date_dt"].date()) == "2026-08-17"
+    assert limit_detail.iloc[0]["limit_times"] == 2
+    assert limit_step.iloc[0]["nums"] == 3
+    assert margin.iloc[0]["exchange_id"] == "SSE"
+    assert margin.iloc[0]["rzye"] == 123.4
+    assert str(margin.iloc[0]["trade_date_dt"].date()) == "2026-08-17"
+
+
+def test_market_radar_estimate_counts_one_unit_per_date() -> None:
+    dates = [date(2026, 8, 17), date(2026, 8, 18)]
+
+    for name in ("tushare_limit_list_d", "tushare_limit_step", "tushare_margin"):
+        assert _estimate_total([name], dates, [], {}) == len(dates)
+
+
+@pytest.mark.asyncio
+async def test_market_radar_date_handler_requests_each_date_and_advances_progress() -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeClient:
+        def request(self, api_name: str, params: dict[str, object]) -> TushareRelayResult:
+            calls.append((api_name, params))
+            return TushareRelayResult(
+                rows=[{"ts_code": "000001.SZ"}],
+                payload={},
+                meta=TushareRelayMeta(
+                    api_name=api_name,
+                    base_url="https://relay.test",
+                    status_code=200,
+                    elapsed_ms=1,
+                ),
+            )
+
+    progress = SimpleNamespace(current=0, total=2, details={})
+    spec = SimpleNamespace(name="tushare_limit_list_d", api_name="limit_list_d")
+    rows, metas = await tushare_relay_sync._sync_market_radar_dataset(
+        FakeClient(),
+        spec,
+        dates=[date(2026, 8, 17), date(2026, 8, 18)],
+        options={},
+        progress=progress,
+    )
+
+    assert calls == [
+        ("limit_list_d", {"trade_date": "20260817"}),
+        ("limit_list_d", {"trade_date": "20260818"}),
+    ]
+    assert [row["trade_date"] for row in rows] == ["20260817", "20260818"]
+    assert len(metas) == 2
+    assert progress.current == 2
 
 
 def test_normalize_analyst_rank_rows() -> None:

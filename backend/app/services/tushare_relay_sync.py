@@ -27,6 +27,7 @@ from app.services.tushare_relay_specs import (
     ANALYST_RELAY_DATASETS,
     FINANCIAL_STATEMENT_RELAY_DATASETS,
     INSTITUTION_RELAY_DATASETS,
+    MARKET_RADAR_RELAY_DATASETS,
     RELAY_DATASET_SPECS,
     STRUCTURED_RELAY_DATASETS,
     TEXT_RELAY_DATASETS,
@@ -314,6 +315,14 @@ def build_sync_catalog(*, refresh: bool = False) -> dict[str, Any]:
                 "description": "复权、资金流、同花顺板块和集合竞价。",
                 "sync_types": [],
                 "relay_datasets": list(STRUCTURED_RELAY_DATASETS),
+                "include_by_default": False,
+            },
+            {
+                "name": "market_radar",
+                "display_name": "市场雷达数据",
+                "description": "涨跌停明细、连板梯队和两融余额，补齐市场雷达的日终依赖。",
+                "sync_types": [],
+                "relay_datasets": list(MARKET_RADAR_RELAY_DATASETS),
                 "include_by_default": False,
             },
             {
@@ -629,6 +638,14 @@ async def run_tushare_relay_sync(
                     options=options,
                     progress=progress,
                 )
+            elif dataset_name in MARKET_RADAR_RELAY_DATASETS:
+                dataset_rows, dataset_meta = await _sync_market_radar_dataset(
+                    client,
+                    spec,
+                    dates=dates,
+                    options=options,
+                    progress=progress,
+                )
             elif dataset_name == "block_moneyflow":
                 dataset_rows, dataset_meta = await _sync_block_moneyflow(client, spec, dates=dates, options=options, progress=progress)
             elif dataset_name == "moneyflow_hsgt":
@@ -911,6 +928,8 @@ def _estimate_total(names: list[str], dates: list[date], symbols: list[str], opt
         spec = RELAY_DATASET_SPECS[name]
         if name in {"adj_factor", "moneyflow", "stk_auction_replay"}:
             total += max(1, len(symbols) * len(dates))
+        elif name in MARKET_RADAR_RELAY_DATASETS:
+            total += max(1, len(dates))
         elif name == "moneyflow_hsgt":
             total += max(1, len(dates))
         elif name == "hk_hold":
@@ -970,6 +989,34 @@ async def _sync_symbol_date_dataset(
                 rows.append(item)
             progress.current = min(progress.current + 1, progress.total)
             await asyncio.sleep(0)
+    return rows, metas
+
+
+async def _sync_market_radar_dataset(
+    client: TushareRelayClient,
+    spec: RelayDatasetSpec,
+    *,
+    dates: list[date],
+    options: dict[str, Any],
+    progress: Any,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    rows: list[dict[str, Any]] = []
+    metas: list[dict[str, Any]] = []
+    field_override = options.get(f"{spec.name}_fields")
+    fields = field_override or getattr(spec, "default_params", {}).get("fields")
+    for current_date in dates:
+        progress.details["current_date"] = current_date.isoformat()
+        params: dict[str, Any] = {"trade_date": current_date.strftime("%Y%m%d")}
+        if fields:
+            params["fields"] = fields
+        result = await asyncio.to_thread(client.request, spec.api_name, params)
+        metas.append(_meta_dict(result.meta))
+        for row in result.rows:
+            item = dict(row)
+            item.setdefault("trade_date", current_date.strftime("%Y%m%d"))
+            rows.append(item)
+        progress.current = min(progress.current + 1, progress.total)
+        await asyncio.sleep(0)
     return rows, metas
 
 
@@ -1571,6 +1618,17 @@ def _text_params(name: str, current_date: date, limit: int, options: dict[str, A
 def _normalize_dataset_rows(name: str, rows: list[dict[str, Any]], options: dict[str, Any]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
+    if name in MARKET_RADAR_RELAY_DATASETS:
+        frame = _normalize_common(rows, date_columns=["trade_date"], symbol_from="ts_code")
+        if frame.empty:
+            return frame
+        if "trade_date" in frame.columns:
+            frame["trade_date_dt"] = frame["trade_date"]
+        elif "trade_date_dt" in frame.columns:
+            frame["trade_date_dt"] = pd.to_datetime(frame["trade_date_dt"], errors="coerce")
+        if "ts_code" in frame.columns and "symbol" not in frame.columns:
+            frame["symbol"] = frame["ts_code"].astype(str)
+        return frame
     if name == "adj_factor":
         return _normalize_common(rows, date_columns=["trade_date"], symbol_from="ts_code")
     if name == "moneyflow":
