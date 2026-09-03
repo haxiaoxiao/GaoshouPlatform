@@ -318,6 +318,43 @@ if (Test-FrontendCommandIdentity -CommandLine '{_ps_quote(other_frontend)}' -Pro
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_shutdown_finds_owned_runner_even_when_its_listener_is_gone(tmp_path):
+    helper = ROOT / "tools" / "stop-gaoshouplatform-services.ps1"
+    pid_file = tmp_path / "sync-service.pid"
+    pid_file.write_text("1234\n", encoding="ascii")
+    valid_command = (
+        f'"{ROOT / "backend" / ".venv" / "Scripts" / "python.exe"}" '
+        f'-m app.service_runner app.sync_main:app --port 8810 --pid-file "{pid_file}"'
+    )
+    script = f"""
+. '{_ps_quote(helper)}' -ProjectRoot '{_ps_quote(ROOT)}' -BackendPort 1 -SyncPort 2 -FrontendPort 3
+function Get-NetTCPConnection {{ return @() }}
+function Get-CimInstance {{
+    return [pscustomobject]@{{ ProcessId = 1234; CommandLine = '{_ps_quote(valid_command)}' }}
+}}
+$process = Get-ManagedServiceProcess -Port 8810 -Application 'app.sync_main:app' -PidFile '{_ps_quote(pid_file)}'
+if (-not $process -or [int]$process.ProcessId -ne 1234) {{ exit 21 }}
+"""
+
+    result = subprocess.run(
+        [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            script,
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_windows_scripts_request_bounded_graceful_shutdown_before_force_fallback():
     start_script = (ROOT / "tools" / "start-gaoshouplatform.bat").read_text(encoding="utf-8")
     stop_script = (ROOT / "tools" / "stop-gaoshouplatform.bat").read_text(encoding="utf-8")

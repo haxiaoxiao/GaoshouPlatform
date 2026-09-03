@@ -87,12 +87,6 @@ function Get-ManagedServiceProcess {
     if ($null -eq $persistedProcessId) {
         return $null
     }
-    $ownsListener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
-        Where-Object { [int]$_.OwningProcess -eq $persistedProcessId } |
-        Select-Object -First 1
-    if (-not $ownsListener) {
-        return $null
-    }
     $process = Get-CimInstance Win32_Process -Filter ("ProcessId=" + $persistedProcessId) -ErrorAction SilentlyContinue
     if (
         $process `
